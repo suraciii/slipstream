@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <csetjmp>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -12,6 +13,15 @@
 #include <new>
 #include <string>
 #include <vector>
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/openat2.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <cerrno>
+#endif
 
 namespace {
 constexpr std::size_t kMaximumJpegBytes = 128 * 1024 * 1024;
@@ -192,6 +202,27 @@ Napi::Object SelectionOutcome(Napi::Env env, const Selection &selection,
   return result;
 }
 
+Napi::Object ExtractOpened(Napi::Env env, const std::string &path) {
+  LibRawHandle raw(libraw_init(0));
+  if (!raw) return Outcome(env, "resource-limit", "LibRaw could not allocate a reader");
+  raw->rawparams.max_raw_memory_mb = kMaximumLibRawMemoryMb;
+  const int open_error = libraw_open_file(raw.get(), path.c_str());
+  if (open_error != LIBRAW_SUCCESS) return Outcome(env, ErrorKind(open_error), libraw_strerror(open_error));
+  Selection selection;
+  ActionableFailure failure;
+  const int count = std::clamp(raw->thumbs_list.thumbcount, 0, LIBRAW_THUMBNAIL_MAXCOUNT);
+  for (int index = 0; index < count; ++index) {
+    const auto &candidate = raw->thumbs_list.thumblist[index];
+    if (candidate.tlength == 0 || candidate.tlength > kMaximumJpegBytes) continue;
+    const int unpack_error = libraw_unpack_thumb_ex(raw.get(), index);
+    if (unpack_error != LIBRAW_SUCCESS) { RecordUnpackFailure(failure, unpack_error); continue; }
+    if (raw->thumbnail.tformat != LIBRAW_THUMBNAIL_JPEG || raw->thumbnail.tlength == 0 || raw->thumbnail.tlength > kMaximumJpegBytes) continue;
+    ConsiderCandidate(selection, index, reinterpret_cast<unsigned char *>(raw->thumbnail.thumb), raw->thumbnail.tlength);
+  }
+  return SelectionOutcome(env, selection, failure);
+}
+
+#ifdef SLIPSTREAM_TEST_ADDON
 Napi::Value ExtractImpl(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
   if (info.Length() != 1 || !info[0].IsString()) {
@@ -199,39 +230,7 @@ Napi::Value ExtractImpl(const Napi::CallbackInfo &info) {
     return env.Undefined();
   }
 
-  LibRawHandle raw(libraw_init(0));
-  if (!raw) {
-    return Outcome(env, "resource-limit", "LibRaw could not allocate a reader");
-  }
-  raw->rawparams.max_raw_memory_mb = kMaximumLibRawMemoryMb;
-
-  const auto path = info[0].As<Napi::String>().Utf8Value();
-  const int open_error = libraw_open_file(raw.get(), path.c_str());
-  if (open_error != LIBRAW_SUCCESS) {
-    return Outcome(env, ErrorKind(open_error), libraw_strerror(open_error));
-  }
-
-  Selection selection;
-  ActionableFailure failure;
-  const int count = std::clamp(raw->thumbs_list.thumbcount, 0, LIBRAW_THUMBNAIL_MAXCOUNT);
-  for (int index = 0; index < count; ++index) {
-    const auto &candidate = raw->thumbs_list.thumblist[index];
-    if (candidate.tlength == 0 || candidate.tlength > kMaximumJpegBytes) {
-      continue;
-    }
-    const int unpack_error = libraw_unpack_thumb_ex(raw.get(), index);
-    if (unpack_error != LIBRAW_SUCCESS) {
-      RecordUnpackFailure(failure, unpack_error);
-      continue;
-    }
-    if (raw->thumbnail.tformat != LIBRAW_THUMBNAIL_JPEG || raw->thumbnail.tlength == 0 ||
-        raw->thumbnail.tlength > kMaximumJpegBytes) {
-      continue;
-    }
-    ConsiderCandidate(selection, index, reinterpret_cast<unsigned char *>(raw->thumbnail.thumb),
-                      raw->thumbnail.tlength);
-  }
-  return SelectionOutcome(env, selection, failure);
+  return ExtractOpened(env, info[0].As<Napi::String>().Utf8Value());
 }
 
 Napi::Value Extract(const Napi::CallbackInfo &info) {
@@ -246,7 +245,6 @@ Napi::Value Extract(const Napi::CallbackInfo &info) {
   }
 }
 
-#ifdef SLIPSTREAM_TEST_ADDON
 int InjectedUnpackError(const std::string &outcome) {
   if (outcome == "success") return LIBRAW_SUCCESS;
   if (outcome == "data") return LIBRAW_DATA_ERROR;
@@ -362,9 +360,232 @@ Napi::Value TestCreateJpeg(const Napi::CallbackInfo &info) {
 #endif
 } // namespace
 
+#ifdef __linux__
+bool ValidRelativePath(const std::string &path, bool allow_empty = false) {
+  if ((!allow_empty && path.empty()) || (!path.empty() && path.front() == '/') || path.find('\0') != std::string::npos) return false;
+  std::size_t start = 0;
+  while (start <= path.size()) {
+    const auto end = path.find('/', start);
+    const auto part = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (part.empty() || part == "." || part == "..") return allow_empty && path.empty();
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return true;
+}
+
+int OpenConfined(int root_fd, const std::string &relative_path, bool directory = false) {
+  if (!ValidRelativePath(relative_path)) return -1;
+  open_how how{};
+  how.flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (directory ? O_DIRECTORY : 0);
+  how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
+  return static_cast<int>(syscall(SYS_openat2, root_fd, relative_path.c_str(), &how, sizeof(how)));
+}
+
+int OpenConfinedDirectory(int root_fd, const std::string &relative_path) {
+  if (relative_path.empty()) return openat(root_fd, ".", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY);
+  return OpenConfined(root_fd, relative_path, true);
+}
+
+Napi::Value ListConfinedDirectory(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 3 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsNumber()) return Outcome(env, "io-error", "Invalid directory request");
+  const auto path = info[1].As<Napi::String>().Utf8Value();
+  const double maximum_value = info[2].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(maximum_value) || maximum_value < 1 || maximum_value > 4294967295.0 ||
+      maximum_value != std::floor(maximum_value))
+    return Outcome(env, "resource-limit", "Directory entry limit is invalid");
+  const auto maximum = static_cast<std::uint32_t>(maximum_value);
+  int fd = OpenConfinedDirectory(info[0].As<Napi::Number>().Int32Value(), path);
+  if (fd < 0) return Outcome(env, "io-error", "Directory could not be opened safely");
+  DIR *directory = fdopendir(fd);
+  if (!directory) { close(fd); return Outcome(env, "io-error", "Directory could not be enumerated safely"); }
+  struct Entry { std::string name; std::string kind; };
+  std::vector<Entry> entries;
+  errno = 0;
+  while (auto *item = readdir(directory)) {
+    std::string name(item->d_name);
+    if (name == "." || name == "..") continue;
+    if (entries.size() >= maximum) { closedir(directory); return Outcome(env, "resource-limit", "Directory exceeds entry limit"); }
+    struct stat facts{};
+    std::string kind = "other";
+    if (fstatat(dirfd(directory), name.c_str(), &facts, AT_SYMLINK_NOFOLLOW) == 0) {
+      if (S_ISREG(facts.st_mode)) kind = "file";
+      else if (S_ISDIR(facts.st_mode)) kind = "directory";
+      else if (S_ISLNK(facts.st_mode)) kind = "symlink";
+    }
+    entries.push_back({name, kind});
+  }
+  const int error = errno;
+  closedir(directory);
+  if (error != 0) return Outcome(env, "io-error", "Directory enumeration failed safely");
+  std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) { return a.name < b.name; });
+  auto result = Napi::Object::New(env); result.Set("kind", "directory");
+  auto list = Napi::Array::New(env, entries.size());
+  for (std::size_t i = 0; i < entries.size(); ++i) { auto value = Napi::Object::New(env); value.Set("name", entries[i].name); value.Set("kind", entries[i].kind); list.Set(i, value); }
+  result.Set("entries", list); return result;
+}
+
+Napi::Value ExtractFromLibrary(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString()) return Outcome(env, "io-error", "Invalid confined RAW request");
+  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
+  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  const std::string path = "/proc/self/fd/" + std::to_string(fd);
+  auto result = ExtractOpened(env, path);
+  close(fd);
+  return result;
+}
+
+Napi::Value ConfinedOriginalFacts(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString()) {
+    Napi::TypeError::New(env, "Expected root descriptor and relative Original path").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
+  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  struct stat facts{};
+  const int result = fstat(fd, &facts);
+  close(fd);
+  if (result != 0 || !S_ISREG(facts.st_mode)) return Outcome(env, "io-error", "Original File is not a regular file");
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "facts");
+  value.Set("size", Napi::Number::New(env, static_cast<double>(facts.st_size)));
+  value.Set("mtimeMs", Napi::Number::New(env, static_cast<double>(facts.st_mtim.tv_sec) * 1000.0 + facts.st_mtim.tv_nsec / 1e6));
+  value.Set("mode", Napi::Number::New(env, facts.st_mode));
+  return value;
+}
+
+Napi::Value ReadConfinedOriginalRange(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 4 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsNumber() || !info[3].IsNumber()) {
+    Napi::TypeError::New(env, "Expected root descriptor, relative path, offset and length").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+  const double offset_value = info[2].As<Napi::Number>().DoubleValue();
+  const double length_value = info[3].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(offset_value) || !std::isfinite(length_value) || offset_value < 0 ||
+      length_value < 0 || offset_value > 9007199254740991.0 || length_value > 16 * 1024 * 1024 ||
+      offset_value != std::floor(offset_value) || length_value != std::floor(length_value))
+    return Outcome(env, "resource-limit", "Confined read exceeds limits");
+  const auto offset = static_cast<off_t>(offset_value);
+  const auto length = static_cast<std::size_t>(length_value);
+  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
+  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  std::vector<unsigned char> bytes(length);
+  const auto count = pread(fd, bytes.data(), length, offset);
+  close(fd);
+  if (count < 0) return Outcome(env, "io-error", "Original File could not be read safely");
+  return Napi::Buffer<unsigned char>::Copy(env, bytes.data(), static_cast<std::size_t>(count));
+}
+
+bool SafeStateFile(const struct stat &facts) {
+  return S_ISREG(facts.st_mode) && facts.st_uid == geteuid() &&
+         (facts.st_mode & 0022) == 0 && facts.st_nlink == 1;
+}
+
+void SetStateIdentity(Napi::Env env, Napi::Object &value, const struct stat &facts) {
+  value.Set("device", Napi::BigInt::New(env, static_cast<std::uint64_t>(facts.st_dev)));
+  value.Set("inode", Napi::BigInt::New(env, static_cast<std::uint64_t>(facts.st_ino)));
+  value.Set("uid", Napi::Number::New(env, facts.st_uid));
+  value.Set("mode", Napi::Number::New(env, facts.st_mode));
+  value.Set("linkCount", Napi::Number::New(env, facts.st_nlink));
+}
+
+bool MatchesStateIdentity(const Napi::Object &expected, const struct stat &facts) {
+  bool device_lossless = false, inode_lossless = false;
+  const auto device = expected.Get("device").As<Napi::BigInt>().Uint64Value(&device_lossless);
+  const auto inode = expected.Get("inode").As<Napi::BigInt>().Uint64Value(&inode_lossless);
+  return device_lossless && inode_lossless &&
+         device == static_cast<std::uint64_t>(facts.st_dev) &&
+         inode == static_cast<std::uint64_t>(facts.st_ino) &&
+         expected.Get("uid").As<Napi::Number>().Uint32Value() == facts.st_uid &&
+         expected.Get("mode").As<Napi::Number>().Uint32Value() == facts.st_mode &&
+         expected.Get("linkCount").As<Napi::Number>().Uint32Value() == facts.st_nlink;
+}
+
+Napi::Value PrepareStateFile(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString())
+    return Outcome(env, "io-error", "Invalid state file request");
+  const auto name = info[1].As<Napi::String>().Utf8Value();
+  if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
+    return Outcome(env, "io-error", "SQLite database name is invalid");
+  const int fd = openat(info[0].As<Napi::Number>().Int32Value(), name.c_str(),
+                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) return Outcome(env, "io-error", "SQLite database could not be created safely");
+  struct stat facts{};
+  const int result = fstat(fd, &facts);
+  close(fd);
+  if (result != 0 || !SafeStateFile(facts))
+    return Outcome(env, "io-error", "SQLite database inode is not safely owned");
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "prepared");
+  SetStateIdentity(env, value, facts);
+  return value;
+}
+
+Napi::Value VerifyStateFile(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 3 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsObject())
+    return Outcome(env, "io-error", "Invalid state verification request");
+  const auto name = info[1].As<Napi::String>().Utf8Value();
+  if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
+    return Outcome(env, "io-error", "SQLite database name is invalid");
+  const int fd = openat(info[0].As<Napi::Number>().Int32Value(), name.c_str(),
+                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) return Outcome(env, "io-error", "SQLite database could not be verified safely");
+  struct stat facts{};
+  const int result = fstat(fd, &facts);
+  close(fd);
+  if (result != 0 || !SafeStateFile(facts) ||
+      !MatchesStateIdentity(info[2].As<Napi::Object>(), facts))
+    return Outcome(env, "io-error", "SQLite database inode changed before startup");
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "verified");
+  return value;
+}
+
+bool AdmitOptionalStateFile(int state_fd, const std::string &name) {
+  const int fd = openat(state_fd, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) return errno == ENOENT;
+  struct stat facts{};
+  const int result = fstat(fd, &facts);
+  close(fd);
+  return result == 0 && SafeStateFile(facts);
+}
+
+Napi::Value AdmitStateSidecars(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString())
+    return Outcome(env, "io-error", "Invalid SQLite sidecar admission request");
+  const int state_fd = info[0].As<Napi::Number>().Int32Value();
+  const auto name = info[1].As<Napi::String>().Utf8Value();
+  if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
+    return Outcome(env, "io-error", "SQLite database name is invalid");
+  for (const char *suffix : {"-journal", "-wal", "-shm"}) {
+    if (!AdmitOptionalStateFile(state_fd, name + suffix))
+      return Outcome(env, "io-error", "SQLite sidecar is not safely owned");
+  }
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "admitted");
+  return value;
+}
+#endif
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
-  exports.Set("extractLargestEmbeddedJpeg", Napi::Function::New(env, Extract));
+#ifdef __linux__
+  exports.Set("confinedOriginalFacts", Napi::Function::New(env, ConfinedOriginalFacts));
+  exports.Set("readConfinedOriginalRange", Napi::Function::New(env, ReadConfinedOriginalRange));
+  exports.Set("listConfinedDirectory", Napi::Function::New(env, ListConfinedDirectory));
+  exports.Set("extractLargestEmbeddedJpegFromLibrary", Napi::Function::New(env, ExtractFromLibrary));
+  exports.Set("prepareStateFile", Napi::Function::New(env, PrepareStateFile));
+  exports.Set("verifyStateFile", Napi::Function::New(env, VerifyStateFile));
+  exports.Set("admitStateSidecars", Napi::Function::New(env, AdmitStateSidecars));
+#endif
 #ifdef SLIPSTREAM_TEST_ADDON
+  exports.Set("extractLargestEmbeddedJpeg", Napi::Function::New(env, Extract));
   exports.Set("__testSelectCandidates", Napi::Function::New(env, TestSelectCandidates));
   exports.Set("__testCreateJpeg", Napi::Function::New(env, TestCreateJpeg));
 #endif

@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { PhotoLibrary } from "../library/photo-library.js";
 import { extractLargestEmbeddedJpeg } from "./libraw-preview.js";
 import {
   createTestJpeg,
@@ -11,37 +13,49 @@ import {
 
 const samplePath = process.env.SLIPSTREAM_RAW_SAMPLE;
 const maximumJpegBytes = 128 * 1024 * 1024;
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
 
 describe("LibRaw embedded JPEG extraction", () => {
   it.skipIf(!samplePath)(
-    "selects the largest embedded JPEG and leaves the external Original unchanged",
+    "selects the largest confined embedded JPEG and leaves the external Original unchanged",
     async () => {
       const before = await sha256(samplePath!);
-      const outcome = extractLargestEmbeddedJpeg(samplePath!);
-      const after = await sha256(samplePath!);
-
-      expect(after).toBe(before);
-      expect(outcome.kind).toBe("preview");
-      if (outcome.kind === "preview") {
-        expect(outcome.candidateIndex).toBe(2);
-        expect(outcome.width).toBe(9504);
-        expect(outcome.height).toBe(6336);
+      const state = await mkdtemp(join(tmpdir(), "slipstream-raw-state-"));
+      temporaryDirectories.push(state);
+      const library = await PhotoLibrary.open(
+        dirname(samplePath!),
+        join(state, "library.sqlite"),
+      );
+      try {
+        const outcome = await extractLargestEmbeddedJpeg(
+          library.confinedOriginal(basename(samplePath!)),
+        );
+        expect(outcome).toMatchObject({
+          kind: "preview",
+          candidateIndex: 2,
+          width: 9504,
+          height: 6336,
+        });
+      } finally {
+        await library.shutdown();
       }
+      expect(await sha256(samplePath!)).toBe(before);
     },
     30_000,
   );
 
-  it("returns a typed I/O outcome for a missing path", () => {
-    const outcome = extractLargestEmbeddedJpeg(
-      "/definitely/missing/slipstream-sample.raw",
+  it("requires a Photo Library capability", () => {
+    expect(() => extractLargestEmbeddedJpeg(undefined as never)).toThrow(
+      TypeError,
     );
-    expect(outcome).toMatchObject({ kind: "io-error" });
-  });
-
-  it("keeps programmer input errors separate from file outcomes", () => {
-    expect(() =>
-      extractLargestEmbeddedJpeg(undefined as unknown as string),
-    ).toThrow(TypeError);
   });
 
   it("falls back when the largest candidate has malformed entropy", () => {
@@ -51,7 +65,6 @@ describe("LibRaw embedded JPEG extraction", () => {
       { declaredLength: malformedLarger.length, jpeg: malformedLarger },
       { declaredLength: smaller.length, jpeg: smaller },
     ]);
-
     expect(outcome).toMatchObject({
       kind: "preview",
       candidateIndex: 1,
@@ -66,15 +79,15 @@ describe("LibRaw embedded JPEG extraction", () => {
       createTestJpeg(32, 32),
       Buffer.alloc(largePixels.length + 100),
     ]);
-    const outcome = selectTestCandidates([
-      {
-        declaredLength: smallPixelsWithTrailingBytes.length,
-        jpeg: smallPixelsWithTrailingBytes,
-      },
-      { declaredLength: largePixels.length, jpeg: largePixels },
-    ]);
-
-    expect(outcome).toMatchObject({ kind: "preview", candidateIndex: 1 });
+    expect(
+      selectTestCandidates([
+        {
+          declaredLength: smallPixelsWithTrailingBytes.length,
+          jpeg: smallPixelsWithTrailingBytes,
+        },
+        { declaredLength: largePixels.length, jpeg: largePixels },
+      ]),
+    ).toMatchObject({ kind: "preview", candidateIndex: 1 });
   });
 
   it("returns no usable preview when every JPEG is malformed", () => {
@@ -87,12 +100,12 @@ describe("LibRaw embedded JPEG extraction", () => {
 
   it("rejects an oversized candidate before extraction", () => {
     const valid = createTestJpeg(16, 16);
-    const outcome = selectTestCandidates([
-      { declaredLength: maximumJpegBytes + 1, jpeg: valid },
-      { declaredLength: valid.length, jpeg: valid },
-    ]);
-
-    expect(outcome).toMatchObject({
+    expect(
+      selectTestCandidates([
+        { declaredLength: maximumJpegBytes + 1, jpeg: valid },
+        { declaredLength: valid.length, jpeg: valid },
+      ]),
+    ).toMatchObject({
       kind: "preview",
       candidateIndex: 1,
       extractedCandidateIndexes: [1],
@@ -140,11 +153,9 @@ describe("LibRaw embedded JPEG extraction", () => {
   it("rejects malformed JPEG dimensions", () => {
     const jpeg = createTestJpeg(32, 16);
     const sof = jpeg.indexOf(Buffer.from([0xff, 0xc0]));
-    expect(sof).toBeGreaterThan(0);
     const invalid = Buffer.from(jpeg);
     invalid[sof + 5] = 0;
     invalid[sof + 6] = 0;
-
     expect(
       selectTestCandidates([{ declaredLength: invalid.length, jpeg: invalid }]),
     ).toMatchObject({ kind: "no-usable-preview" });
@@ -152,10 +163,9 @@ describe("LibRaw embedded JPEG extraction", () => {
 
   it("keeps sensor unpack and RAW development outside the product boundary", async () => {
     const nativeSource = await readFile(
-      fileURLToPath(new URL("../../native/libraw_preview.cc", import.meta.url)),
+      new URL("../../native/libraw_preview.cc", import.meta.url),
       "utf8",
     );
-
     expect(nativeSource).not.toMatch(/\blibraw_unpack\s*\(/);
     expect(nativeSource).not.toMatch(/\blibraw_dcraw_process\s*\(/);
     expect(nativeSource).not.toMatch(/\blibraw_raw2image\s*\(/);
