@@ -10,6 +10,7 @@
 # JavaScript
 node_modules/
 dist/
+build/
 coverage/
 
 # Rust
