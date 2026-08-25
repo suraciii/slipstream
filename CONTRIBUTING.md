@@ -23,7 +23,7 @@ node --version # v22.23.1
 bun install --frozen-lockfile
 ```
 
-The workspace install builds only the production native addon. `test:fast` explicitly builds a separate test addon; the Server TypeScript build does not rebuild either artifact.
+The workspace install builds only the production LibRaw addon. `test:fast` explicitly builds a separate LibRaw test addon; the Server TypeScript build does not rebuild either artifact. Sharp/libvips owns JPEG decode, orientation, Lanczos resize, ICC conversion or preservation, and encoding. Derivative processing is bounded to two concurrent jobs per cache directory.
 
 ## Verification
 
