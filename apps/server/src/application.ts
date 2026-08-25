@@ -6,6 +6,9 @@ import {
   type OriginalRecord,
   type PhotoLibraryOptions,
   type PhotoRecord,
+  type PhotoSetRecord,
+  type SelectionState,
+  type StateMutationResult,
 } from "./library/photo-library.js";
 import type {
   PhotoListResponse,
@@ -85,6 +88,91 @@ export class SlipstreamApplication {
       await library.shutdown();
       throw error;
     }
+  }
+
+  async listPhotoSets(): Promise<ReadonlyArray<PhotoSetRecord>> {
+    return this.#library.listPhotoSets();
+  }
+
+  async createPhotoSet(name: string): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({ kind: "create", name });
+    return this.listPhotoSets();
+  }
+
+  async renamePhotoSet(
+    photoSetId: string,
+    name: string,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({ kind: "rename", photoSetId, name });
+    return this.listPhotoSets();
+  }
+
+  async deletePhotoSet(
+    photoSetId: string,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({ kind: "delete", photoSetId });
+    return this.listPhotoSets();
+  }
+
+  async addPhotoSetMembers(
+    photoSetId: string,
+    photoIds: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({
+      kind: "addMembers",
+      photoSetId,
+      photoIds,
+    });
+    return this.listPhotoSets();
+  }
+
+  async removePhotoSetMember(
+    photoSetId: string,
+    photoId: string,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({
+      kind: "removeMember",
+      photoSetId,
+      photoId,
+    });
+    return this.listPhotoSets();
+  }
+
+  async reorderPhotoSet(
+    photoSetId: string,
+    photoIds: ReadonlyArray<string>,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({
+      kind: "reorder",
+      photoSetId,
+      photoIds,
+    });
+    return this.listPhotoSets();
+  }
+
+  async setReviewProgress(
+    photoSetId: string,
+    photoId: string,
+  ): Promise<ReadonlyArray<PhotoSetRecord>> {
+    await this.#library.mutatePhotoSet({
+      kind: "setProgress",
+      photoSetId,
+      photoId,
+    });
+    return this.listPhotoSets();
+  }
+
+  async mutatePhotoState(input: {
+    photoId: string;
+    field: "selectionState" | "rating";
+    value: SelectionState | number;
+    expectedCurrent?: SelectionState | number;
+    photoSetId?: string;
+  }): Promise<StateMutationResult> {
+    const result = await this.#library.mutatePhotoState(input);
+    if (result.kind === "applied")
+      this.#snapshot = await this.#library.refresh();
+    return result;
   }
 
   listPhotos(): PhotoListResponse {
@@ -173,6 +261,8 @@ export class SlipstreamApplication {
       available: photo.available,
       ambiguous: photo.ambiguous,
       originals,
+      selectionState: photo.selectionState,
+      rating: photo.rating,
       preview: {
         state: photo.previewState,
         ...(source ? { source } : {}),
