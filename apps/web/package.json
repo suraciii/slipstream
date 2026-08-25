@@ -1,0 +1,13 @@
+{
+  "name": "@slipstream/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "vite": "7.1.3"
+  }
+}
