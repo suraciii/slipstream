@@ -24,6 +24,7 @@ import {
 const dirs: string[] = [];
 const identity: DerivativeIdentity = {
   photoIdentity: "photo-1",
+  source: "matching-jpeg",
   sourceRelativePath: "set/IMG.JPG",
   sourceSize: 100,
   sourceMtimeMs: 1,
@@ -465,6 +466,19 @@ describe("Sharp JPEG derivatives", () => {
     expect(await failing.generate(changed, jpeg)).toMatchObject({
       kind: "ready",
       stale: true,
+      source: "matching-jpeg",
+      cacheKey: derivativeCacheKey(identity),
+    });
+    const crossSource = {
+      ...changed,
+      source: "embedded-raw-jpeg" as const,
+      sourceRelativePath: "set/IMG.ARW",
+      embeddedCandidateIdentity: "0",
+    };
+    expect(await failing.generate(crossSource, jpeg)).toMatchObject({
+      kind: "ready",
+      stale: true,
+      source: "matching-jpeg",
       cacheKey: derivativeCacheKey(identity),
     });
     expect(await failing.generate(changed, jpeg)).toMatchObject({

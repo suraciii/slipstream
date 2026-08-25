@@ -49,14 +49,25 @@ export type ScanResult = Readonly<{
     message: string;
   }>;
 }>;
+export type ConfinedSourceFacts = Readonly<{
+  size: number;
+  mtimeMs: number;
+  device: bigint;
+  inode: bigint;
+}>;
 export type ConfinedOriginal = Readonly<{
   relativePath: string;
   facts(): Promise<Readonly<{ size: number; mtimeMs: number; mode: number }>>;
   read(offset: number, length: number): Promise<Buffer>;
-  extractEmbeddedJpeg(): Promise<EmbeddedJpegOutcome>;
+  readWhole(
+    maximumBytes: number,
+  ): Promise<Readonly<{ bytes: Buffer; sourceFacts: ConfinedSourceFacts }>>;
+  extractEmbeddedJpeg(): Promise<
+    EmbeddedJpegOutcome & { sourceFacts: ConfinedSourceFacts }
+  >;
 }>;
 
-type PhotoLibraryOptions = Readonly<{
+export type PhotoLibraryOptions = Readonly<{
   maximumFiles?: number;
   maximumEntries?: number;
   maximumEntriesPerDirectory?: number;
@@ -298,6 +309,8 @@ export class PhotoLibrary {
     width?: number;
     height?: number;
     cacheRevision?: string;
+    actualSource?: PreviewCandidate;
+    actualSourceRevision?: string;
   }): Promise<PreviewSeedResult> {
     this.#assertOpen();
     const result = await this.#request<PreviewSeedResult>("seedPreview", input);
@@ -324,12 +337,25 @@ export class PhotoLibrary {
         });
         return Buffer.from(value);
       },
+      readWhole: async (maximumBytes) => {
+        this.#assertOpen();
+        if (
+          !Number.isSafeInteger(maximumBytes) ||
+          maximumBytes < 0 ||
+          maximumBytes > 128 * 1024 * 1024
+        )
+          throw new RangeError("Whole Original read limit is invalid");
+        const value = await this.#request<{
+          bytes: Uint8Array;
+          sourceFacts: ConfinedSourceFacts;
+        }>("confinedReadWhole", { path: normalized, maximumBytes });
+        return { ...value, bytes: Buffer.from(value.bytes) };
+      },
       extractEmbeddedJpeg: async () => {
         this.#assertOpen();
-        const outcome = await this.#request<EmbeddedJpegOutcome>(
-          "confinedExtract",
-          { path: normalized },
-        );
+        const outcome = await this.#request<
+          EmbeddedJpegOutcome & { sourceFacts: ConfinedSourceFacts }
+        >("confinedExtract", { path: normalized });
         return outcome.kind === "preview"
           ? { ...outcome, jpeg: Buffer.from(outcome.jpeg) }
           : outcome;

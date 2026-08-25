@@ -14,16 +14,18 @@
   "scripts": {
     "build": "bun run --cwd apps/server build:native && bun run build:workspace",
     "build:workspace": "bun run --workspaces --if-present build",
-    "format": "prettier --write .github apps CONTRIBUTING.md README.md eslint.config.js package.json tsconfig.json vitest.config.ts",
-    "format:check": "prettier --check .github apps CONTRIBUTING.md README.md eslint.config.js package.json tsconfig.json vitest.config.ts",
+    "format": "prettier --write .github apps CONTRIBUTING.md README.md eslint.config.js package.json playwright.config.ts tsconfig.json vitest.config.ts",
+    "format:check": "prettier --check .github apps CONTRIBUTING.md README.md eslint.config.js package.json playwright.config.ts tsconfig.json vitest.config.ts",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:fast": "bun run lint && bun run typecheck && bun run --cwd apps/server build:native:test && bun run test",
+    "test:browser": "bun run build:workspace && playwright test",
+    "test:fast": "bun run lint && bun run typecheck && bun run --cwd apps/server build:native:test && bun run test && bun run test:browser",
     "typecheck": "bun run --workspaces --if-present typecheck",
     "verify": "bun run format:check && bun run test:fast && bun run build:workspace"
   },
   "devDependencies": {
     "@eslint/js": "9.34.0",
+    "@playwright/test": "1.55.0",
     "@types/bun": "1.4.0",
     "eslint": "9.34.0",
     "eslint-config-prettier": "10.1.8",

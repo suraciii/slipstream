@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +9,8 @@ import { PhotoLibrary } from "../library/photo-library.js";
 import { extractLargestEmbeddedJpeg } from "./libraw-preview.js";
 import {
   createTestJpeg,
+  extractWithMutation,
+  readWholeWithMutation,
   selectTestCandidates,
 } from "./libraw-preview.native-test.js";
 
@@ -24,6 +27,34 @@ afterEach(async () => {
 });
 
 describe("LibRaw embedded JPEG extraction", () => {
+  it("rejects whole-file bytes when the opened inode changes after admission", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "slipstream-native-race-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "photo.jpg");
+    await writeFile(path, createTestJpeg(32, 16));
+    const result = readWholeWithMutation(path, () => {
+      writeFileSync(path, Buffer.alloc(4096));
+    });
+    expect(result).toMatchObject({ kind: "io-error" });
+    expect(result.bytes).toBeUndefined();
+  });
+
+  it.skipIf(!samplePath)(
+    "rejects extracted bytes when the opened RAW inode changes after admission",
+    async () => {
+      const directory = await mkdtemp(
+        join(tmpdir(), "slipstream-native-raw-race-"),
+      );
+      temporaryDirectories.push(directory);
+      const path = join(directory, basename(samplePath!));
+      await writeFile(path, await readFile(samplePath!));
+      const result = extractWithMutation(path, () => {
+        writeFileSync(path, Buffer.from("changed"));
+      });
+      expect(result).toMatchObject({ kind: "io-error" });
+      expect("jpeg" in result).toBe(false);
+    },
+  );
   it.skipIf(!samplePath)(
     "selects the largest confined embedded JPEG and leaves the external Original unchanged",
     async () => {

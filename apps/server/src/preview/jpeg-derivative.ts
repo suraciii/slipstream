@@ -12,8 +12,10 @@ export type DerivativePriority =
   | "visible-grid"
   | "background";
 
+export type DerivativeSource = "matching-jpeg" | "embedded-raw-jpeg";
 export type DerivativeIdentity = Readonly<{
   photoIdentity: string;
+  source: DerivativeSource;
   sourceRelativePath: string;
   sourceSize: number;
   sourceMtimeMs: number;
@@ -31,6 +33,7 @@ export type DerivativeResult =
       colorProfile: "preserved-icc" | "srgb";
       generated: boolean;
       stale: boolean;
+      source: DerivativeSource;
     }>
   | Readonly<{
       kind: "malformed" | "resource-limit" | "io-error" | "internal-error";
@@ -75,6 +78,7 @@ type SchedulerOptions = Readonly<{
 }>;
 type Manifest = Readonly<{
   key: string;
+  source: DerivativeSource;
   width: number;
   height: number;
   colorProfile: "preserved-icc" | "srgb";
@@ -124,6 +128,7 @@ export function derivativeCacheKey(identity: DerivativeIdentity): string {
       JSON.stringify({
         version: derivativeAlgorithmVersion,
         photo: identity.photoIdentity,
+        source: identity.source,
         path: identity.sourceRelativePath,
         size: identity.sourceSize,
         mtimeMs: identity.sourceMtimeMs,
@@ -308,6 +313,7 @@ export class DerivativeScheduler {
       if (!published) throw new Error("Published derivative validation failed");
       const current: Manifest = {
         key,
+        source: identity.source,
         width: processed.width,
         height: processed.height,
         colorProfile: processed.colorProfile,
@@ -578,6 +584,7 @@ function ready(
     colorProfile: manifest.colorProfile,
     generated,
     stale,
+    source: manifest.source,
   };
 }
 
@@ -838,11 +845,15 @@ function manifestMatches(
 function isManifest(value: unknown): value is Manifest {
   if (!value || typeof value !== "object") return false;
   const item = value as Record<string, unknown>;
-  if (Object.keys(item).sort().join(",") !== "colorProfile,height,key,width")
+  if (
+    Object.keys(item).sort().join(",") !==
+    "colorProfile,height,key,source,width"
+  )
     return false;
   return (
     typeof item.key === "string" &&
     keyPattern.test(item.key) &&
+    (item.source === "matching-jpeg" || item.source === "embedded-raw-jpeg") &&
     Number.isInteger(item.width) &&
     Number(item.width) > 0 &&
     Number.isInteger(item.height) &&
