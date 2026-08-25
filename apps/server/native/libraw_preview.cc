@@ -222,6 +222,15 @@ Napi::Object ExtractOpened(Napi::Env env, const std::string &path) {
   return SelectionOutcome(env, selection, failure);
 }
 
+#ifdef __linux__
+bool SameOriginalRevision(const struct stat &before, const struct stat &after) {
+  return before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+         before.st_size == after.st_size &&
+         before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+         before.st_mtim.tv_nsec == after.st_mtim.tv_nsec;
+}
+#endif
+
 #ifdef SLIPSTREAM_TEST_ADDON
 Napi::Value ExtractImpl(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
@@ -300,6 +309,64 @@ struct TestJpegOutput {
   unsigned char *bytes;
   unsigned long length;
 };
+
+#ifdef __linux__
+Napi::Value TestReadWholeWithMutation(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsString() || !info[1].IsFunction())
+    return Outcome(env, "io-error", "Invalid test whole-file request");
+  const auto path = info[0].As<Napi::String>().Utf8Value();
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) return Outcome(env, "io-error", "Test Original could not be opened");
+  struct stat before{};
+  if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 ||
+      static_cast<std::uint64_t>(before.st_size) > kMaximumJpegBytes) {
+    close(fd);
+    return Outcome(env, "io-error", "Test Original is invalid");
+  }
+  info[1].As<Napi::Function>().Call({});
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(before.st_size));
+  std::size_t consumed = 0;
+  while (consumed < bytes.size()) {
+    const auto count = pread(fd, bytes.data() + consumed, bytes.size() - consumed,
+                             static_cast<off_t>(consumed));
+    if (count <= 0) { close(fd); return Outcome(env, "io-error", "Test Original read failed"); }
+    consumed += static_cast<std::size_t>(count);
+  }
+  struct stat after{};
+  if (fstat(fd, &after) != 0 || !SameOriginalRevision(before, after)) {
+    close(fd);
+    return Outcome(env, "io-error", "Original File changed during read");
+  }
+  close(fd);
+  auto result = Outcome(env, "file", "");
+  result.Set("bytes", Napi::Buffer<unsigned char>::Copy(env, bytes.data(), bytes.size()));
+  return result;
+}
+
+Napi::Value TestExtractWithMutation(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsString() || !info[1].IsFunction())
+    return Outcome(env, "io-error", "Invalid test extraction request");
+  const auto path = info[0].As<Napi::String>().Utf8Value();
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) return Outcome(env, "io-error", "Test Original could not be opened");
+  struct stat before{};
+  if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode)) {
+    close(fd);
+    return Outcome(env, "io-error", "Test Original is invalid");
+  }
+  info[1].As<Napi::Function>().Call({});
+  auto result = ExtractOpened(env, "/proc/self/fd/" + std::to_string(fd));
+  struct stat after{};
+  if (fstat(fd, &after) != 0 || !SameOriginalRevision(before, after)) {
+    close(fd);
+    return Outcome(env, "io-error", "Original File changed during Preview extraction");
+  }
+  close(fd);
+  return result;
+}
+#endif
 
 Napi::Value TestCreateJpeg(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
@@ -426,13 +493,33 @@ Napi::Value ListConfinedDirectory(const Napi::CallbackInfo &info) {
   result.Set("entries", list); return result;
 }
 
+void SetOriginalFacts(Napi::Env env, Napi::Object &value, const struct stat &facts) {
+  auto source = Napi::Object::New(env);
+  source.Set("size", Napi::Number::New(env, static_cast<double>(facts.st_size)));
+  source.Set("mtimeMs", Napi::Number::New(env, static_cast<double>(facts.st_mtim.tv_sec) * 1000.0 + facts.st_mtim.tv_nsec / 1e6));
+  source.Set("device", Napi::BigInt::New(env, static_cast<std::uint64_t>(facts.st_dev)));
+  source.Set("inode", Napi::BigInt::New(env, static_cast<std::uint64_t>(facts.st_ino)));
+  value.Set("sourceFacts", source);
+}
+
 Napi::Value ExtractFromLibrary(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
   if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString()) return Outcome(env, "io-error", "Invalid confined RAW request");
   const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
   if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  struct stat facts{};
+  if (fstat(fd, &facts) != 0 || !S_ISREG(facts.st_mode)) {
+    close(fd);
+    return Outcome(env, "io-error", "Original File is not a regular file");
+  }
   const std::string path = "/proc/self/fd/" + std::to_string(fd);
   auto result = ExtractOpened(env, path);
+  struct stat after{};
+  if (fstat(fd, &after) != 0 || !SameOriginalRevision(facts, after)) {
+    close(fd);
+    return Outcome(env, "io-error", "Original File changed during Preview extraction");
+  }
+  SetOriginalFacts(env, result, facts);
   close(fd);
   return result;
 }
@@ -454,6 +541,44 @@ Napi::Value ConfinedOriginalFacts(const Napi::CallbackInfo &info) {
   value.Set("size", Napi::Number::New(env, static_cast<double>(facts.st_size)));
   value.Set("mtimeMs", Napi::Number::New(env, static_cast<double>(facts.st_mtim.tv_sec) * 1000.0 + facts.st_mtim.tv_nsec / 1e6));
   value.Set("mode", Napi::Number::New(env, facts.st_mode));
+  return value;
+}
+
+Napi::Value ReadConfinedOriginalWhole(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 3 || !info[0].IsNumber() || !info[1].IsString() || !info[2].IsNumber())
+    return Outcome(env, "io-error", "Invalid confined whole-file request");
+  const double maximum_value = info[2].As<Napi::Number>().DoubleValue();
+  if (!std::isfinite(maximum_value) || maximum_value < 0 || maximum_value > 128 * 1024 * 1024 || maximum_value != std::floor(maximum_value))
+    return Outcome(env, "resource-limit", "Confined whole-file read exceeds limits");
+  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
+  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  struct stat facts{};
+  if (fstat(fd, &facts) != 0 || !S_ISREG(facts.st_mode) || facts.st_size < 0 ||
+      static_cast<std::uint64_t>(facts.st_size) > static_cast<std::uint64_t>(maximum_value)) {
+    close(fd);
+    return Outcome(env, "resource-limit", "Original File exceeds whole-file read limit");
+  }
+  std::vector<unsigned char> bytes(static_cast<std::size_t>(facts.st_size));
+  std::size_t consumed = 0;
+  while (consumed < bytes.size()) {
+    const auto count = pread(fd, bytes.data() + consumed, bytes.size() - consumed, static_cast<off_t>(consumed));
+    if (count <= 0) {
+      close(fd);
+      return Outcome(env, "io-error", "Original File could not be read completely");
+    }
+    consumed += static_cast<std::size_t>(count);
+  }
+  struct stat after{};
+  if (fstat(fd, &after) != 0 || !SameOriginalRevision(facts, after)) {
+    close(fd);
+    return Outcome(env, "io-error", "Original File changed during read");
+  }
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "file");
+  value.Set("bytes", Napi::Buffer<unsigned char>::Copy(env, bytes.data(), bytes.size()));
+  SetOriginalFacts(env, value, facts);
+  close(fd);
   return value;
 }
 
@@ -578,6 +703,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 #ifdef __linux__
   exports.Set("confinedOriginalFacts", Napi::Function::New(env, ConfinedOriginalFacts));
   exports.Set("readConfinedOriginalRange", Napi::Function::New(env, ReadConfinedOriginalRange));
+  exports.Set("readConfinedOriginalWhole", Napi::Function::New(env, ReadConfinedOriginalWhole));
   exports.Set("listConfinedDirectory", Napi::Function::New(env, ListConfinedDirectory));
   exports.Set("extractLargestEmbeddedJpegFromLibrary", Napi::Function::New(env, ExtractFromLibrary));
   exports.Set("prepareStateFile", Napi::Function::New(env, PrepareStateFile));
@@ -588,6 +714,10 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("extractLargestEmbeddedJpeg", Napi::Function::New(env, Extract));
   exports.Set("__testSelectCandidates", Napi::Function::New(env, TestSelectCandidates));
   exports.Set("__testCreateJpeg", Napi::Function::New(env, TestCreateJpeg));
+#ifdef __linux__
+  exports.Set("__testReadWholeWithMutation", Napi::Function::New(env, TestReadWholeWithMutation));
+  exports.Set("__testExtractWithMutation", Napi::Function::New(env, TestExtractWithMutation));
+#endif
 #endif
   return exports;
 }

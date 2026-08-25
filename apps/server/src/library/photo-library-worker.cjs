@@ -545,14 +545,36 @@ function seedPreview(p) {
       db.exec("COMMIT");
       return { kind: "stale-ignored" };
     }
+    let actualRevision = revision;
+    if (p.actualSource && p.actualSource !== p.expectedCandidate) {
+      const actualSourceId =
+        p.actualSource === "matching-jpeg"
+          ? photo.jpeg_original_id
+          : photo.raw_original_id;
+      const actualOriginal = actualSourceId
+        ? db
+            .prepare(
+              "SELECT relative_path,size,mtime_ms,available FROM original_files WHERE id=?",
+            )
+            .get(actualSourceId)
+        : undefined;
+      actualRevision =
+        actualOriginal && actualOriginal.available
+          ? `${actualOriginal.relative_path}\0${actualOriginal.size}\0${actualOriginal.mtime_ms}`
+          : null;
+      if (actualRevision !== p.actualSourceRevision) {
+        db.exec("COMMIT");
+        return { kind: "stale-ignored" };
+      }
+    }
     const changed = db
       .prepare(
         "UPDATE photos SET preview_state=?,preview_source=?,preview_source_revision=?,preview_width=?,preview_height=?,cache_revision=? WHERE id=? AND preview_candidate=?",
       )
       .run(
         p.state,
-        p.expectedCandidate,
-        revision,
+        p.actualSource || p.expectedCandidate,
+        actualRevision,
         p.width,
         p.height,
         p.cacheRevision,
@@ -599,6 +621,22 @@ async function handle(message) {
       if (!value || value.kind !== "facts")
         throw new Error("Original File is not safely readable");
       return { size: value.size, mtimeMs: value.mtimeMs, mode: value.mode };
+    }
+    case "confinedReadWhole": {
+      if (workerData.beforeConfinedOperation)
+        await requestHook(
+          "beforeConfinedOperation",
+          message.payload.path,
+          "read",
+        );
+      const value = binding.readConfinedOriginalWhole(
+        workerData.rootFd,
+        message.payload.path,
+        message.payload.maximumBytes,
+      );
+      if (!value || value.kind !== "file" || !Buffer.isBuffer(value.bytes))
+        throw new Error("Original File is not safely readable");
+      return { bytes: value.bytes, sourceFacts: value.sourceFacts };
     }
     case "confinedRead": {
       if (workerData.beforeConfinedOperation)

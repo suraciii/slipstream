@@ -1,20 +1,41 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { defaultServerOptions, startServer } from "./main.js";
+import { defaultNetworkOptions, startupOptions } from "./main.js";
 
-describe("server placeholder entry point", () => {
-  it("defaults its future endpoint to loopback", () => {
-    expect(defaultServerOptions).toEqual({ host: "127.0.0.1", port: 3000 });
+describe("server startup configuration", () => {
+  it("defaults to loopback and the canonical database basename", () => {
+    expect(
+      startupOptions({
+        SLIPSTREAM_LIBRARY_ROOT: "/photos",
+        SLIPSTREAM_STATE_DIRECTORY: "/state",
+        SLIPSTREAM_CACHE_DIRECTORY: "/cache",
+      }),
+    ).toEqual({
+      libraryRoot: "/photos",
+      stateDirectory: "/state",
+      cacheDirectory: "/cache",
+      databaseBasename: "library.sqlite",
+      ...defaultNetworkOptions,
+    });
   });
 
-  it("reports explicit placeholder configuration when called", () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-    startServer({ host: "127.0.0.1", port: 4000 });
-
-    expect(log).toHaveBeenCalledWith(
-      "Slipstream server placeholder configured for http://127.0.0.1:4000",
-    );
-    log.mockRestore();
+  it("allows explicit LAN binding and rejects incomplete or relative paths", () => {
+    expect(
+      startupOptions({
+        SLIPSTREAM_LIBRARY_ROOT: "/photos",
+        SLIPSTREAM_STATE_DIRECTORY: "/state",
+        SLIPSTREAM_CACHE_DIRECTORY: "/cache",
+        SLIPSTREAM_HOST: "0.0.0.0",
+        SLIPSTREAM_PORT: "8080",
+      }).host,
+    ).toBe("0.0.0.0");
+    expect(() => startupOptions({})).toThrow("SLIPSTREAM_LIBRARY_ROOT");
+    expect(() =>
+      startupOptions({
+        SLIPSTREAM_LIBRARY_ROOT: "photos",
+        SLIPSTREAM_STATE_DIRECTORY: "/state",
+        SLIPSTREAM_CACHE_DIRECTORY: "/cache",
+      }),
+    ).toThrow("absolute");
   });
 });

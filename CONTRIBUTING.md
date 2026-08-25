@@ -34,7 +34,19 @@ bun run test:fast
 bun run verify
 ```
 
-`test:fast` runs linting, type checking, the native build, and unit tests. `verify` also checks formatting and builds the server and Web applications. GitHub Actions invokes the same `verify` command.
+Install the Playwright Chromium browser once before running the gates:
+
+```sh
+bun x playwright install chromium
+```
+
+If the host platform is newer than the Playwright browser installer supports, point the test at an existing compatible Chromium binary:
+
+```sh
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
+```
+
+`test:fast` runs linting, type checking, the native build, unit/integration tests, and the real Chromium browser test. `verify` also checks formatting and builds the server and Web applications. GitHub Actions invokes the same `verify` command.
 
 ## Photo fixtures
 
@@ -47,3 +59,18 @@ SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test apps/server/src/
 ```
 
 The test hashes the Original before and after extraction and fails if its bytes change.
+
+## Server startup
+
+Build the workspace, then configure one Library and application-owned state locations with absolute paths:
+
+```sh
+SLIPSTREAM_LIBRARY_ROOT=/photos \
+SLIPSTREAM_STATE_DIRECTORY=/var/lib/slipstream \
+SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
+SLIPSTREAM_HOST=127.0.0.1 \
+SLIPSTREAM_PORT=3000 \
+node apps/server/dist/main.js
+```
+
+`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment.

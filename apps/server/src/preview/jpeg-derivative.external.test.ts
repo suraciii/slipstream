@@ -37,6 +37,7 @@ describe("external RAW derivative validation", () => {
           const result = await scheduler.generate(
             {
               photoIdentity: "external-sony-sample",
+              source: "embedded-raw-jpeg",
               sourceRelativePath: "external-sample.ARW",
               sourceSize: (await stat(samplePath!)).size,
               sourceMtimeMs: (await stat(samplePath!)).mtimeMs,
@@ -65,6 +66,7 @@ describe("external RAW derivative validation", () => {
               scheduler.generate(
                 {
                   photoIdentity: `external-measure-${count}-${index}`,
+                  source: "embedded-raw-jpeg",
                   sourceRelativePath: "external-sample.ARW",
                   sourceSize: source.size,
                   sourceMtimeMs: source.mtimeMs + index,
