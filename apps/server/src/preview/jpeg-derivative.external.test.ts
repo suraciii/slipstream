@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
+import { PhotoLibrary } from "../library/photo-library.js";
 import { DerivativeScheduler } from "./jpeg-derivative.js";
 import { extractLargestEmbeddedJpeg } from "./libraw-preview.js";
 
@@ -15,13 +16,21 @@ describe("external RAW derivative validation", () => {
     "extracts the real embedded JPEG and creates bounded derivatives without modifying the Original",
     async () => {
       const before = await sha256(samplePath!);
-      const extracted = extractLargestEmbeddedJpeg(samplePath!);
-      expect(extracted.kind).toBe("preview");
-      if (extracted.kind !== "preview") return;
-
-      const cache = await mkdtemp(
-        join(tmpdir(), "slipstream-external-derivative-"),
+      const state = await mkdtemp(join(tmpdir(), "slipstream-external-state-"));
+      const cache = join(state, "derivatives");
+      const library = await PhotoLibrary.open(
+        dirname(samplePath!),
+        join(state, "library.sqlite"),
       );
+      const extracted = await extractLargestEmbeddedJpeg(
+        library.confinedOriginal(basename(samplePath!)),
+      );
+      expect(extracted.kind).toBe("preview");
+      if (extracted.kind !== "preview") {
+        await library.shutdown();
+        return;
+      }
+
       try {
         const scheduler = new DerivativeScheduler(cache);
         for (const targetLongEdge of [512, 2560] as const) {
@@ -36,6 +45,8 @@ describe("external RAW derivative validation", () => {
             },
             extracted.jpeg,
           );
+          if (result.kind !== "ready")
+            throw new Error(`${result.kind}: ${result.message}`);
           expect(result).toMatchObject({ kind: "ready" });
           if (result.kind === "ready") {
             expect(Math.max(result.width, result.height)).toBe(targetLongEdge);
@@ -78,7 +89,8 @@ describe("external RAW derivative validation", () => {
         await measure(1);
         await measure(2);
       } finally {
-        await rm(cache, { recursive: true, force: true });
+        await library.shutdown();
+        await rm(state, { recursive: true, force: true });
       }
       expect(await sha256(samplePath!)).toBe(before);
     },

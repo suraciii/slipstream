@@ -1,7 +1,3 @@
-import { accessSync, constants } from "node:fs";
-import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-
 export type EmbeddedJpegOutcome =
   | Readonly<{
       kind: "preview";
@@ -17,35 +13,15 @@ export type EmbeddedJpegOutcome =
   | Readonly<{ kind: "internal-error"; message: string }>
   | Readonly<{ kind: "no-usable-preview"; message: string }>;
 
-type NativeBinding = Readonly<{
-  extractLargestEmbeddedJpeg(path: string): EmbeddedJpegOutcome;
+export type EmbeddedJpegSource = Readonly<{
+  extractEmbeddedJpeg(): Promise<EmbeddedJpegOutcome>;
 }>;
 
-const require = createRequire(import.meta.url);
-const addonPath = fileURLToPath(
-  new URL("../../build/Release/raw_preview.node", import.meta.url),
-);
-let binding: NativeBinding | undefined;
-
-function nativeBinding(): NativeBinding {
-  binding ??= require(addonPath) as NativeBinding;
-  return binding;
-}
-
-export function extractLargestEmbeddedJpeg(path: string): EmbeddedJpegOutcome {
-  if (typeof path !== "string") {
-    throw new TypeError("Expected one RAW file path");
+export function extractLargestEmbeddedJpeg(
+  source: EmbeddedJpegSource,
+): Promise<EmbeddedJpegOutcome> {
+  if (!source || typeof source.extractEmbeddedJpeg !== "function") {
+    throw new TypeError("Expected a Photo Library Original capability");
   }
-  try {
-    accessSync(path, constants.R_OK);
-  } catch (error) {
-    return {
-      kind: "io-error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Original File is not readable",
-    };
-  }
-  return nativeBinding().extractLargestEmbeddedJpeg(path);
+  return source.extractEmbeddedJpeg();
 }

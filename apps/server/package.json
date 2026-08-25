@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "install": "node-gyp rebuild",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/library && cp src/library/photo-library-worker.cjs src/library/file-kinds.cjs dist/library/",
     "build:native": "node-gyp rebuild",
     "build:native:test": "node-gyp rebuild -- -Dslipstream_build_test_addon=1",
     "typecheck": "tsc -p tsconfig.json"

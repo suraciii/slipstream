@@ -12,6 +12,7 @@ type TestSelectionOutcome = EmbeddedJpegOutcome &
   Readonly<{ extractedCandidateIndexes: number[] }>;
 
 type NativeTestBinding = Readonly<{
+  extractLargestEmbeddedJpeg(path: string): EmbeddedJpegOutcome;
   __testCreateJpeg(width: number, height: number): Buffer;
   __testSelectCandidates(candidates: TestCandidate[]): TestSelectionOutcome;
 }>;
@@ -22,5 +23,6 @@ const addonPath = fileURLToPath(
 );
 const binding = require(addonPath) as NativeTestBinding;
 
+export const extractTestPathEmbeddedJpeg = binding.extractLargestEmbeddedJpeg;
 export const createTestJpeg = binding.__testCreateJpeg;
 export const selectTestCandidates = binding.__testSelectCandidates;
