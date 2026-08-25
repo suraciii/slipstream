@@ -180,6 +180,7 @@ test("visible controls and keyboard share mutation, advance, rating independence
 
   await page.keyboard.press("p");
   await expect(page.getByText("2 / 3")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
     "selected",
   );
@@ -191,11 +192,15 @@ test("visible controls and keyboard share mutation, advance, rating independence
   });
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await page.keyboard.press("Control+z");
   await expect(page.getByText("2 / 3")).toBeVisible();
   await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
   await expect(page.getByText("Last change undone.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Clear", exact: true }),
+  ).toBeEnabled();
   await page.keyboard.press("u");
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await expect(page.getByText("2 / 3")).toBeVisible();
@@ -563,6 +568,7 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   await page.getByRole("button", { name: "Exit Detail" }).click();
   await page.keyboard.press("x");
   await expect(page.getByText("3 / 3")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await page.keyboard.press("Control+z");
   await expect(page.getByText("2 / 3")).toBeVisible();
 
