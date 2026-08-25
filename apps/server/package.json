@@ -4,7 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "install": "node-gyp rebuild",
     "build": "tsc -p tsconfig.build.json",
+    "build:native": "node-gyp rebuild",
+    "build:native:test": "node-gyp rebuild -- -Dslipstream_build_test_addon=1",
     "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "node-addon-api": "8.5.0",
+    "node-gyp": "11.4.2"
   }
 }

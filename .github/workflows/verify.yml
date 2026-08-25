@@ -17,5 +17,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+      - run: sudo apt-get update && sudo apt-get install --yes libraw-dev libjpeg-dev pkg-config
       - run: bun install --frozen-lockfile
       - run: bun run verify
