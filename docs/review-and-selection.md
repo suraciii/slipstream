@@ -8,7 +8,7 @@ The Photographer may start a Review Session from a Photo Set or a filtered Photo
 
 Slipstream must use a stable review order for the Session. The first product uses capture time when available, then relative path as a deterministic tie-breaker. A missing capture time sorts by relative path after Photos with capture times.
 
-Slipstream must remember the last reviewed Photo for each Photo Set. Resuming must return to that Photo when it is still present. If it is unavailable, Slipstream must move to the next available Photo without deleting its state.
+Slipstream must remember the last reviewed Photo for each Photo Set. Resuming must return to that Photo when it is still a member and available. If it is unavailable, Slipstream must move to the next available member without deleting its state. Removing the remembered Photo from the Photo Set clears that Set's saved position; the next Review Session starts at its first available member.
 
 ## Review Surface
 
@@ -82,7 +82,7 @@ Undo must restore the previous value and return to the affected Photo when the o
 
 The first product requires one-level undo. A durable, multi-step action history is not required.
 
-Undo remains available until another Selection State or Rating change occurs, the Photographer leaves the Review Session, or the browser reloads.
+Undo remains available until another Selection State or Rating change occurs, the Photographer leaves the Review Session, or the browser reloads. The browser holds the one undo description; the server does not persist an undo history. Undo must fail without changing state when the Photo's current value no longer matches the value produced by the action being undone.
 
 ## Keyboard Behavior
 

@@ -1,12 +1,12 @@
 const { parentPort, workerData } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const { classifyOriginalFile: classify, pairingBaseName: stem } = require(
   workerData.fileKindsPath,
 );
 const binding = require(workerData.addonPath);
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 let db;
 let closed = false;
 
@@ -64,6 +64,68 @@ function columns(name) {
     .all()
     .map((row) => row.name);
 }
+function compactSql(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/["`\[\]]/g, "");
+}
+function schemaSql(name, type = "table") {
+  return db
+    .prepare("SELECT sql FROM sqlite_master WHERE type=? AND name=?")
+    .get(type, name)?.sql;
+}
+function requireSql(name, fragments, type = "table") {
+  const sql = compactSql(schemaSql(name, type));
+  if (!sql || fragments.some((fragment) => !sql.includes(compactSql(fragment))))
+    throw new Error("SQLite schema is unsupported");
+}
+function validateCanonicalV1Shape() {
+  if (
+    JSON.stringify(tableNames()) !==
+    JSON.stringify(["library_metadata", "original_files", "photos"])
+  )
+    throw new Error("SQLite schema is unsupported");
+  requireSql("library_metadata", [
+    "key text primary key",
+    "value text not null",
+  ]);
+  requireSql("original_files", [
+    "id text primary key",
+    "relative_path text not null unique",
+    "kind text not null check(kind in ('raw','jpeg'))",
+    "size integer not null check(size >= 0)",
+    "mtime_ms real not null check(mtime_ms >= 0)",
+    "available integer not null check(available in (0,1))",
+    "error_category text check(error_category is null or error_category in ('unreadable','changed'))",
+    "error_message text check(error_message is null or length(error_message) <= 120)",
+  ]);
+  requireSql("photos", [
+    "id text primary key",
+    "raw_original_id text references original_files(id)",
+    "jpeg_original_id text references original_files(id)",
+    "ambiguous integer not null check(ambiguous in (0,1))",
+    "available integer not null check(available in (0,1))",
+    "preview_state text not null check(preview_state in ('inspection-pending','ready','failed','unavailable'))",
+    "preview_candidate text check(preview_candidate is null or preview_candidate in ('matching-jpeg','embedded-raw-jpeg'))",
+    "preview_source text check(preview_source is null or preview_source in ('matching-jpeg','embedded-raw-jpeg'))",
+    "preview_width integer check(preview_width is null or preview_width > 0)",
+    "preview_height integer check(preview_height is null or preview_height > 0)",
+    "sort_path text not null",
+  ]);
+  requireSql(
+    "photos_raw",
+    ["create index photos_raw on photos(raw_original_id)"],
+    "index",
+  );
+  requireSql(
+    "photos_jpeg",
+    ["create index photos_jpeg on photos(jpeg_original_id)"],
+    "index",
+  );
+  if (db.prepare("PRAGMA foreign_key_check").all().length)
+    throw new Error("SQLite schema data is invalid");
+}
 function validateLegacyShape() {
   const expectedTables = ["library_metadata", "original_files", "photos"];
   if (JSON.stringify(tableNames()) !== JSON.stringify(expectedTables))
@@ -94,6 +156,39 @@ function validateLegacyShape() {
     if (JSON.stringify(columns(name)) !== JSON.stringify(list))
       throw new Error("SQLite legacy schema is unsupported");
 }
+function validateLegacyData() {
+  const invalidOriginal = db
+    .prepare(
+      `SELECT 1 FROM original_files WHERE
+    typeof(id) != 'text' OR id = '' OR typeof(relative_path) != 'text' OR relative_path = '' OR
+    kind NOT IN ('raw','jpeg') OR typeof(size) != 'integer' OR size < 0 OR
+    typeof(mtime_ms) NOT IN ('integer','real') OR mtime_ms < 0 OR
+    typeof(available) != 'integer' OR available NOT IN (0,1) LIMIT 1`,
+    )
+    .get();
+  const invalidPhoto = db
+    .prepare(
+      `SELECT 1 FROM photos WHERE
+    typeof(id) != 'text' OR id = '' OR typeof(ambiguous) != 'integer' OR ambiguous NOT IN (0,1) OR
+    typeof(available) != 'integer' OR available NOT IN (0,1) OR
+    preview_state NOT IN ('inspection-pending','ready','failed','unavailable') OR
+    (preview_source IS NOT NULL AND preview_source NOT IN ('matching-jpeg','embedded-raw-jpeg')) OR
+    typeof(sort_path) != 'text' OR
+    (raw_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.raw_original_id)) OR
+    (jpeg_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.jpeg_original_id)) LIMIT 1`,
+    )
+    .get();
+  const duplicateOriginal = db
+    .prepare(
+      "SELECT 1 FROM original_files GROUP BY id HAVING count(*) > 1 UNION ALL SELECT 1 FROM original_files GROUP BY relative_path HAVING count(*) > 1 LIMIT 1",
+    )
+    .get();
+  const duplicatePhoto = db
+    .prepare("SELECT 1 FROM photos GROUP BY id HAVING count(*) > 1 LIMIT 1")
+    .get();
+  if (invalidOriginal || invalidPhoto || duplicateOriginal || duplicatePhoto)
+    throw new Error("SQLite legacy data cannot be migrated safely");
+}
 function migrate() {
   beginWriteTransaction();
   try {
@@ -110,6 +205,7 @@ function migrate() {
         .get();
       if (hasOriginals) {
         validateLegacyShape();
+        validateLegacyData();
         db.exec(`
           ALTER TABLE original_files RENAME TO original_files_legacy;
           ALTER TABLE photos RENAME TO photos_legacy;
@@ -129,11 +225,9 @@ function migrate() {
             preview_source_revision TEXT, preview_width INTEGER CHECK(preview_width IS NULL OR preview_width > 0),
             preview_height INTEGER CHECK(preview_height IS NULL OR preview_height > 0), cache_revision TEXT, sort_path TEXT NOT NULL);
           INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,error_category,error_message)
-            SELECT id,relative_path,kind,size,mtime_ms,available,NULL,NULL FROM original_files_legacy
-            WHERE kind IN ('raw','jpeg') AND size >= 0 AND mtime_ms >= 0 AND available IN (0,1);
+            SELECT id,relative_path,kind,size,mtime_ms,available,NULL,NULL FROM original_files_legacy;
           INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_source,sort_path)
-            SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_source,sort_path FROM photos_legacy
-            WHERE ambiguous IN (0,1) AND available IN (0,1) AND preview_state IN ('inspection-pending','ready','failed','unavailable');
+            SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_source,sort_path FROM photos_legacy;
           DROP TABLE photos_legacy; DROP TABLE original_files_legacy;
           CREATE INDEX photos_raw ON photos(raw_original_id); CREATE INDEX photos_jpeg ON photos(jpeg_original_id);
         `);
@@ -142,10 +236,8 @@ function migrate() {
         if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
           throw new Error("SQLite migration integrity validation failed");
         db.exec("PRAGMA user_version = 1");
-        db.exec("COMMIT");
-        return;
-      }
-      db.exec(`
+      } else
+        db.exec(`
         CREATE TABLE library_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE original_files(
           id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE,
@@ -165,6 +257,39 @@ function migrate() {
           sort_path TEXT NOT NULL);
         CREATE INDEX photos_raw ON photos(raw_original_id); CREATE INDEX photos_jpeg ON photos(jpeg_original_id);
         PRAGMA user_version = 1;`);
+    }
+    const migratedVersion = db
+      .prepare("PRAGMA user_version")
+      .get().user_version;
+    if (migratedVersion === 1) {
+      validateCanonicalV1Shape();
+      db.exec(`
+        ALTER TABLE photos ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'undecided'
+          CHECK(selection_state IN ('undecided','selected','rejected'));
+        ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0
+          CHECK(rating BETWEEN 0 AND 5);
+        CREATE TABLE photo_sets(
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
+          created_at INTEGER NOT NULL);
+        CREATE TABLE photo_set_members(
+          photo_set_id TEXT NOT NULL REFERENCES photo_sets(id) ON DELETE CASCADE,
+          photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+          position INTEGER NOT NULL CHECK(position >= 0),
+          PRIMARY KEY(photo_set_id, photo_id),
+          UNIQUE(photo_set_id, position));
+        CREATE TABLE review_progress(
+          photo_set_id TEXT PRIMARY KEY REFERENCES photo_sets(id) ON DELETE CASCADE,
+          photo_id TEXT NOT NULL,
+          FOREIGN KEY(photo_set_id, photo_id)
+            REFERENCES photo_set_members(photo_set_id, photo_id) ON DELETE CASCADE);
+        CREATE INDEX photo_set_members_photo ON photo_set_members(photo_id);
+        PRAGMA user_version = 2;
+      `);
+      if (db.prepare("PRAGMA foreign_key_check").all().length)
+        throw new Error("SQLite migration foreign-key validation failed");
+      if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
+        throw new Error("SQLite migration integrity validation failed");
     }
     db.exec("COMMIT");
   } catch (e) {
@@ -509,6 +634,226 @@ function readAll() {
       .all(),
   };
 }
+function readPhotoSets() {
+  const sets = db
+    .prepare("SELECT id,name FROM photo_sets ORDER BY created_at,id")
+    .all();
+  const members = db
+    .prepare(
+      `SELECT m.photo_set_id,m.photo_id,m.position,p.available,p.selection_state,p.rating
+       FROM photo_set_members m JOIN photos p ON p.id=m.photo_id
+       ORDER BY m.photo_set_id,m.position`,
+    )
+    .all();
+  const progress = new Map(
+    db
+      .prepare("SELECT photo_set_id,photo_id FROM review_progress")
+      .all()
+      .map((row) => [row.photo_set_id, row.photo_id]),
+  );
+  return sets.map((set) => ({
+    id: set.id,
+    name: set.name,
+    lastReviewedPhotoId: progress.get(set.id) || null,
+    members: members
+      .filter((member) => member.photo_set_id === set.id)
+      .map((member) => ({
+        photoId: member.photo_id,
+        position: member.position,
+        available: Boolean(member.available),
+        selectionState: member.selection_state,
+        rating: member.rating,
+      })),
+  }));
+}
+class DomainFailure extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+function notFound(message) {
+  throw new DomainFailure("not-found", message);
+}
+function conflict(message) {
+  throw new DomainFailure("conflict", message);
+}
+function rollbackMutation() {
+  try {
+    db.exec("ROLLBACK");
+  } catch {}
+}
+function mutationFailure(error) {
+  if (error instanceof DomainFailure) return error;
+  if (
+    String(error?.code || "").includes("CONSTRAINT") ||
+    /constraint|unique/i.test(String(error?.message || ""))
+  )
+    return new DomainFailure(
+      "conflict",
+      "Mutation conflicts with current state",
+    );
+  return new DomainFailure("persistence", "Mutation could not be persisted");
+}
+function photoSetMutation(p) {
+  try {
+    beginWriteTransaction();
+    let result;
+    switch (p.kind) {
+      case "create": {
+        const id = randomUUID();
+        db.prepare(
+          "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+        ).run(id, p.name, Date.now());
+        result = { kind: "applied", photoSetId: id };
+        break;
+      }
+      case "rename": {
+        const changed = db
+          .prepare("UPDATE photo_sets SET name=? WHERE id=?")
+          .run(p.name, p.photoSetId);
+        if (changed.changes !== 1) notFound("Unknown Photo Set");
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      case "delete": {
+        const changed = db
+          .prepare("DELETE FROM photo_sets WHERE id=?")
+          .run(p.photoSetId);
+        if (changed.changes !== 1) notFound("Unknown Photo Set");
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      case "addMembers": {
+        if (
+          !db.prepare("SELECT 1 FROM photo_sets WHERE id=?").get(p.photoSetId)
+        )
+          notFound("Unknown Photo Set");
+        const exists = db.prepare("SELECT 1 FROM photos WHERE id=?");
+        const insert = db.prepare(
+          "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
+        );
+        let position = db
+          .prepare(
+            "SELECT COALESCE(MAX(position)+1,0) AS position FROM photo_set_members WHERE photo_set_id=?",
+          )
+          .get(p.photoSetId).position;
+        for (const photoId of p.photoIds) {
+          if (!exists.get(photoId)) notFound("Unknown Photo");
+          insert.run(p.photoSetId, photoId, position++);
+        }
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      case "removeMember": {
+        const member = db
+          .prepare(
+            "SELECT position FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
+          )
+          .get(p.photoSetId, p.photoId);
+        if (!member) notFound("Unknown Photo Set member");
+        db.prepare(
+          "DELETE FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
+        ).run(p.photoSetId, p.photoId);
+        db.prepare(
+          "UPDATE photo_set_members SET position=position-1 WHERE photo_set_id=? AND position>?",
+        ).run(p.photoSetId, member.position);
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      case "reorder": {
+        const current = db
+          .prepare(
+            "SELECT photo_id FROM photo_set_members WHERE photo_set_id=? ORDER BY position",
+          )
+          .all(p.photoSetId)
+          .map((row) => row.photo_id);
+        if (
+          current.length !== p.photoIds.length ||
+          new Set(p.photoIds).size !== p.photoIds.length ||
+          current.some((id) => !p.photoIds.includes(id))
+        )
+          conflict("Photo Set order must contain every member once");
+        db.prepare(
+          "UPDATE photo_set_members SET position=position+1000000 WHERE photo_set_id=?",
+        ).run(p.photoSetId);
+        const update = db.prepare(
+          "UPDATE photo_set_members SET position=? WHERE photo_set_id=? AND photo_id=?",
+        );
+        p.photoIds.forEach((id, index) => update.run(index, p.photoSetId, id));
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      case "setProgress": {
+        if (
+          !db
+            .prepare(
+              "SELECT 1 FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
+            )
+            .get(p.photoSetId, p.photoId)
+        )
+          notFound("Unknown Photo Set member");
+        db.prepare(
+          `INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)
+           ON CONFLICT(photo_set_id) DO UPDATE SET photo_id=excluded.photo_id`,
+        ).run(p.photoSetId, p.photoId);
+        result = { kind: "applied", photoSetId: p.photoSetId };
+        break;
+      }
+      default:
+        throw new Error("Unknown Photo Set mutation");
+    }
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    rollbackMutation();
+    throw mutationFailure(error);
+  }
+}
+function photoStateMutation(p) {
+  try {
+    beginWriteTransaction();
+    const column = p.field === "selectionState" ? "selection_state" : "rating";
+    const row = db
+      .prepare(`SELECT ${column} AS value FROM photos WHERE id=?`)
+      .get(p.photoId);
+    if (!row) notFound("Unknown Photo");
+    if (p.expectedCurrent !== undefined && row.value !== p.expectedCurrent)
+      conflict("Photo state changed");
+    db.prepare(`UPDATE photos SET ${column}=? WHERE id=?`).run(
+      p.value,
+      p.photoId,
+    );
+    if (p.photoSetId) {
+      if (
+        !db
+          .prepare(
+            "SELECT 1 FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
+          )
+          .get(p.photoSetId, p.photoId)
+      )
+        notFound("Unknown Photo Set member");
+      db.prepare(
+        `INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)
+         ON CONFLICT(photo_set_id) DO UPDATE SET photo_id=excluded.photo_id`,
+      ).run(p.photoSetId, p.photoId);
+    }
+    db.exec("COMMIT");
+    return {
+      kind: "applied",
+      photoId: p.photoId,
+      undo: {
+        photoId: p.photoId,
+        field: p.field,
+        priorValue: row.value,
+        expectedCurrent: p.value,
+      },
+    };
+  } catch (error) {
+    rollbackMutation();
+    throw mutationFailure(error);
+  }
+}
 async function scan(payload) {
   const { discovered, errors } = await walk();
   applyScan(discovered, payload?.failureHook);
@@ -605,6 +950,12 @@ async function handle(message) {
       return scan(message.payload);
     case "read":
       return readAll();
+    case "readPhotoSets":
+      return readPhotoSets();
+    case "photoSetMutation":
+      return photoSetMutation(message.payload);
+    case "photoStateMutation":
+      return photoStateMutation(message.payload);
     case "seedPreview":
       return seedPreview(message.payload);
     case "confinedFacts": {
@@ -698,6 +1049,7 @@ parentPort.on("message", (m) => {
       parentPort.postMessage({
         id: m.id,
         error: e instanceof Error ? e.message : "Photo Library command failed",
+        errorCode: e instanceof DomainFailure ? e.code : undefined,
       }),
   );
 });

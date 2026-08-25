@@ -39,6 +39,8 @@ export type PhotoRecord = Readonly<{
   previewWidth?: number;
   previewHeight?: number;
   cacheRevision?: string;
+  selectionState: SelectionState;
+  rating: number;
 }>;
 export type ScanResult = Readonly<{
   originals: ReadonlyArray<OriginalRecord>;
@@ -85,6 +87,7 @@ type WorkerResponse = {
   ready?: boolean;
   result?: unknown;
   error?: string;
+  errorCode?: "not-found" | "conflict" | "persistence";
   hook?: "beforeDirectoryRecursion" | "beforeConfinedOperation";
   hookId?: number;
   operation?: "facts" | "read" | "extract";
@@ -95,6 +98,35 @@ type Pending = {
   reject: (error: Error) => void;
 };
 export type PreviewSeedResult = Readonly<{ kind: "applied" | "stale-ignored" }>;
+export type SelectionState = "undecided" | "selected" | "rejected";
+export type PhotoSetRecord = Readonly<{
+  id: string;
+  name: string;
+  lastReviewedPhotoId?: string;
+  members: ReadonlyArray<{
+    photoId: string;
+    position: number;
+    available: boolean;
+    selectionState: SelectionState;
+    rating: number;
+  }>;
+}>;
+export type UndoDescription = Readonly<{
+  photoId: string;
+  field: "selectionState" | "rating";
+  priorValue: SelectionState | number;
+  expectedCurrent: SelectionState | number;
+}>;
+export type StateMutationResult = Readonly<{
+  kind: "applied";
+  photoId: string;
+  undo: UndoDescription;
+}>;
+export class MutationError extends Error {
+  constructor(readonly kind: "not-found" | "conflict" | "persistence") {
+    super("Photo Library mutation failed");
+  }
+}
 type StateFileIdentity = Readonly<{
   device: bigint;
   inode: bigint;
@@ -301,6 +333,31 @@ export class PhotoLibrary {
     return this.#snapshot;
   }
 
+  async listPhotoSets(): Promise<ReadonlyArray<PhotoSetRecord>> {
+    this.#assertOpen();
+    return normalizePhotoSets(
+      await this.#request<RawPhotoSet[]>("readPhotoSets"),
+    );
+  }
+
+  async mutatePhotoSet(
+    input: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    this.#assertOpen();
+    await this.#request("photoSetMutation", input);
+  }
+
+  async mutatePhotoState(input: {
+    photoId: string;
+    field: "selectionState" | "rating";
+    value: SelectionState | number;
+    expectedCurrent?: SelectionState | number;
+    photoSetId?: string;
+  }): Promise<StateMutationResult> {
+    this.#assertOpen();
+    return this.#request<StateMutationResult>("photoStateMutation", input);
+  }
+
   async seedInspectedPreview(input: {
     photoId: string;
     state: "ready" | "failed";
@@ -443,7 +500,12 @@ export class PhotoLibrary {
     const pending = this.#pending.get(message.id);
     if (!pending) return;
     this.#pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error));
+    if (message.error)
+      pending.reject(
+        message.errorCode
+          ? new MutationError(message.errorCode)
+          : new Error(message.error),
+      );
     else pending.resolve(message.result);
   }
 
@@ -561,6 +623,31 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
+type RawPhotoSet = {
+  id: string;
+  name: string;
+  lastReviewedPhotoId: string | null;
+  members: Array<{
+    photoId: string;
+    position: number;
+    available: boolean;
+    selectionState: SelectionState;
+    rating: number;
+  }>;
+};
+function normalizePhotoSets(
+  value: RawPhotoSet[],
+): ReadonlyArray<PhotoSetRecord> {
+  return value.map((set) => ({
+    id: set.id,
+    name: set.name,
+    ...(set.lastReviewedPhotoId
+      ? { lastReviewedPhotoId: set.lastReviewedPhotoId }
+      : {}),
+    members: set.members,
+  }));
+}
+
 type RawScanResult = {
   originals: RawOriginal[];
   photos: RawPhoto[];
@@ -589,6 +676,8 @@ type RawPhoto = {
   preview_width: number | null;
   preview_height: number | null;
   cache_revision: string | null;
+  selection_state: SelectionState;
+  rating: number;
 };
 type RawError = {
   relativePath: string;
@@ -631,6 +720,8 @@ function normalizeResult(value: RawScanResult): ScanResult {
       ...(row.preview_width ? { previewWidth: row.preview_width } : {}),
       ...(row.preview_height ? { previewHeight: row.preview_height } : {}),
       ...(row.cache_revision ? { cacheRevision: row.cache_revision } : {}),
+      selectionState: row.selection_state,
+      rating: row.rating,
     }),
   );
   const errors = (value.errors ?? []).map((error) =>

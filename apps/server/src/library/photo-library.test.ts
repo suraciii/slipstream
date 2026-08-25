@@ -274,7 +274,7 @@ describe("Photo Library indexing", () => {
     await library.shutdown();
     const database = new DatabaseSync(db);
     expect(database.prepare("PRAGMA user_version").get()).toMatchObject({
-      user_version: 1,
+      user_version: 2,
     });
     expect(() =>
       database.exec(
@@ -295,7 +295,7 @@ describe("Photo Library indexing", () => {
     await migrated.shutdown();
     const migratedDb = new DatabaseSync(legacy);
     expect(migratedDb.prepare("PRAGMA user_version").get()).toMatchObject({
-      user_version: 1,
+      user_version: 2,
     });
     expect(
       migratedDb
@@ -313,6 +313,34 @@ describe("Photo Library indexing", () => {
     });
     expect(migratedDb.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     migratedDb.close();
+  });
+
+  it("rolls back an invalid unreferenced version-0 Original without changing anything", async () => {
+    const { root, db } = await fixture();
+    await mkdir(dirname(db), { recursive: true, mode: 0o700 });
+    const legacy = new DatabaseSync(db);
+    legacy.exec(`CREATE TABLE library_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE original_files(id TEXT PRIMARY KEY,relative_path TEXT UNIQUE,kind TEXT,size INTEGER,mtime_ms REAL,available INTEGER,inspection_error TEXT);
+      CREATE TABLE photos(id TEXT PRIMARY KEY,raw_original_id TEXT,jpeg_original_id TEXT,ambiguous INTEGER,available INTEGER,preview_state TEXT,preview_source TEXT,sort_path TEXT);
+      INSERT INTO original_files VALUES('bad','bad.jpg','invalid',1,0,1,NULL);`);
+    const before = legacy
+      .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+      .all();
+    legacy.close();
+    await expect(openLibrary(root, db)).rejects.toThrow(
+      /cannot be migrated safely/,
+    );
+    const after = new DatabaseSync(db);
+    expect(after.prepare("PRAGMA user_version").get()).toMatchObject({
+      user_version: 0,
+    });
+    expect(after.prepare("SELECT * FROM original_files").all()).toHaveLength(1);
+    expect(
+      after
+        .prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        .all(),
+    ).toEqual(before);
+    after.close();
   });
 
   it("rejects malformed version-0 shape without changing schema or version", async () => {

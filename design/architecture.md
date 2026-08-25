@@ -89,7 +89,7 @@ At minimum, SQLite stores:
 
 Original bytes, matching JPEG bytes, and embedded RAW JPEG bytes do not belong in SQLite.
 
-Selection State and Rating update in one database transaction per Photo mutation. Photo Set deletion removes membership and progress, not Photo state or filesystem content.
+Selection State and Rating update in one database transaction per Photo mutation. A mutation may update that Photo Set's review progress in the same transaction. The browser holds one undo description containing the affected Photo, field, prior value, and expected current value; undo uses a compare-and-set transaction so it cannot overwrite a newer change. Photo Set deletion removes membership and progress, not Photo state or filesystem content.
 
 The first architecture does not write XMP sidecars. Export or synchronization requires a later design because it introduces a second writable source of metadata.
 
