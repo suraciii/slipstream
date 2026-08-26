@@ -17,10 +17,13 @@ function admitStateSidecars() {
   );
   if (!admitted || admitted.kind !== "admitted")
     throw new Error("SQLite sidecar is not safely owned");
+  return admitted;
 }
 
 function beginWriteTransaction() {
-  admitStateSidecars();
+  const admitted = admitStateSidecars();
+  if (admitted.present)
+    throw new Error("SQLite state requires recovery before writing");
   db.exec("BEGIN IMMEDIATE");
 }
 let nextHookId = 1;
@@ -80,49 +83,53 @@ function requireSql(name, fragments, type = "table") {
   if (!sql || fragments.some((fragment) => !sql.includes(compactSql(fragment))))
     throw new Error("SQLite schema is unsupported");
 }
-function validateCanonicalV1Shape() {
-  if (
-    JSON.stringify(tableNames()) !==
-    JSON.stringify(["library_metadata", "original_files", "photos"])
-  )
+function schemaManifest() {
+  return {
+    userVersion: db.prepare("PRAGMA user_version").get().user_version,
+    objects: db
+      .prepare(
+        "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+      )
+      .all()
+      .map((row) => ({
+        type: row.type,
+        name: row.name,
+        sql: compactSql(row.sql),
+        ...(row.type === "table"
+          ? {
+              columns: db
+                .prepare(`PRAGMA table_info("${String(row.name)}")`)
+                .all()
+                .map((column) => ({
+                  name: column.name,
+                  type: column.type,
+                  notNull: Boolean(column.notnull),
+                  default: column.dflt_value,
+                  primaryKey: column.pk,
+                })),
+              foreignKeys: db
+                .prepare(`PRAGMA foreign_key_list("${String(row.name)}")`)
+                .all()
+                .map((foreignKey) => ({
+                  table: foreignKey.table,
+                  from: foreignKey.from,
+                  to: foreignKey.to,
+                  onUpdate: foreignKey.on_update,
+                  onDelete: foreignKey.on_delete,
+                })),
+            }
+          : {}),
+      })),
+  };
+}
+function validateCanonicalShape(version) {
+  const expected =
+    version === 1 ? workerData.schemaV1Manifest : workerData.schemaV2Manifest;
+  if (JSON.stringify(schemaManifest()) !== JSON.stringify(expected))
     throw new Error("SQLite schema is unsupported");
-  requireSql("library_metadata", [
-    "key text primary key",
-    "value text not null",
-  ]);
-  requireSql("original_files", [
-    "id text primary key",
-    "relative_path text not null unique",
-    "kind text not null check(kind in ('raw','jpeg'))",
-    "size integer not null check(size >= 0)",
-    "mtime_ms real not null check(mtime_ms >= 0)",
-    "available integer not null check(available in (0,1))",
-    "error_category text check(error_category is null or error_category in ('unreadable','changed'))",
-    "error_message text check(error_message is null or length(error_message) <= 120)",
-  ]);
-  requireSql("photos", [
-    "id text primary key",
-    "raw_original_id text references original_files(id)",
-    "jpeg_original_id text references original_files(id)",
-    "ambiguous integer not null check(ambiguous in (0,1))",
-    "available integer not null check(available in (0,1))",
-    "preview_state text not null check(preview_state in ('inspection-pending','ready','failed','unavailable'))",
-    "preview_candidate text check(preview_candidate is null or preview_candidate in ('matching-jpeg','embedded-raw-jpeg'))",
-    "preview_source text check(preview_source is null or preview_source in ('matching-jpeg','embedded-raw-jpeg'))",
-    "preview_width integer check(preview_width is null or preview_width > 0)",
-    "preview_height integer check(preview_height is null or preview_height > 0)",
-    "sort_path text not null",
-  ]);
-  requireSql(
-    "photos_raw",
-    ["create index photos_raw on photos(raw_original_id)"],
-    "index",
-  );
-  requireSql(
-    "photos_jpeg",
-    ["create index photos_jpeg on photos(jpeg_original_id)"],
-    "index",
-  );
+}
+function validateCanonicalV1Shape() {
+  validateCanonicalShape(1);
   if (db.prepare("PRAGMA foreign_key_check").all().length)
     throw new Error("SQLite schema data is invalid");
 }
@@ -291,6 +298,7 @@ function migrate() {
       if (db.prepare("PRAGMA integrity_check").get().integrity_check !== "ok")
         throw new Error("SQLite migration integrity validation failed");
     }
+    validateCanonicalShape(2);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
@@ -299,9 +307,9 @@ function migrate() {
 }
 function openDatabase() {
   try {
-    db = new DatabaseSync(
-      `/proc/self/fd/${workerData.stateFd}/${workerData.databaseBasename}`,
-    );
+    const sidecars = admitStateSidecars();
+    if (sidecars.present)
+      throw new Error("SQLite state requires recovery before startup");
     const verified = binding.verifyStateFile(
       workerData.stateFd,
       workerData.databaseBasename,
@@ -309,9 +317,12 @@ function openDatabase() {
     );
     if (!verified || verified.kind !== "verified")
       throw new Error("SQLite database inode changed before startup");
-    admitStateSidecars();
-    db.exec("PRAGMA journal_mode = DELETE");
-    admitStateSidecars();
+    db = new DatabaseSync(
+      `/proc/self/fd/${workerData.stateFd}/${workerData.databaseBasename}`,
+    );
+    const admitted = admitStateSidecars();
+    if (admitted.present)
+      throw new Error("SQLite state requires recovery before startup");
     db.exec("PRAGMA foreign_keys = ON");
     migrate();
     const stored = db

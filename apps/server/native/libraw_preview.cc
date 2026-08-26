@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <limits.h>
 #include <memory>
 #include <new>
 #include <string>
@@ -630,6 +631,136 @@ bool MatchesStateIdentity(const Napi::Object &expected, const struct stat &facts
          expected.Get("linkCount").As<Napi::Number>().Uint32Value() == facts.st_nlink;
 }
 
+bool SafeStateDirectory(const struct stat &facts) {
+  return S_ISDIR(facts.st_mode) && facts.st_uid == geteuid() &&
+         (facts.st_mode & 0022) == 0;
+}
+
+bool PathIsUnderRoot(const std::string &root, const std::string &candidate) {
+  return candidate == root ||
+         (candidate.size() > root.size() && candidate.compare(0, root.size(), root) == 0 &&
+          candidate[root.size()] == '/');
+}
+
+std::string CanonicalPathForFd(int fd) {
+  char path[PATH_MAX];
+  const auto count = readlink((std::string("/proc/self/fd/") + std::to_string(fd)).c_str(),
+                              path, sizeof(path) - 1);
+  if (count < 0) return {};
+  path[count] = '\0';
+  return std::string(path);
+}
+
+void SetDirectoryFacts(Napi::Env env, Napi::Object &value, const struct stat &facts) {
+  value.Set("uid", Napi::Number::New(env, facts.st_uid));
+  value.Set("mode", Napi::Number::New(env, facts.st_mode));
+  value.Set("linkCount", Napi::Number::New(env, facts.st_nlink));
+}
+
+int OpenOrCreateStateDirectory(const std::string &path, const std::string &library_root) {
+  if (path.empty() || path.front() != '/' || library_root.empty() || library_root.front() != '/') return -1;
+  int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (current < 0) return -1;
+  std::size_t start = 1;
+  while (start <= path.size()) {
+    const auto end = path.find('/', start);
+    const auto length = end == std::string::npos ? std::string::npos : end - start;
+    const auto component = path.substr(start, length);
+    if (component.empty() || component == "." || component == "..") {
+      close(current);
+      errno = EINVAL;
+      return -1;
+    }
+    const auto parent_path = CanonicalPathForFd(current);
+    if (parent_path.empty() || PathIsUnderRoot(library_root, parent_path)) {
+      close(current);
+      errno = EACCES;
+      return -1;
+    }
+    int next = openat(current, component.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0 && errno == ENOENT) {
+      if (mkdirat(current, component.c_str(), 0700) != 0 && errno != EEXIST) {
+        close(current);
+        return -1;
+      }
+      next = openat(current, component.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    }
+    if (next < 0) {
+      close(current);
+      return -1;
+    }
+    const auto child_path = CanonicalPathForFd(next);
+    if (child_path.empty() || PathIsUnderRoot(library_root, child_path)) {
+      close(next);
+      close(current);
+      errno = EACCES;
+      return -1;
+    }
+    close(current);
+    current = next;
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return current;
+}
+
+Napi::Value OpenOrCreateStateDirectoryBinding(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsString() || !info[1].IsString())
+    return Outcome(env, "io-error", "Invalid state directory request");
+  const int fd = OpenOrCreateStateDirectory(
+      info[0].As<Napi::String>().Utf8Value(), info[1].As<Napi::String>().Utf8Value());
+  if (fd < 0) return Outcome(env, "io-error", "SQLite state directory must be a real directory outside the Photo Library root");
+  struct stat facts{};
+  if (fstat(fd, &facts) != 0 || !SafeStateDirectory(facts)) {
+    close(fd);
+    return Outcome(env, "io-error", "SQLite state directory must be owned by the server user and not group or other writable");
+  }
+  const auto canonical_path = CanonicalPathForFd(fd);
+  if (canonical_path.empty()) {
+    close(fd);
+    return Outcome(env, "io-error", "SQLite state directory could not be canonicalized safely");
+  }
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "directory");
+  value.Set("fd", fd);
+  value.Set("canonicalPath", canonical_path);
+  SetDirectoryFacts(env, value, facts);
+  return value;
+}
+
+Napi::Value CloseStateDirectoryBinding(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 1 || !info[0].IsNumber())
+    return Outcome(env, "io-error", "Invalid state directory close request");
+  if (close(info[0].As<Napi::Number>().Int32Value()) != 0)
+    return Outcome(env, "io-error", "SQLite state directory could not be closed safely");
+  return env.Undefined();
+}
+
+Napi::Value InspectStateFile(const Napi::CallbackInfo &info) {
+  const auto env = info.Env();
+  if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString())
+    return Outcome(env, "io-error", "Invalid state file inspection request");
+  const auto name = info[1].As<Napi::String>().Utf8Value();
+  if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
+    return Outcome(env, "io-error", "SQLite database name is invalid");
+  const int fd = openat(info[0].As<Napi::Number>().Int32Value(), name.c_str(),
+                        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0 && errno == ENOENT) return Outcome(env, "absent", "");
+  if (fd < 0) return Outcome(env, "io-error", "SQLite database could not be inspected safely");
+  struct stat facts{};
+  const int result = fstat(fd, &facts);
+  close(fd);
+  if (result != 0 || !SafeStateFile(facts))
+    return Outcome(env, "io-error", "SQLite database inode is not safely owned");
+  auto value = Napi::Object::New(env);
+  value.Set("kind", "present");
+  value.Set("size", Napi::Number::New(env, static_cast<double>(facts.st_size)));
+  SetStateIdentity(env, value, facts);
+  return value;
+}
+
 Napi::Value PrepareStateFile(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
   if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString())
@@ -638,7 +769,7 @@ Napi::Value PrepareStateFile(const Napi::CallbackInfo &info) {
   if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
     return Outcome(env, "io-error", "SQLite database name is invalid");
   const int fd = openat(info[0].As<Napi::Number>().Int32Value(), name.c_str(),
-                        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+                        O_RDWR | O_CREAT | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0) return Outcome(env, "io-error", "SQLite database could not be created safely");
   struct stat facts{};
   const int result = fstat(fd, &facts);
@@ -659,7 +790,7 @@ Napi::Value VerifyStateFile(const Napi::CallbackInfo &info) {
   if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
     return Outcome(env, "io-error", "SQLite database name is invalid");
   const int fd = openat(info[0].As<Napi::Number>().Int32Value(), name.c_str(),
-                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+                        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return Outcome(env, "io-error", "SQLite database could not be verified safely");
   struct stat facts{};
   const int result = fstat(fd, &facts);
@@ -672,9 +803,10 @@ Napi::Value VerifyStateFile(const Napi::CallbackInfo &info) {
   return value;
 }
 
-bool AdmitOptionalStateFile(int state_fd, const std::string &name) {
-  const int fd = openat(state_fd, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+bool AdmitOptionalStateFile(int state_fd, const std::string &name, bool &present) {
+  const int fd = openat(state_fd, name.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return errno == ENOENT;
+  present = true;
   struct stat facts{};
   const int result = fstat(fd, &facts);
   close(fd);
@@ -689,12 +821,14 @@ Napi::Value AdmitStateSidecars(const Napi::CallbackInfo &info) {
   const auto name = info[1].As<Napi::String>().Utf8Value();
   if (!ValidRelativePath(name) || name.find('/') != std::string::npos)
     return Outcome(env, "io-error", "SQLite database name is invalid");
+  bool present = false;
   for (const char *suffix : {"-journal", "-wal", "-shm"}) {
-    if (!AdmitOptionalStateFile(state_fd, name + suffix))
+      if (!AdmitOptionalStateFile(state_fd, name + suffix, present))
       return Outcome(env, "io-error", "SQLite sidecar is not safely owned");
   }
   auto value = Napi::Object::New(env);
   value.Set("kind", "admitted");
+  value.Set("present", present);
   return value;
 }
 #endif
@@ -706,6 +840,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("readConfinedOriginalWhole", Napi::Function::New(env, ReadConfinedOriginalWhole));
   exports.Set("listConfinedDirectory", Napi::Function::New(env, ListConfinedDirectory));
   exports.Set("extractLargestEmbeddedJpegFromLibrary", Napi::Function::New(env, ExtractFromLibrary));
+  exports.Set("openOrCreateStateDirectory", Napi::Function::New(env, OpenOrCreateStateDirectoryBinding));
+  exports.Set("closeStateDirectory", Napi::Function::New(env, CloseStateDirectoryBinding));
+  exports.Set("inspectStateFile", Napi::Function::New(env, InspectStateFile));
   exports.Set("prepareStateFile", Napi::Function::New(env, PrepareStateFile));
   exports.Set("verifyStateFile", Napi::Function::New(env, VerifyStateFile));
   exports.Set("admitStateSidecars", Napi::Function::New(env, AdmitStateSidecars));

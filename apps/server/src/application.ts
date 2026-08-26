@@ -65,7 +65,6 @@ export class SlipstreamApplication {
 
   static async open(config: ApplicationConfig): Promise<SlipstreamApplication> {
     await validateConfig(config);
-    await mkdir(config.stateDirectory, { recursive: true, mode: 0o700 });
     await mkdir(config.cacheDirectory, { recursive: true, mode: 0o700 });
     await validateOwnedDirectory(
       config.cacheDirectory,

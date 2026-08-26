@@ -221,6 +221,32 @@ describe("Photo Library indexing", () => {
     await library.shutdown();
   });
 
+  it("rejects a safely owned sidecar introduced before a write", async () => {
+    const { root, db } = await fixture();
+    await put(root, "one.JPG", "preview-source");
+    const library = await openLibrary(root, db);
+    const first = await library.scan();
+    const photo = first.photos[0]!;
+    const journal = `${db}-journal`;
+    await writeFile(journal, "stale");
+    await chmod(journal, 0o600);
+    const before = await readFile(journal);
+    await expect(
+      library.seedInspectedPreview({
+        photoId: photo.id,
+        state: "ready",
+        expectedCandidate: "matching-jpeg",
+        expectedSourceRevision: sourceRevision(first, "one.JPG"),
+        width: 100,
+        height: 50,
+        cacheRevision: "v1",
+      }),
+    ).rejects.toThrow(/recovery/);
+    expect(await readFile(journal)).toEqual(before);
+    await unlink(journal);
+    await library.shutdown();
+  });
+
   it.each(["symlink", "hardlink"] as const)(
     "admits SQLite sidecars immediately before Preview CAS writes and rejects an unsafe journal %s",
     async (replacement) => {
@@ -284,6 +310,14 @@ describe("Photo Library indexing", () => {
     database.exec("PRAGMA user_version=99");
     database.close();
     await expect(openLibrary(root, db)).rejects.toThrow(/newer/);
+
+    const negative = join(dirname(db), "negative.sqlite");
+    const negativeDb = new DatabaseSync(negative);
+    negativeDb.exec("PRAGMA user_version=-1");
+    negativeDb.close();
+    const negativeBefore = await readFile(negative);
+    await expect(openLibrary(root, negative)).rejects.toThrow(/unsupported/);
+    expect(await readFile(negative)).toEqual(negativeBefore);
 
     const legacy = join(dirname(db), "legacy.sqlite");
     const old = new DatabaseSync(legacy);
@@ -589,16 +623,19 @@ describe("Photo Library indexing", () => {
     },
   );
 
-  it("accepts a safely owned stale rollback journal and keeps it in the state directory", async () => {
+  it("rejects a safely owned stale rollback journal without changing it", async () => {
     const { base, root } = await fixture();
     const state = join(base, "safe-sidecar-state");
     await mkdir(state, { mode: 0o700 });
-    await writeFile(join(state, "library.sqlite-journal"), "stale");
-    await chmod(join(state, "library.sqlite-journal"), 0o600);
-    const library = await openLibrary(root, join(state, "library.sqlite"));
-    await library.scan();
-    await library.shutdown();
-    expect(await readdir(state)).toContain("library.sqlite");
+    const journal = join(state, "library.sqlite-journal");
+    await writeFile(journal, "stale");
+    await chmod(journal, 0o600);
+    const before = await readFile(journal);
+    await expect(
+      openLibrary(root, join(state, "library.sqlite")),
+    ).rejects.toThrow(/recovery/);
+    expect(await readFile(journal)).toEqual(before);
+    expect(await readdir(state)).toEqual(["library.sqlite-journal"]);
   });
 
   it("keeps SQLite files in the descriptor-owned state directory after pathname replacement", async () => {
