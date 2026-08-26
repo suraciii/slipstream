@@ -1,0 +1,35 @@
+[
+  {
+    "environment": {
+      "SLIPSTREAM_LIBRARY_ROOT": "/photos",
+      "SLIPSTREAM_STATE_DIRECTORY": "/state",
+      "SLIPSTREAM_CACHE_DIRECTORY": "/cache"
+    },
+    "expected": {
+      "libraryRoot": "/photos",
+      "stateDirectory": "/state",
+      "cacheDirectory": "/cache",
+      "databaseBasename": "library.sqlite",
+      "host": "127.0.0.1",
+      "port": 3000
+    }
+  },
+  {
+    "environment": {
+      "SLIPSTREAM_LIBRARY_ROOT": "/photos",
+      "SLIPSTREAM_STATE_DIRECTORY": "/state",
+      "SLIPSTREAM_CACHE_DIRECTORY": "/cache",
+      "SLIPSTREAM_DATABASE_BASENAME": "review.sqlite",
+      "SLIPSTREAM_HOST": "0.0.0.0",
+      "SLIPSTREAM_PORT": "8080"
+    },
+    "expected": {
+      "libraryRoot": "/photos",
+      "stateDirectory": "/state",
+      "cacheDirectory": "/cache",
+      "databaseBasename": "review.sqlite",
+      "host": "0.0.0.0",
+      "port": 8080
+    }
+  }
+]

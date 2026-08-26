@@ -1,0 +1,61 @@
+[
+  {
+    "name": "list-photos",
+    "request": { "method": "GET", "path": "/api/photos" },
+    "expected": { "status": 200, "body": { "photos": [] } }
+  },
+  {
+    "name": "invalid-photo-set",
+    "request": {
+      "method": "POST",
+      "path": "/api/photo-sets",
+      "headers": { "content-type": "application/json" },
+      "body": { "name": "" }
+    },
+    "expected": { "status": 400, "body": { "error": "Invalid Photo Set name" } }
+  },
+  {
+    "name": "cross-origin-mutation",
+    "request": {
+      "method": "POST",
+      "path": "/api/scan",
+      "headers": { "origin": "https://foreign.example" }
+    },
+    "expected": {
+      "status": 403,
+      "body": { "error": "Cross-origin mutation rejected" }
+    }
+  },
+  {
+    "name": "unsupported-method",
+    "request": { "method": "DELETE", "path": "/api/photos" },
+    "expected": { "status": 405, "body": { "error": "Method not allowed" } }
+  },
+  {
+    "name": "api-no-spa-fallback",
+    "request": { "method": "GET", "path": "/api/unknown" },
+    "expected": { "status": 404, "body": { "error": "Not found" } }
+  },
+  {
+    "name": "index-revalidation",
+    "request": { "method": "GET", "path": "/" },
+    "expected": {
+      "status": 200,
+      "headers": {
+        "cache-control": "no-cache",
+        "content-type": "text/html; charset=utf-8",
+        "x-content-type-options": "nosniff"
+      },
+      "bodyText": "<main>compatibility web</main>"
+    }
+  },
+  {
+    "name": "spa-fallback-revalidation",
+    "request": { "method": "GET", "path": "/review/session" },
+    "expected": {
+      "status": 200,
+      "headers": { "cache-control": "no-cache" },
+      "bodyText": "<main>compatibility web</main>"
+    }
+  }
+]

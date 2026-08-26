@@ -1,0 +1,20 @@
+[
+  {
+    "name": "malformed-v0-shape",
+    "version": 0,
+    "sql": "CREATE TABLE original_files(id TEXT PRIMARY KEY); CREATE TABLE photos(id TEXT PRIMARY KEY);",
+    "expectedError": "legacy schema"
+  },
+  {
+    "name": "invalid-v0-data",
+    "version": 0,
+    "sql": "CREATE TABLE library_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE original_files(id TEXT PRIMARY KEY,relative_path TEXT UNIQUE,kind TEXT,size INTEGER,mtime_ms REAL,available INTEGER,inspection_error TEXT); CREATE TABLE photos(id TEXT PRIMARY KEY,raw_original_id TEXT,jpeg_original_id TEXT,ambiguous INTEGER,available INTEGER,preview_state TEXT,preview_source TEXT,sort_path TEXT); INSERT INTO original_files VALUES('bad','bad.jpg','invalid',1,0,1,NULL);",
+    "expectedError": "cannot be migrated safely"
+  },
+  {
+    "name": "malformed-v1-shape",
+    "version": 1,
+    "sql": "CREATE TABLE library_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE original_files(id TEXT PRIMARY KEY,relative_path TEXT UNIQUE,kind TEXT,size INTEGER,mtime_ms REAL,available INTEGER,error_category TEXT,error_message TEXT); CREATE TABLE photos(id TEXT PRIMARY KEY,raw_original_id TEXT,jpeg_original_id TEXT,ambiguous INTEGER,available INTEGER,preview_state TEXT,preview_candidate TEXT,preview_source TEXT,preview_source_revision TEXT,preview_width INTEGER,preview_height INTEGER,cache_revision TEXT,sort_path TEXT); CREATE INDEX photos_raw ON photos(raw_original_id); CREATE INDEX photos_jpeg ON photos(jpeg_original_id); INSERT INTO original_files VALUES('bad','bad.jpg','jpeg',1,0,1,NULL,NULL); PRAGMA user_version=1;",
+    "expectedError": "schema"
+  }
+]

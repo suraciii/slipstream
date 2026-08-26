@@ -1,0 +1,40 @@
+{
+  "algorithmVersion": "sharp-v2",
+  "vectors": [
+    {
+      "name": "unicode-matching-512",
+      "path": "春节/相机/IMG_0001.JPG",
+      "source": "matching-jpeg",
+      "size": 1234567,
+      "mtimeMs": 1700000000123.5,
+      "candidate": null,
+      "edge": 512,
+      "originalId": "af29c8b52a2f3cd1fc09dc42b74668c16cf9c8f552bf9f1947cdbd4a538b92da",
+      "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
+      "sourceRevision": "春节/相机/IMG_0001.JPG\u00001234567\u00001700000000123.5",
+      "cacheKey": "e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105",
+      "manifestIdentity": "8e6dd1c415faefdb79e00059d55f66ebdcc1206acaed27ed8b28effc15a75ea4"
+    },
+    {
+      "name": "unicode-embedded-2560",
+      "path": "春节/相机/_R5_0001.ARW",
+      "source": "embedded-raw-jpeg",
+      "size": 987654321,
+      "mtimeMs": 1700000000456.75,
+      "candidate": "3",
+      "edge": 2560,
+      "originalId": "913b911910e1361793f50547d79d8f8e1c99bdc0f47a3719ddc1a6e5ce0a1e38",
+      "photoId": "add6f8534b0e38e15a13576b62da9c3e4eda92413f896a68a0a016674c6945a1",
+      "sourceRevision": "春节/相机/_R5_0001.ARW\u0000987654321\u00001700000000456.75",
+      "cacheKey": "49d81bab2c5ea3cbc7a6f9d2d40f5560174573c888009b26d2acf78f48067010",
+      "manifestIdentity": "213cdbe0e81343340fcd63b23c716bf34fbe3a99b20750a20e1bb3edf0fb42aa"
+    }
+  ],
+  "paired": {
+    "rawPath": "春节/相机/_R5_0002.ARW",
+    "jpegPath": "春节/相机/_R5_0002.JPG",
+    "rawOriginalId": "045326f4482d3161c09523b07cd8535a5cad51e839a99cdc39cc456c2c54eae3",
+    "jpegOriginalId": "3ca931a2e714802590d05303c47b6bcf5e6181c8622855d373e6c3e5274d1190",
+    "photoId": "2ec4722cbab21b52c830cb36e5ee9b59df20bff38cfb6590c72a4b0e29e32dbe"
+  }
+}
