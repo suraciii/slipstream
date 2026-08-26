@@ -125,7 +125,9 @@ These are ownership boundaries, not required packages or services. The first imp
 
 ## Technology Direction
 
-The initial implementation should use one server language with direct, maintained bindings to SQLite and LibRaw. The browser should use ordinary Web platform image display and pointer/touch events, with a small established gesture library only if it reduces tested interaction complexity.
+The production server is a Rust modular monolith. Rust owns HTTP, application lifecycle, SQLite, Photo Library indexing and confinement, Preview extraction, derivative caching, and durable mutations. Bun and TypeScript own the Web application, browser tests, and repository tooling; they are not a production server runtime. [`rust-server.md`](rust-server.md) defines the module, compatibility, staged cutover, and rollback contracts.
+
+The browser uses ordinary Web platform image display and pointer/touch events, with a small established gesture library only if it reduces tested interaction complexity.
 
 LibRaw owns RAW container support and embedded JPEG extraction. It does not own a first-product RAW development path.
 

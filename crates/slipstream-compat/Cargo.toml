@@ -1,0 +1,25 @@
+[package]
+name = "slipstream-compat"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+image.workspace = true
+lcms2.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tower.workspace = true
+
+[build-dependencies]
+cc = "=1.4.4"
+pkg-config = "=0.3.32"

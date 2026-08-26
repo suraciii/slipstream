@@ -4,23 +4,27 @@
 
 The native Preview boundary is currently verified on Linux only.
 
+- Rust `1.97.1` with Cargo, Clippy, and rustfmt
 - Bun `1.4.0`
-- Node.js `22.23.1` (required by `node-gyp`)
+- Node.js `22.23.1` (transitional server and `node-gyp` only)
 - A C++17 compiler and Python 3
-- `pkg-config`, LibRaw development headers, and libjpeg-turbo development headers
+- `pkg-config`, LibRaw, libjpeg-turbo, and LittleCMS development headers
 
 On Debian/Ubuntu, install native dependencies with:
 
 ```sh
-sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev
+sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev liblcms2-dev
 ```
 
-Install the exact Bun version recorded in `package.json`, make the exact Node.js version available, then install dependencies from the lockfile:
+Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, make the transitional Node.js version available, then install dependencies from the lockfiles:
 
 ```sh
+rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+rustc --version # 1.97.1
 curl -fsSL https://bun.com/install | bash -s "bun-v1.4.0"
 node --version # v22.23.1
 bun install --frozen-lockfile
+cargo fetch --locked
 ```
 
 The workspace install builds only the production LibRaw addon. `test:fast` explicitly builds a separate LibRaw test addon; the Server TypeScript build does not rebuild either artifact. Sharp/libvips owns JPEG decode, orientation, Lanczos resize, ICC conversion or preservation, and encoding. Derivative processing is bounded to two concurrent jobs per cache directory.
@@ -30,6 +34,7 @@ The workspace install builds only the production LibRaw addon. `test:fast` expli
 Use the repository commands rather than invoking individual tools in CI or reviews:
 
 ```sh
+bun run test:rust
 bun run test:fast
 bun run verify
 ```
@@ -46,7 +51,9 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:fast` runs linting, type checking, the native build, unit/integration tests, and the real Chromium browser test. `verify` also checks formatting and builds the server and Web applications. GitHub Actions invokes the same `verify` command.
+`test:rust` checks formatting, denies Clippy warnings, and runs the Rust compatibility tests. `test:fast` adds TypeScript linting and type checking, the transitional native build, unit/integration tests, and the real Chromium browser test. `verify` also checks repository formatting and builds Rust plus the transitional server and Web applications. GitHub Actions invokes the same `verify` command.
+
+The Rust workspace currently contains compatibility probes and shared migration contracts, not production routes. The production-language and cutover contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); both Rust and TypeScript tests consume them.
 
 ## Photo fixtures
 

@@ -1,0 +1,31 @@
+[
+  {
+    "name": "matching-jpeg-derivative",
+    "setup": "matching-jpeg",
+    "request": { "method": "GET", "target": "generated-derivative" },
+    "expected": {
+      "status": 200,
+      "headers": {
+        "content-type": "image/jpeg",
+        "cache-control": "public, max-age=31536000, immutable",
+        "x-content-type-options": "nosniff"
+      },
+      "etagPattern": "^\"[a-f0-9]{64}\"$",
+      "minimumBodyBytes": 1
+    },
+    "revalidation": { "header": "if-none-match", "expectedStatus": 304 }
+  },
+  {
+    "name": "fingerprinted-web-asset",
+    "setup": "web-asset",
+    "request": { "method": "GET", "path": "/assets/app.js" },
+    "expected": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/javascript; charset=utf-8",
+        "cache-control": "public, max-age=31536000, immutable",
+        "x-content-type-options": "nosniff"
+      }
+    }
+  }
+]
