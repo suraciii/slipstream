@@ -1,5 +1,6 @@
 [package]
 name = "slipstream-core"
+build = "build.rs"
 version = "0.0.0"
 publish = false
 edition.workspace = true
@@ -9,9 +10,16 @@ license.workspace = true
 [dependencies]
 libc.workspace = true
 rusqlite.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 
+[build-dependencies]
+cc.workspace = true
+pkg-config.workspace = true
+
 [dev-dependencies]
+image.workspace = true
+lcms2.workspace = true
 serde.workspace = true

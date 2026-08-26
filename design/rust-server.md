@@ -74,19 +74,21 @@ sqlx `0.9.0` was considered. Its pool, async facade, macro/offline metadata, and
 
 ### Original confinement and LibRaw
 
-Rust owns Linux `openat2` confinement and same-descriptor pre/post `fstat` revision checks. A narrow C/C++ shim built with `cc` owns LibRaw and libjpeg error handling. Its production ABI uses opaque handles, fixed-width values, owned byte buffers, and normalized outcomes. Broad generated LibRaw bindings and `libraw-sys` are rejected because the available crate does not prove the required thumbnail enumeration, fd boundary, memory policy, or maintenance contract.
+Rust owns Linux `openat2` confinement and same-descriptor pre/post `fstat` revision checks. A narrow owned C/C++ wrapper built with `cc` owns LibRaw and libjpeg error handling. Its production ABI uses opaque handles, fixed-width values, owned byte buffers, and normalized outcomes. Broad generated LibRaw bindings and `libraw-sys` are rejected because the available crate does not prove the required thumbnail enumeration, fd boundary, memory policy, or maintenance contract.
 
-The shim must expose only embedded-JPEG extraction and complete JPEG validation. Node-API, whole-RAW buffering, sensor unpack, demosaic, and general RAW development are outside the boundary.
+The wrapper must expose only embedded-JPEG extraction and complete JPEG validation. Node-API, whole-RAW buffering, sensor unpack, demosaic, and general RAW development are outside the boundary. The wrapper receives a borrowed descriptor adapter; Rust retains descriptor ownership and performs the post-operation revision check.
 
 ### Derivative image and color processing
 
 The final runtime must not depend on Sharp or Node. Reusing Sharp during migration is rejected because it would preserve the unintended runtime boundary.
 
-libvips with LittleCMS is preferred for initial parity because the existing Sharp pipeline already proves the engine's orientation, Lanczos, ICC, and JPEG behavior. The current host lacks the libvips development package, so Issue #20 does not freeze a libvips crate or wrapper. Issue #22 must install and probe the deployment packages, then prefer either a maintained Rust binding that contains global lifetime and errors or a narrow owned C wrapper.
+The selected implementation is a narrow owned C wrapper around libvips, with LittleCMS used where an explicit profile transform is required. The wrapper owns the libvips object graph, translates failures to bounded Rust outcomes, and exposes only JPEG inspection, orientation normalization, bounded resize, profile handling, and JPEG encoding. It must not expose libvips objects or GLib ownership conventions to the rest of the Rust application.
 
-`image 0.25.10` with `lcms2 6.1.1` compiles and proves Lanczos and sRGB profile primitives, but does not yet prove EXIF orientations 1–8, multipart ICC handling, non-sRGB conversion, metadata policy, corruption behavior, memory bounds, or pixel parity. It is an alternative only if the complete Issue #22 fixture matrix passes within the resource budget. `image` alone is rejected.
+libvips initialization is process-global: the first Preview operation calls `vips_init` once, and libvips remains initialized until process exit. Individual requests, Libraries, and Preview services must not call `vips_shutdown`. The wrapper must use libvips' bounded operation options and the application owns the Preview queue with a default concurrency of 2 jobs per cache directory. Input JPEG bytes are capped at 128 MiB, decoded pixels at 100 million, output JPEG bytes at 64 MiB, and LibRaw native memory at 256 MiB.
 
-A Rust derivative may retain cache algorithm version `sharp-v2` only if orientation, dimensions, representative decoded pixels, ICC classification, and manifest behavior pass compatibility vectors. Otherwise Issue #22 must introduce a new version and treat old derivatives as rebuildable stale entries rather than claiming byte compatibility.
+`image 0.25.10` with `lcms2 6.1.1` remains a probe-only alternative. It compiles and proves basic Lanczos and sRGB primitives, but it is not selected unless the complete Issue #22 fixture matrix passes orientation 1–8, ICC, CMYK, corruption, memory, and representative pixel checks within the resource budget. `image` alone is rejected.
+
+The Rust derivative uses cache algorithm version `rust-vips-v1`; semantic parity with the existing Sharp implementation is not yet proven, so `sharp-v2` derivatives are rebuildable stale entries rather than byte-compatible outputs. A future retention of `sharp-v2` requires the checked-in fixture contract to prove orientation, dimensions, representative decoded pixels, ICC classification, and manifest behavior.
 
 ## Exact Dependency Evidence
 
@@ -102,7 +104,7 @@ The compatibility workspace pins:
 
 `cargo info` provided crate metadata and repository URLs for the selected and rejected candidates. These results and a successful locked compile are selection evidence, not a guarantee of future maintenance. Security advisory and upstream activity review remains part of each delivery Issue when dependencies change.
 
-The native probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.1.5`, and LittleCMS `2.17`. A libvips development package is not currently available, so image-pipeline parity remains the explicit Issue #22 decision gate.
+The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.1.5`, libvips `8.18.0`, and LittleCMS `2.17`. These versions prove that the selected native headers and process-global libvips lifecycle are available in the build environment; they do not by themselves establish derivative parity. The checked-in Preview fixture contract and later Rust implementation tests are the algorithm-version evidence gate.
 
 ## Compatibility Contracts
 

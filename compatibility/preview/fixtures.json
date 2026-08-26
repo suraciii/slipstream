@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "algorithmVersionGate": {
+    "required": "fixture-matrix-pass",
+    "selectedRustVersion": "rust-vips-v1"
+  },
+  "targets": [512, 2560],
+  "limits": {
+    "inputBytes": 134217728,
+    "decodedPixels": 100000000,
+    "outputBytes": 67108864,
+    "librawMemoryMb": 256,
+    "queueConcurrency": 2
+  },
+  "cases": [
+    {
+      "name": "rgb-small-orientation-1-8",
+      "kind": "rgb",
+      "width": 12,
+      "height": 8,
+      "profile": "none",
+      "orientations": [1, 2, 3, 4, 5, 6, 7, 8]
+    },
+    {
+      "name": "rgb-large",
+      "kind": "rgb",
+      "width": 3200,
+      "height": 2000,
+      "profile": "none",
+      "orientations": [1]
+    },
+    {
+      "name": "rgb-valid-icc",
+      "kind": "rgb",
+      "width": 32,
+      "height": 16,
+      "profile": "srgb",
+      "orientations": [1]
+    },
+    {
+      "name": "rgb-invalid-icc",
+      "kind": "rgb",
+      "width": 32,
+      "height": 16,
+      "profile": "invalid",
+      "orientations": [1]
+    },
+    {
+      "name": "cmyk",
+      "kind": "cmyk",
+      "width": 24,
+      "height": 12,
+      "profile": "cmyk",
+      "orientations": [1]
+    },
+    {
+      "name": "corrupt-jpeg",
+      "kind": "corrupt",
+      "profile": "none",
+      "orientations": []
+    },
+    {
+      "name": "truncated-jpeg",
+      "kind": "truncated",
+      "profile": "none",
+      "orientations": []
+    }
+  ]
+}

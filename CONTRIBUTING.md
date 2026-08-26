@@ -8,12 +8,12 @@ The native Preview boundary is currently verified on Linux only.
 - Bun `1.4.0`
 - Node.js `22.23.1` (transitional server and `node-gyp` only)
 - A C++17 compiler and Python 3
-- `pkg-config`, LibRaw, libjpeg-turbo, and LittleCMS development headers
+- `pkg-config`, LibRaw, libjpeg-turbo, libvips, and LittleCMS development headers
 
 On Debian/Ubuntu, install native dependencies with:
 
 ```sh
-sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev liblcms2-dev
+sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev libvips-dev liblcms2-dev
 ```
 
 Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, make the transitional Node.js version available, then install dependencies from the lockfiles:
@@ -27,7 +27,7 @@ bun install --frozen-lockfile
 cargo fetch --locked
 ```
 
-The workspace install builds only the production LibRaw addon. `test:fast` explicitly builds a separate LibRaw test addon; the Server TypeScript build does not rebuild either artifact. Sharp/libvips owns JPEG decode, orientation, Lanczos resize, ICC conversion or preservation, and encoding. Derivative processing is bounded to two concurrent jobs per cache directory.
+The workspace install builds only the transitional production LibRaw addon. `test:fast` explicitly builds a separate LibRaw test addon; the Server TypeScript build does not rebuild either artifact. The Rust Preview boundary uses owned C wrappers around LibRaw/libjpeg and libvips, with one process-global libvips lifecycle. Derivative processing is bounded to two concurrent jobs per cache directory, with 128 MiB input JPEG, 100 million decoded-pixel, 64 MiB output JPEG, and 256 MiB LibRaw native-memory limits.
 
 ## Verification
 
