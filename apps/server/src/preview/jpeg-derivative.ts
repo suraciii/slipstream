@@ -3,6 +3,8 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import sharp from "sharp";
 
+// The rollback implementation remains Sharp-owned. Rust uses the distinct
+// `rust-vips-v1` namespace and must never read or publish these entries.
 export const derivativeAlgorithmVersion = "sharp-v2";
 export const derivativeConcurrencyLimit = 2;
 export type DerivativeTarget = 512 | 2560;

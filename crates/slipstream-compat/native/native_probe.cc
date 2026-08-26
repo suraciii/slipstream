@@ -3,6 +3,7 @@
 
 #include <jpeglib.h>
 #include <libraw/libraw.h>
+#include <vips/vips.h>
 
 extern "C" const char *slipstream_probe_libraw_version() {
   return libraw_version();
@@ -10,6 +11,14 @@ extern "C" const char *slipstream_probe_libraw_version() {
 
 extern "C" int slipstream_probe_jpeg_version() {
   return JPEG_LIB_VERSION;
+}
+
+extern "C" int slipstream_probe_vips_lifecycle() {
+  if (vips_init("slipstream-probe") != 0) return 0;
+  // libvips is process-global. Keep it initialized until process exit; the
+  // production wrapper never exposes or calls vips_shutdown between jobs.
+  const auto version = vips_version(0);
+  return version >= 8 ? 1 : 0;
 }
 
 extern "C" int slipstream_probe_thumbnail_api() {

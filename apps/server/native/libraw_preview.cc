@@ -317,7 +317,7 @@ Napi::Value TestReadWholeWithMutation(const Napi::CallbackInfo &info) {
   if (info.Length() != 2 || !info[0].IsString() || !info[1].IsFunction())
     return Outcome(env, "io-error", "Invalid test whole-file request");
   const auto path = info[0].As<Napi::String>().Utf8Value();
-  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return Outcome(env, "io-error", "Test Original could not be opened");
   struct stat before{};
   if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 ||
@@ -350,7 +350,7 @@ Napi::Value TestExtractWithMutation(const Napi::CallbackInfo &info) {
   if (info.Length() != 2 || !info[0].IsString() || !info[1].IsFunction())
     return Outcome(env, "io-error", "Invalid test extraction request");
   const auto path = info[0].As<Napi::String>().Utf8Value();
-  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) return Outcome(env, "io-error", "Test Original could not be opened");
   struct stat before{};
   if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode)) {
@@ -445,13 +445,15 @@ bool ValidRelativePath(const std::string &path, bool allow_empty = false) {
 int OpenConfined(int root_fd, const std::string &relative_path, bool directory = false) {
   if (!ValidRelativePath(relative_path)) return -1;
   open_how how{};
-  how.flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | (directory ? O_DIRECTORY : 0);
+  // O_NONBLOCK prevents a hostile FIFO/device from blocking before fstat can
+  // reject it. Regular Original files retain normal pread semantics.
+  how.flags = O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | (directory ? O_DIRECTORY : 0);
   how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
   return static_cast<int>(syscall(SYS_openat2, root_fd, relative_path.c_str(), &how, sizeof(how)));
 }
 
 int OpenConfinedDirectory(int root_fd, const std::string &relative_path) {
-  if (relative_path.empty()) return openat(root_fd, ".", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY);
+  if (relative_path.empty()) return openat(root_fd, ".", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY);
   return OpenConfined(root_fd, relative_path, true);
 }
 
@@ -503,26 +505,44 @@ void SetOriginalFacts(Napi::Env env, Napi::Object &value, const struct stat &fac
   value.Set("sourceFacts", source);
 }
 
-Napi::Value ExtractFromLibrary(const Napi::CallbackInfo &info) {
+class ScopedFd {
+ public:
+  explicit ScopedFd(int fd) : fd_(fd) {}
+  ~ScopedFd() { if (fd_ >= 0) close(fd_); }
+  ScopedFd(const ScopedFd &) = delete;
+  ScopedFd &operator=(const ScopedFd &) = delete;
+  int get() const { return fd_; }
+ private:
+  int fd_;
+};
+
+Napi::Value ExtractFromLibraryImpl(const Napi::CallbackInfo &info) {
   const auto env = info.Env();
   if (info.Length() != 2 || !info[0].IsNumber() || !info[1].IsString()) return Outcome(env, "io-error", "Invalid confined RAW request");
-  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
-  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  ScopedFd fd(OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value()));
+  if (fd.get() < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
   struct stat facts{};
-  if (fstat(fd, &facts) != 0 || !S_ISREG(facts.st_mode)) {
-    close(fd);
+  if (fstat(fd.get(), &facts) != 0 || !S_ISREG(facts.st_mode))
     return Outcome(env, "io-error", "Original File is not a regular file");
-  }
-  const std::string path = "/proc/self/fd/" + std::to_string(fd);
+  const std::string path = "/proc/self/fd/" + std::to_string(fd.get());
   auto result = ExtractOpened(env, path);
   struct stat after{};
-  if (fstat(fd, &after) != 0 || !SameOriginalRevision(facts, after)) {
-    close(fd);
+  if (fstat(fd.get(), &after) != 0 || !SameOriginalRevision(facts, after))
     return Outcome(env, "io-error", "Original File changed during Preview extraction");
-  }
   SetOriginalFacts(env, result, facts);
-  close(fd);
   return result;
+}
+
+Napi::Value ExtractFromLibrary(const Napi::CallbackInfo &info) {
+  try {
+    return ExtractFromLibraryImpl(info);
+  } catch (const std::bad_alloc &) {
+    return Outcome(info.Env(), "resource-limit", "Native preview extraction exceeded its memory limit");
+  } catch (const std::exception &) {
+    return Outcome(info.Env(), "internal-error", "Native preview extraction failed internally");
+  } catch (...) {
+    return Outcome(info.Env(), "internal-error", "Native preview extraction failed internally");
+  }
 }
 
 Napi::Value ConfinedOriginalFacts(const Napi::CallbackInfo &info) {
@@ -597,12 +617,17 @@ Napi::Value ReadConfinedOriginalRange(const Napi::CallbackInfo &info) {
     return Outcome(env, "resource-limit", "Confined read exceeds limits");
   const auto offset = static_cast<off_t>(offset_value);
   const auto length = static_cast<std::size_t>(length_value);
-  const int fd = OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value());
-  if (fd < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  ScopedFd fd(OpenConfined(info[0].As<Napi::Number>().Int32Value(), info[1].As<Napi::String>().Utf8Value()));
+  if (fd.get() < 0) return Outcome(env, "io-error", "Original File could not be opened safely");
+  struct stat before{};
+  if (fstat(fd.get(), &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0)
+    return Outcome(env, "io-error", "Original File is not a regular file");
   std::vector<unsigned char> bytes(length);
-  const auto count = pread(fd, bytes.data(), length, offset);
-  close(fd);
+  const auto count = pread(fd.get(), bytes.data(), length, offset);
   if (count < 0) return Outcome(env, "io-error", "Original File could not be read safely");
+  struct stat after{};
+  if (fstat(fd.get(), &after) != 0 || !SameOriginalRevision(before, after))
+    return Outcome(env, "io-error", "Original File changed during read");
   return Napi::Buffer<unsigned char>::Copy(env, bytes.data(), static_cast<std::size_t>(count));
 }
 
@@ -659,7 +684,7 @@ void SetDirectoryFacts(Napi::Env env, Napi::Object &value, const struct stat &fa
 
 int OpenOrCreateStateDirectory(const std::string &path, const std::string &library_root) {
   if (path.empty() || path.front() != '/' || library_root.empty() || library_root.front() != '/') return -1;
-  int current = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  int current = open("/", O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   if (current < 0) return -1;
   std::size_t start = 1;
   while (start <= path.size()) {
@@ -677,7 +702,7 @@ int OpenOrCreateStateDirectory(const std::string &path, const std::string &libra
       errno = EACCES;
       return -1;
     }
-    int next = openat(current, component.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int next = openat(current, component.c_str(), O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (next < 0 && errno == ENOENT) {
       if (mkdirat(current, component.c_str(), 0700) != 0 && errno != EEXIST) {
         close(current);

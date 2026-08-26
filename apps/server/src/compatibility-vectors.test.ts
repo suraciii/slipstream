@@ -69,6 +69,64 @@ function schemaManifest(database: DatabaseSync) {
 }
 
 describe("shared Rust migration compatibility vectors", () => {
+  it("parses the deterministic Preview fixture contract and resource defaults", async () => {
+    const contract = await json<{
+      schemaVersion: number;
+      algorithmVersionGate: {
+        required: string;
+        selectedRustVersion: string | null;
+      };
+      targets: number[];
+      limits: {
+        inputBytes: number;
+        decodedPixels: number;
+        outputBytes: number;
+        librawMemoryMb: number;
+        queueConcurrency: number;
+      };
+      cases: Array<{
+        name: string;
+        kind: string;
+        width?: number;
+        height?: number;
+        profile: string;
+        orientations: number[];
+      }>;
+    }>("preview/fixtures.json");
+    expect(contract.schemaVersion).toBe(1);
+    expect(contract.algorithmVersionGate.required).toBe("fixture-matrix-pass");
+    expect(contract.algorithmVersionGate.selectedRustVersion).toBe(
+      "rust-vips-v1",
+    );
+    expect(contract.targets).toEqual([512, 2560]);
+    expect(contract.limits).toEqual({
+      inputBytes: 128 * 1024 * 1024,
+      decodedPixels: 100_000_000,
+      outputBytes: 64 * 1024 * 1024,
+      librawMemoryMb: 256,
+      queueConcurrency: 2,
+    });
+    expect(contract.cases.map((item) => item.name)).toEqual([
+      "rgb-small-orientation-1-8",
+      "rgb-large",
+      "rgb-valid-icc",
+      "rgb-invalid-icc",
+      "cmyk",
+      "corrupt-jpeg",
+      "truncated-jpeg",
+    ]);
+    const orientationCase = contract.cases[0]!;
+    expect(orientationCase.orientations).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(orientationCase.width).toBe(12);
+    expect(orientationCase.height).toBe(8);
+    expect(contract.cases.find((item) => item.kind === "cmyk")?.profile).toBe(
+      "cmyk",
+    );
+    expect(
+      contract.cases.find((item) => item.profile === "invalid")?.kind,
+    ).toBe("rgb");
+  });
+
   it("keeps protocol optional fields omitted instead of null", async () => {
     const responses = await json<unknown[]>("protocol/responses.json");
     expect(responses.length).toBeGreaterThanOrEqual(6);

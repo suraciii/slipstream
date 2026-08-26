@@ -306,7 +306,6 @@ impl OriginalCapability {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn open_revision_checked(&self) -> Result<OpenedOriginal, ConfinementError> {
         let file = self.root.open_confined(&self.path, false)?;
         let revision = stat_regular(file.as_raw_fd())?;
@@ -314,13 +313,11 @@ impl OriginalCapability {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) struct OpenedOriginal {
     file: File,
     revision: libc::stat,
 }
 
-#[allow(dead_code)]
 impl OpenedOriginal {
     pub(crate) fn descriptor(&self) -> RawFd {
         self.file.as_raw_fd()
@@ -1234,7 +1231,6 @@ mod tests {
     #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
     fn sony_original_remains_unchanged() {
         let Ok(path) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
-            eprintln!("skipped: SLIPSTREAM_RAW_SAMPLE is not set");
             return;
         };
         let path = PathBuf::from(path);

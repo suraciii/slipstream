@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy,rustfmt
-      - run: sudo apt-get update && sudo apt-get install --yes libraw-dev libjpeg-dev liblcms2-dev pkg-config
+      - run: sudo apt-get update && sudo apt-get install --yes libraw-dev libjpeg-dev libvips-dev liblcms2-dev pkg-config
       - run: bun install --frozen-lockfile
       - run: bun x playwright install --with-deps chromium
       - run: bun run verify

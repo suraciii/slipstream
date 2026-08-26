@@ -243,6 +243,19 @@ impl Library {
         self.root.canonical_path()
     }
 
+    pub(crate) fn snapshot_blocking(&self) -> Result<ScanSnapshot, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .snapshot_receiver()
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(crate::persistence::PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     pub async fn snapshot(&self) -> Result<ScanSnapshot, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
@@ -333,6 +346,22 @@ impl Library {
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn seed_preview_blocking(
+        &self,
+        preview: PreviewSeed,
+    ) -> Result<PreviewSeedResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .seed_preview_receiver(preview)
+                .map_err(LibraryError::from)?
+        };
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(crate::persistence::PersistenceError::OwnerStopped))
             .map_err(Into::into)
     }
 

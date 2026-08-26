@@ -69,23 +69,17 @@ No sensor-data unpacking, demosaicing, camera-profile rendering, or generic fall
 
 ### Native Library Boundary
 
-LibRaw is the authoritative RAW container and embedded-preview extraction dependency. Slipstream wraps only the operations needed to:
+LibRaw is the authoritative RAW container and embedded-preview extraction dependency. Slipstream uses a narrow owned C/C++ wrapper around LibRaw and libjpeg. The wrapper accepts a borrowed descriptor adapter, enumerates embedded JPEG candidates, validates complete JPEG bytes, returns bounded fixed-width results, and releases all native resources on success, failure, or cancellation. Rust retains descriptor ownership and performs the same-descriptor post-operation revision check. The wrapper must not expose LibRaw structs or native allocation ownership across the Preview module boundary.
 
-- open a confined RAW path;
-- inspect available embedded thumbnails or Previews when the LibRaw version supports enumeration;
-- extract JPEG bytes;
-- return bounded metadata and errors;
-- release all native resources on success, failure, or cancellation.
+A second narrow owned C wrapper around libvips owns JPEG inspection, orientation, bounded resize, ICC handling, and encoding. It receives bytes or a confined file handle, not an unconstrained browser path, and does not expose `VipsImage`, GLib references, or variadic option ownership to Rust. libvips is initialized once per process before Preview work and remains initialized until process exit; requests never initialize or shut down the library. The process-global lifecycle is not tied to an individual Library or PreviewService.
 
-The wrapper must not expose LibRaw structs across the Preview module boundary.
-
-One established image library owns JPEG validation, orientation, resize, ICC handling, and encoding. It receives bytes or a confined file handle, not an unconstrained browser path.
+Preview processing is bounded by 128 MiB input JPEG bytes, 100 million decoded pixels, 64 MiB output JPEG bytes, and 256 MiB LibRaw native memory. The Preview queue defaults to two concurrent jobs per cache directory; inspection and generation consume the same bounded budget.
 
 ### Orientation
 
 The output Derivative must display in the same visible orientation as the selected source under normal browser rendering.
 
-The implementation may either bake orientation into output pixels and clear orientation metadata or preserve correct orientation metadata. It must use one tested rule consistently and must not rotate twice.
+The Rust libvips implementation bakes orientation into output pixels and removes orientation metadata. It must use this one tested rule consistently and must not rotate twice.
 
 ### Color
 
@@ -158,9 +152,9 @@ A malformed or adversarial file must not cause unbounded allocation based only o
 
 ## Options
 
-### Selected: LibRaw Plus One JPEG Processing Library
+### Selected: Owned LibRaw/libjpeg and libvips Wrappers
 
-This combination has a small responsibility split. LibRaw knows RAW containers and embedded images. The image library knows JPEG, orientation, resize, profiles, and encoding. Slipstream owns source order, limits, caching, and product semantics.
+This combination has a small responsibility split. The owned LibRaw/libjpeg wrapper knows RAW containers, embedded images, and complete JPEG validation. The owned libvips wrapper knows JPEG inspection, orientation, resize, profiles, and encoding. Slipstream owns source order, limits, process-global library lifecycle, caching, and product semantics.
 
 ### Rejected: LibRaw Basic RAW Conversion
 
@@ -179,6 +173,8 @@ Direct return is attractive, but camera JPEG metadata, orientation, profiles, ve
 Full precomputation delays first use and performs expensive I/O for Photos the Photographer may never review. Demand-driven generation serves the current selection workflow with less work.
 
 ## Verification
+
+The checked-in minimal fixture contract must cover generated, redistributable JPEG inputs for orientation values 1 through 8, small and large dimensions, unprofiled RGB, valid RGB ICC, invalid ICC, CMYK conversion, corrupt and truncated input, and both derivative targets. The contract is executable by the compatibility tests and is the evidence gate for selecting a Rust pipeline algorithm version. It must not contain real photographs or generated binaries.
 
 Implementation tests must prove:
 
