@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, stat } from "node:fs/promises";
+import { constants, readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { open, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
-
+import { Worker } from "node:worker_threads";
 import type { EmbeddedJpegOutcome } from "../preview/libraw-preview.js";
 import type { OriginalKind } from "./file-kinds.js";
 
@@ -140,10 +140,43 @@ type NativeBinding = {
     stateFd: number,
     name: string,
   ): PreparedStateFile | { kind: "io-error"; message: string };
+  openOrCreateStateDirectory(
+    path: string,
+    libraryRoot: string,
+  ):
+    | {
+        kind: "directory";
+        fd: number;
+        canonicalPath: string;
+        uid: number;
+        mode: number;
+        linkCount: number;
+      }
+    | { kind: "io-error"; message: string };
+  closeStateDirectory(
+    fd: number,
+  ): undefined | { kind: "io-error"; message: string };
+  inspectStateFile(
+    stateFd: number,
+    name: string,
+  ):
+    | { kind: "absent"; message: string }
+    | {
+        kind: "present";
+        size: number;
+        device: bigint;
+        inode: bigint;
+        uid: number;
+        mode: number;
+        linkCount: number;
+      }
+    | { kind: "io-error"; message: string };
   admitStateSidecars(
     stateFd: number,
     name: string,
-  ): { kind: "admitted" } | { kind: "io-error"; message: string };
+  ):
+    | { kind: "admitted"; present: boolean }
+    | { kind: "io-error"; message: string };
 };
 
 const workerPath = fileURLToPath(
@@ -159,7 +192,7 @@ const fileKindsPath = fileURLToPath(
 export class PhotoLibrary {
   readonly #root: string;
   readonly #rootHandle: Awaited<ReturnType<typeof open>>;
-  readonly #stateHandle: Awaited<ReturnType<typeof open>>;
+  readonly #stateFd: number;
   readonly #worker: Worker;
   readonly #pending = new Map<number, Pending>();
   readonly #failureHook: PhotoLibraryOptions["failureHook"];
@@ -174,13 +207,13 @@ export class PhotoLibrary {
   private constructor(
     root: string,
     rootHandle: Awaited<ReturnType<typeof open>>,
-    stateHandle: Awaited<ReturnType<typeof open>>,
+    stateFd: number,
     worker: Worker,
     options: PhotoLibraryOptions,
   ) {
     this.#root = root;
     this.#rootHandle = rootHandle;
-    this.#stateHandle = stateHandle;
+    this.#stateFd = stateFd;
     this.#worker = worker;
     this.#failureHook = options.failureHook;
     this.#beforeDirectoryRecursion = options.beforeDirectoryRecursion;
@@ -208,39 +241,41 @@ export class PhotoLibrary {
     if (!(await stat(canonicalRoot)).isDirectory())
       throw new Error("Photo Library root must be a readable directory");
     const { directory: stateDirectory, basename: databaseBasename } =
-      await validateStateDirectory(canonicalRoot, databasePath);
-    const directoryFlags =
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+      parseStateDirectory(canonicalRoot, databasePath);
     let rootHandle: Awaited<ReturnType<typeof open>> | undefined;
-    let stateHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let stateFd: number | undefined;
     let prepared: PreparedStateFile;
     try {
-      rootHandle = await open(canonicalRoot, directoryFlags);
-      stateHandle = await open(stateDirectory, directoryFlags);
-      const openedStateFacts = await stateHandle.stat();
-      if (
-        !openedStateFacts.isDirectory() ||
-        openedStateFacts.uid !== process.getuid!() ||
-        (openedStateFacts.mode & 0o022) !== 0
-      )
-        throw new Error("SQLite state directory is not safely owned");
+      rootHandle = await open(
+        canonicalRoot,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      const directory = nativeBinding().openOrCreateStateDirectory(
+        stateDirectory,
+        canonicalRoot,
+      );
+      if (directory.kind === "io-error") throw new Error(directory.message);
+      stateFd = directory.fd;
+      const sidecars = nativeBinding().admitStateSidecars(
+        stateFd,
+        databaseBasename,
+      );
+      if (sidecars.kind !== "admitted")
+        throw new Error("SQLite sidecar is not safely owned");
+      if (sidecars.present)
+        throw new Error("SQLite state requires recovery before startup");
+      preflightDatabase(stateFd, databaseBasename, canonicalRoot);
       const preparedResult = nativeBinding().prepareStateFile(
-        stateHandle.fd,
+        stateFd,
         databaseBasename,
       );
       if (preparedResult.kind === "io-error")
         throw new Error("SQLite database could not be created safely");
       prepared = preparedResult;
-      const sidecars = nativeBinding().admitStateSidecars(
-        stateHandle.fd,
-        databaseBasename,
-      );
-      if (sidecars.kind !== "admitted")
-        throw new Error("SQLite sidecar is not safely owned");
       await options.beforeWorkerStart?.();
     } catch (error) {
       await rootHandle?.close();
-      await stateHandle?.close();
+      if (stateFd !== undefined) nativeBinding().closeStateDirectory(stateFd);
       throw error;
     }
     // The 0700 state directory is single-process owned. Mutation by another
@@ -258,11 +293,13 @@ export class PhotoLibrary {
         workerData: {
           root: canonicalRoot,
           rootFd: rootHandle.fd,
-          stateFd: stateHandle.fd,
+          stateFd,
           databaseBasename,
           stateIdentity,
           addonPath,
           fileKindsPath,
+          schemaV1Manifest: schemaManifestFile(1),
+          schemaV2Manifest: schemaManifestFile(2),
           maximumFiles: positive(
             options.maximumFiles ?? 100_000,
             "recognized file",
@@ -284,13 +321,13 @@ export class PhotoLibrary {
       });
     } catch (error) {
       await rootHandle.close();
-      await stateHandle.close();
+      nativeBinding().closeStateDirectory(stateFd);
       throw error;
     }
     const library = new PhotoLibrary(
       canonicalRoot,
       rootHandle,
-      stateHandle,
+      stateFd,
       worker,
       options,
     );
@@ -431,7 +468,7 @@ export class PhotoLibrary {
       } finally {
         await this.#worker.terminate();
         await this.#rootHandle.close();
-        await this.#stateHandle.close();
+        nativeBinding().closeStateDirectory(this.#stateFd);
       }
     })();
     return this.#shutdownPromise;
@@ -529,10 +566,10 @@ function requireAddon(path: string): NativeBinding {
   return require(path) as NativeBinding;
 }
 
-async function validateStateDirectory(
+function parseStateDirectory(
   root: string,
   databasePath: string,
-): Promise<{ directory: string; basename: string }> {
+): { directory: string; basename: string } {
   if (!isAbsolute(databasePath))
     throw new Error("SQLite database path must be absolute");
   const resolved = resolve(databasePath);
@@ -545,36 +582,8 @@ async function validateStateDirectory(
     databaseBasename === ".."
   )
     throw new Error("SQLite database path must name one file");
-  const stateDirectory = dirname(resolved);
-  // Reject lexical placement before mkdir so an invalid configuration cannot
-  // create application state inside the Original File tree.
-  rejectUnderRoot(root, stateDirectory);
-  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  const directoryFacts = await lstat(stateDirectory);
-  if (directoryFacts.isSymbolicLink() || !directoryFacts.isDirectory())
-    throw new Error("SQLite state directory must be a real directory");
-  const canonicalDirectory = await realpath(stateDirectory);
-  rejectUnderRoot(root, canonicalDirectory);
-  if (
-    typeof process.getuid !== "function" ||
-    directoryFacts.uid !== process.getuid()
-  )
-    throw new Error("SQLite state directory must be owned by the server user");
-  if ((directoryFacts.mode & 0o022) !== 0)
-    throw new Error(
-      "SQLite state directory must not be group or other writable",
-    );
-  try {
-    const fileFacts = await lstat(resolved);
-    if (fileFacts.isSymbolicLink() || !fileFacts.isFile())
-      throw new Error("SQLite database path must be a regular file");
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
-  }
-  return { directory: canonicalDirectory, basename: databaseBasename };
-}
-function rejectUnderRoot(root: string, candidate: string): void {
-  const rel = relative(root, candidate);
+  const directory = dirname(resolved);
+  const rel = relative(root, directory);
   if (
     rel === "" ||
     (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))
@@ -582,6 +591,174 @@ function rejectUnderRoot(root: string, candidate: string): void {
     throw new Error(
       "SQLite database must be outside the read-only Photo Library root",
     );
+  return { directory, basename: databaseBasename };
+}
+
+function preflightDatabase(
+  stateFd: number,
+  databaseBasename: string,
+  canonicalRoot: string,
+): void {
+  const inspected = nativeBinding().inspectStateFile(stateFd, databaseBasename);
+  if (inspected.kind === "absent") return;
+  if (inspected.kind === "io-error")
+    throw new Error("SQLite database path must be a safely owned regular file");
+  const path = `/proc/self/fd/${stateFd}/${databaseBasename}`;
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    const versionValue = database
+      .prepare("PRAGMA user_version")
+      .get()?.user_version;
+    const version = typeof versionValue === "number" ? versionValue : undefined;
+    if (version !== 0 && version !== 1 && version !== 2)
+      throw new Error(
+        version !== undefined && version > 2
+          ? "SQLite schema version is newer than this Slipstream build"
+          : "SQLite schema is unsupported",
+      );
+    const hasMetadata = database
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_metadata'",
+      )
+      .get();
+    if (hasMetadata) {
+      const stored = database
+        .prepare(
+          "SELECT value FROM library_metadata WHERE key='canonical_root'",
+        )
+        .get() as { value?: unknown } | undefined;
+      if (stored && stored.value !== canonicalRoot)
+        throw new Error(
+          "SQLite database belongs to a different Photo Library root",
+        );
+    }
+    if (version === 0) {
+      const hasOriginals = database
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='original_files'",
+        )
+        .get();
+      if (hasOriginals) {
+        validateLegacyShape(database);
+        validateLegacyData(database);
+      }
+    } else if (version === 1) validateCanonicalV1Shape(database);
+    else if (version === 2) validateCanonicalV2Shape(database);
+  } finally {
+    database.close();
+  }
+}
+
+function compactSql(value: unknown): string {
+  return typeof value === "string"
+    ? value
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/["`[\]]/g, "")
+    : "";
+}
+function schemaManifest(database: DatabaseSync): unknown {
+  return {
+    userVersion: database.prepare("PRAGMA user_version").get()?.user_version,
+    objects: database
+      .prepare(
+        "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+      )
+      .all()
+      .map((row) => ({
+        type: row.type,
+        name: row.name,
+        sql: compactSql(row.sql),
+        ...(row.type === "table"
+          ? {
+              columns: database
+                .prepare(`PRAGMA table_info("${String(row.name)}")`)
+                .all()
+                .map((column) => ({
+                  name: column.name,
+                  type: column.type,
+                  notNull: Boolean(column.notnull),
+                  default: column.dflt_value,
+                  primaryKey: column.pk,
+                })),
+              foreignKeys: database
+                .prepare(`PRAGMA foreign_key_list("${String(row.name)}")`)
+                .all()
+                .map((foreignKey) => ({
+                  table: foreignKey.table,
+                  from: foreignKey.from,
+                  to: foreignKey.to,
+                  onUpdate: foreignKey.on_update,
+                  onDelete: foreignKey.on_delete,
+                })),
+            }
+          : {}),
+      })),
+  };
+}
+function schemaManifestFile(version: 1 | 2): unknown {
+  return JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          `../../../../compatibility/sqlite/schema-v${version}.json`,
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    ),
+  );
+}
+function validateExactManifest(database: DatabaseSync, version: 1 | 2): void {
+  if (
+    JSON.stringify(schemaManifest(database)) !==
+    JSON.stringify(schemaManifestFile(version))
+  )
+    throw new Error("SQLite schema is unsupported");
+}
+function validateLegacyShape(database: DatabaseSync): void {
+  const tables = database
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .all()
+    .map((row) => row.name);
+  if (
+    JSON.stringify(tables) !==
+    JSON.stringify(["library_metadata", "original_files", "photos"])
+  )
+    throw new Error("SQLite legacy schema is unsupported");
+}
+function validateLegacyData(database: DatabaseSync): void {
+  const invalidOriginal = database
+    .prepare(
+      `SELECT 1 FROM original_files WHERE
+       typeof(id) != 'text' OR id = '' OR typeof(relative_path) != 'text' OR relative_path = '' OR
+       kind NOT IN ('raw','jpeg') OR typeof(size) != 'integer' OR size < 0 OR
+       typeof(mtime_ms) NOT IN ('integer','real') OR mtime_ms < 0 OR
+       typeof(available) != 'integer' OR available NOT IN (0,1) LIMIT 1`,
+    )
+    .get();
+  const invalidPhoto = database
+    .prepare(
+      `SELECT 1 FROM photos WHERE
+       typeof(id) != 'text' OR id = '' OR typeof(ambiguous) != 'integer' OR ambiguous NOT IN (0,1) OR
+       typeof(available) != 'integer' OR available NOT IN (0,1) OR
+       preview_state NOT IN ('inspection-pending','ready','failed','unavailable') OR
+       (preview_source IS NOT NULL AND preview_source NOT IN ('matching-jpeg','embedded-raw-jpeg')) OR
+       typeof(sort_path) != 'text' OR
+       (raw_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.raw_original_id)) OR
+       (jpeg_original_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM original_files o WHERE o.id=photos.jpeg_original_id)) LIMIT 1`,
+    )
+    .get();
+  if (invalidOriginal || invalidPhoto)
+    throw new Error("SQLite legacy data cannot be migrated safely");
+}
+function validateCanonicalV1Shape(database: DatabaseSync): void {
+  validateExactManifest(database, 1);
+}
+function validateCanonicalV2Shape(database: DatabaseSync): void {
+  validateExactManifest(database, 2);
 }
 function validateReadRange(offset: number, length: number): void {
   if (
@@ -613,14 +790,6 @@ function positiveUint32(value: number, label: string): number {
   if (checked > 0xffffffff)
     throw new RangeError(`${label} limit must fit an unsigned 32-bit integer`);
   return checked;
-}
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
 }
 
 type RawPhotoSet = {
