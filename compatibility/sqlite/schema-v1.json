@@ -1,0 +1,215 @@
+{
+  "userVersion": 1,
+  "objects": [
+    {
+      "type": "index",
+      "name": "photos_jpeg",
+      "sql": "createindexphotos_jpegonphotos(jpeg_original_id)"
+    },
+    {
+      "type": "index",
+      "name": "photos_raw",
+      "sql": "createindexphotos_rawonphotos(raw_original_id)"
+    },
+    {
+      "type": "table",
+      "name": "library_metadata",
+      "sql": "createtablelibrary_metadata(keytextprimarykey,valuetextnotnull)",
+      "columns": [
+        {
+          "name": "key",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "value",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "original_files",
+      "sql": "createtableoriginal_files(idtextprimarykey,relative_pathtextnotnullunique,kindtextnotnullcheck(kindin('raw','jpeg')),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0),availableintegernotnullcheck(availablein(0,1)),error_categorytextcheck(error_categoryisnullorerror_categoryin('unreadable','changed')),error_messagetextcheck(error_messageisnullorlength(error_message)<=120))",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "relative_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "kind",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "size",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "mtime_ms",
+          "type": "REAL",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "available",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "error_category",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "error_message",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": []
+    },
+    {
+      "type": "table",
+      "name": "photos",
+      "sql": "createtablephotos(idtextprimarykey,raw_original_idtextreferencesoriginal_files(id),jpeg_original_idtextreferencesoriginal_files(id),ambiguousintegernotnullcheck(ambiguousin(0,1)),availableintegernotnullcheck(availablein(0,1)),preview_statetextnotnullcheck(preview_statein('inspection-pending','ready','failed','unavailable')),preview_candidatetextcheck(preview_candidateisnullorpreview_candidatein('matching-jpeg','embedded-raw-jpeg')),preview_sourcetextcheck(preview_sourceisnullorpreview_sourcein('matching-jpeg','embedded-raw-jpeg')),preview_source_revisiontext,preview_widthintegercheck(preview_widthisnullorpreview_width>0),preview_heightintegercheck(preview_heightisnullorpreview_height>0),cache_revisiontext,sort_pathtextnotnull)",
+      "columns": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 1
+        },
+        {
+          "name": "raw_original_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "jpeg_original_id",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "ambiguous",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "available",
+          "type": "INTEGER",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_state",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_candidate",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_source",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_source_revision",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_width",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "preview_height",
+          "type": "INTEGER",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "cache_revision",
+          "type": "TEXT",
+          "notNull": false,
+          "default": null,
+          "primaryKey": 0
+        },
+        {
+          "name": "sort_path",
+          "type": "TEXT",
+          "notNull": true,
+          "default": null,
+          "primaryKey": 0
+        }
+      ],
+      "foreignKeys": [
+        {
+          "table": "original_files",
+          "from": "jpeg_original_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "NO ACTION"
+        },
+        {
+          "table": "original_files",
+          "from": "raw_original_id",
+          "to": "id",
+          "onUpdate": "NO ACTION",
+          "onDelete": "NO ACTION"
+        }
+      ]
+    }
+  ]
+}

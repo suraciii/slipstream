@@ -623,6 +623,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "slipstream-core"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
