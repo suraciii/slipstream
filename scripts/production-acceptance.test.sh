@@ -121,6 +121,17 @@ expect_failure() {
 }
 
 env "${base_env[@]}" "$repo_root/scripts/verify-production.sh" >"$work_dir/pass.log"
+python3 - "$work_dir/sets.json" "$work_dir/photos.json" "$work_dir/sets-no-progress.json" "$work_dir/state-no-progress.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: sets = json.load(source)
+sets["photoSets"][0].pop("lastReviewedPhotoId")
+with open(sys.argv[3], "w", encoding="utf-8") as output: json.dump(sets, output)
+with open(sys.argv[2], encoding="utf-8") as source: photos = json.load(source)["photos"]
+with open(sys.argv[4], "w", encoding="utf-8") as output: json.dump({"photos": photos, "photoSets": sets["photoSets"]}, output)
+PY
+env "${base_env[@]}" FAKE_SETS="$work_dir/sets-no-progress.json" \
+  SLIPSTREAM_EXPECTED_STATE_SNAPSHOT="$work_dir/state-no-progress.json" \
+  "$repo_root/scripts/verify-production.sh" >"$work_dir/no-progress-pass.log"
 mkdir -p "$work_dir/restore/state" "$work_dir/restore/cache/metadata/manifests" "$work_dir/restore/cache/metadata/failures"
 cp "$work_dir/state/library.sqlite" "$work_dir/restore/state/library.sqlite"
 python3 - "$work_dir/container.json" "$work_dir/restore-container.json" "$work_dir/state" "$work_dir/cache" "$work_dir/restore/state" "$work_dir/restore/cache" <<'PY'
