@@ -3262,8 +3262,11 @@ mod tests {
             })
             .await
             .unwrap();
+        let sets = persistence.list_photo_sets().await.unwrap();
         assert_eq!(
-            persistence.list_photo_sets().await.unwrap()[0]
+            sets.iter()
+                .find(|set| set.id == set_a)
+                .unwrap()
                 .last_reviewed_photo_id
                 .as_deref(),
             Some(ids[0].as_str())
@@ -3283,10 +3286,18 @@ mod tests {
             PhotoStateValue::Selection(SelectionState::Undecided)
         );
         let sets = persistence.list_photo_sets().await.unwrap();
-        assert_eq!(sets[0].members[0].selection_state, SelectionState::Selected);
-        assert_eq!(sets[1].members[0].selection_state, SelectionState::Selected);
+        let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
+        let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
         assert_eq!(
-            sets[1].last_reviewed_photo_id.as_deref(),
+            current_a.members[0].selection_state,
+            SelectionState::Selected
+        );
+        assert_eq!(
+            current_b.members[0].selection_state,
+            SelectionState::Selected
+        );
+        assert_eq!(
+            current_b.last_reviewed_photo_id.as_deref(),
             Some(ids[0].as_str())
         );
         assert_eq!(
@@ -3322,10 +3333,12 @@ mod tests {
             .await
             .unwrap();
         let sets = persistence.list_photo_sets().await.unwrap();
-        assert_eq!(sets[0].members[1].rating, 5);
-        assert_eq!(sets[1].members[1].rating, 5);
+        let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
+        let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
+        assert_eq!(current_a.members[1].rating, 5);
+        assert_eq!(current_b.members[1].rating, 5);
         assert_eq!(
-            sets[0].last_reviewed_photo_id.as_deref(),
+            current_a.last_reviewed_photo_id.as_deref(),
             Some(ids[1].as_str())
         );
         persistence
@@ -3335,8 +3348,12 @@ mod tests {
             })
             .await
             .unwrap();
+        let sets = persistence.list_photo_sets().await.unwrap();
         assert_eq!(
-            persistence.list_photo_sets().await.unwrap()[0].last_reviewed_photo_id,
+            sets.iter()
+                .find(|set| set.id == set_a)
+                .unwrap()
+                .last_reviewed_photo_id,
             None
         );
         persistence.shutdown().unwrap();
