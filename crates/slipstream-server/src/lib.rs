@@ -21,13 +21,13 @@ use slipstream_core::{
 };
 use std::{
     env,
-    ffi::CString,
+    ffi::{CString, OsString},
     fmt, fs, io,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::fs::OpenOptionsExt,
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
 use tokio::{
@@ -177,6 +177,8 @@ pub enum ServerError {
     Library(LibraryError),
     Preview(String),
     PreviewUnavailable,
+    WebUnavailable,
+    StorageLayout,
     Io(io::Error),
     Cache(String),
     Join(String),
@@ -189,6 +191,10 @@ impl fmt::Display for ServerError {
             Self::Library(error) => error.fmt(formatter),
             Self::Preview(error) => formatter.write_str(error),
             Self::PreviewUnavailable => formatter.write_str("Preview service is unavailable"),
+            Self::WebUnavailable => formatter.write_str("Web application is not built"),
+            Self::StorageLayout => {
+                formatter.write_str("Photo Library, state, and cache directories must not overlap")
+            }
             Self::Io(error) => error.fmt(formatter),
             Self::Cache(error) => formatter.write_str(error),
             Self::Join(error) => formatter.write_str(error),
@@ -218,6 +224,66 @@ impl From<slipstream_core::CacheError> for ServerError {
     }
 }
 
+fn validate_storage_layout(config: &Config) -> Result<(), ServerError> {
+    let paths = [
+        config.library_root.as_path(),
+        config.state_directory.as_path(),
+        config.cache_directory.as_path(),
+    ];
+    let canonical = paths
+        .iter()
+        .map(|path| canonicalize_layout_path(path).map_err(|_| ServerError::StorageLayout))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, left) in canonical.iter().enumerate() {
+        for right in canonical.iter().skip(index + 1) {
+            if left == right || left.starts_with(right) || right.starts_with(left) {
+                return Err(ServerError::StorageLayout);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_layout_path(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let mut components = Vec::<OsString>::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::CurDir => {}
+            Component::Normal(value) => components.push(value.to_owned()),
+            Component::ParentDir => {
+                components
+                    .pop()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            }
+            Component::Prefix(_) => {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+        }
+    }
+
+    let mut existing = PathBuf::from("/");
+    let mut first_missing = components.len();
+    for (index, component) in components.iter().enumerate() {
+        if first_missing != components.len() {
+            break;
+        }
+        let candidate = existing.join(component);
+        match fs::canonicalize(&candidate) {
+            Ok(canonical) => existing = canonical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => first_missing = index,
+            Err(error) => return Err(error),
+        }
+    }
+    for component in components.iter().skip(first_missing) {
+        existing.push(component);
+    }
+    Ok(existing)
+}
+
 pub struct Application {
     library: Arc<Library>,
     preview: PreviewService,
@@ -227,6 +293,7 @@ pub struct Application {
 
 impl Application {
     pub async fn open(config: &Config) -> Result<Arc<Self>, ServerError> {
+        validate_storage_layout(config)?;
         let cache = CacheDirectory::open(&config.cache_directory, &config.library_root)?;
         let library_config = LibraryConfig {
             library_root: config.library_root.clone(),
@@ -656,6 +723,7 @@ pub struct DerivativeDelivery {
 struct WebRoot {
     path: PathBuf,
     descriptor: Option<Arc<OwnedFd>>,
+    ready: bool,
 }
 
 #[derive(Clone)]
@@ -712,8 +780,11 @@ impl RunningServer {
 }
 
 pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> {
+    let web_root = open_web_root(config.web_root());
+    if !web_root.ready {
+        return Err(ServerError::WebUnavailable);
+    }
     let application = Application::open(&config).await?;
-    let web_root = config.web_root();
     let listener = match TcpListener::bind((config.host.as_str(), config.port)).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -722,7 +793,7 @@ pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> 
         }
     };
     let address = listener.local_addr()?;
-    let router = create_router(Arc::clone(&application), web_root);
+    let router = create_router_with_web_root(Arc::clone(&application), web_root);
     let (sender, receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -744,6 +815,10 @@ pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> 
 }
 
 pub fn create_router(application: Arc<Application>, web_root: impl Into<PathBuf>) -> Router {
+    create_router_with_web_root(application, open_web_root(web_root.into()))
+}
+
+fn create_router_with_web_root(application: Arc<Application>, web_root: WebRoot) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(healthz))
         .route("/api/photos", get(list_photos))
@@ -789,15 +864,29 @@ pub fn create_router(application: Arc<Application>, web_root: impl Into<PathBuf>
         .layer(middleware::from_fn(request_policy))
         .with_state(HttpState {
             application,
-            web_root: Arc::new(open_web_root(web_root.into())),
+            web_root: Arc::new(web_root),
         })
 }
 
 fn open_web_root(path: PathBuf) -> WebRoot {
-    WebRoot {
-        descriptor: open_directory_descriptor(&path).ok().map(Arc::new),
+    let descriptor = open_directory_descriptor(&path).ok().map(Arc::new);
+    let mut root = WebRoot {
+        descriptor,
         path,
-    }
+        ready: false,
+    };
+    root.ready = web_root_has_index(&root);
+    root
+}
+
+fn web_root_has_index(root: &WebRoot) -> bool {
+    let Some(descriptor) = &root.descriptor else {
+        return false;
+    };
+    let index = CString::new("index.html").expect("static filename has no NUL");
+    open_confined_file(descriptor.as_raw_fd(), &index)
+        .and_then(|file| fstat(file.as_raw_fd()))
+        .is_ok_and(|facts| facts.st_mode & libc::S_IFMT == libc::S_IFREG)
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -805,8 +894,14 @@ struct HealthResponse {
     status: &'static str,
 }
 
-async fn healthz() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
+async fn healthz(State(state): State<HttpState>) -> Response<Body> {
+    if !state.web_root.ready || !web_root_has_index(&state.web_root) {
+        return plain_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Web application is not built",
+        );
+    }
+    Json(HealthResponse { status: "ok" }).into_response()
 }
 
 async fn list_photos(State(state): State<HttpState>) -> Json<PhotoListResponse> {
@@ -1661,6 +1756,67 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn application_rejects_overlapping_paths_before_opening_state_or_cache() {
+        let base = unique_base();
+        let originals = base.join("originals");
+        let state = originals.join("state");
+        let cache = base.join("cache");
+        fs::create_dir(&originals).unwrap();
+        let config = test_config(&base, base.join("web"), 3000);
+        let config = Config {
+            library_root: originals,
+            state_directory: state.clone(),
+            cache_directory: cache,
+            ..config
+        };
+        assert!(matches!(
+            Application::open(&config).await,
+            Err(ServerError::StorageLayout)
+        ));
+        assert!(!state.exists());
+        assert!(!config.cache_directory.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn start_server_rejects_missing_web_root_before_opening_application() {
+        let base = unique_base();
+        let originals = base.join("originals");
+        fs::create_dir(&originals).unwrap();
+        let config = test_config(&base, base.join("missing-web"), 0);
+        assert!(matches!(
+            start_server(config).await,
+            Err(ServerError::WebUnavailable)
+        ));
+        assert!(!base.join("state").exists());
+        assert!(!base.join("cache").exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn storage_layout_rejects_symlink_aliases() {
+        let base = unique_base();
+        let originals = base.join("originals");
+        let state_parent = base.join("state-parent");
+        fs::create_dir(&originals).unwrap();
+        fs::create_dir(&state_parent).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&originals, state_parent.join("alias")).unwrap();
+        let config = test_config(&base, base.join("web"), 3000);
+        let config = Config {
+            library_root: originals,
+            state_directory: state_parent.join("alias"),
+            cache_directory: base.join("cache"),
+            ..config
+        };
+        assert!(matches!(
+            validate_storage_layout(&config),
+            Err(ServerError::StorageLayout)
+        ));
+        let _ = fs::remove_dir_all(base);
+    }
+
     #[test]
     fn startup_vectors_reject_relative_paths_and_invalid_ports() {
         let missing = Config::from_env(HashMap::new());
@@ -1889,6 +2045,23 @@ mod tests {
                 .as_ref(),
             br#"{"status":"ok"}"#
         );
+        let missing_web = base.join("missing-web");
+        let missing_router = Router::new()
+            .route(HEALTH_PATH, get(healthz))
+            .with_state(HttpState {
+                application: Arc::clone(&application),
+                web_root: Arc::new(open_web_root(missing_web)),
+            });
+        let response = tower::ServiceExt::oneshot(
+            missing_router,
+            Request::builder()
+                .uri(HEALTH_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let response = tower::ServiceExt::oneshot(
             router,
             Request::builder()
