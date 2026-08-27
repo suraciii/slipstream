@@ -541,6 +541,63 @@ fn worker_loop(inner: Weak<ServiceInner>) {
     }
 }
 
+fn process_invalid_source(
+    inner: &ServiceInner,
+    job: &PreviewJob,
+    context: &PreviewContext,
+    invalid: InvalidSource,
+) -> Result<PreviewRequestResult, PreviewServiceError> {
+    let identity = DerivativeIdentity {
+        photo_identity: context.photo.id.clone(),
+        source: match invalid.actual_source {
+            PreviewCandidate::MatchingJpeg => crate::cache::DerivativeSource::MatchingJpeg,
+            PreviewCandidate::EmbeddedRawJpeg => crate::cache::DerivativeSource::EmbeddedRawJpeg,
+        },
+        source_relative_path: invalid.actual.relative_path.as_str().to_owned(),
+        source_size: invalid.actual.facts.size,
+        source_mtime_ms: invalid.actual.facts.mtime_ms,
+        embedded_candidate_identity: None,
+        target: job.target,
+    };
+    let generated = inner
+        .scheduler
+        .generate(identity, invalid.jpeg, job.priority())?;
+    match generated {
+        DerivativeResult::Ready(ready) if ready.stale => Ok(PreviewRequestResult::Stale(
+            ready_result(&ready, job.target),
+        )),
+        DerivativeResult::Ready(_) => Ok(PreviewRequestResult::Failed(PreviewFailure {
+            kind: PreviewFailureKind::Malformed,
+        })),
+        DerivativeResult::Failed(_failure) => {
+            let publication = inner.state.lock().expect("Preview service poisoned");
+            if publication.closed {
+                return Err(PreviewServiceError::Closed);
+            }
+            drop(publication);
+            let seed = inner.library.seed_preview_blocking(PreviewSeed {
+                photo_id: context.photo.id.clone(),
+                state: PreviewState::Unavailable,
+                expected_candidate: invalid.expected_candidate,
+                expected_source_revision: invalid.expected_revision,
+                width: None,
+                height: None,
+                cache_revision: None,
+                actual_source: Some(invalid.actual_source),
+                actual_source_revision: Some(invalid.actual_revision),
+            })?;
+            Ok(match seed {
+                PreviewSeedResult::Applied => {
+                    PreviewRequestResult::Unavailable(PreviewUnavailable {
+                        reason: PreviewUnavailableReason::NoUsableSource,
+                    })
+                }
+                PreviewSeedResult::StaleIgnored => PreviewRequestResult::StaleIgnored,
+            })
+        }
+    }
+}
+
 fn process_job(
     inner: &ServiceInner,
     job: &PreviewJob,
@@ -567,6 +624,9 @@ fn process_job(
     };
     let inspected = match inspection {
         Some(Inspection::Source(inspected)) => inspected,
+        Some(Inspection::InvalidSource(invalid)) => {
+            return process_invalid_source(inner, job, &context, invalid);
+        }
         Some(Inspection::Unavailable(unavailable)) => {
             let publication = inner.state.lock().expect("Preview service poisoned");
             if publication.closed {
@@ -760,8 +820,18 @@ struct UnavailableSource {
     expected_revision: String,
 }
 
+struct InvalidSource {
+    expected_candidate: PreviewCandidate,
+    expected_revision: String,
+    actual_source: PreviewCandidate,
+    actual_revision: String,
+    actual: OriginalRecord,
+    jpeg: Vec<u8>,
+}
+
 enum Inspection {
     Source(InspectedSource),
+    InvalidSource(InvalidSource),
     Unavailable(UnavailableSource),
 }
 
@@ -826,7 +896,21 @@ impl PreviewContext {
                     crate::NativePreviewError::Malformed
                     | crate::NativePreviewError::Unsupported
                     | crate::NativePreviewError::NoUsablePreview,
-                )) => {}
+                )) => {
+                    let revision = revision_of(jpeg)?;
+                    let bytes = capability
+                        .read_whole(128 * 1024 * 1024)
+                        .map_err(map_confinement_error)?
+                        .bytes;
+                    return Ok(Some(Inspection::InvalidSource(InvalidSource {
+                        expected_candidate: PreviewCandidate::MatchingJpeg,
+                        expected_revision: revision.clone(),
+                        actual_source: PreviewCandidate::MatchingJpeg,
+                        actual_revision: revision,
+                        actual: jpeg.clone(),
+                        jpeg: bytes,
+                    })));
+                }
                 Err(error) => return Err(map_preview_error(error)),
             }
         }
