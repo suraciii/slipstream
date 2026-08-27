@@ -5,6 +5,9 @@ Original Files. The repository contains only the Rust production server; the
 sealed rollback artifact used by the completed live rollback proof is maintained
 outside this source tree under `/data/slipstream`. It is intentionally
 operator-controlled: do not use it as an automated live deployment from CI.
+The supported 0.1 deployment boundary, release notes, and rollback-artifact
+retirement criteria are in
+[`../docs/0.1-support-and-release.md`](../docs/0.1-support-and-release.md).
 
 ## Configuration
 
@@ -127,7 +130,8 @@ The backup is an operator recovery copy. Do not remove SQLite journal, WAL, or s
    The expected state snapshot contains the exact `photos` and `photoSets` arrays recorded before backup. It binds Photo identities/order, availability, Selection State, Rating, Photo Set membership/order, review progress, and persisted Preview facts. The command validates exact health, that complete state snapshot, required persisted current Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache. Missing inputs or skipped checks fail closed.
 
 6. Check the interactive browser review flow. Confirm that any intended state mutation survives a restart and generated derivatives remain below the cache mount.
-7. Keep the previous Rust image and state backup available for rollback.
+7. Keep rollback artifacts according to the retirement criteria in the
+   [0.1 Support and Release Contract](../docs/0.1-support-and-release.md).
 
 Compose enforces the deployment boundary: UID 1000, read-only root filesystem,
 private tmpfs, all Linux capabilities dropped, `no-new-privileges`, an init
@@ -223,5 +227,6 @@ Do not delete state or cache during rollback.
    state backup with the repository's controlled recovery process.
 5. Confirm the Original hash is unchanged and record the rollback evidence.
 
-Keep the previous Rust image and state backup until the rollback proof is
-complete. This repository change does not perform a live deployment.
+Retain rollback artifacts according to the
+[0.1 Support and Release Contract](../docs/0.1-support-and-release.md). This
+repository change does not perform a live deployment.
