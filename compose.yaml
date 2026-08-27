@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SLIPSTREAM_VCS_REF: ${SLIPSTREAM_VCS_REF:-unknown}
     user: "1000:1000"
     read_only: true
     tmpfs:
@@ -40,7 +42,15 @@ services:
         source: ${SLIPSTREAM_CACHE_DIRECTORY:?Set SLIPSTREAM_CACHE_DIRECTORY to the derivative cache directory}
         target: /cache
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/healthz"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "--show-error",
+          "http://127.0.0.1:3000/healthz",
+        ]
       interval: 30s
       timeout: 5s
       start_period: 10s

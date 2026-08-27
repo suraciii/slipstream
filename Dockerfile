@@ -38,6 +38,9 @@ RUN cargo build --release --locked -p slipstream-server
 
 FROM ubuntu:26.04 AS runtime
 
+ARG SLIPSTREAM_VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$SLIPSTREAM_VCS_REF
+
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes \
         ca-certificates \

@@ -13,6 +13,7 @@ variables in the shell that runs Compose):
 
 ```dotenv
 SLIPSTREAM_IMAGE=slipstream:<immutable-release-tag>
+SLIPSTREAM_VCS_REF=<exact-merged-commit>
 SLIPSTREAM_LIBRARY_ROOT=/srv/slipstream/originals
 SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
 SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
@@ -50,8 +51,13 @@ SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" ./scripts/verify-container.sh
 Build or pull the exact image tag, then inspect it before starting the service:
 
 ```sh
-docker build --tag "$SLIPSTREAM_IMAGE" .
-VERIFY_IMAGE=1 SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" ./scripts/verify-container.sh
+docker build \
+  --build-arg "SLIPSTREAM_VCS_REF=$SLIPSTREAM_VCS_REF" \
+  --tag "$SLIPSTREAM_IMAGE" .
+VERIFY_IMAGE=1 \
+SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" \
+SLIPSTREAM_EXPECTED_COMMIT="$SLIPSTREAM_VCS_REF" \
+./scripts/verify-container.sh
 ```
 
 Record the image digest, verify that the image user is `1000:1000`, and verify
@@ -60,21 +66,17 @@ sealed rollback archive under `/data/slipstream` is external evidence and is not
 part of the image or repository build.
 Do not proceed if the image inspection or the Compose rendering check fails.
 
-Before deployment, stop any existing Slipstream process that uses the target
-state database. Never run two Slipstream processes against the same SQLite
-database concurrently. Back up the state directory and
-record the current Rust image and the location of the external rollback artifact:
+Before deployment, stop every Slipstream process that uses the target state database. Never copy a running, unquiesced database and never run two Slipstream processes against one SQLite database. Create and verify the operator recovery backup:
 
 ```sh
-tar --xattrs --acls -C "$(dirname "$SLIPSTREAM_STATE_DIRECTORY")" \
-  -czf "slipstream-state-before-$(date -u +%Y%m%dT%H%M%SZ).tar.gz" \
-  "$(basename "$SLIPSTREAM_STATE_DIRECTORY")"
+export SLIPSTREAM_BACKUP_OUTPUT="/data/slipstream/backups/state-before-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+./scripts/backup-state.sh
 docker compose --env-file /path/to/slipstream.env -f compose.yaml config >/dev/null
 ```
 
-The backup is an operator recovery copy. Do not remove SQLite journal, WAL, or
-shared-memory sidecars by hand; Slipstream's startup admission must classify
-those files and require operator recovery when appropriate.
+`backup-state.sh` uses SQLite's backup API to create a transactionally consistent snapshot instead of sequentially copying database bytes. It fails when a journal/WAL/SHM sidecar or any unexpected state entry exists, SQLite integrity or foreign-key checks fail, or the extracted archive differs from the verified snapshot. It never checkpoints, repairs, or rewrites the source database. Stopping the service remains the deployment precondition so the backup and image cutover share one quiescent boundary; the backup API also prevents a torn copy if that operational step is accidentally violated. A filesystem snapshot is acceptable only when it provides equivalently proven consistency and is verified before use.
+
+The backup is an operator recovery copy. Do not remove SQLite journal, WAL, or shared-memory sidecars by hand; Slipstream's startup admission must classify those files and require operator recovery when appropriate.
 
 ## Cutover
 
@@ -99,15 +101,97 @@ those files and require operator recovery when appropriate.
    response proves process readiness; continue with the browser and state
    checks before declaring the deployment verified.
 
-5. Check the browser review flow against the deployed service. Confirm that
-   state mutations survive a restart, generated derivatives are written only
-   under the cache mount, and an Original File's hash is unchanged.
-6. Keep the previous Rust image and state backup available for rollback.
+5. Run the fail-closed, read-only production acceptance command with exact expected values:
+
+   ```sh
+   export SLIPSTREAM_BASE_URL="http://${SLIPSTREAM_BIND_ADDRESS}:${SLIPSTREAM_PORT}"
+   export SLIPSTREAM_DATABASE_BASENAME=${SLIPSTREAM_DATABASE_BASENAME:-library.sqlite}
+   export SLIPSTREAM_EXPECTED_BIND_ADDRESS="$SLIPSTREAM_BIND_ADDRESS"
+   export SLIPSTREAM_EXPECTED_PORT="$SLIPSTREAM_PORT"
+   export SLIPSTREAM_EXPECTED_SCHEMA_VERSION=<current-schema-version>
+   export SLIPSTREAM_EXPECTED_STATE_SNAPSHOT=/path/to/pre-backup-state.json
+   export SLIPSTREAM_CONTAINER=slipstream-slipstream-1
+   export SLIPSTREAM_EXPECTED_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$SLIPSTREAM_IMAGE")"
+   export SLIPSTREAM_EXPECTED_COMMIT="$SLIPSTREAM_VCS_REF"
+   export SLIPSTREAM_EXPECTED_PHOTO_COUNT=<known-count>
+   export SLIPSTREAM_EXPECTED_PHOTO_SET=<known-name>
+   export SLIPSTREAM_EXPECTED_MEMBER_COUNT=<known-count>
+   export SLIPSTREAM_ORIGINAL_SAMPLE=/absolute/path/below/the/Library/root/sample.RAW
+   export SLIPSTREAM_EXPECTED_ORIGINAL_SHA256=<known-sha256>
+   # Required persisted real RAW Preview-fact assertion (does not generate a Preview):
+   export SLIPSTREAM_PREVIEW_PHOTO_ID=<known-photo-id>
+   export SLIPSTREAM_EXPECTED_PREVIEW_SOURCE=embedded-raw-jpeg
+   ./scripts/verify-production.sh
+   ```
+
+   The expected state snapshot contains the exact `photos` and `photoSets` arrays recorded before backup. It binds Photo identities/order, availability, Selection State, Rating, Photo Set membership/order, review progress, and persisted Preview facts. The command validates exact health, that complete state snapshot, required persisted current Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache. Missing inputs or skipped checks fail closed.
+
+6. Check the interactive browser review flow. Confirm that any intended state mutation survives a restart and generated derivatives remain below the cache mount.
+7. Keep the previous Rust image and state backup available for rollback.
 
 Compose enforces the deployment boundary: UID 1000, read-only root filesystem,
 private tmpfs, all Linux capabilities dropped, `no-new-privileges`, an init
 process, a 30-second stop grace period, SIGTERM shutdown, a restart policy,
 read-only Originals, and a `/healthz` check that uses curl rather than Node.
+
+## Isolated restore rehearsal
+
+A backup is not accepted until it starts and passes state checks in isolation. Never extract it over live state.
+
+1. Create empty temporary state and cache directories owned by UID 1000.
+2. Extract the verified archive into a separate restore root and use its state directory as `SLIPSTREAM_STATE_DIRECTORY`.
+3. Keep the same canonical `SLIPSTREAM_LIBRARY_ROOT`, mounted read-only.
+4. Select a non-production loopback port and a distinct Compose project name.
+5. Start the exact candidate image with the restored state and empty cache.
+6. Run `scripts/verify-production.sh` against the isolated listener with the expected Photo, Photo Set, member, image, Preview, and Original-SHA values.
+7. Stop the isolated project cleanly and verify that no journal/WAL/SHM sidecars remain.
+8. Delete only the temporary restored state and cache after recording the result. Do not delete the verified backup.
+
+Example:
+
+```sh
+set -euo pipefail
+restore_root=$(mktemp -d)
+cleanup_restore() {
+  if ! docker compose --project-name slipstream-restore \
+    --env-file /path/to/restore.env -f compose.yaml down; then
+    printf 'restore shutdown failed; preserve and inspect %s\n' "$restore_root" >&2
+  fi
+}
+trap cleanup_restore EXIT
+tar -xzf "$SLIPSTREAM_BACKUP_OUTPUT" -C "$restore_root"
+export SLIPSTREAM_ISOLATED_RESTORE_ROOT="$restore_root"
+export SLIPSTREAM_PRODUCTION_STATE_DIRECTORY=/data/slipstream/state
+export SLIPSTREAM_PRODUCTION_CACHE_DIRECTORY=/data/slipstream/cache
+export SLIPSTREAM_STATE_DIRECTORY="$restore_root/$(basename "$SLIPSTREAM_STATE_DIRECTORY")"
+export SLIPSTREAM_CACHE_DIRECTORY="$restore_root/cache"
+export SLIPSTREAM_ALLOW_DERIVED_WRITES=1
+export SLIPSTREAM_DATABASE_BASENAME=${SLIPSTREAM_DATABASE_BASENAME:-library.sqlite}
+export SLIPSTREAM_BIND_ADDRESS=127.0.0.1
+export SLIPSTREAM_PORT=17330
+install -d -o 1000 -g 1000 -m 0700 "$SLIPSTREAM_CACHE_DIRECTORY"
+docker compose --project-name slipstream-restore \
+  --env-file /path/to/restore.env -f compose.yaml up -d --no-build
+# Set SLIPSTREAM_CONTAINER=slipstream-restore-slipstream-1, the restore URL,
+# expected bind/port/schema/state snapshot, and SLIPSTREAM_ALLOW_DERIVED_WRITES=1.
+# The isolated acceptance may generate and read the real Preview derivative;
+# derived writes remain below restore_root and never touch live state.
+./scripts/verify-production.sh
+docker compose --project-name slipstream-restore \
+  --env-file /path/to/restore.env -f compose.yaml down || {
+    printf 'restore shutdown failed; preserve and inspect %s\n' "$restore_root" >&2
+    exit 1
+  }
+for suffix in -journal -wal -shm; do
+  if test -e "$SLIPSTREAM_STATE_DIRECTORY/$SLIPSTREAM_DATABASE_BASENAME$suffix"; then
+    printf 'restore left a SQLite sidecar; preserve and inspect %s\n' "$restore_root" >&2
+    exit 1
+  fi
+done
+# Record successful state, Preview, and sidecar evidence before cleanup.
+trap - EXIT
+rm -rf -- "$restore_root"
+```
 
 ## Rollback
 
