@@ -7,19 +7,18 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 import sharp from "sharp";
 
-import { startServer, type RunningServer } from "./http-server.js";
+import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 import type { PhotoListResponse, PhotoSetResponse } from "./protocol.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 const temporary: string[] = [];
-const servers: RunningServer[] = [];
+const servers: BrowserServer[] = [];
 
 test.afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
@@ -42,28 +41,8 @@ async function fixture() {
   await mkdir(root);
   return { base, root };
 }
-async function availablePort(): Promise<number> {
-  const probe = createServer();
-  await new Promise<void>((resolve, reject) => {
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", resolve);
-  });
-  const address = probe.address();
-  const port = typeof address === "object" && address ? address.port : 0;
-  await new Promise<void>((resolve, reject) =>
-    probe.close((error) => (error ? reject(error) : resolve())),
-  );
-  return port;
-}
 async function server(base: string, root: string) {
-  const running = await startServer({
-    libraryRoot: root,
-    stateDirectory: join(base, "state"),
-    databaseBasename: "library.sqlite",
-    cacheDirectory: join(base, "cache"),
-    host: "127.0.0.1",
-    port: await availablePort(),
-  });
+  const running = await startBrowserServer({ base, root });
   servers.push(running);
   return running;
 }
@@ -603,7 +582,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await createSet(running.url);
   await startReview(page, running.url);
   await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
-  await writeFile(matching, "corrupt jpeg");
+  await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
   await page.getByRole("button", { name: /Review/ }).click();
