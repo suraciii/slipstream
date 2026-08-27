@@ -28,7 +28,7 @@ pub const DEFAULT_WORKERS: usize = 2;
 pub const DEFAULT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_WAITER_CAPACITY: usize = 64;
 pub const MAXIMUM_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
-const CACHE_RECORD_SCHEMA_VERSION: u32 = 1;
+const CACHE_RECORD_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_METADATA_BYTES: u64 = 16 * 1024;
 const CACHE_NAMESPACE: &str = "rust-vips-v1";
 const NATIVE_WORK_CAPACITY: usize = 2;
@@ -332,6 +332,8 @@ struct Manifest {
     source_size: u64,
     #[serde(rename = "sourceMtimeMs")]
     source_mtime_ms: f64,
+    #[serde(rename = "sourceMtimeBits")]
+    source_mtime_bits: u64,
     #[serde(rename = "embeddedCandidateIdentity")]
     embedded_candidate_identity: Option<String>,
     width: u32,
@@ -383,6 +385,8 @@ struct FailureRecord {
     source_size: u64,
     #[serde(rename = "sourceMtimeMs")]
     source_mtime_ms: f64,
+    #[serde(rename = "sourceMtimeBits")]
+    source_mtime_bits: u64,
     #[serde(rename = "embeddedCandidateIdentity")]
     embedded_candidate_identity: Option<String>,
     kind: PersistentFailureKind,
@@ -664,7 +668,11 @@ impl DerivativeScheduler {
             if let Some(failure) = state.failed.get(&key).cloned() {
                 state.waiter_count += 1;
                 drop(state);
-                let result = Ok(DerivativeResult::Failed(failure));
+                let result = stale_or_failure(
+                    &self.inner,
+                    &identity,
+                    failure_record(&identity, &key, failure.kind),
+                );
                 let mut state = self.inner.state.lock().expect("scheduler state poisoned");
                 state.waiter_count = state.waiter_count.saturating_sub(1);
                 return result;
@@ -978,6 +986,7 @@ fn generate_one(inner: &SchedulerInner, job: &QueuedJob) -> Result<DerivativeRes
         source_relative_path: job.identity.source_relative_path.clone(),
         source_size: job.identity.source_size,
         source_mtime_ms: job.identity.source_mtime_ms,
+        source_mtime_bits: job.identity.source_mtime_ms.to_bits(),
         embedded_candidate_identity: job.identity.embedded_candidate_identity.clone(),
     };
     let current_generation = state.authoritative.get(&job.manifest_key).copied();
@@ -1305,8 +1314,13 @@ fn read_manifest(path: &Path) -> Result<Manifest, CacheError> {
     if bytes.len() as u64 > MAXIMUM_METADATA_BYTES {
         return Err(CacheError::InvalidCachedDerivative);
     }
-    let manifest: Manifest =
+    let mut manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|_| CacheError::InvalidCachedDerivative)?;
+    let exact_mtime_ms = f64::from_bits(manifest.source_mtime_bits);
+    if !exact_mtime_ms.is_finite() || exact_mtime_ms < 0.0 {
+        return Err(CacheError::InvalidCachedDerivative);
+    }
+    manifest.source_mtime_ms = exact_mtime_ms;
     if manifest.schema_version != CACHE_RECORD_SCHEMA_VERSION
         || manifest.algorithm_version != DERIVATIVE_ALGORITHM_VERSION
         || manifest.width == 0
@@ -1340,7 +1354,12 @@ fn read_failure(
     if bytes.len() as u64 > MAXIMUM_METADATA_BYTES {
         return None;
     }
-    let failure: FailureRecord = serde_json::from_slice(&bytes).ok()?;
+    let mut failure: FailureRecord = serde_json::from_slice(&bytes).ok()?;
+    let exact_mtime_ms = f64::from_bits(failure.source_mtime_bits);
+    if !exact_mtime_ms.is_finite() || exact_mtime_ms < 0.0 {
+        return None;
+    }
+    failure.source_mtime_ms = exact_mtime_ms;
     if failure.schema_version != CACHE_RECORD_SCHEMA_VERSION
         || failure.algorithm_version != DERIVATIVE_ALGORITHM_VERSION
         || failure.photo_identity != identity.photo_identity
@@ -1373,6 +1392,7 @@ fn failure_record(
         source_relative_path: identity.source_relative_path.clone(),
         source_size: identity.source_size,
         source_mtime_ms: identity.source_mtime_ms,
+        source_mtime_bits: identity.source_mtime_ms.to_bits(),
         embedded_candidate_identity: identity.embedded_candidate_identity.clone(),
         kind: match kind {
             DerivativeFailureKind::Unsupported => PersistentFailureKind::Unsupported,
@@ -1941,8 +1961,14 @@ mod tests {
     fn stale_fallback_reports_stored_source_facts_and_key() {
         let (scheduler, cache_path) = scheduler(None);
         let source = jpeg(80, 40);
+        let initial_mtime = 1_787_845_263_523.322_5;
+        let failing_mtime = 1_787_845_263_571.322_3;
         let initial = scheduler
-            .generate(identity(5.0), source.clone(), DerivativePriority::Current)
+            .generate(
+                identity(initial_mtime),
+                source.clone(),
+                DerivativePriority::Current,
+            )
             .unwrap();
         let DerivativeResult::Ready(initial) = initial else {
             panic!()
@@ -1962,16 +1988,23 @@ mod tests {
             },
         )
         .unwrap();
-        let result = replacement
-            .generate(identity(6.0), source, DerivativePriority::Current)
-            .unwrap();
-        let DerivativeResult::Ready(stale) = result else {
-            panic!()
-        };
-        assert!(stale.stale);
-        assert_eq!(stale.cache_key, initial.cache_key);
-        assert_eq!(stale.source, DerivativeSource::MatchingJpeg);
-        assert_eq!((stale.width, stale.height), (80, 40));
+        for _ in 0..2 {
+            let result = replacement
+                .generate(
+                    identity(failing_mtime),
+                    source.clone(),
+                    DerivativePriority::Current,
+                )
+                .unwrap();
+            let DerivativeResult::Ready(stale) = result else {
+                panic!()
+            };
+            assert!(stale.stale);
+            assert_eq!(stale.cache_key, initial.cache_key);
+            assert_eq!(stale.source, DerivativeSource::MatchingJpeg);
+            assert_eq!(stale.source_mtime_ms.to_bits(), initial_mtime.to_bits());
+            assert_eq!((stale.width, stale.height), (80, 40));
+        }
         replacement.shutdown().unwrap();
         let _ = fs::remove_dir_all(cache_path.parent().unwrap());
     }
@@ -2009,6 +2042,7 @@ mod tests {
             source_relative_path: value.source_relative_path.clone(),
             source_size: value.source_size,
             source_mtime_ms: value.source_mtime_ms,
+            source_mtime_bits: value.source_mtime_ms.to_bits(),
             embedded_candidate_identity: value.embedded_candidate_identity.clone(),
             width: 8,
             height: 8,
