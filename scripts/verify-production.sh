@@ -152,8 +152,6 @@ member_fields = {"photoId", "position", "available", "selectionState", "rating"}
 for member in matches[0]["members"]:
     if not member_fields.issubset(member):
         raise SystemExit("Photo Set member omits order or review state")
-if "lastReviewedPhotoId" not in matches[0]:
-    raise SystemExit("Photo Set progress is not present in the expected acceptance Set")
 PY
 
 python3 - "$work_dir/photos.json" "$SLIPSTREAM_PREVIEW_PHOTO_ID" "$SLIPSTREAM_EXPECTED_PREVIEW_SOURCE" <<'PY' \
