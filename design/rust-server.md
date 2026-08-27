@@ -31,7 +31,7 @@ Startup proceeds in one direction:
 1. Parse and validate configuration.
 2. Open the canonical Library, state, and cache directories.
 3. Admit and open SQLite, validate or migrate it, and start its bounded owner thread.
-4. Complete the initial scan.
+4. Complete the initial scan, including required Capture Time inspection or schema-v2 backfill for available Originals.
 5. Start bounded Preview workers.
 6. Bind HTTP and report readiness.
 
@@ -45,9 +45,9 @@ Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous 
 
 ## Compatibility
 
-The checked-in files under [`../compatibility/`](../compatibility/) are the authority for deterministic identities, JSON omission behavior, startup configuration, and canonical SQLite v2 shape. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
+The checked-in files under [`../compatibility/`](../compatibility/) are the authority for deterministic identities, JSON omission behavior, startup configuration, canonical SQLite v2 migration input, canonical SQLite v3 shape, Capture Time vectors, and ordering examples. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
 
-HTTP responses, SQLite v2, cache records, and deterministic identities remain compatible unless a later Design Spec defines a lossless transition. Docker preserves the bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
+HTTP response shapes, SQLite v2 migration input, cache records, and deterministic identities remain compatible. SQLite v3 is the current writable schema after the lossless transition defined in [`capture-time-ordering.md`](capture-time-ordering.md). Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
 
 Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
 
@@ -105,7 +105,7 @@ The service preserves:
 
 - the current HTTP routes, statuses, path-free JSON, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
-- SQLite schema version 2, canonical-root binding, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
+- SQLite schema version 3, lossless migration from canonical v2, canonical-root binding, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
 - Original and Photo SHA-256 identities, source revision text, and cache/manifest identity serialization, including Unicode and fractional modification times;
 - matching JPEG before largest usable embedded RAW JPEG;
 - descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
@@ -117,4 +117,4 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1 state migration success and rejection rollback, exact v2 schema shape, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 schema shape, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.

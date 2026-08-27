@@ -8,6 +8,9 @@ The Original Files indexed by Slipstream together with their organization and se
 **Photo**:
 One photograph presented for review. A Photo may contain a RAW Original and its matching JPEG Original.
 
+**Capture Time**:
+The optional camera-recorded local date and time used to order Photos in filtered Photo Library Review. Capture Time does not come from filesystem modification time and does not determine Photo Set membership order.
+
 **Original File**:
 A RAW or JPEG file owned by the Photographer. Slipstream must not modify it.
 
