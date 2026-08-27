@@ -201,6 +201,7 @@ impl CacheDirectory {
         if !canonical_original_root.is_dir() {
             return Err(CacheError::InvalidCacheDirectory);
         }
+        reject_cache_under_original(cache_directory, &canonical_original_root)?;
         fs::create_dir_all(cache_directory).map_err(|_| CacheError::Io)?;
         let canonical_root = fs::canonicalize(cache_directory).map_err(|_| CacheError::Io)?;
         if !canonical_root.is_dir()
@@ -1519,6 +1520,46 @@ fn is_hex_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn reject_cache_under_original(
+    cache_directory: &Path,
+    canonical_original_root: &Path,
+) -> Result<(), CacheError> {
+    let lexical_cache = lexical_absolute_path(cache_directory)?;
+    if lexical_cache == canonical_original_root
+        || lexical_cache.starts_with(canonical_original_root)
+    {
+        return Err(CacheError::InvalidCacheDirectory);
+    }
+    let mut existing = cache_directory;
+    while !existing.exists() {
+        existing = existing.parent().ok_or(CacheError::InvalidCacheDirectory)?;
+    }
+    let canonical_existing =
+        fs::canonicalize(existing).map_err(|_| CacheError::InvalidCacheDirectory)?;
+    if canonical_existing == canonical_original_root
+        || canonical_existing.starts_with(canonical_original_root)
+    {
+        return Err(CacheError::InvalidCacheDirectory);
+    }
+    Ok(())
+}
+
+fn lexical_absolute_path(path: &Path) -> Result<PathBuf, CacheError> {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => result.push(component.as_os_str()),
+            Component::Normal(value) => result.push(value),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::Prefix(_) => return Err(CacheError::InvalidCacheDirectory),
+        }
+    }
+    Ok(result)
+}
+
 fn is_safe_relative_utf8_path(value: &str) -> bool {
     let path = Path::new(value);
     if value.is_empty() || path.is_absolute() {
@@ -1625,6 +1666,12 @@ mod tests {
     #[test]
     fn cache_rejects_original_subtree_and_non_utf8_roots() {
         let (cache_path, original_path) = directories();
+        let nested_missing = original_path.join("new").join("cache");
+        assert_eq!(
+            CacheDirectory::open(&nested_missing, &original_path),
+            Err(CacheError::InvalidCacheDirectory)
+        );
+        assert!(!nested_missing.exists());
         assert_eq!(
             CacheDirectory::open(original_path.join("cache"), &original_path),
             Err(CacheError::InvalidCacheDirectory)

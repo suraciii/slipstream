@@ -35,6 +35,8 @@ Startup proceeds in one direction:
 5. Start bounded Preview workers.
 6. Bind HTTP and report readiness.
 
+The opt-in Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` only after the initial scan, Preview worker startup, and HTTP bind have completed. Startup failures never expose a ready listener. Shutdown stops HTTP admission before closing Preview and Library resources.
+
 A failure closes resources in reverse order. Shutdown stops admission, drains already accepted mutations, stops Preview publication, closes SQLite, and then completes. Repeated shutdown requests share one completion path.
 
 SQLite startup accepts the configured `DELETE` journal policy only from a sidecar-free state. If a journal, WAL, or shared-memory sidecar remains after another process or an unclean stop, startup must return a recovery-required failure before opening SQLite and must leave the database and every sidecar unchanged. Recovery uses an operator-controlled copy rather than letting startup checkpoint or rewrite state whose schema and Library binding may exist only in WAL.

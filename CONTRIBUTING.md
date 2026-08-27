@@ -53,7 +53,7 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 
 `test:rust` checks formatting, denies Clippy warnings, and runs the Rust compatibility tests. `test:fast` adds TypeScript linting and type checking, the transitional native build, unit/integration tests, and the real Chromium browser test. `verify` also checks repository formatting and builds Rust plus the transitional server and Web applications. GitHub Actions invokes the same `verify` command.
 
-The Rust workspace currently contains compatibility probes and shared migration contracts, not production routes. The production-language and cutover contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); both Rust and TypeScript tests consume them.
+The Rust workspace contains the production Library/Preview core and an opt-in Rust HTTP server in `crates/slipstream-server`. The TypeScript server remains the rollback baseline until Docker cutover. The production-language and cutover contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); both Rust and TypeScript tests consume them.
 
 ## Photo fixtures
 
@@ -69,15 +69,17 @@ The test hashes the Original before and after extraction and fails if its bytes 
 
 ## Server startup
 
-Build the workspace, then configure one Library and application-owned state locations with absolute paths:
+Build the workspace, then configure one Library and application-owned state locations with absolute paths. The opt-in Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:
 
 ```sh
+bun run --cwd apps/web build
 SLIPSTREAM_LIBRARY_ROOT=/photos \
 SLIPSTREAM_STATE_DIRECTORY=/var/lib/slipstream \
 SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
+SLIPSTREAM_WEB_ROOT="$PWD/apps/web/dist" \
 SLIPSTREAM_HOST=127.0.0.1 \
 SLIPSTREAM_PORT=3000 \
-node apps/server/dist/main.js
+cargo run --locked -p slipstream-server
 ```
 
-`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment.
+The transitional rollback server still starts with `node apps/server/dist/main.js` using the same existing variables. Never start both servers against one SQLite database. `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.

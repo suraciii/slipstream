@@ -244,15 +244,35 @@ impl PreviewService {
         Self::with_options(library, cache_directory, PreviewServiceOptions::default())
     }
 
+    pub fn from_cache(
+        library: Arc<Library>,
+        cache: CacheDirectory,
+    ) -> Result<Self, PreviewServiceError> {
+        Self::with_open_cache(library, cache, PreviewServiceOptions::default())
+    }
+
     pub fn with_options(
         library: Arc<Library>,
         cache_directory: impl AsRef<Path>,
         options: PreviewServiceOptions,
     ) -> Result<Self, PreviewServiceError> {
+        let cache = CacheDirectory::open(cache_directory, library.canonical_root())?;
+        Self::with_open_cache(library, cache, options)
+    }
+
+    pub fn with_open_cache(
+        library: Arc<Library>,
+        cache: CacheDirectory,
+        options: PreviewServiceOptions,
+    ) -> Result<Self, PreviewServiceError> {
+        if cache.original_root() != library.canonical_root() {
+            return Err(PreviewServiceError::Cache(
+                CacheError::InvalidCacheDirectory,
+            ));
+        }
         if options.workers == 0 || options.queue_capacity == 0 || options.waiter_capacity == 0 {
             return Err(PreviewServiceError::Saturated);
         }
-        let cache = CacheDirectory::open(cache_directory, library.canonical_root())?;
         // Preview workers own source inspection, so derivative workers are kept at
         // one per cache. This is the single native-work budget for both stages.
         let scheduler = DerivativeScheduler::with_options(
