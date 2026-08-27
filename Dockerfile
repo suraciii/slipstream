@@ -1,11 +1,10 @@
 FROM oven/bun:1.4.0 AS web-build
 WORKDIR /src
 
-# The Web imports the shared protocol types from the rollback package, but does
-# not need the rollback package's runtime or native dependencies to build.
+# Bun is used only to build the Web application. The Rust service is built in
+# the following stages and is the only production server.
 COPY package.json bun.lock tsconfig.json ./
 COPY apps/web/package.json apps/web/package.json
-COPY apps/server/src/protocol.ts apps/server/src/protocol.ts
 COPY apps/web apps/web
 RUN bun install --frozen-lockfile --ignore-scripts
 RUN bun run --cwd apps/web build

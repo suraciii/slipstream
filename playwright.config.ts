@@ -1,7 +1,7 @@
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "apps/server/src",
+  testDir: "apps/web/src",
   testMatch: "**/*.browser-test.ts",
   use: {
     browserName: "chromium",

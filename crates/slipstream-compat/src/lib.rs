@@ -1,4 +1,4 @@
-//! Executable compatibility contracts for the staged Rust server migration.
+//! Executable compatibility contracts for the Rust server and Web boundary.
 //! This crate is not a production server.
 
 #[cfg(test)]
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_identity_vectors_match_javascript_serialization() {
+    fn shared_identity_vectors_match_contract_serialization() {
         let contract: IdentityContract =
             serde_json::from_slice(&fs::read(contract_path("identity/vectors.json")).unwrap())
                 .unwrap();

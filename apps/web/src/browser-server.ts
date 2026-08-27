@@ -4,8 +4,6 @@ import { access } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
-import { startServer, type RunningServer } from "./http-server.js";
-
 export type BrowserServer = Readonly<{
   url: string;
   close(): Promise<void>;
@@ -16,34 +14,9 @@ type BrowserServerOptions = Readonly<{
   root: string;
 }>;
 
-const mode = process.env.SLIPSTREAM_BROWSER_SERVER ?? "typescript";
 const startupTimeoutMs = 60_000;
 
-export async function startBrowserServer(
-  options: BrowserServerOptions,
-): Promise<BrowserServer> {
-  if (mode === "typescript") return startTypeScriptServer(options);
-  if (mode === "rust") return startRustServer(options);
-  throw new Error(
-    `SLIPSTREAM_BROWSER_SERVER must be either typescript or rust, got ${mode}`,
-  );
-}
-
-async function startTypeScriptServer({
-  base,
-  root,
-}: BrowserServerOptions): Promise<RunningServer> {
-  return startServer({
-    libraryRoot: root,
-    stateDirectory: join(base, "state"),
-    databaseBasename: "library.sqlite",
-    cacheDirectory: join(base, "cache"),
-    host: "127.0.0.1",
-    port: await availablePort(),
-  });
-}
-
-async function startRustServer({
+export async function startBrowserServer({
   base,
   root,
 }: BrowserServerOptions): Promise<BrowserServer> {

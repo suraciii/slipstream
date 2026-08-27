@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
-import sharp from "sharp";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 import type { PhotoListResponse, PhotoSetResponse } from "./protocol.js";
@@ -29,10 +28,8 @@ test.afterEach(async () => {
   );
 });
 
-async function jpeg(width = 120, height = 60, color = "#c04020") {
-  return sharp({ create: { width, height, channels: 3, background: color } })
-    .jpeg()
-    .toBuffer();
+async function jpeg() {
+  return readFile(new URL("../test-fixtures/review.jpg", import.meta.url));
 }
 async function fixture() {
   const base = await mkdtemp(join(tmpdir(), "slipstream-browser-"));
@@ -110,7 +107,7 @@ test("starts from a Photo Set, shows facts, accessible controls, and resumes per
 }) => {
   const { base, root } = await fixture();
   await writeFile(join(root, "a.jpg"), await jpeg());
-  await writeFile(join(root, "b.jpg"), await jpeg(100, 50, "#2080c0"));
+  await writeFile(join(root, "b.jpg"), await jpeg());
   let running = await server(base, root);
   const { setId } = await createSet(running.url, "Picks");
   await startReview(page, running.url, "Picks");
@@ -298,7 +295,7 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
 }) => {
   const { base, root } = await fixture();
   for (const name of ["a.jpg", "b.jpg"])
-    await writeFile(join(root, name), await jpeg(320, 180));
+    await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
   const { setId } = await createSet(running.url);
   await startReview(page, running.url);
@@ -505,7 +502,7 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
 }) => {
   const { base, root } = await fixture();
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
-    await writeFile(join(root, name), await jpeg(320, 180));
+    await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
   const { setId } = await createSet(running.url);
   await startReview(page, running.url);
@@ -577,7 +574,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   const raw = join(root, `camera${extname(cameraSample)}`);
   const matching = join(root, "camera.jpg");
   await copyFile(cameraSample, raw);
-  await writeFile(matching, await jpeg(160, 80, "#34905d"));
+  await writeFile(matching, await jpeg());
   const running = await server(base, root);
   await createSet(running.url);
   await startReview(page, running.url);

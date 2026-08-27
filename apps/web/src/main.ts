@@ -6,7 +6,7 @@ import type {
   PreviewSource,
   SelectionState,
   UndoDescription,
-} from "../../server/src/protocol.js";
+} from "./protocol.js";
 import "./style.css";
 
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
