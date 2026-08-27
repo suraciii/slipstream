@@ -121,7 +121,7 @@ expect_failure() {
 }
 
 env "${base_env[@]}" "$repo_root/scripts/verify-production.sh" >"$work_dir/pass.log"
-mkdir -p "$work_dir/restore/state" "$work_dir/restore/cache"
+mkdir -p "$work_dir/restore/state" "$work_dir/restore/cache/metadata/manifests" "$work_dir/restore/cache/metadata/failures"
 cp "$work_dir/state/library.sqlite" "$work_dir/restore/state/library.sqlite"
 python3 - "$work_dir/container.json" "$work_dir/restore-container.json" "$work_dir/state" "$work_dir/cache" "$work_dir/restore/state" "$work_dir/restore/cache" <<'PY'
 import json, sys
@@ -141,6 +141,18 @@ env "${base_env[@]}" \
   SLIPSTREAM_PRODUCTION_CACHE_DIRECTORY="$work_dir/cache" \
   SLIPSTREAM_ALLOW_DERIVED_WRITES=1 \
   "$repo_root/scripts/verify-production.sh" >"$work_dir/derived-pass.log"
+rm -rf "$work_dir/restore/cache"/*
+mkdir -p "$work_dir/restore/cache/metadata"
+printf stale >"$work_dir/restore/cache/metadata/stale.json"
+expect_failure derived-preexisting-cache-file \
+  FAKE_DOCKER_INSPECT="$work_dir/restore-container.json" \
+  FAKE_CACHE_DIRECTORY="$work_dir/restore/cache" \
+  SLIPSTREAM_STATE_DIRECTORY="$work_dir/restore/state" \
+  SLIPSTREAM_CACHE_DIRECTORY="$work_dir/restore/cache" \
+  SLIPSTREAM_ISOLATED_RESTORE_ROOT="$work_dir/restore" \
+  SLIPSTREAM_PRODUCTION_STATE_DIRECTORY="$work_dir/state" \
+  SLIPSTREAM_PRODUCTION_CACHE_DIRECTORY="$work_dir/cache" \
+  SLIPSTREAM_ALLOW_DERIVED_WRITES=1
 rm -rf "$work_dir/restore/cache"/*
 expect_failure derived-overlap-equal \
   FAKE_DOCKER_INSPECT="$work_dir/restore-container.json" \
