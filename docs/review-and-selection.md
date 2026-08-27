@@ -4,11 +4,27 @@ A Photographer needs to make repeated decisions with minimal delay and without a
 
 ## Starting a Review Session
 
-The Photographer may start a Review Session from a Photo Set or a filtered Photo Library view.
+The Photographer may start a Review Session from a Photo Set or a filtered Photo Library view. Each source owns one order:
 
-Slipstream must use a stable review order for the Session. The first product uses capture time when available, then relative path as a deterministic tie-breaker. A missing capture time sorts by relative path after Photos with capture times.
+- A filtered Photo Library Review uses Capture Time order.
+- A Photo Set Review uses explicit Photo Set membership order.
 
-Slipstream must remember the last reviewed Photo for each Photo Set. Resuming must return to that Photo when it is still a member and available. If it is unavailable, Slipstream must move to the next available member without deleting its state. Removing the remembered Photo from the Photo Set clears that Set's saved position; the next Review Session starts at its first available member.
+A Review Session must snapshot its ordered Photo IDs when it starts. A rescan may refresh availability and Preview facts for Photos already in the Session, but it must not insert, remove, or reorder the active sequence. A later filtered Library Review Session may use new or corrected Capture Time facts from a completed rescan.
+
+Filtered Library Review must use this deterministic order:
+
+1. Photos with a valid authoritative Capture Time, ordered by normalized camera-local Capture Time.
+2. Photos without a valid authoritative Capture Time.
+3. For equal Capture Times and throughout the missing-time partition, the Photo ordering path by UTF-8 bytes.
+4. Photo ID by UTF-8 bytes when all earlier values tie.
+
+The Photo ordering path is the RAW Original's relative path when the Photo contains RAW. Otherwise it is the JPEG Original's relative path.
+
+Photo Set Review must use membership position only. Capture metadata, availability changes, Selection State, Rating, Preview state, and rescans must not reorder a Photo Set.
+
+Slipstream must remember the last reviewed Photo for each Photo Set. Resuming must return to that Photo when it is still a member and available. If it is unavailable, Slipstream must move to the next available member by membership position and wrap once to the first available member. If no member is available, Slipstream must keep the remembered member current. Removing the remembered Photo from the Photo Set clears that Set's saved position. The next Review Session starts at its first available member, or its first member when none are available.
+
+The first product does not persist progress for filtered Photo Library Review.
 
 ## Review Surface
 
@@ -20,6 +36,8 @@ The review surface must show one current Photo as the primary content. It must a
 - Preview Source;
 - controls for select, reject, clear, undo, and Rating;
 - whether Preview detail is limited.
+
+The first product does not display Capture Time, timezone availability, missing metadata, or RAW/JPEG capture disagreement on the Review surface. These facts affect deterministic Library order only. They must not disable selection, Rating, navigation, or Preview behavior.
 
 The next and previous Photos must remain reachable without recording a decision.
 
@@ -113,3 +131,23 @@ The Photographer drags a Photo to the right. A selected indicator grows with the
 The Photographer pinches to inspect a face. A horizontal one-finger drag pans across the enlarged Preview and does not reject or select it.
 
 The Photographer rejects a Photo by mistake, then chooses Undo. Slipstream restores its prior state and returns to that Photo.
+
+A filtered Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. The expected Review order is `Z`, then `A`, even though the filenames sort in the opposite order.
+
+A filtered Library contains `shoot/a.JPG` and `shoot/b.JPG` with the same Capture Time. The expected order is `a`, then `b`. If Capture Time and ordering path also tie, Photo ID `1a...` sorts before Photo ID `2b...`.
+
+A filtered Library contains `shoot/C.JPG` with a valid Capture Time, `shoot/A.JPG` with malformed `DateTimeOriginal` and no valid fallback, and `shoot/B.JPG` with no recognized capture field. The expected order is `C`, `A`, `B`.
+
+A filtered Library contains RAW-only `shoot/A.ARW` captured at `09:00`, JPEG-only `shoot/B.JPG` captured at `08:00`, and pair `shoot/C.ARW` plus `shoot/C.JPG` captured at `07:00`. The expected order is `C`, `B`, `A`.
+
+Pair `shoot/D.ARW` plus `shoot/D.JPG` reports `11:00` in RAW and `10:00` in JPEG. Slipstream records the disagreement and uses `11:00`. If `shoot/E.JPG` reports `10:30`, the expected order is `E`, then `D`.
+
+`shoot/F.JPG` reports `10:00` with no timezone. `shoot/G.JPG` reports `09:30+01:00`. Capture ordering compares their camera-local values and does not apply the offset. The expected order is `G`, then `F`. Slipstream must not describe `F` as UTC.
+
+`shoot/H.JPG` reports `10:00:00` with no subsecond value. `shoot/I.JPG` reports `10:00:00.001`. Missing subseconds normalize to zero, so the expected order is `H`, then `I`.
+
+`shoot/K.JPG` was captured at `09:00`, was indexed successfully, and later becomes unavailable. `shoot/L.JPG` is available and was captured at `10:00`. A later filtered Library Review keeps `K` before `L`; `K` remains navigable and is identified as unavailable.
+
+A Photo Set explicitly contains `shoot/A.JPG` at position 0 and `shoot/Z.JPG` at position 1, while `Z` has the earlier Capture Time. Photo Set Review must show `A`, then `Z`. A filtered Library Review of the same Photos must show `Z`, then `A`.
+
+A Photo Set contains unavailable `A`, available `B`, and available `C` in that order, and its saved progress points to `A`. Resuming starts at `B`. The unavailable `A` remains in position 0 and remains reachable through Previous.

@@ -36,11 +36,36 @@ Moving or renaming Original Files outside Slipstream may create a new Photo and 
 
 An unavailable Photo must retain its recorded state until the Photographer removes it from Slipstream. Slipstream must not silently transfer that state to a different file.
 
+## Capture Time
+
+Capture Time is optional camera metadata. Slipstream uses it to order filtered Photo Library Review. Capture Time must not determine pairing or change a Photo Set's membership order.
+
+Slipstream must inspect each available Original independently. It must use the first valid base field in this order:
+
+- EXIF `DateTimeOriginal`;
+- EXIF `DateTimeDigitized`.
+
+For the selected base field, Slipstream must use its matching `SubSecTimeOriginal` or `SubSecTimeDigitized` value when valid. It must retain a valid matching `OffsetTimeOriginal` or `OffsetTimeDigitized` value as a metadata fact.
+
+Capture ordering uses the camera-local date and time. Slipstream must not convert known offsets to UTC or invent an offset when one is missing. This keeps files with and without timezone metadata in one stable camera-local sequence.
+
+A missing or malformed subsecond value must contribute zero. Slipstream must normalize valid subseconds to nine decimal digits; digits beyond the first nine do not affect ordering. A missing or malformed offset remains unknown and does not invalidate an otherwise valid Capture Time.
+
+Slipstream must not use EXIF `DateTime`, GPS time, filesystem modification time, a filename, Preview metadata, XMP, or another Original as a guessed fallback.
+
+For a RAW/JPEG pair, a valid RAW Capture Time is authoritative. A valid matching JPEG Capture Time is used only when RAW has no valid Capture Time. If both Originals have valid values that differ, Slipstream must retain the disagreement and use RAW for ordering. If both have valid timezone offsets that differ, that is also a disagreement. A known offset on one Original and an unknown offset on the other is not a disagreement.
+
+Missing, invalid, or failed capture metadata must not make an otherwise readable Photo unavailable. A Photo without an authoritative Capture Time remains reviewable and sorts in the missing-time partition.
+
+When an Original becomes unavailable, Slipstream must retain its last successfully inspected Capture Time for ordering. When that Original returns with changed file revision facts, Slipstream must replace the retained fact with the result of inspecting the current bytes.
+
 ## Photo Sets
 
 The Photographer may create, rename, and delete a Photo Set.
 
-A Photo Set contains ordered references to Photos. One Photo may belong to multiple Photo Sets. Deleting a Photo Set must not delete or modify a Photo or Original File.
+A Photo Set contains explicitly ordered references to Photos. Its membership positions are authoritative whenever the Photographer reviews that Photo Set. Capture metadata and rescans must not silently change those positions.
+
+One Photo may belong to multiple Photo Sets. New members append in the order supplied by the add operation. Only an explicit reorder operation may change the order of existing members. Deleting a Photo Set must not delete or modify a Photo or Original File.
 
 The Photographer may add or remove Photos from a Photo Set. A Photo's Selection State and Rating belong to the Photo, not to one membership. The same decision therefore appears in every Photo Set that contains the Photo.
 
@@ -55,6 +80,11 @@ A rescan must:
 - add newly discovered supported files;
 - refresh a changed file's Preview state;
 - mark missing files unavailable;
+- inspect Capture Time for newly discovered or changed available Originals;
+- reuse persisted Capture Time facts for unchanged Originals;
+- retain the last successfully inspected Capture Time for a remembered unavailable Original;
+- publish one completed Library snapshot without exposing partial reordering while the rescan runs;
+- leave explicit Photo Set membership positions unchanged;
 - preserve unaffected Photo Sets and decisions;
 - never remove a decision only because a file is temporarily unavailable.
 
@@ -67,6 +97,8 @@ A failure to inspect one file must identify that file and allow other valid Phot
 A database or indexing failure must not change Original Files.
 
 If a previously paired RAW or JPEG changes so that the pair becomes ambiguous, Slipstream must preserve existing records and identify the ambiguity. Automatic state splitting or merging is not required in the first product.
+
+A malformed or unavailable capture metadata value must affect only that Original's capture fact. Slipstream must continue indexing valid sibling Photos. It must not use filesystem modification time or another guessed value to hide the failure.
 
 ## Examples
 

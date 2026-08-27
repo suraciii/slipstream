@@ -54,7 +54,9 @@ Every Original File read must resolve under the canonical root. Slipstream must 
 
 ### Review Scope
 
-A browser Review Session refers to one ordered Photo query and one current Photo. Durable progress records only the last reviewed Photo for a Photo Set. Drag position, active animation, zoom, pan, and undo are browser-local.
+A browser Review Session refers to one ordered Photo query and one current Photo. Filtered Library queries own Capture Time order, while Photo Set membership owns explicit Photo Set order. A Session snapshots the ordered Photo IDs when it starts. [`capture-time-ordering.md`](capture-time-ordering.md) defines metadata authority, rescan behavior, and deterministic ties.
+
+Durable progress records only the last reviewed Photo for a Photo Set. Drag position, active animation, zoom, pan, and undo are browser-local.
 
 The server is authoritative for Selection State and Rating. The browser must reconcile failed mutations instead of assuming an animation committed them.
 
@@ -80,7 +82,7 @@ At minimum, SQLite stores:
 
 - schema version;
 - configured Photo Library identity and canonical runtime path;
-- Original File relative path, kind, size, modification time, and availability;
+- Original File relative path, kind, size, modification time, availability, and derived Capture Time inspection facts;
 - Photo identity and RAW/JPEG references;
 - Preview source, dimensions, cache revision, and failure state;
 - Photo Set identity, name, order, and membership;
