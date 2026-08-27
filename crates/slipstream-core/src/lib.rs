@@ -4,6 +4,7 @@
 //! and the SQLite persistence foundation. HTTP and Preview processing live elsewhere.
 
 pub mod cache;
+pub mod capture;
 pub mod confinement;
 pub mod derivative;
 pub mod domain;
@@ -18,7 +19,12 @@ pub use cache::{
     CacheDirectory, CacheError, CachedDerivative, DEFAULT_QUEUE_CAPACITY, DEFAULT_WAITER_CAPACITY,
     DEFAULT_WORKERS, DERIVATIVE_ALGORITHM_VERSION, DerivativeFailure, DerivativeFailureKind,
     DerivativeIdentity, DerivativePriority, DerivativeResult, DerivativeScheduler,
-    DerivativeSchedulerOptions, DerivativeSource, derivative_cache_key, manifest_identity,
+    DerivativeSchedulerOptions, DerivativeSource, NativeWorkBudget, derivative_cache_key,
+    manifest_identity,
+};
+pub use capture::{
+    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureTimeField,
+    MAXIMUM_CAPTURE_METADATA_BYTES,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
 pub use derivative::{

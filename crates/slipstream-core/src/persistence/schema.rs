@@ -4,11 +4,13 @@ use std::fmt;
 
 const SCHEMA_V1_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v1.json");
 const SCHEMA_V2_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v2.json");
+const SCHEMA_V3_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v3.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
     V1,
     V2,
+    V3,
 }
 
 impl SchemaVersion {
@@ -16,6 +18,7 @@ impl SchemaVersion {
         match self {
             Self::V1 => SCHEMA_V1_MANIFEST,
             Self::V2 => SCHEMA_V2_MANIFEST,
+            Self::V3 => SCHEMA_V3_MANIFEST,
         }
     }
 }
@@ -113,6 +116,7 @@ mod tests {
 
     const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
     const SCHEMA_V2_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v2.sql");
+    const SCHEMA_V3_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v3.sql");
 
     fn execute_fixture(sql: &str) -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -121,11 +125,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_v1_and_v2_manifests_match_shared_contracts() {
+    fn exact_v1_v2_and_v3_manifests_match_shared_contracts() {
         let v1 = execute_fixture(SCHEMA_V1_SQL);
         validate_canonical_schema(&v1, SchemaVersion::V1).unwrap();
         let v2 = execute_fixture(SCHEMA_V2_SQL);
         validate_canonical_schema(&v2, SchemaVersion::V2).unwrap();
+        let v3 = execute_fixture(SCHEMA_V3_SQL);
+        assert_eq!(
+            schema_manifest(&v3).unwrap(),
+            expected_manifest(SchemaVersion::V3).unwrap()
+        );
+        validate_canonical_schema(&v3, SchemaVersion::V3).unwrap();
     }
 
     #[test]

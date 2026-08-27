@@ -2013,17 +2013,31 @@ mod tests {
 
     #[tokio::test]
     async fn photo_json_omits_optional_values_and_preserves_original_order() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../compatibility/protocol/capture-order-omission.json"
+        ))
+        .unwrap();
+        let ordered_paths = contract["orderedPaths"].as_array().unwrap();
         let (base, config) = prepare_fixture();
-        let jpeg = image::RgbImage::from_pixel(8, 4, image::Rgb([32, 64, 192]));
-        jpeg.save_with_format(config.library_root.join("z.JPG"), image::ImageFormat::Jpeg)
-            .unwrap();
-        jpeg.save_with_format(config.library_root.join("a.jpg"), image::ImageFormat::Jpeg)
-            .unwrap();
+        capture_metadata_fixture(&config.library_root.join("z.JPG"), "2026:01:01 09:00:00");
+        capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 10:00:00");
         let application = Application::open(&config).await.unwrap();
         let photos = serde_json::to_value(application.photos()).unwrap();
         let list = photos["photos"].as_array().unwrap();
         assert_eq!(list.len(), 2);
-        assert!(list[0]["id"].as_str().unwrap() < list[1]["id"].as_str().unwrap());
+        assert_eq!(
+            list.iter()
+                .map(|photo| photo["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ordered_paths
+                .iter()
+                .map(|path| {
+                    slipstream_core::standalone_photo_id(&slipstream_core::original_id(
+                        path.as_str().unwrap(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        );
         for photo in list {
             assert_eq!(photo["originals"][0]["kind"], "jpeg");
             assert_eq!(
@@ -2031,6 +2045,10 @@ mod tests {
                 serde_json::json!({"state": "inspection-pending"})
             );
             assert!(!photo.to_string().contains(":null"));
+            for hidden in contract["hiddenFields"].as_array().unwrap() {
+                let hidden = hidden.as_str().unwrap();
+                assert!(photo.get(hidden).is_none(), "{hidden} leaked into protocol");
+            }
             assert!(
                 !photo
                     .to_string()
@@ -2246,6 +2264,28 @@ mod tests {
         image::RgbImage::from_pixel(width, height, image::Rgb(color))
             .save_with_format(path, image::ImageFormat::Jpeg)
             .unwrap();
+    }
+
+    fn capture_metadata_fixture(path: &Path, capture_time: &str) {
+        let mut value = capture_time.as_bytes().to_vec();
+        value.push(0);
+        let data_offset = 8 + 2 + 12 + 4;
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&1_u16.to_le_bytes());
+        tiff.extend_from_slice(&0x9003_u16.to_le_bytes());
+        tiff.extend_from_slice(&2_u16.to_le_bytes());
+        tiff.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&(data_offset as u32).to_le_bytes());
+        tiff.extend_from_slice(&0_u32.to_le_bytes());
+        tiff.extend_from_slice(&value);
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let length = u16::try_from(payload.len() + 2).unwrap();
+        let mut bytes = b"\xff\xd8\xff\xe1".to_vec();
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"\xff\xd9");
+        fs::write(path, bytes).unwrap();
     }
 
     #[tokio::test]

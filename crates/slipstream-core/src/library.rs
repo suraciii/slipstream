@@ -1,7 +1,8 @@
 use crate::{
-    LibraryRoot, OriginalCapability, PhotoSetMutation, PhotoSetMutationResult, PhotoSetRecord,
-    PhotoStateMutation, PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits,
-    ScanResult, ScanSnapshot,
+    CaptureFact, LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoSetMutation,
+    PhotoSetMutationResult, PhotoSetRecord, PhotoStateMutation, PhotoStateMutationResult,
+    PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
+    capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
     },
@@ -174,6 +175,7 @@ struct Scanner {
 
 pub struct Library {
     root: LibraryRoot,
+    native_work: NativeWorkBudget,
     persistence: Persistence,
     scanner: Scanner,
     lifecycle: Mutex<Lifecycle>,
@@ -211,7 +213,9 @@ impl Library {
             }),
             Condvar::new(),
         ));
+        let native_work = NativeWorkBudget::new();
         let worker_root = root.clone();
+        let worker_native_work = native_work.clone();
         let worker_persistence = persistence.clone();
         let worker_state = state.clone();
         let join = thread::Builder::new()
@@ -219,6 +223,7 @@ impl Library {
             .spawn(move || {
                 scanner_main(
                     worker_root,
+                    worker_native_work,
                     worker_persistence,
                     config.limits,
                     receiver,
@@ -228,6 +233,7 @@ impl Library {
             .map_err(|_| LibraryError::ScannerStopped)?;
         Ok(Self {
             root,
+            native_work,
             persistence,
             scanner: Scanner {
                 sender,
@@ -241,6 +247,10 @@ impl Library {
 
     pub fn canonical_root(&self) -> &std::path::Path {
         self.root.canonical_path()
+    }
+
+    pub(crate) fn native_work_budget(&self) -> NativeWorkBudget {
+        self.native_work.clone()
     }
 
     pub(crate) fn snapshot_blocking(&self) -> Result<ScanSnapshot, LibraryError> {
@@ -436,8 +446,54 @@ impl Library {
     }
 }
 
+fn inspect_capture_facts(
+    root: &LibraryRoot,
+    native_work: &NativeWorkBudget,
+    originals: &mut [crate::DiscoveredOriginal],
+    previous: &[crate::OriginalRecord],
+) {
+    let previous = previous
+        .iter()
+        .map(|original| (original.relative_path.as_str(), original))
+        .collect::<std::collections::HashMap<_, _>>();
+    for original in originals {
+        let prior = previous.get(original.path.as_str()).copied();
+        if original.error_category.is_some() {
+            if let Some(prior) = prior {
+                original.capture = prior.capture.clone();
+            }
+            continue;
+        }
+        let revision = capture_source_revision(original.path.as_str(), original.facts);
+        let Ok(revision) = revision else {
+            original.capture = CaptureFact::failed(None);
+            continue;
+        };
+        if let Some(prior) = prior
+            && prior.capture.is_reusable_for(&revision)
+        {
+            original.capture = prior.capture.clone();
+            continue;
+        }
+        original.capture = match root.original(original.path.clone()) {
+            Ok(capability) => {
+                let _permit = native_work.acquire();
+                match crate::capture::inspect_capture(&capability, original.kind, original.facts) {
+                    Ok(capture) => capture,
+                    Err(crate::CaptureInspectionError::Confinement(
+                        crate::confinement::ConfinementError::Changed,
+                    )) => CaptureFact::failed(None),
+                    Err(_) => CaptureFact::failed(Some(revision)),
+                }
+            }
+            Err(_) => CaptureFact::failed(Some(revision)),
+        };
+    }
+}
+
 fn scanner_main(
     root: LibraryRoot,
+    native_work: NativeWorkBudget,
     persistence: Persistence,
     limits: ScanLimits,
     receiver: std::sync::mpsc::Receiver<ScanCommand>,
@@ -452,7 +508,16 @@ fn scanner_main(
                 let result = root
                     .scan(limits)
                     .map_err(LibraryError::from)
-                    .and_then(|result: ScanResult| {
+                    .and_then(|mut result: ScanResult| {
+                        let previous = persistence
+                            .snapshot_blocking()
+                            .map_err(LibraryError::from)?;
+                        inspect_capture_facts(
+                            &root,
+                            &native_work,
+                            &mut result.originals,
+                            &previous.originals,
+                        );
                         persistence
                             .apply_scan_blocking(result.originals, result.errors)
                             .map_err(LibraryError::from)

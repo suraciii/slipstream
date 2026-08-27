@@ -470,6 +470,11 @@ struct SchedulerState {
     failed: HashMap<String, DerivativeFailure>,
 }
 
+/// Shared bounded admission for native parsing, LibRaw, and libvips work.
+/// A Library creates one budget; standalone schedulers create their own.
+#[derive(Clone)]
+pub struct NativeWorkBudget(Arc<NativeWorkSemaphore>);
+
 struct NativeWorkSemaphore {
     state: Mutex<NativeWorkState>,
     signal: Condvar,
@@ -483,6 +488,27 @@ struct NativeWorkState {
 
 pub(crate) struct NativeWorkPermit {
     semaphore: Arc<NativeWorkSemaphore>,
+}
+
+impl NativeWorkBudget {
+    pub fn new() -> Self {
+        Self(NativeWorkSemaphore::new(NATIVE_WORK_CAPACITY))
+    }
+
+    pub(crate) fn acquire(&self) -> NativeWorkPermit {
+        self.0.acquire()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peak(&self) -> u64 {
+        self.0.peak.load(Ordering::Acquire)
+    }
+}
+
+impl Default for NativeWorkBudget {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NativeWorkSemaphore {
@@ -532,7 +558,7 @@ impl Drop for NativeWorkPermit {
 
 struct SchedulerInner {
     cache: CacheDirectory,
-    native_work: Arc<NativeWorkSemaphore>,
+    native_work: NativeWorkBudget,
     state: Mutex<SchedulerState>,
     signal: Condvar,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -578,6 +604,14 @@ impl DerivativeScheduler {
         cache: CacheDirectory,
         options: DerivativeSchedulerOptions,
     ) -> Result<Self, CacheError> {
+        Self::with_native_work_budget(cache, options, NativeWorkBudget::new())
+    }
+
+    pub(crate) fn with_native_work_budget(
+        cache: CacheDirectory,
+        options: DerivativeSchedulerOptions,
+        native_work: NativeWorkBudget,
+    ) -> Result<Self, CacheError> {
         if options.workers == 0 || options.queue_capacity == 0 || options.waiter_capacity == 0 {
             return Err(CacheError::InvalidCacheDirectory);
         }
@@ -596,7 +630,7 @@ impl DerivativeScheduler {
         let cache_root = cache.root().to_owned();
         let inner = Arc::new(SchedulerInner {
             cache,
-            native_work: NativeWorkSemaphore::new(NATIVE_WORK_CAPACITY),
+            native_work,
             state: Mutex::new(SchedulerState {
                 closed: false,
                 terminate_workers: false,
@@ -1635,7 +1669,7 @@ mod tests {
     use std::{
         fs,
         sync::{
-            Arc,
+            Arc, Condvar, Mutex,
             atomic::{AtomicU64, Ordering},
         },
         time::Duration,
@@ -1688,6 +1722,76 @@ mod tests {
         )
         .unwrap();
         (scheduler, cache_path)
+    }
+
+    #[test]
+    fn shared_native_budget_limits_capture_and_derivative_work_to_two() {
+        let (cache_path, original_path) = directories();
+        let cache = CacheDirectory::open(&cache_path, &original_path).unwrap();
+        let budget = NativeWorkBudget::new();
+        let holders = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
+        let mut captures = Vec::new();
+        for _ in 0..2 {
+            let budget = budget.clone();
+            let holders = Arc::clone(&holders);
+            captures.push(thread::spawn(move || {
+                let _capture_permit = budget.acquire();
+                let (lock, signal) = &*holders;
+                let mut state = lock.lock().unwrap();
+                state.0 += 1;
+                signal.notify_all();
+                while !state.1 {
+                    state = signal.wait(state).unwrap();
+                }
+            }));
+        }
+        let (lock, signal) = &*holders;
+        let mut state = lock.lock().unwrap();
+        while state.0 != 2 {
+            state = signal.wait(state).unwrap();
+        }
+        drop(state);
+
+        let derivative_entered = Arc::new(AtomicU64::new(0));
+        let entered = Arc::clone(&derivative_entered);
+        let output = jpeg(1, 1);
+        let scheduler = DerivativeScheduler::with_native_work_budget(
+            cache,
+            DerivativeSchedulerOptions {
+                workers: 1,
+                queue_capacity: 64,
+                waiter_capacity: 64,
+                process: Some(Arc::new(move |_, _| {
+                    entered.fetch_add(1, Ordering::AcqRel);
+                    Ok(Derivative {
+                        width: 1,
+                        height: 1,
+                        profile: DerivativeProfile::Srgb,
+                        jpeg: output.clone(),
+                    })
+                })),
+            },
+            budget.clone(),
+        )
+        .unwrap();
+        let scheduled = scheduler.clone();
+        let derivative = thread::spawn(move || {
+            scheduled.generate(identity(1.0), jpeg(2, 2), DerivativePriority::Current)
+        });
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(derivative_entered.load(Ordering::Acquire), 0);
+        let (lock, signal) = &*holders;
+        lock.lock().unwrap().1 = true;
+        signal.notify_all();
+        for capture in captures {
+            capture.join().unwrap();
+        }
+        assert!(matches!(
+            derivative.join().unwrap(),
+            Ok(DerivativeResult::Ready(_))
+        ));
+        assert!(budget.peak() <= 2);
+        scheduler.shutdown().unwrap();
     }
 
     #[test]

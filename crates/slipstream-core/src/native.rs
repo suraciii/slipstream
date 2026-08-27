@@ -14,6 +14,27 @@ struct NativeResult {
     length: u64,
 }
 
+#[repr(C)]
+struct NativeCaptureTimeResult {
+    has_timestamp: i32,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeCaptureTime {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
 unsafe extern "C" {
     fn slipstream_inspect_jpeg_fd(
         fd: i32,
@@ -27,6 +48,11 @@ unsafe extern "C" {
         maximum_pixels: u64,
         maximum_libraw_memory_mb: u32,
         result: *mut NativeResult,
+    ) -> i32;
+    fn slipstream_inspect_raw_capture_time_fd(
+        fd: i32,
+        maximum_libraw_memory_mb: u32,
+        result: *mut NativeCaptureTimeResult,
     ) -> i32;
     fn slipstream_preview_result_free(result: *mut NativeResult);
 }
@@ -141,6 +167,53 @@ fn empty_result() -> NativeResult {
         bytes: std::ptr::null_mut(),
         length: 0,
     }
+}
+
+pub(crate) fn inspect_raw_capture_time(
+    opened: &OpenedOriginal,
+) -> Result<Option<NativeCaptureTime>, NativePreviewError> {
+    let mut result = NativeCaptureTimeResult {
+        has_timestamp: 0,
+        year: 0,
+        month: 0,
+        day: 0,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    };
+    // SAFETY: the retained descriptor remains open for LibRaw's metadata-only
+    // open, and the native result is valid writable storage.
+    let status = unsafe {
+        slipstream_inspect_raw_capture_time_fd(
+            opened.descriptor(),
+            MAXIMUM_LIBRAW_MEMORY_MB,
+            &mut result,
+        )
+    };
+    if status != 0 {
+        return Err(error_for_status(status));
+    }
+    if result.has_timestamp == 0 {
+        return Ok(None);
+    }
+    let valid = result.has_timestamp == 1
+        && (1..=9999).contains(&result.year)
+        && (1..=12).contains(&result.month)
+        && (1..=31).contains(&result.day)
+        && (0..=23).contains(&result.hour)
+        && (0..=59).contains(&result.minute)
+        && (0..=59).contains(&result.second);
+    if !valid {
+        return Err(NativePreviewError::Internal);
+    }
+    Ok(Some(NativeCaptureTime {
+        year: result.year as u16,
+        month: result.month as u8,
+        day: result.day as u8,
+        hour: result.hour as u8,
+        minute: result.minute as u8,
+        second: result.second as u8,
+    }))
 }
 
 fn inspect_opened(opened: &OpenedOriginal) -> Result<NativePreview, PreviewError> {
@@ -284,6 +357,21 @@ mod tests {
         assert!(matches!(
             with_capability("invalid.JPG", b"not jpeg", inspect_matching_jpeg),
             Err(PreviewError::Native(NativePreviewError::Malformed))
+        ));
+    }
+
+    #[test]
+    fn raw_capture_time_wrapper_reports_a_native_status_for_non_raw_descriptor() {
+        let result = with_capability("not-raw.ARW", b"not a raw container", |capability| {
+            let opened = capability.open_revision_checked().unwrap();
+            inspect_raw_capture_time(&opened)
+        });
+        assert!(matches!(
+            result,
+            Err(NativePreviewError::Unsupported
+                | NativePreviewError::Malformed
+                | NativePreviewError::Io
+                | NativePreviewError::Internal)
         ));
     }
 

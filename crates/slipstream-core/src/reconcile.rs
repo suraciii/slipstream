@@ -370,6 +370,7 @@ mod tests {
             },
             error_category: None,
             error_message: None,
+            capture: crate::CaptureFact::pending(),
         }
     }
 
@@ -402,6 +403,7 @@ mod tests {
             available: original.error_category.is_none(),
             error_category: original.error_category,
             error_message: original.error_message.clone(),
+            capture: original.capture.clone(),
         }
     }
 

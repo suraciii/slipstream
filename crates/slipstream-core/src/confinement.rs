@@ -319,6 +319,36 @@ pub(crate) struct OpenedOriginal {
 }
 
 impl OpenedOriginal {
+    /// Reads one bounded range through the descriptor retained for this
+    /// inspection. A short result is meaningful to format parsers (for
+    /// example, a truncated EXIF segment); callers verify the same descriptor
+    /// once their complete inspection is finished.
+    pub(crate) fn pread_range(
+        &self,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, ConfinementError> {
+        if length > MAXIMUM_RANGE_BYTES || offset > i64::MAX as u64 {
+            return Err(ConfinementError::ResourceLimit(
+                "Confined read exceeds limits",
+            ));
+        }
+        let mut bytes = vec![0; length];
+        let count = sys::pread(self.file.as_raw_fd(), &mut bytes, offset).map_err(|_| {
+            read_failure_after_revision_check(
+                self.file.as_raw_fd(),
+                &self.revision,
+                "Original File could not be read safely",
+            )
+        })?;
+        bytes.truncate(count);
+        Ok(bytes)
+    }
+
+    pub(crate) fn size(&self) -> Result<u64, ConfinementError> {
+        validated_size(&self.revision)
+    }
+
     pub(crate) fn descriptor(&self) -> RawFd {
         self.file.as_raw_fd()
     }
@@ -396,6 +426,7 @@ impl Scanner<'_> {
                     facts: file_facts,
                     error_category: None,
                     error_message: None,
+                    capture: crate::CaptureFact::pending(),
                 }),
                 Err(_) => {
                     let error_category = OriginalErrorCategory::Unreadable;
@@ -406,6 +437,7 @@ impl Scanner<'_> {
                         facts: OriginalFacts::UNREADABLE,
                         error_category: Some(error_category),
                         error_message: Some(error_message.clone()),
+                        capture: crate::CaptureFact::pending(),
                     });
                     self.errors.push(OriginalScanError {
                         path: relative,

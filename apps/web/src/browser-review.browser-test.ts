@@ -31,6 +31,37 @@ test.afterEach(async () => {
 async function jpeg() {
   return readFile(new URL("../test-fixtures/review.jpg", import.meta.url));
 }
+function photoIdFor(relativePath: string): string {
+  const originalId = createHash("sha256")
+    .update("original\0")
+    .update(relativePath)
+    .digest("hex");
+  return createHash("sha256")
+    .update("photo\0")
+    .update(originalId)
+    .digest("hex");
+}
+function withCaptureTime(source: Uint8Array, captureTime: string): Uint8Array {
+  const value = new TextEncoder().encode(`${captureTime}\0`);
+  const dataOffset = 8 + 2 + 12 + 4;
+  const tiff = new Uint8Array(dataOffset + value.length);
+  tiff.set([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]);
+  tiff.set([1, 0], 8);
+  tiff.set([0x03, 0x90, 2, 0], 10);
+  new DataView(tiff.buffer).setUint32(14, value.length, true);
+  new DataView(tiff.buffer).setUint32(18, dataOffset, true);
+  tiff.set(value, dataOffset);
+  const payload = new Uint8Array([69, 120, 105, 102, 0, 0, ...tiff]);
+  const app1 = new Uint8Array(payload.length + 4);
+  app1.set([
+    0xff,
+    0xe1,
+    (payload.length + 2) >> 8,
+    (payload.length + 2) & 0xff,
+  ]);
+  app1.set(payload, 4);
+  return new Uint8Array([...source.slice(0, 2), ...app1, ...source.slice(2)]);
+}
 async function fixture() {
   const base = await mkdtemp(join(tmpdir(), "slipstream-browser-"));
   temporary.push(base);
@@ -68,7 +99,10 @@ async function createSet(url: string, name = "Review") {
 async function startReview(page: Page, url: string, name = "Review") {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(url);
-  await page.getByRole("button", { name: new RegExp(name) }).click();
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await page
+    .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
+    .click();
   await expect(page.locator("[data-review]")).toBeVisible();
 }
 async function state(url: string, setId: string) {
@@ -488,7 +522,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
 
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.reload();
-  await page.getByRole("button", { name: /Review/ }).click();
+  await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await event("pointerdown", 100, 0, 48);
   await event("pointermove", 200, 10, 48);
@@ -582,7 +616,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
-  await page.getByRole("button", { name: /Review/ }).click();
+  await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
   await expect(
     page.getByText("RAW embedded JPEG", { exact: true }),
   ).toBeVisible();
@@ -594,3 +628,266 @@ async function sha256(path: string): Promise<string> {
     .update(await readFile(path))
     .digest("hex");
 }
+
+test("Library Review uses server Capture Time order, snapshots it, and stores no progress", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "Z.jpg"),
+    withCaptureTime(source, "2026:01:01 09:00:00"),
+  );
+  const running = await server(base, root);
+  const photos = (await (
+    await fetch(`${running.url}/api/photos`)
+  ).json()) as PhotoListResponse;
+  const zId = photoIdFor("Z.jpg");
+  const aId = photoIdFor("A.jpg");
+  expect(photos.photos.map((photo) => photo.id)).toEqual([zId, aId]);
+  const previewRequests: string[] = [];
+  const stateBodies: unknown[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/preview")) previewRequests.push(request.url());
+    if (request.url().includes("/state"))
+      stateBodies.push(request.postDataJSON());
+  });
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /Library Review/ }).click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect
+    .poll(() => previewRequests.some((url) => url.includes(zId)))
+    .toBe(true);
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  expect(stateBodies[0]).toMatchObject({
+    field: "selectionState",
+    value: "selected",
+  });
+  expect(stateBodies[0]).not.toHaveProperty("photoSetId");
+  expect(await (await fetch(`${running.url}/api/photo-sets`)).json()).toEqual({
+    photoSets: [],
+  });
+  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: /Library Review/ }).click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  const { setId } = await createSet(running.url, "Explicit order");
+  await post(running.url, `/api/photo-sets/${setId}/order`, {
+    photoIds: [aId, zId],
+  });
+  await page.reload();
+  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect
+    .poll(() => previewRequests.some((url) => url.includes(aId)))
+    .toBe(true);
+});
+
+test("active Library Review keeps its Capture Time snapshot until the next Session", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "Z.jpg"),
+    withCaptureTime(source, "2026:01:01 09:00:00"),
+  );
+  const running = await server(base, root);
+  const zId = photoIdFor("Z.jpg");
+  const bId = photoIdFor("B.jpg");
+  const previews: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/preview")) previews.push(request.url());
+  });
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /Library Review/ }).click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect.poll(() => previews.some((url) => url.includes(zId))).toBe(true);
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:01 08:00:00"),
+  );
+  await post(running.url, "/api/scan", {});
+  await page.route("**/api/photos/*/preview", (route) => route.abort());
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await page.unroute("**/api/photos/*/preview");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: /Library Review/ }).click();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+  await expect.poll(() => previews.some((url) => url.includes(bId))).toBe(true);
+});
+
+test("Photo Set Review snapshots explicit members across rescan and reconnect", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "Z.jpg"),
+    withCaptureTime(source, "2026:01:01 09:00:00"),
+  );
+  const running = await server(base, root);
+  const aId = photoIdFor("A.jpg");
+  const zId = photoIdFor("Z.jpg");
+  const bId = photoIdFor("B.jpg");
+  const { setId } = await createSet(running.url, "Snapshot");
+  await post(running.url, `/api/photo-sets/${setId}/order`, {
+    photoIds: [aId, zId],
+  });
+  await startReview(page, running.url, "Snapshot");
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:01 08:00:00"),
+  );
+  await post(running.url, "/api/scan", {});
+  await post(running.url, `/api/photo-sets/${setId}/members`, {
+    photoIds: [bId],
+  });
+  await page.route("**/api/photos/*/preview", (route) => route.abort());
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await page.unroute("**/api/photos/*/preview");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: /^Snapshot(?: |$)/ }).click();
+  await expect(page.getByText("2 / 3")).toBeVisible();
+});
+
+test("reconnect retains confirmed undo and a delayed progress failure blocks the active Session", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "Recovery");
+  await startReview(page, running.url, "Recovery");
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await page.route("**/api/photos/*/preview", (route) => route.abort());
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await page.unroute("**/api/photos/*/preview");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+
+  let releaseFailure!: () => void;
+  const failureReleased = new Promise<void>((resolve) => {
+    releaseFailure = resolve;
+  });
+  let failed = false;
+  await page.route("**/api/photo-sets/*/progress", async (route) => {
+    if (!failed) {
+      failed = true;
+      await failureReleased;
+      await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 3")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("3 / 3")).toBeVisible();
+  releaseFailure();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+  await page.unroute("**/api/photo-sets/*/progress");
+  let releaseSuccess!: () => void;
+  const successReleased = new Promise<void>((resolve) => {
+    releaseSuccess = resolve;
+  });
+  await page.route("**/api/photo-sets/*/progress", async (route) => {
+    await successReleased;
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+  releaseSuccess();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  await page.unroute("**/api/photo-sets/*/progress");
+  await expect
+    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
+    .toBe((await state(running.url, setId)).members[2]!.photoId);
+});
+
+test("Photo Set resume wraps past an unavailable saved member and retains it when all are unavailable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "Resume");
+  const initial = await state(running.url, setId);
+  const savedId = initial.members[2]!.photoId;
+  expect(
+    initial.members.findIndex((member) => member.photoId === savedId),
+  ).toBe(2);
+  await post(running.url, `/api/photo-sets/${setId}/progress`, {
+    photoId: savedId,
+  });
+  await rm(join(root, "c.jpg"));
+  await post(running.url, "/api/scan", {});
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+
+  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await rm(join(root, "a.jpg"));
+  await rm(join(root, "b.jpg"));
+  await post(running.url, "/api/scan", {});
+  await page.route("**/api/photo-sets", async (route) => {
+    await route.fulfill({
+      json: {
+        photoSets: [
+          {
+            ...initial,
+            lastReviewedPhotoId: savedId,
+            members: initial.members.map((member) => ({
+              ...member,
+              available: false,
+            })),
+          },
+        ],
+      },
+    });
+  });
+  await page.reload();
+  await expect
+    .poll(async () =>
+      page.evaluate(async () => {
+        const body = (await (await fetch("/api/photo-sets")).json()) as {
+          photoSets: PhotoSetResponse[];
+        };
+        return body.photoSets[0]?.lastReviewedPhotoId;
+      }),
+    )
+    .toBe(savedId);
+  await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await expect(page.getByText("3 / 3")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+});

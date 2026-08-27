@@ -1,10 +1,10 @@
 use super::{DatabaseName, SchemaVersion, StateDirectory, StateError, validate_canonical_schema};
 use crate::{
-    DiscoveredOriginal, OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoRecord, PhotoSetMember, PhotoSetMutation, PhotoSetMutationResult,
-    PhotoSetRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
-    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, ScanSnapshot,
-    SelectionState,
+    CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, OriginalErrorCategory,
+    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoSetMember,
+    PhotoSetMutation, PhotoSetMutationResult, PhotoSetRecord, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
+    PreviewSeedResult, PreviewState, ScanSnapshot, SelectionState,
     identity::{original_id, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -629,7 +629,7 @@ fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(),
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 2 {
+    if version > 3 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -639,6 +639,8 @@ fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(),
         1 => validate_canonical_schema(connection, SchemaVersion::V1)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         2 => validate_canonical_schema(connection, SchemaVersion::V2)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        3 => validate_canonical_schema(connection, SchemaVersion::V3)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -676,7 +678,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 2 {
+    if version > 3 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -685,13 +687,22 @@ fn startup_schema(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
     match version {
-        0 => migrate_v0(&transaction)?,
+        0 => {
+            migrate_v0(&transaction)?;
+            migrate_v2(&transaction)?;
+        }
         1 => {
             validate_canonical_schema(&transaction, SchemaVersion::V1)
                 .map_err(|_| PersistenceError::UnsupportedSchema)?;
             migrate_v1(&transaction)?;
+            migrate_v2(&transaction)?;
         }
-        2 => validate_canonical_schema(&transaction, SchemaVersion::V2)
+        2 => {
+            validate_canonical_schema(&transaction, SchemaVersion::V2)
+                .map_err(|_| PersistenceError::UnsupportedSchema)?;
+            migrate_v2(&transaction)?;
+        }
+        3 => validate_canonical_schema(&transaction, SchemaVersion::V3)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
@@ -712,7 +723,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V2)
+    validate_canonical_schema(&transaction, SchemaVersion::V3)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -783,6 +794,27 @@ fn migrate_v1(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
                  REFERENCES photo_set_members(photo_set_id, photo_id) ON DELETE CASCADE);
              CREATE INDEX photo_set_members_photo ON photo_set_members(photo_id);
              PRAGMA user_version = 2;",
+        )
+        .map_err(|_| PersistenceError::Storage)
+}
+
+fn migrate_v2(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    transaction
+        .execute_batch(
+            "ALTER TABLE original_files ADD COLUMN capture_metadata_state TEXT NOT NULL DEFAULT 'pending'
+               CHECK(capture_metadata_state IN ('pending','known','missing','invalid','failed'));
+             ALTER TABLE original_files ADD COLUMN capture_order_key TEXT CHECK(capture_order_key IS NULL OR (
+               length(capture_order_key)=29 AND substr(capture_order_key,5,1)='-' AND
+               substr(capture_order_key,8,1)='-' AND substr(capture_order_key,11,1)='T' AND
+               substr(capture_order_key,14,1)=':' AND substr(capture_order_key,17,1)=':' AND
+               substr(capture_order_key,20,1)='.' AND
+               replace(replace(replace(replace(capture_order_key,'-',''),':',''),'T',''),'.','')
+                 NOT GLOB '*[^0-9]*'
+             ));
+             ALTER TABLE original_files ADD COLUMN capture_time_field TEXT CHECK(capture_time_field IS NULL OR capture_time_field IN ('date-time-original','date-time-digitized'));
+             ALTER TABLE original_files ADD COLUMN capture_offset_minutes INTEGER CHECK(capture_offset_minutes IS NULL OR capture_offset_minutes BETWEEN -840 AND 840);
+             ALTER TABLE original_files ADD COLUMN capture_source_revision TEXT;
+             PRAGMA user_version = 3;",
         )
         .map_err(|_| PersistenceError::Storage)
 }
@@ -872,7 +904,9 @@ fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
 fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
     let originals = connection
         .prepare(
-            "SELECT id,relative_path,kind,size,mtime_ms,available,error_category,error_message
+            "SELECT id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
+                    capture_metadata_state,capture_order_key,capture_time_field,
+                    capture_offset_minutes,capture_source_revision
              FROM original_files ORDER BY relative_path COLLATE BINARY",
         )
         .map_err(|_| PersistenceError::Storage)?
@@ -894,6 +928,13 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
                 available: row.get::<_, i64>(5)? != 0,
                 error_category: parse_error_category(row.get(6)?)?,
                 error_message: row.get(7)?,
+                capture: parse_capture_fact(
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                )?,
             })
         })
         .map_err(|_| PersistenceError::Storage)?
@@ -901,10 +942,15 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
         .map_err(|_| PersistenceError::Storage)?;
     let photos = connection
         .prepare(
-            "SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,
-                    preview_candidate,preview_source,preview_source_revision,preview_width,
-                    preview_height,cache_revision,sort_path,selection_state,rating
-             FROM photos ORDER BY sort_path COLLATE BINARY,id",
+            "SELECT p.id,p.raw_original_id,p.jpeg_original_id,p.ambiguous,p.available,p.preview_state,
+                    p.preview_candidate,p.preview_source,p.preview_source_revision,p.preview_width,
+                    p.preview_height,p.cache_revision,p.sort_path,p.selection_state,p.rating
+             FROM photos p
+             LEFT JOIN original_files raw ON raw.id=p.raw_original_id
+             LEFT JOIN original_files jpeg ON jpeg.id=p.jpeg_original_id
+             ORDER BY CASE WHEN COALESCE(raw.capture_order_key,jpeg.capture_order_key) IS NULL THEN 1 ELSE 0 END,
+                      COALESCE(raw.capture_order_key,jpeg.capture_order_key) COLLATE BINARY,
+                      p.sort_path COLLATE BINARY,p.id",
         )
         .map_err(|_| PersistenceError::Storage)?
         .query_map([], |row| {
@@ -955,6 +1001,89 @@ fn parse_error_category(value: Option<String>) -> rusqlite::Result<Option<Origin
             _ => Err(rusqlite::Error::InvalidQuery),
         })
         .transpose()
+}
+
+fn capture_state_name(state: CaptureMetadataState) -> &'static str {
+    match state {
+        CaptureMetadataState::Pending => "pending",
+        CaptureMetadataState::Known => "known",
+        CaptureMetadataState::Missing => "missing",
+        CaptureMetadataState::Invalid => "invalid",
+        CaptureMetadataState::Failed => "failed",
+    }
+}
+
+fn parse_capture_fact(
+    state: String,
+    order_key: Option<String>,
+    field: Option<String>,
+    offset_minutes: Option<i64>,
+    source_revision: Option<String>,
+) -> rusqlite::Result<CaptureFact> {
+    let state = match state.as_str() {
+        "pending" => CaptureMetadataState::Pending,
+        "known" => CaptureMetadataState::Known,
+        "missing" => CaptureMetadataState::Missing,
+        "invalid" => CaptureMetadataState::Invalid,
+        "failed" => CaptureMetadataState::Failed,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let field = match field.as_deref() {
+        None => None,
+        Some(value) => Some(
+            CaptureTimeField::parse_database_name(value).ok_or(rusqlite::Error::InvalidQuery)?,
+        ),
+    };
+    let offset_minutes = offset_minutes
+        .map(|value| value.try_into().map_err(|_| rusqlite::Error::InvalidQuery))
+        .transpose()?;
+    let fact = CaptureFact {
+        state,
+        order_key,
+        field,
+        offset_minutes,
+        source_revision,
+    };
+    validate_capture_fact(&fact).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(fact)
+}
+
+fn valid_capture_order_key(value: &str) -> bool {
+    value.len() == 29
+        && value.as_bytes()[4] == b'-'
+        && value.as_bytes()[7] == b'-'
+        && value.as_bytes()[10] == b'T'
+        && value.as_bytes()[13] == b':'
+        && value.as_bytes()[16] == b':'
+        && value.as_bytes()[19] == b'.'
+        && value.bytes().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+}
+
+fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
+    let source_revision = fact
+        .source_revision
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let known = fact
+        .order_key
+        .as_deref()
+        .is_some_and(valid_capture_order_key)
+        && fact.field.is_some()
+        && source_revision;
+    let no_derived =
+        fact.order_key.is_none() && fact.field.is_none() && fact.offset_minutes.is_none();
+    match fact.state {
+        CaptureMetadataState::Pending => no_derived && fact.source_revision.is_none(),
+        CaptureMetadataState::Known => known,
+        CaptureMetadataState::Missing | CaptureMetadataState::Invalid => {
+            no_derived && source_revision
+        }
+        CaptureMetadataState::Failed => no_derived,
+    }
+    .then_some(())
+    .ok_or(())
 }
 
 fn parse_preview_candidate(value: Option<String>) -> rusqlite::Result<Option<PreviewCandidate>> {
@@ -1032,14 +1161,23 @@ fn apply_scan(
             .map_err(|_| PersistenceError::Storage)?;
         let mut upsert_original = transaction
             .prepare(
-                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,error_category,error_message)
-                 VALUES(?,?,?,?,?,?,?,?)
+                "INSERT INTO original_files(
+                    id,relative_path,kind,size,mtime_ms,available,error_category,error_message,
+                    capture_metadata_state,capture_order_key,capture_time_field,
+                    capture_offset_minutes,capture_source_revision)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(relative_path) DO UPDATE SET
                    id=excluded.id,kind=excluded.kind,size=excluded.size,mtime_ms=excluded.mtime_ms,
-                   available=excluded.available,error_category=excluded.error_category,error_message=excluded.error_message",
+                   available=excluded.available,error_category=excluded.error_category,error_message=excluded.error_message,
+                   capture_metadata_state=excluded.capture_metadata_state,
+                   capture_order_key=excluded.capture_order_key,
+                   capture_time_field=excluded.capture_time_field,
+                   capture_offset_minutes=excluded.capture_offset_minutes,
+                   capture_source_revision=excluded.capture_source_revision",
             )
             .map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
+            validate_capture_fact(&original.capture).map_err(|_| PersistenceError::Storage)?;
             let id = original_id(original.path.as_str());
             upsert_original
                 .execute(params![
@@ -1060,6 +1198,11 @@ fn apply_scan(
                             OriginalErrorCategory::Changed => "changed",
                         }),
                     original.error_message.as_deref(),
+                    capture_state_name(original.capture.state),
+                    original.capture.order_key.as_deref(),
+                    original.capture.field.map(CaptureTimeField::database_name),
+                    original.capture.offset_minutes.map(i64::from),
+                    original.capture.source_revision.as_deref(),
                 ])
                 .map_err(|_| PersistenceError::Storage)?;
             if failure_after_first && index == 0 {
@@ -1757,6 +1900,27 @@ mod tests {
         expected_error: String,
     }
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CaptureOrderVector {
+        name: String,
+        raw_path: Option<String>,
+        raw_order_key: Option<String>,
+        jpeg_path: Option<String>,
+        jpeg_order_key: Option<String>,
+        order_key: Option<String>,
+        #[serde(default)]
+        expected_paths: Vec<String>,
+        expected_photo_ids: Option<Vec<String>>,
+    }
+
+    fn capture_order_vectors() -> Vec<CaptureOrderVector> {
+        serde_json::from_str(include_str!(
+            "../../../../compatibility/metadata/capture-order.json"
+        ))
+        .unwrap()
+    }
+
     struct TempTree(PathBuf);
     impl TempTree {
         fn new() -> Self {
@@ -1803,7 +1967,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initializes_exact_v2_and_runs_fifo_writes() {
+    async fn initializes_exact_v3_and_runs_fifo_writes() {
         let (_base, library, state, name, path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -1824,11 +1988,11 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V2).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
     }
 
     #[tokio::test]
-    async fn migrates_shared_v0_and_v1_and_rejects_malformed_v2() {
+    async fn migrates_shared_v0_and_v1_to_v3_and_rejects_malformed_v2() {
         for sql in [
             include_str!("../../../../compatibility/sqlite/v0.sql"),
             include_str!("../../../../compatibility/sqlite/v1.sql"),
@@ -1843,7 +2007,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V2).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -1902,6 +2066,114 @@ mod tests {
                 rejection.name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn v2_migration_preserves_identity_membership_decisions_preview_and_progress() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v2.sql"),
+        );
+        let original_id = original_id("shoot/A.JPG");
+        let photo_id = "photo-preserved";
+        let set_id = "00000000-0000-4000-8000-000000000027";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?)",
+                params![
+                    original_id,
+                    "shoot/A.JPG",
+                    "jpeg",
+                    12_i64,
+                    1_000.0_f64,
+                    1_i64,
+                    Option::<String>::None,
+                    Option::<String>::None
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,preview_source,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![photo_id, original_id, 0_i64, 1_i64, "ready", "matching-jpeg", "matching-jpeg", "preview-revision", 8_i64, 4_i64, "cache-revision", "shoot/A.JPG", "selected", 5_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![set_id, "Preserved", 1_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
+                params![set_id, photo_id, 0_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
+                params![set_id, photo_id],
+            )
+            .unwrap();
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.snapshot().await.unwrap();
+        let photo = &snapshot.photos[0];
+        assert_eq!(photo.id, photo_id);
+        assert_eq!(photo.raw_original_id, None);
+        assert_eq!(
+            photo.jpeg_original_id.as_deref(),
+            Some(original_id.as_str())
+        );
+        assert!(!photo.ambiguous);
+        assert!(photo.available);
+        assert_eq!(photo.preview_state, PreviewState::Ready);
+        assert_eq!(
+            photo.preview_candidate,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        assert_eq!(photo.preview_source, Some(PreviewCandidate::MatchingJpeg));
+        assert_eq!(
+            photo.preview_source_revision.as_deref(),
+            Some("preview-revision")
+        );
+        assert_eq!(photo.preview_width, Some(8));
+        assert_eq!(photo.preview_height, Some(4));
+        assert_eq!(photo.cache_revision.as_deref(), Some("cache-revision"));
+        assert_eq!(photo.sort_path, "shoot/A.JPG");
+        assert_eq!(photo.selection_state, SelectionState::Selected);
+        assert_eq!(photo.rating, 5);
+        let original = &snapshot.originals[0];
+        assert_eq!(original.id, original_id);
+        assert_eq!(original.relative_path.as_str(), "shoot/A.JPG");
+        assert_eq!(original.kind, OriginalKind::Jpeg);
+        assert_eq!(original.facts.size, 12);
+        assert_eq!(original.facts.mtime_ms, 1_000.0);
+        assert!(original.available);
+        assert_eq!(original.error_category, None);
+        assert_eq!(original.error_message, None);
+        assert_eq!(original.capture, CaptureFact::pending());
+        let set = persistence.list_photo_sets().await.unwrap().remove(0);
+        assert_eq!(set.id, set_id);
+        assert_eq!(set.name, "Preserved");
+        assert_eq!(set.members.len(), 1);
+        assert_eq!(set.members[0].photo_id, photo_id);
+        assert_eq!(set.members[0].position, 0);
+        assert!(set.members[0].available);
+        assert_eq!(set.members[0].selection_state, SelectionState::Selected);
+        assert_eq!(set.members[0].rating, 5);
+        assert_eq!(set.last_reviewed_photo_id.as_deref(), Some(photo_id));
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
     }
 
     #[tokio::test]
@@ -2101,7 +2373,204 @@ mod tests {
             },
             error_category: None,
             error_message: None,
+            capture: CaptureFact::pending(),
         }
+    }
+
+    #[tokio::test]
+    async fn library_snapshot_orders_raw_first_capture_then_missing_paths() {
+        let (_base, library, state, name, _path) = fixture();
+        let mut z = discovered("shoot/Z.JPG", OriginalKind::Jpeg, 1, 1.0);
+        let mut a = discovered("shoot/A.JPG", OriginalKind::Jpeg, 2, 2.0);
+        let b = discovered("shoot/B.JPG", OriginalKind::Jpeg, 3, 3.0);
+        z.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T09:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: None,
+            source_revision: Some("z-revision".to_owned()),
+        };
+        a.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: Some(60),
+            source_revision: Some("a-revision".to_owned()),
+        };
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(vec![a, b, z], Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .photos
+                .iter()
+                .map(|photo| photo.sort_path.as_str())
+                .collect::<Vec<_>>(),
+            ["shoot/Z.JPG", "shoot/A.JPG", "shoot/B.JPG"]
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_order_uses_raw_authority_ties_paths_and_retains_unavailable_facts() {
+        let (_base, library, state, name, _path) = fixture();
+        let vectors = capture_order_vectors();
+        let disagreement = vectors
+            .iter()
+            .find(|vector| vector.name == "raw-jpeg-disagreement-uses-raw")
+            .unwrap();
+        let missing_partition = vectors
+            .iter()
+            .find(|vector| vector.name == "missing-capture-time-is-a-final-path-partition")
+            .unwrap();
+        let known = |key: &str, revision: &str| CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some(key.to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: None,
+            source_revision: Some(revision.to_owned()),
+        };
+        let mut raw = discovered(
+            disagreement.raw_path.as_deref().unwrap(),
+            OriginalKind::Raw,
+            1,
+            1.0,
+        );
+        raw.capture = known(disagreement.raw_order_key.as_deref().unwrap(), "raw");
+        let mut paired_jpeg = discovered(
+            disagreement.jpeg_path.as_deref().unwrap(),
+            OriginalKind::Jpeg,
+            1,
+            1.0,
+        );
+        paired_jpeg.capture = known(disagreement.jpeg_order_key.as_deref().unwrap(), "jpeg");
+        let mut middle = discovered("middle.JPG", OriginalKind::Jpeg, 1, 1.0);
+        middle.capture = known("2026-01-01T10:30:00.000000000", "middle");
+        let mut z = discovered("z.JPG", OriginalKind::Jpeg, 1, 1.0);
+        z.capture = known("2026-01-01T12:00:00.000000000", "z");
+        let mut a = discovered("a.JPG", OriginalKind::Jpeg, 1, 1.0);
+        a.capture = known("2026-01-01T12:00:00.000000000", "a");
+        let missing = discovered("missing.JPG", OriginalKind::Jpeg, 1, 1.0);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let first = persistence
+            .apply_scan(
+                vec![raw.clone(), paired_jpeg, middle, z, a, missing],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .photos
+                .iter()
+                .map(|photo| photo.sort_path.as_str())
+                .collect::<Vec<_>>(),
+            disagreement
+                .expected_paths
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(missing_partition.expected_paths, ["missing.JPG"]);
+        let unavailable = persistence
+            .apply_scan(Vec::new(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            unavailable
+                .originals
+                .iter()
+                .find(|original| original.relative_path.as_str() == "pair.ARW")
+                .unwrap()
+                .capture,
+            raw.capture
+        );
+        raw.facts.size = 2;
+        raw.capture = CaptureFact {
+            state: CaptureMetadataState::Missing,
+            order_key: None,
+            field: None,
+            offset_minutes: None,
+            source_revision: Some("raw-replaced".to_owned()),
+        };
+        let replacement_fact = raw.capture.clone();
+        let replaced = persistence.apply_scan(vec![raw], Vec::new()).await.unwrap();
+        assert_eq!(
+            replaced
+                .originals
+                .iter()
+                .find(|original| original.relative_path.as_str() == "pair.ARW")
+                .unwrap()
+                .capture,
+            replacement_fact
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn equal_capture_and_path_ties_use_photo_id_bytes() {
+        let (_base, library, state, name, path) = fixture();
+        let vectors = capture_order_vectors();
+        let tie = vectors
+            .iter()
+            .find(|vector| vector.name == "equal-time-ties-use-path-then-photo-id-bytes")
+            .unwrap();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v3.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        for (original_id, path) in [
+            ("original-a", "source-a.JPG"),
+            ("original-z", "source-z.JPG"),
+        ] {
+            connection.execute(
+                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,error_category,error_message,capture_metadata_state,capture_order_key,capture_time_field,capture_offset_minutes,capture_source_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![original_id, path, "jpeg", 1_i64, 1.0_f64, 1_i64, Option::<String>::None, Option::<String>::None, "known", tie.order_key.as_deref().unwrap(), "date-time-original", Option::<i64>::None, "revision"],
+            ).unwrap();
+        }
+        for (photo_id, original_id) in [("z-photo", "original-z"), ("a-photo", "original-a")] {
+            connection.execute(
+                "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,?,?,?,?,?,?)",
+                params![photo_id, original_id, 0_i64, 1_i64, "inspection-pending", "same.JPG", "undecided", 0_i64],
+            ).unwrap();
+        }
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            persistence
+                .snapshot()
+                .await
+                .unwrap()
+                .photos
+                .iter()
+                .map(|photo| photo.id.as_str())
+                .collect::<Vec<_>>(),
+            tie.expected_photo_ids
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        persistence.shutdown().unwrap();
     }
 
     #[tokio::test]

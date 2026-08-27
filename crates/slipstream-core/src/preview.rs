@@ -273,14 +273,15 @@ impl PreviewService {
         if options.workers == 0 || options.queue_capacity == 0 || options.waiter_capacity == 0 {
             return Err(PreviewServiceError::Saturated);
         }
-        // Preview workers own source inspection, so derivative workers are kept at
-        // one per cache. This is the single native-work budget for both stages.
-        let scheduler = DerivativeScheduler::with_options(
+        // Library Capture inspection, Preview source inspection, and derivative
+        // processing all share this Library-owned capacity-two native budget.
+        let scheduler = DerivativeScheduler::with_native_work_budget(
             cache,
             crate::DerivativeSchedulerOptions {
                 workers: 1,
                 ..Default::default()
             },
+            library.native_work_budget(),
         )?;
         let inner = Arc::new(ServiceInner {
             library,
