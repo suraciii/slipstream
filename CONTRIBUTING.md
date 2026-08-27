@@ -35,6 +35,7 @@ Use the repository commands rather than invoking individual tools in CI or revie
 ```sh
 bun run test:rust
 bun run test:fast
+bun run test:operations
 bun run verify
 ```
 
@@ -49,6 +50,8 @@ If the host platform is newer than the Playwright browser installer supports, po
 ```sh
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
+
+`test:operations` runs the production acceptance and consistent-backup controller through positive and fail-closed negative fixtures. It does not access production state.
 
 `test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a real loopback TCP port, and gives it independent temporary state and cache directories. Use `SLIPSTREAM_SERVER_BINARY` or `SLIPSTREAM_WEB_ROOT` only when testing a separately built Rust binary or Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
@@ -94,8 +97,12 @@ bun run test:container
 Build and inspect an image before an operator-controlled deployment:
 
 ```sh
-docker build --tag slipstream:local .
-VERIFY_IMAGE=1 SLIPSTREAM_IMAGE=slipstream:local bun run test:container
+commit=$(git rev-parse HEAD)
+docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
+VERIFY_IMAGE=1 \
+SLIPSTREAM_IMAGE=slipstream:local \
+SLIPSTREAM_EXPECTED_COMMIT="$commit" \
+bun run test:container
 ```
 
 The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The repository-owned deployment and rollback procedure is [`deploy/README.md`](deploy/README.md).

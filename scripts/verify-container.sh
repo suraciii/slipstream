@@ -26,6 +26,8 @@ if grep -Eiq 'node|bun|sharp|node-api|node_addon' <<<"$runtime_dockerfile"; then
   fail 'runtime Dockerfile contains a Node/Bun/Sharp/Node-API dependency'
 fi
 for line in \
+  'ARG SLIPSTREAM_VCS_REF=unknown' \
+  'LABEL org.opencontainers.image.revision=$SLIPSTREAM_VCS_REF' \
   'USER 1000:1000' \
   'STOPSIGNAL SIGTERM' \
   'ENTRYPOINT ["/usr/local/bin/slipstream-server"]'; do
@@ -65,6 +67,7 @@ for pattern in \
   'stop_grace_period: 30s'; do
   grep -Fq "$pattern" <<<"$rendered" || fail "rendered Compose configuration is missing: $pattern"
 done
+grep -Fq 'SLIPSTREAM_VCS_REF: unknown' <<<"$rendered" || fail 'default image revision build argument is missing'
 grep -Fq 'host_ip: 127.0.0.1' <<<"$rendered" || fail 'default host bind is not loopback'
 grep -Fq "target: $SLIPSTREAM_LIBRARY_ROOT" <<<"$rendered" || fail 'Originals bind mount does not preserve the canonical host path'
 grep -Fq 'target: /state' <<<"$rendered" || fail 'state bind mount is missing'
@@ -83,6 +86,11 @@ if [[ "${VERIFY_IMAGE:-0}" == "1" ]]; then
   docker image inspect "$SLIPSTREAM_IMAGE" >/dev/null 2>&1 || fail "image not found: $SLIPSTREAM_IMAGE"
   image_user=$(docker image inspect --format '{{.Config.User}}' "$SLIPSTREAM_IMAGE")
   [[ "$image_user" == '1000:1000' ]] || fail "image user is $image_user, expected 1000:1000"
+  image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SLIPSTREAM_IMAGE")
+  [[ -n "$image_revision" && "$image_revision" != '<no value>' ]] || fail 'runtime image has no revision label'
+  if [[ -n "${SLIPSTREAM_EXPECTED_COMMIT:-}" ]]; then
+    [[ "$image_revision" == "$SLIPSTREAM_EXPECTED_COMMIT" ]] || fail "image revision is $image_revision, expected $SLIPSTREAM_EXPECTED_COMMIT"
+  fi
   docker run --rm --entrypoint /bin/sh "$SLIPSTREAM_IMAGE" -c '
     ! command -v node >/dev/null 2>&1 &&
     ! command -v bun >/dev/null 2>&1 &&
