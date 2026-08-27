@@ -248,6 +248,35 @@ impl CacheDirectory {
         &self.root.canonical_original_root
     }
 
+    /// Reads one already-published derivative by its cache identity.
+    ///
+    /// Callers provide only the validated hexadecimal identity; cache path
+    /// construction and no-follow file admission remain inside the cache
+    /// boundary. This keeps filesystem paths out of the HTTP and Preview APIs.
+    pub fn read_derivative(&self, key: &str) -> Result<Vec<u8>, CacheError> {
+        if !is_hex_key(key) {
+            return Err(CacheError::InvalidIdentity);
+        }
+        let path = self.derivative_path(key);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(no_follow_flag())
+            .open(path)
+            .map_err(|_| CacheError::Io)?;
+        let metadata = file.metadata().map_err(|_| CacheError::Io)?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAXIMUM_OUTPUT_BYTES {
+            return Err(CacheError::InvalidCachedDerivative);
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAXIMUM_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| CacheError::Io)?;
+        if bytes.len() as u64 > MAXIMUM_OUTPUT_BYTES {
+            return Err(CacheError::InvalidCachedDerivative);
+        }
+        Ok(bytes)
+    }
+
     fn derivative_path(&self, key: &str) -> PathBuf {
         self.root.namespace_root.join(format!("{key}.jpg"))
     }
