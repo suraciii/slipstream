@@ -1942,7 +1942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_protocol_read_vectors_preserve_static_and_api_contracts() {
+    async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
         let router = create_router(Arc::clone(&application), config.web_root());
@@ -1955,14 +1955,20 @@ mod tests {
         )
         .unwrap();
         for vector in vectors {
-            if vector["request"]["method"] != "GET" {
-                continue;
+            let request_definition = &vector["request"];
+            let method = request_definition["method"].as_str().unwrap();
+            let path = request_definition["path"].as_str().unwrap();
+            let mut builder = Request::builder().method(method).uri(path);
+            if let Some(headers) = request_definition["headers"].as_object() {
+                for (name, value) in headers {
+                    builder = builder.header(name, value.as_str().unwrap());
+                }
             }
-            let request = Request::builder()
-                .method(vector["request"]["method"].as_str().unwrap())
-                .uri(vector["request"]["path"].as_str().unwrap())
-                .body(Body::empty())
-                .unwrap();
+            let body = request_definition
+                .get("body")
+                .map(|body| Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap_or_else(Body::empty);
+            let request = builder.body(body).unwrap();
             let response = tower::ServiceExt::oneshot(router.clone(), request)
                 .await
                 .unwrap();
@@ -1972,6 +1978,19 @@ mod tests {
                 "{}",
                 vector["name"]
             );
+            if let Some(expected_headers) = vector["expected"]["headers"].as_object() {
+                for (name, expected) in expected_headers {
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get(name)
+                            .and_then(|value| value.to_str().ok()),
+                        expected.as_str(),
+                        "{} header {name}",
+                        vector["name"]
+                    );
+                }
+            }
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await
                 .unwrap();
@@ -2753,6 +2772,18 @@ mod tests {
             .await
             .status(),
             StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!("http://camera.local{changed_url}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .status(),
+            StatusCode::OK
         );
 
         std::thread::sleep(std::time::Duration::from_millis(10));

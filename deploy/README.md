@@ -1,8 +1,10 @@
 # Slipstream deployment and rollback
 
 This procedure deploys the Rust server image without modifying Photographer-owned
-Original Files. It is intentionally operator-controlled: do not use it as an
-automated live deployment from CI.
+Original Files. The repository contains only the Rust production server; the
+sealed rollback artifact used by the completed live rollback proof is maintained
+outside this source tree under `/data/slipstream`. It is intentionally
+operator-controlled: do not use it as an automated live deployment from CI.
 
 ## Configuration
 
@@ -34,7 +36,7 @@ test "$(realpath -- "$SLIPSTREAM_LIBRARY_ROOT")" = "$SLIPSTREAM_LIBRARY_ROOT"
 install -d -o 1000 -g 1000 -m 0700 "$SLIPSTREAM_STATE_DIRECTORY" "$SLIPSTREAM_CACHE_DIRECTORY"
 ```
 
-Do not place state or cache inside the Originals directory. The SQLite root binding stores the canonical Library path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts Originals read-only at that same path inside the container. Do not change it during migration. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
+Do not place state or cache inside the Originals directory. The SQLite root binding stores the canonical Library path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts Originals read-only at that same path inside the container. Do not change it after deployment. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
 
 ## Pre-cutover checks
 
@@ -53,13 +55,15 @@ VERIFY_IMAGE=1 SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" ./scripts/verify-container.s
 ```
 
 Record the image digest, verify that the image user is `1000:1000`, and verify
-that no `node`, `bun`, `npm`, Sharp, or Node-API runtime artifact is present.
+that no `node`, `bun`, `npm`, Sharp, or Node-API runtime artifact is present. The
+sealed rollback archive under `/data/slipstream` is external evidence and is not
+part of the image or repository build.
 Do not proceed if the image inspection or the Compose rendering check fails.
 
-Before cutover, stop any existing Slipstream process that uses the target
-state database. Never run the TypeScript rollback server and Rust server
-against the same SQLite database concurrently. Back up the state directory and
-record the current image or rollback artifact:
+Before deployment, stop any existing Slipstream process that uses the target
+state database. Never run two Slipstream processes against the same SQLite
+database concurrently. Back up the state directory and
+record the current Rust image and the location of the external rollback artifact:
 
 ```sh
 tar --xattrs --acls -C "$(dirname "$SLIPSTREAM_STATE_DIRECTORY")" \
@@ -92,14 +96,13 @@ those files and require operator recovery when appropriate.
    ```
 
    The health endpoint must return exactly `{"status":"ok"}`. A healthy
-   response proves process readiness, not that a live migration or rollback
-   proof has completed.
+   response proves process readiness; continue with the browser and state
+   checks before declaring the deployment verified.
 
 5. Check the browser review flow against the deployed service. Confirm that
    state mutations survive a restart, generated derivatives are written only
    under the cache mount, and an Original File's hash is unchanged.
-6. Keep the previous image, state backup, and TypeScript rollback artifact
-   available until the live rollback proof below is complete.
+6. Keep the previous Rust image and state backup available for rollback.
 
 Compose enforces the deployment boundary: UID 1000, read-only root filesystem,
 private tmpfs, all Linux capabilities dropped, `no-new-privileges`, an init
@@ -122,14 +125,12 @@ Do not delete state or cache during rollback.
 2. Verify that no Rust process remains and that the target SQLite database is
    closed. Preserve any sidecars for operator recovery; do not checkpoint or
    rewrite them by starting a second process.
-3. Restore the previously verified rollback image or TypeScript artifact. Run
-   it with the same `SLIPSTREAM_LIBRARY_ROOT`, state directory, database
-   basename, and cache directory, but never concurrently with Rust:
+3. Restore the previously verified Rust image. Run it with the same
+   `SLIPSTREAM_LIBRARY_ROOT`, state directory, database basename, and cache
+   directory. Never start two Slipstream processes against one SQLite database:
 
    ```sh
-   # The transitional rollback command is intentionally explicit and must run
-   # only after the Rust Compose service is stopped.
-   node apps/server/dist/main.js
+   docker compose --env-file /path/to/slipstream.env -f compose.yaml up -d --no-build
    ```
 
 4. Verify `GET /healthz`, photo-set reads, one state mutation, undo, and a
@@ -138,7 +139,5 @@ Do not delete state or cache during rollback.
    state backup with the repository's controlled recovery process.
 5. Confirm the Original hash is unchanged and record the rollback evidence.
 
-Do not remove the TypeScript server, Sharp dependency, or Node-API addon until
-this live rollback proof has passed and the governing migration review
-explicitly closes the rollback window. This repository change does not perform
-that removal or any live deployment.
+Keep the previous Rust image and state backup until the rollback proof is
+complete. This repository change does not perform a live deployment.

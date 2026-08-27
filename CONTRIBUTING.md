@@ -6,7 +6,6 @@ The native Preview boundary is currently verified on Linux only.
 
 - Rust `1.97.1` with Cargo, Clippy, and rustfmt
 - Bun `1.4.0`
-- Node.js `22.23.1` (transitional server and `node-gyp` only)
 - A C++17 compiler and Python 3
 - `pkg-config`, LibRaw, libjpeg-turbo, libvips, and LittleCMS development headers
 
@@ -16,18 +15,18 @@ On Debian/Ubuntu, install native dependencies with:
 sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev libvips-dev liblcms2-dev
 ```
 
-Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, make the transitional Node.js version available, then install dependencies from the lockfiles:
+Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, then install dependencies from the lockfiles:
 
 ```sh
 rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
 rustc --version # 1.97.1
 curl -fsSL https://bun.com/install | bash -s "bun-v1.4.0"
-node --version # v22.23.1
+bun --version # 1.4.0
 bun install --frozen-lockfile
 cargo fetch --locked
 ```
 
-The workspace install builds only the transitional production LibRaw addon. `test:fast` explicitly builds a separate LibRaw test addon; the Server TypeScript build does not rebuild either artifact. The Rust Preview boundary uses owned C wrappers around LibRaw/libjpeg and libvips, with one process-global libvips lifecycle. Derivative processing is bounded to two concurrent jobs per cache directory, with 128 MiB input JPEG, 100 million decoded-pixel, 64 MiB output JPEG, and 256 MiB LibRaw native-memory limits.
+Bun owns Web builds and browser-test tooling; the production server and Preview pipeline are Rust. The Rust Preview boundary uses owned C wrappers around LibRaw/libjpeg and libvips, with one process-global libvips lifecycle. Derivative processing is bounded to two concurrent jobs per cache directory, with 128 MiB input JPEG, 100 million decoded-pixel, 64 MiB output JPEG, and 256 MiB LibRaw native-memory limits.
 
 ## Verification
 
@@ -51,25 +50,25 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs the same browser scenarios first against the TypeScript rollback server and then against the Rust `slipstream-server` binary. The Rust run builds the Web assets, starts the binary on a real loopback TCP port, and gives it independent temporary state and cache directories. Use `SLIPSTREAM_SERVER_BINARY` or `SLIPSTREAM_WEB_ROOT` only when testing a separately built Rust binary or Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs the Rust compatibility tests. `test:fast` adds TypeScript linting and type checking, the transitional native build, unit/integration tests, and both browser parity runs. `verify` also checks repository formatting and builds Rust plus the transitional server and Web applications. GitHub Actions invokes the same `verify` command.
+`test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a real loopback TCP port, and gives it independent temporary state and cache directories. Use `SLIPSTREAM_SERVER_BINARY` or `SLIPSTREAM_WEB_ROOT` only when testing a separately built Rust binary or Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
-The Rust workspace contains the production Library/Preview core and an opt-in Rust HTTP server in `crates/slipstream-server`. The TypeScript server remains the rollback baseline until Docker cutover. The production-language and cutover contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); both Rust and TypeScript tests consume them.
+The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
 ## Photo fixtures
 
 Do not commit real photographs, RAW files, generated Previews, SQLite databases, or Slipstream runtime state. Tests that require a real camera file must accept an explicit local path and skip with a clear reason when the file is unavailable. Repository fixtures must be generated, minimal, redistributable, and contain no private photography.
 
-Run the opt-in LibRaw integration test with an explicit local Original File path:
+Run the opt-in LibRaw integration tests with an explicit local Original File path:
 
 ```sh
-SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test apps/server/src/preview/libraw-preview.test.ts
+SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW cargo test --workspace --locked -- --ignored
 ```
 
 The test hashes the Original before and after extraction and fails if its bytes change.
 
 ## Server startup
 
-Build the workspace, then configure one Library and application-owned state locations with absolute paths. The opt-in Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:
+Build the workspace, then configure one Library and application-owned state locations with absolute paths. The Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:
 
 ```sh
 bun run --cwd apps/web build
@@ -82,7 +81,7 @@ SLIPSTREAM_PORT=3000 \
 cargo run --locked -p slipstream-server
 ```
 
-The transitional rollback server still starts with `node apps/server/dist/main.js` using the same existing variables. Never start both servers against one SQLite database. `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
+`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
 
 ## Container verification
 
@@ -92,11 +91,11 @@ The production image uses Bun only while building the Web, Rust `1.97.1` to buil
 bun run test:container
 ```
 
-Build and inspect an image before an operator-controlled cutover:
+Build and inspect an image before an operator-controlled deployment:
 
 ```sh
 docker build --tag slipstream:local .
 VERIFY_IMAGE=1 SLIPSTREAM_IMAGE=slipstream:local bun run test:container
 ```
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The repository-owned deployment and rollback procedure is [`deploy/README.md`](deploy/README.md); it deliberately keeps the TypeScript server and native addon available until live rollback proof is complete.
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The repository-owned deployment and rollback procedure is [`deploy/README.md`](deploy/README.md).

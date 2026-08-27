@@ -7,10 +7,10 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 ## Design Drivers
 
 - Original Files are irreplaceable and require descriptor-confined access.
-- Existing SQLite review state and browser behavior must survive the migration.
+- Existing SQLite review state and browser behavior must remain stable.
 - LibRaw and image processing are blocking native work and must remain bounded.
 - One Photographer and one Photo Library do not justify distributed services, an ORM, or an actor framework.
-- The migration must remain reversible until the Rust service passes the existing production browser gate.
+- The service must support operator-controlled restart and rollback without modifying Original Files.
 
 ## Ownership Model
 
@@ -35,7 +35,7 @@ Startup proceeds in one direction:
 5. Start bounded Preview workers.
 6. Bind HTTP and report readiness.
 
-The opt-in Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` only after the initial scan, Preview worker startup, and HTTP bind have completed. Startup failures never expose a ready listener. Shutdown stops HTTP admission before closing Preview and Library resources.
+The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` only after the initial scan, Preview worker startup, and HTTP bind have completed. Startup failures never expose a ready listener. Shutdown stops HTTP admission before closing Preview and Library resources.
 
 A failure closes resources in reverse order. Shutdown stops admission, drains already accepted mutations, stops Preview publication, closes SQLite, and then completes. Repeated shutdown requests share one completion path.
 
@@ -43,22 +43,13 @@ SQLite startup accepts the configured `DELETE` journal policy only from a sideca
 
 Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous HTTP executor threads. Queue saturation is explicit backpressure, not unbounded memory growth.
 
-## Compatibility and Cutover
+## Compatibility
 
-The checked-in files under [`../compatibility/`](../compatibility/) are the migration authority for deterministic identities, JSON omission behavior, startup configuration, and canonical SQLite v2 shape. Existing TypeScript tests and Rust tests consume the same vectors. The real Playwright suite remains the final browser authority.
+The checked-in files under [`../compatibility/`](../compatibility/) are the authority for deterministic identities, JSON omission behavior, startup configuration, and canonical SQLite v2 shape. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
 
-During migration:
+HTTP responses, SQLite v2, cache records, and deterministic identities remain compatible unless a later Design Spec defines a lossless transition. Docker preserves the bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
 
-- the TypeScript server remains behaviorally frozen and rollback-capable;
-- Rust slices use copied state, cache, and generated Original fixtures;
-- the implementations must not write one SQLite database concurrently;
-- HTTP responses, SQLite v2, cache records, and deterministic identities remain compatible unless a later Design Spec defines a lossless transition;
-- cutover occurs only after Rust passes protocol, migration, security, Preview, browser, and real-sample safety gates;
-- Docker switches the process while preserving bind-mounted state and cache;
-- rollback restores the prior process against the same verified schema;
-- the Node server and Node-API addon are removed only after cutover and rollback verification.
-
-Golden JSON and SQL fixtures are the source of truth during migration. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
+Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
 
 ## Selected Technology Direction
 
@@ -82,7 +73,7 @@ The wrapper must expose only embedded-JPEG extraction and complete JPEG validati
 
 ### Derivative image and color processing
 
-The final runtime must not depend on Sharp or Node. Reusing Sharp during migration is rejected because it would preserve the unintended runtime boundary.
+The final runtime does not depend on Sharp or Node. Bun and TypeScript are limited to the Web build, browser tests, and repository tooling.
 
 The selected implementation is a narrow owned C wrapper around libvips, with LittleCMS used where an explicit profile transform is required. The wrapper owns the libvips object graph, translates failures to bounded Rust outcomes, and exposes only JPEG inspection, orientation normalization, bounded resize, profile handling, and JPEG encoding. It must not expose libvips objects or GLib ownership conventions to the rest of the Rust application.
 
@@ -90,7 +81,7 @@ libvips initialization is process-global: the first Preview operation calls `vip
 
 `image 0.25.10` with `lcms2 6.1.1` remains a probe-only alternative. It compiles and proves basic Lanczos and sRGB primitives, but it is not selected unless the complete Issue #22 fixture matrix passes orientation 1–8, ICC, CMYK, corruption, memory, and representative pixel checks within the resource budget. `image` alone is rejected.
 
-The Rust derivative uses cache algorithm version `rust-vips-v1`; semantic parity with the existing Sharp implementation is not yet proven, so `sharp-v2` derivatives are rebuildable stale entries rather than byte-compatible outputs. A future retention of `sharp-v2` requires the checked-in fixture contract to prove orientation, dimensions, representative decoded pixels, ICC classification, and manifest behavior.
+The Rust derivative uses cache algorithm version `rust-vips-v1`. Cache entries from earlier implementations are not byte-compatible outputs and are rebuildable stale entries. The checked-in fixture contract proves orientation, dimensions, representative decoded pixels, ICC classification, and manifest behavior for the selected implementation. The identity vectors retain their historical `sharp-v2` algorithm label because it is part of the deterministic migration authority; it is not a runtime dependency, and new derivative records use `rust-vips-v1`.
 
 ## Exact Dependency Evidence
 
@@ -110,7 +101,7 @@ The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.
 
 ## Compatibility Contracts
 
-The migration preserves:
+The service preserves:
 
 - the current HTTP routes, statuses, path-free JSON, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
@@ -120,10 +111,10 @@ The migration preserves:
 - descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
 - required absolute startup paths, loopback default, startup cleanup, signals, and idempotent close.
 
-Implementation details may improve standards compliance, such as parsing an `If-None-Match` list, only when the old accepted behavior remains accepted and executable compatibility tests define the change.
+Implementation details may improve standards compliance, such as parsing an `If-None-Match` list, only when the accepted behavior remains compatible and executable compatibility tests define the change.
 
 ## Verification
 
-Every migration slice must run the shared compatibility crate and TypeScript vector verifier. The full gate includes Rust formatting, Clippy with warnings denied, Rust tests/build, existing Bun checks, native tests, and real Chromium tests.
+The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1 migration success and rejection rollback, exact v2 schema shape, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. Before production cutover, verification must additionally cover copied production SQLite cross-open and rollback, Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1 state migration success and rejection rollback, exact v2 schema shape, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.

@@ -4,13 +4,18 @@
 .vscode
 .idea
 
-# JavaScript dependencies and generated output
+# Bun dependencies and generated output
 node_modules
 **/node_modules
 dist
 **/dist
 coverage
 test-results
+
+# Browser-test tooling and checked fixtures are not Web image inputs
+apps/web/src/*browser-test.ts
+apps/web/src/browser-server.ts
+apps/web/test-fixtures
 
 # Rust output
 target
