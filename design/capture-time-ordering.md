@@ -58,6 +58,8 @@ Missing or malformed subseconds contribute zero. Use at most the first nine deci
 
 Do not use EXIF `DateTime`, GPS time, filesystem modification time, filenames, XMP, Preview metadata, or another Original as a guessed capture fact.
 
+For a supported RAW container without a TIFF header at byte zero, a narrow LibRaw metadata-only fallback may use `raw->other.timestamp`. It is converted with `localtime_r` in the inspecting process and normalized as a camera-local `DateTimeOriginal` value with zero subseconds and no offset. The fallback never runs for a TIFF container, including a TIFF container with missing fields, so direct EXIF remains exact. It calls only LibRaw open on a `/proc/self/fd` alias of the retained descriptor; it never unpacks, develops, or reads Preview pixels.
+
 ## Photo Capture Fact
 
 A Photo derives its authoritative ordering key from its Originals:
@@ -89,9 +91,9 @@ Photo Set queries continue to order only by `photo_set_members.position`.
 
 Metadata inspection begins from the Library-owned Original capability. It opens the Original read-only beneath the retained canonical Library descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
 
-The parser must not receive or reopen an absolute or relative filesystem path. The same descriptor is revision-checked before and after inspection. Traversal, symlink escape, inode substitution, and mid-read revision changes fail only the affected fact.
+The parser must not receive an Original filesystem path or reopen the Original by name. Direct parsing uses bounded reads from the retained descriptor. The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor. The same descriptor is revision-checked before and after inspection and compared to the discovery device, inode, size, and modification time. Traversal, symlink escape, inode substitution, and mid-read revision changes fail only the affected fact.
 
-Metadata input, parser allocation, blocking workers, and queued work are bounded. Capture inspection shares the existing per-cache native-work capacity of two with Preview extraction and derivative work. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
+Metadata input, parser allocation, blocking workers, and queued work are bounded. Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers may own an independent budget. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
 
 ## Scan and Session Lifecycle
 
@@ -104,6 +106,8 @@ An unavailable Original retains its last completed capture fact. When it becomes
 A per-file capture failure does not abort valid sibling Photos. A root-level scan or persistence failure leaves the previously committed snapshot authoritative.
 
 An active Review Session keeps its snapshotted Photo-ID sequence. Availability and Preview facts may refresh, but a rescan does not insert, remove, or reorder the active sequence. A later filtered Library Session may observe the newly published order.
+
+When a Photo Set resumes at an unavailable saved Photo, it searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member; without saved progress it starts at the first available member or, if none are available, the first member. A disconnected Photo Set Retry keeps all controls disabled until refreshed current progress is POSTed successfully. Library Review has no durable progress POST and reconnects after refreshed facts and Preview state.
 
 ## Persistence
 
@@ -183,13 +187,13 @@ A lazy backfill would expose temporary path order and reorder later Sessions as 
 
 ## Compatibility Fixtures
 
-- `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, subsecond, disagreement, and ordering vectors.
+- `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns RAW/JPEG authority, tie, missing-partition, and camera-local-offset ordering vectors.
 - `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own canonical v3 shape; canonical v2 remains a migration input.
 - Migration fixtures prove preservation of Photo identity, Photo Sets, positions, Selection State, Rating, Preview facts, and progress.
-- Protocol fixtures own ordered responses and prove that capture fields remain omitted.
+- `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
 - Browser tests own the filename-versus-capture-order example and the explicit Photo Set order example.
 - Generated metadata fixtures are minimal and redistributable. Real camera Originals remain opt-in and retain their SHA.
 
 ## Verification
 
-Verification covers every Product Spec example, descriptor-confined inspection, mid-read revision change, parser and resource failures, v2-to-v3 migration, v2 backup restore, stable active Session order, future-session rescan reorder, unchanged Photo Set positions, exact protocol omission, and unchanged Original bytes and metadata.
+Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3 migrated state, stable active Session order, future-session rescan reorder, unchanged Photo Set positions, exact protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.

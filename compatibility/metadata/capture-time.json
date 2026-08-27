@@ -1,0 +1,56 @@
+[
+  {
+    "name": "original-precedes-digitized-and-normalizes-subseconds",
+    "dateTimeOriginal": "2026:01:02 03:04:05",
+    "subSecTimeOriginal": "12",
+    "offsetTimeOriginal": "+01:30",
+    "dateTimeDigitized": "2026:01:02 03:04:04",
+    "expected": {
+      "state": "known",
+      "field": "date-time-original",
+      "orderKey": "2026-01-02T03:04:05.120000000",
+      "offsetMinutes": 90
+    }
+  },
+  {
+    "name": "malformed-original-falls-back-to-digitized",
+    "dateTimeOriginal": "not-a-date",
+    "dateTimeDigitized": "2026:01:02 03:04:05",
+    "subSecTimeDigitized": "00123456789",
+    "offsetTimeDigitized": "+15:00",
+    "expected": {
+      "state": "known",
+      "field": "date-time-digitized",
+      "orderKey": "2026-01-02T03:04:05.001234567"
+    }
+  },
+  {
+    "name": "missing-subsecond-normalizes-to-zero",
+    "dateTimeOriginal": "2026:01:02 03:04:05",
+    "expected": {
+      "state": "known",
+      "field": "date-time-original",
+      "orderKey": "2026-01-02T03:04:05.000000000"
+    }
+  },
+  {
+    "name": "camera-local-offset-is-retained-not-applied",
+    "dateTimeOriginal": "2026:01:02 09:30:00",
+    "offsetTimeOriginal": "+01:00",
+    "expected": {
+      "state": "known",
+      "field": "date-time-original",
+      "orderKey": "2026-01-02T09:30:00.000000000",
+      "offsetMinutes": 60
+    }
+  },
+  {
+    "name": "no-supported-field-is-missing",
+    "expected": { "state": "missing" }
+  },
+  {
+    "name": "all-supported-base-fields-malformed-is-invalid",
+    "dateTimeOriginal": "2026:99:02 03:04:05",
+    "expected": { "state": "invalid" }
+  }
+]

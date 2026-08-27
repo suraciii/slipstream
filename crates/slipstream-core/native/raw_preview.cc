@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <csetjmp>
 #include <cstdint>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -360,6 +361,69 @@ extern "C" int32_t slipstream_extract_embedded_jpeg_fd(
   (void)fd;
   (void)maximum_jpeg_bytes;
   (void)maximum_pixels;
+  (void)maximum_libraw_memory_mb;
+  return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
+#endif
+}
+
+extern "C" int32_t slipstream_inspect_raw_capture_time_fd(
+    int fd, std::uint32_t maximum_libraw_memory_mb,
+    SlipstreamCaptureTimeResult *result) noexcept {
+  if (result == nullptr) return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
+  *result = {};
+  if (fd < 0 || maximum_libraw_memory_mb == 0)
+    return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
+#ifdef __linux__
+  int duplicate = -1;
+  try {
+    duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (duplicate < 0) return SLIPSTREAM_PREVIEW_IO_ERROR;
+    struct stat facts {};
+    if (fstat(duplicate, &facts) != 0 || !S_ISREG(facts.st_mode)) {
+      close(duplicate);
+      return SLIPSTREAM_PREVIEW_IO_ERROR;
+    }
+    LibRawHandle raw(libraw_init(0));
+    if (!raw) {
+      close(duplicate);
+      return SLIPSTREAM_PREVIEW_RESOURCE_LIMIT;
+    }
+    raw->rawparams.max_raw_memory_mb = maximum_libraw_memory_mb;
+    // This is intentionally metadata open only. Do not call unpack,
+    // unpack_thumb, dcraw_process, or any sensor-development API here.
+    const int open_error = libraw_open_file(raw.get(), ProcFdPath(duplicate));
+    close(duplicate);
+    duplicate = -1;
+    if (open_error != LIBRAW_SUCCESS) return StatusForLibRawError(open_error);
+    const auto timestamp = raw->other.timestamp;
+    if (timestamp <= 0) return SLIPSTREAM_PREVIEW_OK;
+    std::tm camera_local {};
+    if (localtime_r(&timestamp, &camera_local) == nullptr)
+      return SLIPSTREAM_PREVIEW_MALFORMED;
+    const int year = camera_local.tm_year + 1900;
+    if (year <= 0 || camera_local.tm_mon < 0 || camera_local.tm_mon > 11 ||
+        camera_local.tm_mday < 1 || camera_local.tm_mday > 31 ||
+        camera_local.tm_hour < 0 || camera_local.tm_hour > 23 ||
+        camera_local.tm_min < 0 || camera_local.tm_min > 59 ||
+        camera_local.tm_sec < 0 || camera_local.tm_sec > 59)
+      return SLIPSTREAM_PREVIEW_MALFORMED;
+    result->has_timestamp = 1;
+    result->year = year;
+    result->month = camera_local.tm_mon + 1;
+    result->day = camera_local.tm_mday;
+    result->hour = camera_local.tm_hour;
+    result->minute = camera_local.tm_min;
+    result->second = camera_local.tm_sec;
+    return SLIPSTREAM_PREVIEW_OK;
+  } catch (const std::bad_alloc &) {
+    if (duplicate >= 0) close(duplicate);
+    return SLIPSTREAM_PREVIEW_RESOURCE_LIMIT;
+  } catch (...) {
+    if (duplicate >= 0) close(duplicate);
+    return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
+  }
+#else
+  (void)fd;
   (void)maximum_libraw_memory_mb;
   return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
 #endif

@@ -12,6 +12,7 @@ import "./style.css";
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
 type PhotoSetList = Readonly<{ photoSets: ReadonlyArray<PhotoSetResponse> }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
+type SessionMember = PhotoSetResponse["members"][number];
 
 const swipePendingPixels = 24;
 const swipeCommitPixels = 72;
@@ -104,8 +105,11 @@ export function renderApp(
   }
 
   let sets: ReadonlyArray<PhotoSetResponse> = [];
+  let libraryPhotos: ReadonlyArray<PhotoSummary> = [];
   let photoFacts = new Map<string, PhotoSummary>();
   let currentSet: PhotoSetResponse | undefined;
+  let photoSetSession: ReadonlyArray<SessionMember> | undefined;
+  let librarySession: ReadonlyArray<SessionMember> | undefined;
   let index = 0;
   let connected = false;
   let busy = false;
@@ -130,7 +134,11 @@ export function renderApp(
       }
     | undefined;
 
-  const currentMember = () => currentSet?.members[index];
+  const sessionMembers = (): ReadonlyArray<SessionMember> =>
+    librarySession ?? photoSetSession ?? [];
+  const isLibrarySession = () => librarySession !== undefined;
+  const sessionLength = () => sessionMembers().length;
+  const currentMember = () => sessionMembers()[index];
   const clearPointer = () => {
     const pointerId = pointer?.id;
     pointer = undefined;
@@ -171,7 +179,7 @@ export function renderApp(
       button.disabled = busy || button.dataset.empty === "true";
     previous.disabled = busy || index <= 0;
     next.disabled =
-      busy || !currentSet || index >= currentSet.members.length - 1;
+      busy || sessionLength() === 0 || index >= sessionLength() - 1;
     undoButton.disabled = !connected || busy || !undo;
     detail.disabled = !stage.querySelector("img");
   };
@@ -191,7 +199,7 @@ export function renderApp(
       : "translate(0, 0) scale(1)";
     preview.classList.toggle("detail", zoomed);
   };
-  const refreshFacts = async (preservePosition = true) => {
+  const refreshFacts = async () => {
     const [setResponse, photosResponse] = await Promise.all([
       fetcher("/api/photo-sets"),
       fetcher("/api/photos"),
@@ -200,24 +208,22 @@ export function renderApp(
       throw new Error("refresh failed");
     sets = ((await setResponse.json()) as PhotoSetList).photoSets;
     const photos = ((await photosResponse.json()) as PhotoListResponse).photos;
+    // GET /api/photos owns the next filtered Library session's order. An
+    // active Library session intentionally keeps its separate ID snapshot.
+    libraryPhotos = photos;
     photoFacts = new Map(photos.map((photo) => [photo.id, photo]));
-    if (currentSet) {
-      const priorId = preservePosition ? currentMember()?.photoId : undefined;
-      currentSet = sets.find((item) => item.id === currentSet!.id);
-      if (!currentSet) leaveSession();
-      else if (priorId) {
-        const preserved = currentSet.members.findIndex(
-          (item) => item.photoId === priorId,
-        );
-        if (preserved >= 0) index = preserved;
-      }
-    }
-    setConnected(true);
+    // A Photo Set Session snapshots membership just like Library Review.
+    // Fresh Photo Set data updates future Sessions only; current facts still
+    // refresh through photoFacts without inserting, removing, or reordering
+    // the active member sequence.
+    if (currentSet && !sets.some((item) => item.id === currentSet!.id))
+      leaveSession();
   };
   const loadSets = async () => {
     setStatus.textContent = "Loading Photo Sets…";
     try {
       await refreshFacts();
+      setConnected(true);
       renderSets();
     } catch {
       setStatus.textContent =
@@ -227,12 +233,24 @@ export function renderApp(
   };
   const renderSets = () => {
     setList.replaceChildren();
+    const library = document.createElement("button");
+    library.type = "button";
+    library.className = "set-card";
+    library.disabled = busy || libraryPhotos.length === 0;
+    library.dataset.empty = String(libraryPhotos.length === 0);
+    library.innerHTML = "<strong>Library Review</strong><span></span>";
+    library.querySelector("span")!.textContent = libraryPhotos.length
+      ? `${libraryPhotos.length} Photos`
+      : "No Photos in Library";
+    library.addEventListener("click", startLibrarySession);
+    setList.append(library);
     if (sets.length === 0) {
       setStatus.textContent =
-        "No Photo Sets yet. Create a Photo Set through the server API, then retry.";
+        "No Photo Sets yet. Start Library Review or create a Photo Set through the server API.";
       return;
     }
-    setStatus.textContent = "Choose a Photo Set to start or resume review.";
+    setStatus.textContent =
+      "Choose Library Review or a Photo Set to start or resume review.";
     for (const set of sets) {
       const button = document.createElement("button");
       button.type = "button";
@@ -254,24 +272,27 @@ export function renderApp(
     clearPointer();
     const set = sets.find((item) => item.id === id);
     if (!set || set.members.length === 0) return;
+    librarySession = undefined;
     currentSet = set;
+    photoSetSession = set.members.map((member) => ({ ...member }));
     undo = undefined;
     const saved = set.lastReviewedPhotoId
       ? set.members.findIndex(
           (item) => item.photoId === set.lastReviewedPhotoId,
         )
       : -1;
-    const resumed =
-      saved >= 0 && set.members[saved]?.available
-        ? saved
-        : saved >= 0
-          ? set.members.findIndex(
-              (item, memberIndex) => memberIndex > saved && item.available,
-            )
-          : -1;
+    const nextAvailableAfterSaved =
+      saved >= 0
+        ? Array.from(
+            { length: set.members.length },
+            (_, offset) => (saved + offset + 1) % set.members.length,
+          ).find((memberIndex) => set.members[memberIndex]?.available)
+        : undefined;
     index =
-      resumed >= 0
-        ? resumed
+      saved >= 0
+        ? set.members[saved]?.available
+          ? saved
+          : (nextAvailableAfterSaved ?? saved)
         : Math.max(
             0,
             set.members.findIndex((item) => item.available),
@@ -282,12 +303,37 @@ export function renderApp(
     review.focus();
     void show();
   };
+  const startLibrarySession = () => {
+    if (busy || libraryPhotos.length === 0) return;
+    sessionGeneration += 1;
+    clearPointer();
+    // Snapshot the ordered IDs and their current review facts. A rescan can
+    // refresh facts in photoFacts but cannot insert or reorder this session.
+    librarySession = libraryPhotos.map((photo) => ({
+      photoId: photo.id,
+      position: 0,
+      available: photo.available,
+      selectionState: photo.selectionState,
+      rating: photo.rating,
+    }));
+    currentSet = undefined;
+    photoSetSession = undefined;
+    undo = undefined;
+    index = 0;
+    setScreen.hidden = true;
+    review.hidden = false;
+    setName.textContent = "Library Review";
+    review.focus();
+    void show();
+  };
   const leaveSession = () => {
     if (busy) return;
     sessionGeneration += 1;
     requestGeneration += 1;
     clearPointer();
     currentSet = undefined;
+    photoSetSession = undefined;
+    librarySession = undefined;
     undo = undefined;
     review.hidden = true;
     setScreen.hidden = false;
@@ -300,12 +346,13 @@ export function renderApp(
     resetTransform();
     const member = currentMember();
     const photo = currentPhoto();
-    position.textContent =
-      member && currentSet
-        ? `${index + 1} / ${currentSet.members.length}`
-        : "0 / 0";
-    selection.textContent = selectionLabel(member?.selectionState);
-    rating.textContent = `${member?.rating ?? 0} ${member?.rating === 1 ? "star" : "stars"}`;
+    position.textContent = member
+      ? `${index + 1} / ${sessionLength()}`
+      : "0 / 0";
+    const currentSelection = photo?.selectionState ?? member?.selectionState;
+    const currentRating = photo?.rating ?? member?.rating ?? 0;
+    selection.textContent = selectionLabel(currentSelection);
+    rating.textContent = `${currentRating} ${currentRating === 1 ? "star" : "stars"}`;
     source.textContent = "—";
     limited.hidden = true;
     status.textContent = "";
@@ -314,7 +361,7 @@ export function renderApp(
     );
     updateControls();
     if (!member || !photo) return;
-    if (!member.available) {
+    if (!photo.available) {
       status.textContent =
         "Original File is unavailable. Decisions remain available; restore it and rescan for a Preview.";
       stage.replaceChildren(paragraph("Preview unavailable"));
@@ -331,7 +378,7 @@ export function renderApp(
         return;
       }
       const image = document.createElement("img");
-      image.alt = `Photo ${index + 1} of ${currentSet!.members.length}`;
+      image.alt = `Photo ${index + 1} of ${sessionLength()}`;
       image.draggable = false;
       image.src = result.url;
       image.addEventListener(
@@ -360,12 +407,12 @@ export function renderApp(
       stage.replaceChildren(paragraph("Preview unavailable"));
     }
   };
-  const persistProgress = (photoId: string) => {
+  const persistProgress = (photoId: string): Promise<boolean> => {
     const set = currentSet;
-    if (!set) return;
+    if (!set || isLibrarySession()) return Promise.resolve(true);
     const generation = sessionGeneration;
     const setId = set.id;
-    progressQueue = progressQueue.then(async () => {
+    const task = progressQueue.then(async () => {
       try {
         const response = await fetcher(`/api/photo-sets/${setId}/progress`, {
           method: "POST",
@@ -376,34 +423,33 @@ export function renderApp(
         sets = sets.map((item) =>
           item.id === setId ? { ...item, lastReviewedPhotoId: photoId } : item,
         );
-        if (generation === sessionGeneration && currentSet?.id === setId) {
+        if (generation === sessionGeneration && currentSet?.id === setId)
           currentSet = { ...currentSet, lastReviewedPhotoId: photoId };
-        }
+        return true;
       } catch {
-        if (
-          generation === sessionGeneration &&
-          currentSet?.id === setId &&
-          currentMember()?.photoId === photoId
-        )
+        // A queued write can fail after navigation. It still means this active
+        // Session has unconfirmed progress, so block decisions and let Retry
+        // persist whichever Photo is current now.
+        if (generation === sessionGeneration && currentSet?.id === setId)
           setConnected(
             false,
             "Review position could not be saved. Retry before making decisions.",
           );
+        return false;
       }
     });
+    progressQueue = task.then(() => undefined);
+    return task;
   };
   const moveTo = (target: number) => {
-    if (!currentSet || busy) return;
-    const bounded = Math.max(
-      0,
-      Math.min(currentSet.members.length - 1, target),
-    );
+    if (sessionLength() === 0 || busy) return;
+    const bounded = Math.max(0, Math.min(sessionLength() - 1, target));
     if (bounded === index) return;
     clearPointer();
     index = bounded;
     const photoId = currentMember()!.photoId;
     void show();
-    persistProgress(photoId);
+    void persistProgress(photoId);
   };
   const mutate = async (
     field: "selectionState" | "rating",
@@ -412,9 +458,10 @@ export function renderApp(
   ) => {
     const member = currentMember();
     const set = currentSet;
-    if (!member || !set || !connected || busy) return;
+    const library = isLibrarySession();
+    if (!member || (!set && !library) || !connected || busy) return;
     const generation = sessionGeneration;
-    const setId = set.id;
+    const setId = set?.id;
     const photoId = member.photoId;
     const priorIndex = index;
     const priorUndo = undo;
@@ -423,16 +470,31 @@ export function renderApp(
     busy = true;
     status.textContent = `Saving ${field === "rating" ? "Rating" : "Selection State"}…`;
     updateControls();
+    const currentSession = () =>
+      generation === sessionGeneration &&
+      (library ? isLibrarySession() : currentSet?.id === setId);
+    const updateCurrentFacts = () => {
+      const fact = photoFacts.get(photoId);
+      if (fact)
+        photoFacts.set(photoId, {
+          ...fact,
+          ...(field === "selectionState"
+            ? { selectionState: value as SelectionState }
+            : { rating: value as number }),
+        });
+    };
     try {
       const response = await fetcher(`/api/photos/${photoId}/state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ field, value, photoSetId: setId }),
+        body: JSON.stringify({
+          field,
+          value,
+          ...(setId ? { photoSetId: setId } : {}),
+        }),
       });
-      const current =
-        generation === sessionGeneration && currentSet?.id === setId;
       if (!response.ok) {
-        if (current) {
+        if (currentSession()) {
           undo = priorUndo;
           if (response.status === 409) {
             setConnected(
@@ -447,8 +509,8 @@ export function renderApp(
         return;
       }
       const result = (await response.json()) as MutationResponse;
-      if (!current) return;
-      const updatedMembers = currentSet!.members.map((item) =>
+      if (!currentSession()) return;
+      const updatedMembers = sessionMembers().map((item) =>
         item.photoId === photoId
           ? {
               ...item,
@@ -458,12 +520,31 @@ export function renderApp(
             }
           : item,
       );
-      currentSet = {
-        ...currentSet!,
-        members: updatedMembers,
-        lastReviewedPhotoId: photoId,
-      };
-      sets = sets.map((item) => (item.id === setId ? currentSet! : item));
+      updateCurrentFacts();
+      if (library) {
+        librarySession = updatedMembers;
+      } else {
+        photoSetSession = updatedMembers;
+        currentSet = { ...currentSet!, lastReviewedPhotoId: photoId };
+        sets = sets.map((item) =>
+          item.id === setId
+            ? {
+                ...item,
+                members: item.members.map((member) =>
+                  member.photoId === photoId
+                    ? {
+                        ...member,
+                        ...(field === "selectionState"
+                          ? { selectionState: value as SelectionState }
+                          : { rating: value as number }),
+                      }
+                    : member,
+                ),
+                lastReviewedPhotoId: photoId,
+              }
+            : item,
+        );
+      }
       undo = {
         ...result.undo,
         advanced: advance && priorIndex < updatedMembers.length - 1,
@@ -471,12 +552,12 @@ export function renderApp(
       status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
       if (undo.advanced) {
         index = priorIndex + 1;
-        const nextPhotoId = currentMember()!.photoId;
         await show();
-        persistProgress(nextPhotoId);
+        const nextPhotoId = currentMember()!.photoId;
+        void persistProgress(nextPhotoId);
       } else await show();
     } catch {
-      if (generation === sessionGeneration && currentSet?.id === setId) {
+      if (currentSession()) {
         undo = undefined;
         setConnected(
           false,
@@ -484,7 +565,7 @@ export function renderApp(
         );
       }
     } finally {
-      if (generation === sessionGeneration && currentSet?.id === setId) {
+      if (currentSession()) {
         busy = false;
         updateControls();
       }
@@ -492,11 +573,12 @@ export function renderApp(
   };
   const performUndo = async () => {
     const set = currentSet;
-    if (!undo || !connected || busy || !set) return;
+    const library = isLibrarySession();
+    if (!undo || !connected || busy || (!set && !library)) return;
     const action = undo;
     const generation = sessionGeneration;
-    const setId = set.id;
-    const affectedIndex = set.members.findIndex(
+    const setId = set?.id;
+    const affectedIndex = sessionMembers().findIndex(
       (item) => item.photoId === action.photoId,
     );
     if (affectedIndex < 0) {
@@ -508,6 +590,9 @@ export function renderApp(
     clearPointer();
     busy = true;
     updateControls();
+    const currentSession = () =>
+      generation === sessionGeneration &&
+      (library ? isLibrarySession() : currentSet?.id === setId);
     try {
       const response = await fetcher(`/api/photos/${action.photoId}/state`, {
         method: "POST",
@@ -516,13 +601,11 @@ export function renderApp(
           field: action.field,
           value: action.priorValue,
           expectedCurrent: action.expectedCurrent,
-          photoSetId: setId,
+          ...(setId ? { photoSetId: setId } : {}),
         }),
       });
-      const current =
-        generation === sessionGeneration && currentSet?.id === setId;
       if (!response.ok) {
-        if (current) {
+        if (currentSession()) {
           if (response.status === 409) {
             setConnected(
               false,
@@ -536,27 +619,57 @@ export function renderApp(
         }
         return;
       }
-      if (!current) return;
-      currentSet = {
-        ...currentSet!,
-        members: currentSet!.members.map((item) =>
-          item.photoId === action.photoId
+      if (!currentSession()) return;
+      const members = sessionMembers().map((item) =>
+        item.photoId === action.photoId
+          ? {
+              ...item,
+              ...(action.field === "selectionState"
+                ? { selectionState: action.priorValue as SelectionState }
+                : { rating: action.priorValue as number }),
+            }
+          : item,
+      );
+      const fact = photoFacts.get(action.photoId);
+      if (fact)
+        photoFacts.set(action.photoId, {
+          ...fact,
+          ...(action.field === "selectionState"
+            ? { selectionState: action.priorValue as SelectionState }
+            : { rating: action.priorValue as number }),
+        });
+      if (library) {
+        librarySession = members;
+      } else {
+        photoSetSession = members;
+        currentSet = { ...currentSet!, lastReviewedPhotoId: action.photoId };
+        sets = sets.map((item) =>
+          item.id === setId
             ? {
                 ...item,
-                ...(action.field === "selectionState"
-                  ? { selectionState: action.priorValue as SelectionState }
-                  : { rating: action.priorValue as number }),
+                members: item.members.map((member) =>
+                  member.photoId === action.photoId
+                    ? {
+                        ...member,
+                        ...(action.field === "selectionState"
+                          ? {
+                              selectionState:
+                                action.priorValue as SelectionState,
+                            }
+                          : { rating: action.priorValue as number }),
+                      }
+                    : member,
+                ),
+                lastReviewedPhotoId: action.photoId,
               }
             : item,
-        ),
-        lastReviewedPhotoId: action.photoId,
-      };
-      sets = sets.map((item) => (item.id === setId ? currentSet! : item));
+        );
+      }
       index = affectedIndex;
       await show();
       status.textContent = "Last change undone.";
     } catch {
-      if (generation === sessionGeneration && currentSet?.id === setId) {
+      if (currentSession()) {
         undo = undefined;
         setConnected(
           false,
@@ -564,27 +677,32 @@ export function renderApp(
         );
       }
     } finally {
-      if (generation === sessionGeneration && currentSet?.id === setId) {
+      if (currentSession()) {
         busy = false;
         updateControls();
       }
     }
   };
   const reconnect = async () => {
-    sessionGeneration += 1;
+    if (busy) return;
+    busy = true;
     clearPointer();
-    undo = undefined;
     status.textContent = "Reconnecting…";
+    updateControls();
     try {
-      await refreshFacts(true);
-      if (currentSet) {
+      await refreshFacts();
+      if (currentSet || isLibrarySession()) {
         await show();
         const photoId = currentMember()?.photoId;
-        if (photoId) persistProgress(photoId);
+        if (currentSet && photoId && !(await persistProgress(photoId))) return;
       } else renderSets();
+      setConnected(true);
       status.textContent = "Connected. Current state refreshed.";
     } catch {
       setConnected(false, "Still disconnected. Check the server and retry.");
+    } finally {
+      busy = false;
+      updateControls();
     }
   };
   const toggleDetail = () => {

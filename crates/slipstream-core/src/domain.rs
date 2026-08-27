@@ -1,3 +1,4 @@
+use crate::capture::CaptureFact;
 use std::{fmt, sync::Arc};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,6 +87,7 @@ pub struct DiscoveredOriginal {
     pub facts: OriginalFacts,
     pub error_category: Option<OriginalErrorCategory>,
     pub error_message: Option<String>,
+    pub capture: CaptureFact,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -111,6 +113,7 @@ pub struct OriginalRecord {
     pub available: bool,
     pub error_category: Option<OriginalErrorCategory>,
     pub error_message: Option<String>,
+    pub capture: CaptureFact,
 }
 
 #[derive(Clone, Debug, PartialEq)]
