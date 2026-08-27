@@ -118,6 +118,9 @@ impl StateDirectory {
         &self,
         name: &DatabaseName,
     ) -> Result<(StateFileIdentity, bool), StateError> {
+        // Recovery sidecars must be admitted before O_CREAT can materialize a
+        // new database. Callers still re-check after opening for races.
+        self.admit_sidecars(name)?;
         let existed = self.database_exists(name)?;
         let descriptor =
             self.open_database(name, libc::O_RDWR | libc::O_CREAT | libc::O_NONBLOCK, 0o600)?;
@@ -534,6 +537,10 @@ mod tests {
         fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(state.startup_sidecars_present(&name).unwrap());
         assert_eq!(state.admit_sidecars(&name), Err(StateError::SidecarPresent));
+        assert_eq!(
+            state.prepare_database(&name),
+            Err(StateError::SidecarPresent)
+        );
         assert!(!state_path.join("library.sqlite").exists());
         assert_eq!(fs::read(sidecar).unwrap(), b"operator recovery data");
     }

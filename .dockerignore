@@ -1,0 +1,53 @@
+# Version-control and local tooling
+.git
+.github
+.vscode
+.idea
+
+# JavaScript dependencies and generated output
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+test-results
+
+# Rust output
+target
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+.slipstream
+previews
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Photographer-owned files must never enter the build context
+*.ARW
+*.arw
+*.CR2
+*.cr2
+*.CR3
+*.cr3
+*.DNG
+*.dng
+*.NEF
+*.nef
+*.RAF
+*.raf
+*.RAW
+*.raw
+*.RW2
+*.rw2
+*.JPG
+*.jpg
+*.JPEG
+*.jpeg
+*.PNG
+*.png

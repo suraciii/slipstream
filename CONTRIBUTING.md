@@ -83,3 +83,20 @@ cargo run --locked -p slipstream-server
 ```
 
 The transitional rollback server still starts with `node apps/server/dist/main.js` using the same existing variables. Never start both servers against one SQLite database. `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
+
+## Container verification
+
+The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and a Debian runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Run the focused static and Compose checks with:
+
+```sh
+bun run test:container
+```
+
+Build and inspect an image before an operator-controlled cutover:
+
+```sh
+docker build --tag slipstream:local .
+VERIFY_IMAGE=1 SLIPSTREAM_IMAGE=slipstream:local bun run test:container
+```
+
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The repository-owned deployment and rollback procedure is [`deploy/README.md`](deploy/README.md); it deliberately keeps the TypeScript server and native addon available until live rollback proof is complete.

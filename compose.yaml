@@ -1,0 +1,47 @@
+services:
+  slipstream:
+    image: ${SLIPSTREAM_IMAGE:-slipstream:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp/slipstream:rw,noexec,nosuid,nodev,size=64m,uid=1000,gid=1000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    ports:
+      - "${SLIPSTREAM_BIND_ADDRESS:-127.0.0.1}:${SLIPSTREAM_PORT:-3000}:3000"
+    environment:
+      SLIPSTREAM_LIBRARY_ROOT: ${SLIPSTREAM_LIBRARY_ROOT:?Set SLIPSTREAM_LIBRARY_ROOT to the Originals directory}
+      SLIPSTREAM_STATE_DIRECTORY: /state
+      SLIPSTREAM_CACHE_DIRECTORY: /cache
+      SLIPSTREAM_DATABASE_BASENAME: ${SLIPSTREAM_DATABASE_BASENAME:-library.sqlite}
+      SLIPSTREAM_WEB_ROOT: /app/web
+      SLIPSTREAM_HOST: 0.0.0.0
+      SLIPSTREAM_PORT: 3000
+      HOME: /home/slipstream
+      TMPDIR: /tmp/slipstream
+    volumes:
+      - type: bind
+        source: ${SLIPSTREAM_LIBRARY_ROOT:?Set SLIPSTREAM_LIBRARY_ROOT to the Originals directory}
+        target: ${SLIPSTREAM_LIBRARY_ROOT:?Set SLIPSTREAM_LIBRARY_ROOT to the Originals directory}
+        read_only: true
+      - type: bind
+        source: ${SLIPSTREAM_STATE_DIRECTORY:?Set SLIPSTREAM_STATE_DIRECTORY to the application state directory}
+        target: /state
+      - type: bind
+        source: ${SLIPSTREAM_CACHE_DIRECTORY:?Set SLIPSTREAM_CACHE_DIRECTORY to the derivative cache directory}
+        target: /cache
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
