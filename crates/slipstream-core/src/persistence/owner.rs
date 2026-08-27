@@ -34,6 +34,7 @@ pub enum PersistenceError {
     Saturated,
     Closed,
     State(StateError),
+    RecoveryRequired,
     UnsupportedSchema,
     NewerSchema,
     RootMismatch,
@@ -48,6 +49,7 @@ impl fmt::Display for PersistenceError {
             Self::Saturated => "SQLite persistence queue is saturated",
             Self::Closed => "SQLite persistence is closed",
             Self::State(error) => return error.fmt(formatter),
+            Self::RecoveryRequired => "SQLite state requires operator recovery",
             Self::UnsupportedSchema => "SQLite schema is unsupported",
             Self::NewerSchema => "SQLite schema version is newer than this Slipstream build",
             Self::RootMismatch => "SQLite database belongs to a different Photo Library root",
@@ -62,7 +64,10 @@ impl std::error::Error for PersistenceError {}
 
 impl From<StateError> for PersistenceError {
     fn from(value: StateError) -> Self {
-        Self::State(value)
+        match value {
+            StateError::SidecarPresent => Self::RecoveryRequired,
+            other => Self::State(other),
+        }
     }
 }
 
@@ -95,6 +100,7 @@ fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
         PersistenceError::Closed => MutationError::Closed,
         PersistenceError::OwnerStopped
         | PersistenceError::State(_)
+        | PersistenceError::RecoveryRequired
         | PersistenceError::UnsupportedSchema
         | PersistenceError::NewerSchema
         | PersistenceError::RootMismatch
@@ -229,7 +235,13 @@ impl Persistence {
         canonical_root: String,
         capacity: NonZeroUsize,
     ) -> Result<Self, PersistenceError> {
-        let identity = state.prepare_database(&database_name)?;
+        let (identity, created) = state.prepare_database_with_creation(&database_name)?;
+        if state.startup_sidecars_present(&database_name)? {
+            if created {
+                state.remove_created_empty_database(&database_name, identity)?;
+            }
+            return Err(PersistenceError::RecoveryRequired);
+        }
         let (sender, receiver) = sync_channel(capacity.get());
         let (startup_send, startup_receive) = std::sync::mpsc::channel();
         let join = thread::Builder::new()
@@ -587,7 +599,7 @@ fn open_connection(
 ) -> Result<Connection, PersistenceError> {
     state.verify_database(database_name, identity)?;
     if state.startup_sidecars_present(database_name)? {
-        return Err(PersistenceError::UnsupportedSchema);
+        return Err(PersistenceError::RecoveryRequired);
     }
     let readonly = Connection::open_with_flags(
         state.sqlite_immutable_uri(database_name),
@@ -1729,7 +1741,7 @@ mod tests {
     use serde::Deserialize;
     use std::{
         fs,
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::fs::PermissionsExt,
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1893,6 +1905,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_present_sidecar_rejects_startup_before_creating_database() {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let (_base, library, state, name, path) = fixture();
+            let sidecar = path.with_file_name(format!("library.sqlite{suffix}"));
+            fs::write(&sidecar, b"operator recovery data").unwrap();
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+            let result = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            );
+            assert!(matches!(result, Err(PersistenceError::RecoveryRequired)));
+            assert!(
+                !path.exists(),
+                "{suffix} must be checked before database creation"
+            );
+            assert_eq!(fs::read(sidecar).unwrap(), b"operator recovery data");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_present_sidecar_blocks_writes_without_changing_database() {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let (_base, library, state, name, path) = fixture();
+            let persistence = Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            )
+            .unwrap();
+            let sidecar = path.with_file_name(format!("library.sqlite{suffix}"));
+            fs::write(&sidecar, b"operator recovery data").unwrap();
+            fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+            let before = fs::read(&path).unwrap();
+            assert_eq!(
+                persistence
+                    .mutate_photo_set(PhotoSetMutation::Create {
+                        name: format!("Blocked {suffix}"),
+                    })
+                    .await,
+                Err(MutationError::Persistence)
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before,
+                "{suffix} changed database"
+            );
+            assert_eq!(fs::read(&sidecar).unwrap(), b"operator recovery data");
+            persistence.shutdown().unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_v2_wal_rejection_preserves_database_and_sidecars() {
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -1926,7 +1991,7 @@ mod tests {
             name,
             library.canonical_path().to_str().unwrap().to_owned(),
         );
-        assert!(matches!(result, Err(PersistenceError::UnsupportedSchema)));
+        assert!(matches!(result, Err(PersistenceError::RecoveryRequired)));
         let after = paths
             .iter()
             .map(|path| fs::read(path).ok())
@@ -2004,7 +2069,7 @@ mod tests {
         );
         assert!(matches!(
             open_result,
-            Err(PersistenceError::UnsupportedSchema)
+            Err(PersistenceError::RecoveryRequired)
         ));
         let after = paths
             .iter()
@@ -2856,9 +2921,10 @@ mod tests {
         let member = &persistence.list_photo_sets().await.unwrap()[0].members[0];
         assert!(!member.available);
         assert_eq!(member.rating, 4);
-        let target = path.with_file_name("sidecar-target");
-        fs::write(&target, b"unchanged").unwrap();
-        symlink(&target, path.with_file_name("library.sqlite-journal")).unwrap();
+        let sidecar = path.with_file_name("library.sqlite-journal");
+        fs::write(&sidecar, b"operator recovery data").unwrap();
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = fs::read(&path).unwrap();
         assert_eq!(
             persistence
                 .mutate_photo_set(PhotoSetMutation::Create {
@@ -2867,7 +2933,8 @@ mod tests {
                 .await,
             Err(MutationError::Persistence)
         );
-        assert_eq!(fs::read(&target).unwrap(), b"unchanged");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(&sidecar).unwrap(), b"operator recovery data");
         persistence.shutdown().unwrap();
     }
 

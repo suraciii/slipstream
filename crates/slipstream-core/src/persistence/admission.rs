@@ -40,7 +40,7 @@ pub struct StateFileIdentity {
     link_count: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StateError {
     InvalidStatePath,
     InvalidDatabaseName,
@@ -49,6 +49,7 @@ pub enum StateError {
     UnsafeDatabase,
     ChangedDatabase,
     UnsafeSidecar,
+    SidecarPresent,
     Io(&'static str),
 }
 
@@ -64,6 +65,7 @@ impl fmt::Display for StateError {
             Self::UnsafeDatabase => "SQLite database inode is not safely owned",
             Self::ChangedDatabase => "SQLite database inode changed before startup",
             Self::UnsafeSidecar => "SQLite sidecar is not safely owned",
+            Self::SidecarPresent => "SQLite sidecar requires operator recovery",
             Self::Io(message) => message,
         })
     }
@@ -108,10 +110,50 @@ impl StateDirectory {
     }
 
     pub fn prepare_database(&self, name: &DatabaseName) -> Result<StateFileIdentity, StateError> {
+        self.prepare_database_with_creation(name)
+            .map(|(identity, _)| identity)
+    }
+
+    pub(crate) fn prepare_database_with_creation(
+        &self,
+        name: &DatabaseName,
+    ) -> Result<(StateFileIdentity, bool), StateError> {
+        let existed = self.database_exists(name)?;
         let descriptor =
             self.open_database(name, libc::O_RDWR | libc::O_CREAT | libc::O_NONBLOCK, 0o600)?;
         let facts = sys::fstat(descriptor.as_raw_fd()).map_err(|_| StateError::UnsafeDatabase)?;
-        safe_identity(&facts).ok_or(StateError::UnsafeDatabase)
+        let identity = safe_identity(&facts).ok_or(StateError::UnsafeDatabase)?;
+        Ok((identity, !existed))
+    }
+
+    pub(crate) fn remove_created_empty_database(
+        &self,
+        name: &DatabaseName,
+        expected: StateFileIdentity,
+    ) -> Result<(), StateError> {
+        let descriptor = self.open_database(name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
+        let facts = sys::fstat(descriptor.as_raw_fd()).map_err(|_| StateError::ChangedDatabase)?;
+        if safe_identity(&facts) != Some(expected) || facts.st_size != 0 {
+            return Err(StateError::ChangedDatabase);
+        }
+        let name = CString::new(name.as_os_str().as_bytes())
+            .map_err(|_| StateError::InvalidDatabaseName)?;
+        sys::unlink_at(self.descriptor.as_raw_fd(), &name).map_err(|_| StateError::ChangedDatabase)
+    }
+
+    fn database_exists(&self, name: &DatabaseName) -> Result<bool, StateError> {
+        let name = CString::new(name.as_os_str().as_bytes())
+            .map_err(|_| StateError::InvalidDatabaseName)?;
+        match sys::open_at(
+            self.descriptor.as_raw_fd(),
+            &name,
+            libc::O_RDONLY | libc::O_NONBLOCK,
+            0,
+        ) {
+            Ok(_) => Ok(true),
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(false),
+            Err(_) => Err(StateError::UnsafeDatabase),
+        }
     }
 
     pub fn verify_database(
@@ -128,7 +170,10 @@ impl StateDirectory {
     }
 
     pub fn admit_sidecars(&self, name: &DatabaseName) -> Result<(), StateError> {
-        self.inspect_sidecars(name).map(|_| ())
+        if self.inspect_sidecars(name)? {
+            return Err(StateError::SidecarPresent);
+        }
+        Ok(())
     }
 
     pub(crate) fn startup_sidecars_present(&self, name: &DatabaseName) -> Result<bool, StateError> {
@@ -336,6 +381,15 @@ mod sys {
         }
     }
 
+    pub fn unlink_at(root: RawFd, name: &CString) -> io::Result<()> {
+        // SAFETY: `name` is NUL-terminated and relative to the retained directory descriptor.
+        if unsafe { libc::unlinkat(root, name.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     pub fn owned(descriptor: libc::c_int) -> io::Result<OwnedFd> {
         if descriptor < 0 {
             Err(io::Error::last_os_error())
@@ -461,7 +515,27 @@ mod tests {
             fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        state.admit_sidecars(&name).unwrap();
+        assert_eq!(state.admit_sidecars(&name), Err(StateError::SidecarPresent));
+    }
+
+    #[test]
+    fn rejects_present_sidecar_before_creating_missing_database() {
+        let base = TempTree::new();
+        let library_path = base.0.join("originals");
+        let state_path = base.0.join("state");
+        fs::create_dir(&library_path).unwrap();
+        fs::create_dir(&state_path).unwrap();
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700)).unwrap();
+        let library = LibraryRoot::open(&library_path).unwrap();
+        let state = StateDirectory::open_or_create(&library, &state_path).unwrap();
+        let name = DatabaseName::parse("library.sqlite").unwrap();
+        let sidecar = state_path.join("library.sqlite-journal");
+        fs::write(&sidecar, b"operator recovery data").unwrap();
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(state.startup_sidecars_present(&name).unwrap());
+        assert_eq!(state.admit_sidecars(&name), Err(StateError::SidecarPresent));
+        assert!(!state_path.join("library.sqlite").exists());
+        assert_eq!(fs::read(sidecar).unwrap(), b"operator recovery data");
     }
 
     #[test]
