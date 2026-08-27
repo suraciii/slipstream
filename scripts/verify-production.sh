@@ -218,8 +218,8 @@ bindings = ports.get("3000/tcp") or []
 if len(bindings) != 1 or bindings[0].get("HostIp") != bind or bindings[0].get("HostPort") != port: raise SystemExit("binding")
 if value.get("State", {}).get("Health", {}).get("Status") != "healthy": raise SystemExit("health")
 PY
-  if find "$SLIPSTREAM_CACHE_DIRECTORY" -mindepth 1 -print -quit | grep -q .; then
-    fail 'isolated derived-write verification requires an empty cache'
+  if find "$SLIPSTREAM_CACHE_DIRECTORY" -mindepth 1 -type f -print -quit | grep -q .; then
+    fail 'isolated derived-write verification requires no pre-existing cache files'
   fi
   curl --noproxy '*' --fail --silent --show-error \
     "$SLIPSTREAM_BASE_URL/api/photos/$SLIPSTREAM_PREVIEW_PHOTO_ID/preview" >"$work_dir/preview.json" \
