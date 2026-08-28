@@ -6,17 +6,29 @@ export type UndoDescription = Readonly<{
   priorValue: SelectionState | number;
   expectedCurrent: SelectionState | number;
 }>;
-export type PhotoSetResponse = Readonly<{
+
+export type PhotoSetSummary = Readonly<{
   id: string;
   name: string;
-  lastReviewedPhotoId?: string;
-  members: ReadonlyArray<{
-    photoId: string;
-    position: number;
-    available: boolean;
-    selectionState: SelectionState;
-    rating: number;
+  photoCount: number;
+  hasSavedPosition: boolean;
+}>;
+
+export type LibraryOverviewResponse = Readonly<{
+  published: boolean;
+  photoCount: number;
+  scan: Readonly<{
+    state: string;
+    completed?: number;
+    total?: number;
   }>;
+  photoSets: ReadonlyArray<PhotoSetSummary>;
+}>;
+
+export type BrowseOpenResponse = Readonly<{
+  token: string;
+  total: number;
+  position: number;
 }>;
 
 export type PhotoSummary = Readonly<{
@@ -38,8 +50,27 @@ export type PhotoSummary = Readonly<{
   }>;
 }>;
 
+export type BrowseWindowResponse = Readonly<{
+  start: number;
+  total: number;
+  photos: ReadonlyArray<PhotoSummary>;
+}>;
+
 export type PhotoListResponse = Readonly<{
   photos: ReadonlyArray<PhotoSummary>;
+}>;
+
+export type PhotoSetResponse = Readonly<{
+  id: string;
+  name: string;
+  lastReviewedPhotoId?: string;
+  members: ReadonlyArray<{
+    photoId: string;
+    position: number;
+    available: boolean;
+    selectionState: SelectionState;
+    rating: number;
+  }>;
 }>;
 
 export type PreviewResponse = Readonly<{

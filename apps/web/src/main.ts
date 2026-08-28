@@ -1,6 +1,8 @@
 import type {
-  PhotoListResponse,
-  PhotoSetResponse,
+  BrowseOpenResponse,
+  BrowseWindowResponse,
+  LibraryOverviewResponse,
+  PhotoSetSummary,
   PhotoSummary,
   PreviewResponse,
   PreviewSource,
@@ -10,10 +12,13 @@ import type {
 import "./style.css";
 
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
-type PhotoSetList = Readonly<{ photoSets: ReadonlyArray<PhotoSetResponse> }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
-type SessionMember = PhotoSetResponse["members"][number];
 
+const WINDOW_SIZE = 60;
+const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
+const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
+const GRID_CELL_HEIGHT = 178;
+const GRID_CELL_WIDTH = 150;
 const swipePendingPixels = 24;
 const swipeCommitPixels = 72;
 const swipeCommitVelocity = 0.5;
@@ -25,54 +30,46 @@ export function renderApp(
   root.innerHTML = `
     <main class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
-      <section class="set-screen" data-set-screen aria-labelledby="sets-title">
-        <h2 id="sets-title">Photo Sets</h2>
-        <p data-set-status role="status">Loading Photo Sets…</p>
-        <div class="set-list" data-set-list></div>
-        <button type="button" data-retry hidden>Retry connection</button>
-      </section>
-      <section class="review" data-review hidden tabindex="-1" aria-labelledby="review-title">
-        <header class="review-header">
-          <button type="button" class="quiet" data-leave>Photo Sets</button>
-          <div><h2 id="review-title" data-set-name>Review</h2><p data-position>0 / 0</p></div>
-          <button type="button" class="quiet" data-retry-review hidden>Retry</button>
-        </header>
-        <section class="preview" data-preview aria-label="Photo Preview">
-          <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
-          <div class="image-stage" data-stage><p>Loading…</p></div>
-          <div class="swipe-feedback select" data-select-feedback>Select</div>
+      <section class="browser" data-browser aria-labelledby="browser-title">
+        <aside class="source-panel" data-set-screen aria-label="Library sources">
+          <h2 id="browser-title">Library</h2>
+          <p data-summary-status role="status">Loading Library…</p>
+          <div class="source-list" data-source-list></div>
+          <button type="button" data-retry hidden>Retry connection</button>
+        </aside>
+        <section class="grid-view" data-grid-view aria-labelledby="grid-title">
+          <header class="grid-header"><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><button type="button" data-refresh>Refresh</button></header>
+          <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div></div>
         </section>
-        <dl class="facts">
-          <div><dt>Selection</dt><dd data-selection>Undecided</dd></div>
-          <div><dt>Rating</dt><dd data-rating>0 stars</dd></div>
-          <div><dt>Preview Source</dt><dd data-source>—</dd></div>
-          <div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div>
-        </dl>
-        <p class="status" data-status role="status" aria-live="polite"></p>
-        <div class="decision-controls" aria-label="Selection controls">
-          <button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button>
-          <button type="button" data-clear>Clear <span aria-hidden="true">U</span></button>
-          <button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button>
-        </div>
-        <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-        <div class="session-controls">
-          <button type="button" data-previous>Previous</button>
-          <button type="button" data-detail aria-pressed="false">Detail Review</button>
-          <button type="button" data-undo disabled>Undo</button>
-          <button type="button" data-next>Next</button>
-        </div>
+        <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
+          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><button type="button" class="quiet" data-retry-photo hidden>Retry</button></header>
+          <section class="preview" data-preview aria-label="Photo Preview">
+            <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
+            <div class="image-stage" data-stage><p>Loading Preview…</p></div>
+            <div class="swipe-feedback select" data-select-feedback>Select</div>
+          </section>
+          <dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview Source</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl>
+          <p class="status" data-status role="status" aria-live="polite"></p>
+          <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
+          <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
+          <div class="photo-controls"><button type="button" data-previous>Previous</button><button type="button" data-detail aria-pressed="false">Detail Review</button><button type="button" data-undo disabled>Undo</button><button type="button" data-next>Next</button></div>
+        </section>
       </section>
     </main>`;
 
-  const setScreen = required<HTMLElement>(root, "[data-set-screen]");
-  const review = required<HTMLElement>(root, "[data-review]");
-  const setList = required<HTMLElement>(root, "[data-set-list]");
-  const setStatus = required<HTMLElement>(root, "[data-set-status]");
   const connection = required<HTMLElement>(root, "[data-connection]");
+  const summaryStatus = required<HTMLElement>(root, "[data-summary-status]");
+  const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
-  const retryReview = required<HTMLButtonElement>(root, "[data-retry-review]");
-  const leave = required<HTMLButtonElement>(root, "[data-leave]");
-  const setName = required<HTMLElement>(root, "[data-set-name]");
+  const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
+  const gridView = required<HTMLElement>(root, "[data-grid-view]");
+  const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
+  const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
+  const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
+  const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
+  const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
+  const photoView = required<HTMLElement>(root, "[data-photo-view]");
+  const photoTitle = required<HTMLElement>(root, "[data-photo-title]");
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
@@ -81,6 +78,8 @@ export function renderApp(
   const source = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
   const status = required<HTMLElement>(root, "[data-status]");
+  const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
+  const back = required<HTMLButtonElement>(root, "[data-back]");
   const previous = required<HTMLButtonElement>(root, "[data-previous]");
   const next = required<HTMLButtonElement>(root, "[data-next]");
   const select = required<HTMLButtonElement>(root, "[data-select]");
@@ -104,18 +103,28 @@ export function renderApp(
     ratings.append(button);
   }
 
-  let sets: ReadonlyArray<PhotoSetResponse> = [];
-  let libraryPhotos: ReadonlyArray<PhotoSummary> = [];
-  let photoFacts = new Map<string, PhotoSummary>();
-  let currentSet: PhotoSetResponse | undefined;
-  let photoSetSession: ReadonlyArray<SessionMember> | undefined;
-  let librarySession: ReadonlyArray<SessionMember> | undefined;
-  let index = 0;
+  let overview: LibraryOverviewResponse | undefined;
+  let sets: ReadonlyArray<PhotoSetSummary> = [];
+  let token = "";
+  let total = 0;
+  let currentIndex = 0;
+  let sourceKind: "library" | "photo-set" = "library";
+  let sourceSetId: string | undefined;
+  let sourceSetName = "All Photos";
+  let loaded = new Map<number, PhotoSummary>();
+  let loadingRanges = new Set<number>();
+  let thumbnailUrls = new Map<string, string>();
+  let thumbnailRequests = new Map<string, Promise<string | undefined>>();
+  let thumbnailFailures = new Set<string>();
+  let lastCurrentPhotoId: string | undefined;
+  let renderedColumns = 0;
   let connected = false;
   let busy = false;
+  let openingPhoto = false;
+  let currentPhotoMode = false;
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
-  let sessionGeneration = 0;
+  let sourceGeneration = 0;
   let progressQueue: Promise<void> = Promise.resolve();
   let zoomed = false;
   let panX = 0;
@@ -129,58 +138,38 @@ export function renderApp(
         lastY: number;
         startedAt: number;
         vertical: boolean;
-        sessionGeneration: number;
+        generation: number;
         photoId: string;
       }
     | undefined;
 
-  const sessionMembers = (): ReadonlyArray<SessionMember> =>
-    librarySession ?? photoSetSession ?? [];
-  const isLibrarySession = () => librarySession !== undefined;
-  const sessionLength = () => sessionMembers().length;
-  const currentMember = () => sessionMembers()[index];
-  const clearPointer = () => {
-    const pointerId = pointer?.id;
-    pointer = undefined;
-    if (pointerId !== undefined && preview.hasPointerCapture(pointerId))
-      preview.releasePointerCapture(pointerId);
-    stage.style.transform = "";
-    selectFeedback.classList.remove("pending");
-    rejectFeedback.classList.remove("pending");
-  };
-  const currentPhoto = () => {
-    const member = currentMember();
-    return member ? photoFacts.get(member.photoId) : undefined;
-  };
+  const currentPhoto = () => loaded.get(currentIndex);
   const setConnected = (value: boolean, message?: string) => {
     if (!value) clearPointer();
     connected = value;
     connection.textContent = value ? "Connected" : "Disconnected";
     connection.classList.toggle("offline", !value);
-    retry.hidden = value;
-    retryReview.hidden = value;
+    retry.hidden = value || currentPhotoMode;
+    retryPhoto.hidden = value || !currentPhotoMode;
     if (message) status.textContent = message;
     updateControls();
   };
   const updateControls = () => {
-    const member = currentMember();
-    const decisionsEnabled = Boolean(member) && connected && !busy;
+    const photo = currentPhoto();
+    const enabled = Boolean(photo) && connected && !busy;
     for (const button of [
       select,
       reject,
       clear,
       ...Array.from(ratings.querySelectorAll<HTMLButtonElement>("button")),
     ])
-      button.disabled = !decisionsEnabled;
-    leave.disabled = busy;
-    for (const button of Array.from(
-      setList.querySelectorAll<HTMLButtonElement>("button"),
-    ))
-      button.disabled = busy || button.dataset.empty === "true";
-    previous.disabled = busy || index <= 0;
+      button.disabled = !enabled;
+    back.disabled = busy;
+    refresh.disabled = busy;
+    previous.disabled = busy || openingPhoto || currentIndex <= 0;
     next.disabled =
-      busy || sessionLength() === 0 || index >= sessionLength() - 1;
-    undoButton.disabled = !connected || busy || !undo;
+      busy || openingPhoto || total === 0 || currentIndex >= total - 1;
+    undoButton.disabled = !connected || busy || openingPhoto || !undo;
     detail.disabled = !stage.querySelector("img");
   };
   const resetTransform = () => {
@@ -199,400 +188,617 @@ export function renderApp(
       : "translate(0, 0) scale(1)";
     preview.classList.toggle("detail", zoomed);
   };
-  const refreshFacts = async () => {
-    const [setResponse, photosResponse] = await Promise.all([
-      fetcher("/api/photo-sets"),
-      fetcher("/api/photos"),
-    ]);
-    if (!setResponse.ok || !photosResponse.ok)
-      throw new Error("refresh failed");
-    sets = ((await setResponse.json()) as PhotoSetList).photoSets;
-    const photos = ((await photosResponse.json()) as PhotoListResponse).photos;
-    // GET /api/photos owns the next filtered Library session's order. An
-    // active Library session intentionally keeps its separate ID snapshot.
-    libraryPhotos = photos;
-    photoFacts = new Map(photos.map((photo) => [photo.id, photo]));
-    // A Photo Set Session snapshots membership just like Library Review.
-    // Fresh Photo Set data updates future Sessions only; current facts still
-    // refresh through photoFacts without inserting, removing, or reordering
-    // the active member sequence.
-    if (currentSet && !sets.some((item) => item.id === currentSet!.id))
-      leaveSession();
+
+  const renderSources = () => {
+    sourceList.replaceChildren();
+    const libraryButton = sourceButton(
+      "All Photos",
+      overview?.photoCount ?? 0,
+      sourceKind === "library",
+    );
+    libraryButton.addEventListener("click", () => void openSource("library"));
+    sourceList.append(libraryButton);
+    for (const set of sets) {
+      const button = sourceButton(
+        set.name,
+        set.photoCount,
+        sourceKind === "photo-set" && sourceSetId === set.id,
+        set.hasSavedPosition,
+      );
+      button.addEventListener("click", () => void openSource("photo-set", set));
+      sourceList.append(button);
+    }
   };
-  const loadSets = async () => {
-    setStatus.textContent = "Loading Photo Sets…";
+  const sourceButton = (
+    name: string,
+    count: number,
+    active: boolean,
+    saved = false,
+  ) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `source-card${active ? " active" : ""}`;
+    button.disabled = count === 0;
+    button.innerHTML = "<strong></strong><span></span>";
+    button.querySelector("strong")!.textContent = name;
+    button.querySelector("span")!.textContent =
+      `${count} Photos${saved ? " · Resume" : ""}`;
+    return button;
+  };
+
+  const loadOverview = async () => {
+    summaryStatus.textContent = "Loading Library summary…";
     try {
-      await refreshFacts();
+      const response = await fetcher("/api/overview");
+      if (!response.ok) throw new Error("overview failed");
+      overview = (await response.json()) as LibraryOverviewResponse;
+      sets = overview.photoSets;
+      summaryStatus.textContent =
+        overview.scan.state === "idle"
+          ? "Library ready"
+          : `Library ${overview.scan.state}`;
       setConnected(true);
-      renderSets();
+      renderSources();
+      if (!token) await openSource("library");
     } catch {
-      setStatus.textContent =
+      summaryStatus.textContent =
         "Could not reach Slipstream. Check the server and retry.";
       setConnected(false);
     }
   };
-  const renderSets = () => {
-    setList.replaceChildren();
-    const library = document.createElement("button");
-    library.type = "button";
-    library.className = "set-card";
-    library.disabled = busy || libraryPhotos.length === 0;
-    library.dataset.empty = String(libraryPhotos.length === 0);
-    library.innerHTML = "<strong>Library Review</strong><span></span>";
-    library.querySelector("span")!.textContent = libraryPhotos.length
-      ? `${libraryPhotos.length} Photos`
-      : "No Photos in Library";
-    library.addEventListener("click", startLibrarySession);
-    setList.append(library);
-    if (sets.length === 0) {
-      setStatus.textContent =
-        "No Photo Sets yet. Start Library Review or create a Photo Set through the server API.";
-      return;
-    }
-    setStatus.textContent =
-      "Choose Library Review or a Photo Set to start or resume review.";
-    for (const set of sets) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "set-card";
-      button.disabled = busy || set.members.length === 0;
-      button.dataset.empty = String(set.members.length === 0);
-      button.innerHTML = `<strong></strong><span></span>`;
-      button.querySelector("strong")!.textContent = set.name;
-      button.querySelector("span")!.textContent = set.members.length
-        ? `${set.members.length} Photos${set.lastReviewedPhotoId ? " · Resume" : ""}`
-        : "Empty Photo Set";
-      button.addEventListener("click", () => startSession(set.id));
-      setList.append(button);
-    }
-  };
-  const startSession = (id: string) => {
-    if (busy) return;
-    sessionGeneration += 1;
-    clearPointer();
-    const set = sets.find((item) => item.id === id);
-    if (!set || set.members.length === 0) return;
-    librarySession = undefined;
-    currentSet = set;
-    photoSetSession = set.members.map((member) => ({ ...member }));
-    undo = undefined;
-    const saved = set.lastReviewedPhotoId
-      ? set.members.findIndex(
-          (item) => item.photoId === set.lastReviewedPhotoId,
-        )
-      : -1;
-    const nextAvailableAfterSaved =
-      saved >= 0
-        ? Array.from(
-            { length: set.members.length },
-            (_, offset) => (saved + offset + 1) % set.members.length,
-          ).find((memberIndex) => set.members[memberIndex]?.available)
-        : undefined;
-    index =
-      saved >= 0
-        ? set.members[saved]?.available
-          ? saved
-          : (nextAvailableAfterSaved ?? saved)
-        : Math.max(
-            0,
-            set.members.findIndex((item) => item.available),
-          );
-    setScreen.hidden = true;
-    review.hidden = false;
-    setName.textContent = set.name;
-    review.focus();
-    void show();
-  };
-  const startLibrarySession = () => {
-    if (busy || libraryPhotos.length === 0) return;
-    sessionGeneration += 1;
-    clearPointer();
-    // Snapshot the ordered IDs and their current review facts. A rescan can
-    // refresh facts in photoFacts but cannot insert or reorder this session.
-    librarySession = libraryPhotos.map((photo) => ({
-      photoId: photo.id,
-      position: 0,
-      available: photo.available,
-      selectionState: photo.selectionState,
-      rating: photo.rating,
-    }));
-    currentSet = undefined;
-    photoSetSession = undefined;
-    undo = undefined;
-    index = 0;
-    setScreen.hidden = true;
-    review.hidden = false;
-    setName.textContent = "Library Review";
-    review.focus();
-    void show();
-  };
-  const leaveSession = () => {
-    if (busy) return;
-    sessionGeneration += 1;
+
+  const openSource = async (
+    kind: "library" | "photo-set",
+    set?: PhotoSetSummary,
+    preferredPhotoId?: string,
+  ) => {
+    busy = true;
+    sourceGeneration += 1;
     requestGeneration += 1;
-    clearPointer();
-    currentSet = undefined;
-    photoSetSession = undefined;
-    librarySession = undefined;
+    const generation = sourceGeneration;
+    currentPhotoMode = false;
+    gridView.hidden = false;
+    photoView.hidden = true;
+    sourceKind = kind;
+    sourceSetId = set?.id;
+    sourceSetName = set?.name ?? "All Photos";
+    gridTitle.textContent = sourceSetName;
+    gridStatus.textContent = "Preparing Library order…";
     undo = undefined;
-    review.hidden = true;
-    setScreen.hidden = false;
-    resetTransform();
-    renderSets();
-  };
-  const show = async () => {
-    const token = ++requestGeneration;
-    clearPointer();
-    resetTransform();
-    const member = currentMember();
-    const photo = currentPhoto();
-    position.textContent = member
-      ? `${index + 1} / ${sessionLength()}`
-      : "0 / 0";
-    const currentSelection = photo?.selectionState ?? member?.selectionState;
-    const currentRating = photo?.rating ?? member?.rating ?? 0;
-    selection.textContent = selectionLabel(currentSelection);
-    rating.textContent = `${currentRating} ${currentRating === 1 ? "star" : "stars"}`;
-    source.textContent = "—";
-    limited.hidden = true;
-    status.textContent = "";
-    stage.replaceChildren(
-      paragraph(member ? "Loading review Preview…" : "No Photos found"),
-    );
-    updateControls();
-    if (!member || !photo) return;
-    if (!photo.available) {
-      status.textContent =
-        "Original File is unavailable. Decisions remain available; restore it and rescan for a Preview.";
-      stage.replaceChildren(paragraph("Preview unavailable"));
-      updateControls();
-      return;
-    }
+    loaded = new Map();
+    loadingRanges = new Set();
+    thumbnailUrls = new Map();
+    thumbnailRequests = new Map();
+    thumbnailFailures = new Set();
+    lastCurrentPhotoId = preferredPhotoId;
+    const priorToken = token;
     try {
-      const response = await fetcher(`/api/photos/${member.photoId}/preview`);
-      const result = (await response.json()) as PreviewResponse;
-      if (token !== requestGeneration) return;
-      if (result.state !== "ready" || !result.url) {
-        status.textContent = result.message ?? "Preview unavailable";
-        stage.replaceChildren(paragraph("Preview unavailable"));
+      const response = await fetcher("/api/browse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          kind === "library"
+            ? {
+                source: "library",
+                ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
+              }
+            : {
+                source: "photo-set",
+                photoSetId: set!.id,
+                ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
+              },
+        ),
+      });
+      if (!response.ok) throw new Error("browse open failed");
+      const opened = (await response.json()) as BrowseOpenResponse;
+      if (generation !== sourceGeneration) return;
+      token = opened.token;
+      if (priorToken && priorToken !== token) void closeBrowse(priorToken);
+      total = opened.total;
+      currentIndex = Math.min(opened.position, Math.max(0, total - 1));
+      gridViewport.scrollTop =
+        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+      renderSources();
+      await loadWindow(currentIndex, generation);
+      renderGrid();
+      gridStatus.textContent = total
+        ? `Ready · ${total.toLocaleString()} Photos`
+        : "No Photos in this source";
+    } catch {
+      token = "";
+      if (priorToken) void closeBrowse(priorToken);
+      gridStatus.textContent = "Could not load this source. Retry to continue.";
+      setConnected(false);
+    } finally {
+      if (generation === sourceGeneration) {
+        busy = false;
+        updateControls();
+      }
+    }
+  };
+
+  const columns = () =>
+    Math.max(
+      1,
+      Math.floor(Math.max(320, gridViewport.clientWidth) / GRID_CELL_WIDTH),
+    );
+  const alignedStart = (index: number) =>
+    Math.max(
+      0,
+      Math.min(
+        Math.floor(index / WINDOW_SIZE) * WINDOW_SIZE,
+        Math.max(0, total - WINDOW_SIZE),
+      ),
+    );
+  const closeBrowse = async (browseToken: string) => {
+    try {
+      await fetcher(`/api/browse/${encodeURIComponent(browseToken)}`, {
+        method: "DELETE",
+      });
+    } catch {
+      /* bounded server expiry remains the fallback */
+    }
+  };
+  const reopenExpired = async (anchorIndex: number) => {
+    const oldToken = token;
+    const anchorId =
+      loaded.get(anchorIndex)?.id ?? lastCurrentPhotoId ?? currentPhoto()?.id;
+    const generation = ++sourceGeneration;
+    const notice =
+      "Library order expired. Reopening this source from the latest Library…";
+    gridStatus.textContent = notice;
+    status.textContent = notice;
+    try {
+      const response = await fetcher("/api/browse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          sourceKind === "library"
+            ? { source: "library", ...(anchorId ? { photoId: anchorId } : {}) }
+            : {
+                source: "photo-set",
+                photoSetId: sourceSetId,
+                ...(anchorId ? { photoId: anchorId } : {}),
+              },
+        ),
+      });
+      if (!response.ok) throw new Error("browse reopen failed");
+      const opened = (await response.json()) as BrowseOpenResponse;
+      if (generation !== sourceGeneration) return;
+      token = opened.token;
+      total = opened.total;
+      currentIndex = Math.min(opened.position, Math.max(0, total - 1));
+      loaded = new Map();
+      loadingRanges = new Set();
+      thumbnailUrls = new Map();
+      thumbnailRequests = new Map();
+      thumbnailFailures = new Set();
+      if (oldToken && oldToken !== token) void closeBrowse(oldToken);
+      await loadWindow(currentIndex, generation);
+      gridViewport.scrollTop =
+        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+      renderGrid();
+      gridStatus.textContent =
+        "Source reopened using the latest published Library order.";
+      setConnected(true);
+    } catch {
+      const failure =
+        "This source expired and could not be reopened. Retry the connection.";
+      gridStatus.textContent = failure;
+      status.textContent = failure;
+      setConnected(false);
+    }
+  };
+  const windowLoaded = (start: number) => {
+    const end = Math.min(total, start + WINDOW_SIZE);
+    for (let index = start; index < end; index += 1)
+      if (!loaded.has(index)) return false;
+    return start < end;
+  };
+  const loadWindow = async (
+    index: number,
+    generation = sourceGeneration,
+    quiet = false,
+  ) => {
+    if (!token || total === 0) return;
+    const start = alignedStart(index);
+    if (loadingRanges.has(start) || windowLoaded(start)) return;
+    loadingRanges.add(start);
+    if (!quiet)
+      gridStatus.textContent = `Loading Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)} of ${total.toLocaleString()}…`;
+    try {
+      let response: Response;
+      try {
+        response = await fetcher(
+          `/api/browse/${encodeURIComponent(token)}?start=${start}&limit=${WINDOW_SIZE}`,
+        );
+      } catch {
+        if (generation === sourceGeneration)
+          setConnected(false, "Connection lost. Retry to refresh this range.");
         return;
       }
-      const image = document.createElement("img");
-      image.alt = `Photo ${index + 1} of ${sessionLength()}`;
-      image.draggable = false;
-      image.src = result.url;
-      image.addEventListener(
-        "error",
-        () => {
-          if (token !== requestGeneration) return;
-          status.textContent =
-            "Preview could not be loaded. Retry the connection or continue reviewing.";
-        },
-        { once: true },
-      );
-      stage.replaceChildren(image);
-      source.textContent = sourceLabel(result.source);
-      limited.hidden = !result.limitedDetail;
-      if (result.stale)
-        status.textContent =
-          result.message ??
-          "Showing a stale Preview; retry to generate the current Preview.";
-      updateControls();
+      if (response.status === 404) {
+        await reopenExpired(index);
+        return;
+      }
+      if (!response.ok) throw new Error("window failed");
+      const result = (await response.json()) as BrowseWindowResponse;
+      if (generation !== sourceGeneration) return;
+      for (const [offset, photo] of result.photos.entries())
+        loaded.set(result.start + offset, photo);
+      trimLoaded(index);
+      renderGrid();
+      if (!quiet)
+        gridStatus.textContent = `Ready · ${total.toLocaleString()} Photos`;
     } catch {
-      if (token !== requestGeneration) return;
-      setConnected(
-        false,
-        "Connection lost. Decisions are disabled until Retry succeeds.",
-      );
-      stage.replaceChildren(paragraph("Preview unavailable"));
+      if (generation === sourceGeneration)
+        gridStatus.textContent =
+          "Some Photos could not load. Scroll or retry this range.";
+    } finally {
+      loadingRanges.delete(start);
+      updateControls();
     }
   };
-  const persistProgress = (photoId: string): Promise<boolean> => {
-    const set = currentSet;
-    if (!set || isLibrarySession()) return Promise.resolve(true);
-    const generation = sessionGeneration;
-    const setId = set.id;
+  const trimLoaded = (anchor: number) => {
+    if (loaded.size <= MAX_RETAINED_FACTS) return;
+    for (const index of Array.from(loaded.keys()))
+      if (
+        Math.abs(index - anchor) > WINDOW_SIZE &&
+        loaded.size > MAX_RETAINED_FACTS
+      )
+        loaded.delete(index);
+  };
+  const renderGrid = () => {
+    const count = columns();
+    renderedColumns = count;
+    const rows = Math.ceil(total / count);
+    gridCanvas.style.height = `${rows * GRID_CELL_HEIGHT}px`;
+    const firstRow = Math.max(
+      0,
+      Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
+    );
+    const visibleRows =
+      Math.ceil(Math.max(360, gridViewport.clientHeight) / GRID_CELL_HEIGHT) +
+      4;
+    const start = firstRow * count;
+    const end = Math.min(total, start + visibleRows * count);
+    gridLayer.replaceChildren();
+    gridLayer.style.height = `${rows * GRID_CELL_HEIGHT}px`;
+    for (let index = start; index < end; index += 1) {
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "photo-cell";
+      cell.style.left = `${(index % count) * GRID_CELL_WIDTH}px`;
+      cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
+      const photo = loaded.get(index);
+      if (!photo) {
+        cell.disabled = true;
+        cell.textContent = "Loading…";
+        void loadWindow(index);
+      } else {
+        cell.dataset.photoIndex = String(index);
+        renderCell(cell, photo, index);
+        cell.addEventListener("click", () => void openPhoto(index));
+      }
+      gridLayer.append(cell);
+    }
+    updateControls();
+  };
+  const renderCell = (
+    cell: HTMLButtonElement,
+    photo: PhotoSummary,
+    index: number,
+  ) => {
+    const image = document.createElement("img");
+    image.alt = `Photo ${index + 1} of ${total}`;
+    image.loading = "lazy";
+    image.draggable = false;
+    image.className = "thumbnail";
+    cell.append(image);
+    const badge = document.createElement("span");
+    badge.className = `cell-state ${photo.selectionState}`;
+    badge.textContent =
+      photo.selectionState === "undecided"
+        ? ""
+        : photo.selectionState === "selected"
+          ? "✓"
+          : "×";
+    cell.append(badge);
+    const caption = document.createElement("span");
+    caption.className = "cell-caption";
+    caption.textContent = `${index + 1} · ${photo.rating ? `${photo.rating}★` : ""}`;
+    cell.append(caption);
+    void loadThumbnail(photo.id, image);
+  };
+  const rememberThumbnail = (photoId: string, url: string) => {
+    thumbnailUrls.delete(photoId);
+    thumbnailUrls.set(photoId, url);
+    while (thumbnailUrls.size > MAX_RETAINED_THUMBNAILS) {
+      const oldest = thumbnailUrls.keys().next().value;
+      if (oldest === undefined) break;
+      thumbnailUrls.delete(oldest);
+    }
+  };
+  const loadThumbnail = (photoId: string, image: HTMLImageElement) => {
+    const cached = thumbnailUrls.get(photoId);
+    if (cached) {
+      image.src = cached;
+      return;
+    }
+    if (thumbnailFailures.has(photoId)) {
+      image.alt = "Thumbnail unavailable";
+      return;
+    }
+    const attach = (url?: string) => {
+      if (url && image.isConnected) image.src = url;
+    };
+    const pending = thumbnailRequests.get(photoId);
+    if (pending) {
+      void pending.then(attach);
+      return;
+    }
+    const request = (async () => {
+      try {
+        const response = await fetcher(`/api/photos/${photoId}/thumbnail`);
+        if (!response.ok) return undefined;
+        const result = (await response.json()) as PreviewResponse;
+        return result.url ?? undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    thumbnailRequests.set(photoId, request);
+    void request.then((url) => {
+      thumbnailRequests.delete(photoId);
+      if (url) {
+        rememberThumbnail(photoId, url);
+        thumbnailFailures.delete(photoId);
+      } else {
+        thumbnailFailures.add(photoId);
+        if (image.isConnected) image.alt = "Thumbnail unavailable";
+      }
+      attach(url);
+    });
+  };
+
+  const openPhoto = async (index: number) => {
+    if (busy || openingPhoto || index < 0 || index >= total) return;
+    openingPhoto = true;
+    currentIndex = index;
+    const generation = ++requestGeneration;
+    currentPhotoMode = true;
+    gridView.hidden = true;
+    photoView.hidden = false;
+    photoView.focus();
+    resetTransform();
+    try {
+      if (!loaded.has(index)) await loadWindow(index, sourceGeneration, true);
+    } finally {
+      // Back to Grid or a superseding view may end this request while an
+      // unloaded boundary window is still loading. Release the open gate so
+      // the interface can never remain wedged by an abandoned load.
+      openingPhoto = false;
+      updateControls();
+    }
+    if (generation !== requestGeneration) return;
+    const current = loaded.get(index);
+    if (current) lastCurrentPhotoId = current.id;
+    renderPhotoShell();
+    updateControls();
+    await showPreview(generation);
+    await persistPosition();
+    updateControls();
+  };
+  const renderPhotoFacts = () => {
+    const photo = currentPhoto();
+    position.textContent = `${currentIndex + 1} / ${total}`;
+    selection.textContent = selectionLabel(photo?.selectionState);
+    rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
+    updateControls();
+  };
+  const renderPhotoShell = () => {
+    const photo = currentPhoto();
+    photoTitle.textContent = sourceSetName;
+    renderPhotoFacts();
+    source.textContent = "—";
+    limited.hidden = true;
+    stage.replaceChildren(
+      paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
+    );
+    status.textContent =
+      photo && !photo.available
+        ? "Original File is unavailable. Decisions remain available."
+        : "";
+    updateControls();
+  };
+  const showPreview = async (generation: number): Promise<boolean> => {
+    const photo = currentPhoto();
+    if (!photo) return false;
+    let result: PreviewResponse;
+    try {
+      // Always contact the server, even for an unavailable Photo: a restored
+      // Original must surface its Preview without a full reload, and Retry
+      // must prove the server is reachable before reporting Connected.
+      const response = await fetcher(`/api/photos/${photo.id}/preview`);
+      result = (await response.json()) as PreviewResponse;
+    } catch {
+      if (generation === requestGeneration)
+        setConnected(false, "Connection lost. Retry to refresh this Photo.");
+      return false;
+    }
+    if (
+      generation !== requestGeneration ||
+      !currentPhoto() ||
+      currentPhoto()!.id !== photo.id
+    )
+      return false;
+    if (result.state !== "ready" || !result.url) {
+      status.textContent = result.message ?? "Preview unavailable";
+      stage.replaceChildren(paragraph("Preview unavailable"));
+      return true;
+    }
+    const image = document.createElement("img");
+    image.alt = `Photo ${currentIndex + 1} of ${total}`;
+    image.draggable = false;
+    image.src = result.url;
+    image.addEventListener(
+      "error",
+      () => {
+        status.textContent =
+          "Preview could not be loaded. You can continue browsing.";
+      },
+      { once: true },
+    );
+    stage.replaceChildren(image);
+    source.textContent = sourceLabel(result.source);
+    limited.hidden = !result.limitedDetail;
+    status.textContent = result.stale
+      ? (result.message ?? "Showing a stale Preview.")
+      : "";
+    updateControls();
+    void prefetchAdjacent(currentIndex - 1, generation);
+    void prefetchAdjacent(currentIndex + 1, generation);
+    return true;
+  };
+  const prefetchAdjacent = async (index: number, generation: number) => {
+    if (generation !== requestGeneration) return;
+    if (index < 0 || index >= total) return;
+    let photo = loaded.get(index);
+    if (!photo) {
+      await loadWindow(index, sourceGeneration, true);
+      if (generation !== requestGeneration) return;
+      photo = loaded.get(index);
+    }
+    if (!photo || !photo.available) return;
+    try {
+      await fetcher(`/api/photos/${photo.id}/preview?priority=adjacent`);
+    } catch {
+      /* adjacent work is best effort */
+    }
+  };
+  const showGrid = () => {
+    currentPhotoMode = false;
+    requestGeneration += 1;
+    photoView.hidden = true;
+    gridView.hidden = false;
+    renderGrid();
+    requestAnimationFrame(() => {
+      gridViewport.scrollTop =
+        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+      renderGrid();
+    });
+    updateControls();
+  };
+  const persistPosition = (): Promise<boolean> => {
+    if (sourceKind !== "photo-set" || !sourceSetId || !currentPhoto())
+      return Promise.resolve(true);
+    const photoId = currentPhoto()!.id;
     const task = progressQueue.then(async () => {
       try {
-        const response = await fetcher(`/api/photo-sets/${setId}/progress`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ photoId }),
-        });
-        if (!response.ok) throw new Error("progress rejected");
-        sets = sets.map((item) =>
-          item.id === setId ? { ...item, lastReviewedPhotoId: photoId } : item,
+        const response = await fetcher(
+          `/api/photo-sets/${sourceSetId}/progress`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ photoId }),
+          },
         );
-        if (generation === sessionGeneration && currentSet?.id === setId)
-          currentSet = { ...currentSet, lastReviewedPhotoId: photoId };
+        if (!response.ok) throw new Error("position rejected");
+        sets = sets.map((set) =>
+          set.id === sourceSetId ? { ...set, hasSavedPosition: true } : set,
+        );
+        renderSources();
         return true;
       } catch {
-        // A queued write can fail after navigation. It still means this active
-        // Session has unconfirmed progress, so block decisions and let Retry
-        // persist whichever Photo is current now.
-        if (generation === sessionGeneration && currentSet?.id === setId)
-          setConnected(
-            false,
-            "Review position could not be saved. Retry before making decisions.",
-          );
+        setConnected(
+          false,
+          "Photo Set position could not be saved. Retry before making more decisions.",
+        );
         return false;
       }
     });
     progressQueue = task.then(() => undefined);
     return task;
   };
-  const moveTo = (target: number) => {
-    if (sessionLength() === 0 || busy) return;
-    const bounded = Math.max(0, Math.min(sessionLength() - 1, target));
-    if (bounded === index) return;
-    clearPointer();
-    index = bounded;
-    const photoId = currentMember()!.photoId;
-    void show();
-    void persistProgress(photoId);
+  const moveTo = async (target: number) => {
+    if (busy || openingPhoto || target < 0 || target >= total) return;
+    await openPhoto(target);
   };
   const mutate = async (
     field: "selectionState" | "rating",
     value: SelectionState | number,
     advance: boolean,
   ) => {
-    const member = currentMember();
-    const set = currentSet;
-    const library = isLibrarySession();
-    if (!member || (!set && !library) || !connected || busy) return;
-    const generation = sessionGeneration;
-    const setId = set?.id;
-    const photoId = member.photoId;
-    const priorIndex = index;
-    const priorUndo = undo;
+    const photo = currentPhoto();
+    if (!photo || !connected || busy) return;
+    const generation = sourceGeneration;
+    const prior = undo;
     undo = undefined;
-    clearPointer();
     busy = true;
     status.textContent = `Saving ${field === "rating" ? "Rating" : "Selection State"}…`;
     updateControls();
-    const currentSession = () =>
-      generation === sessionGeneration &&
-      (library ? isLibrarySession() : currentSet?.id === setId);
-    const updateCurrentFacts = () => {
-      const fact = photoFacts.get(photoId);
-      if (fact)
-        photoFacts.set(photoId, {
-          ...fact,
-          ...(field === "selectionState"
-            ? { selectionState: value as SelectionState }
-            : { rating: value as number }),
-        });
-    };
     try {
-      const response = await fetcher(`/api/photos/${photoId}/state`, {
+      const response = await fetcher(`/api/photos/${photo.id}/state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           field,
           value,
-          ...(setId ? { photoSetId: setId } : {}),
+          ...(sourceSetId ? { photoSetId: sourceSetId } : {}),
         }),
       });
       if (!response.ok) {
-        if (currentSession()) {
-          undo = priorUndo;
-          if (response.status === 409) {
-            setConnected(
-              false,
-              "The Photo changed elsewhere. Retry to refresh its current state.",
-            );
-          } else {
-            status.textContent =
-              "The decision could not be saved. Try the action again without losing your place.";
-          }
-        }
+        undo = prior;
+        status.textContent =
+          response.status === 409
+            ? "The Photo changed elsewhere. Retry to refresh its current state."
+            : "The change could not be saved.";
+        if (response.status === 409) setConnected(false);
         return;
       }
       const result = (await response.json()) as MutationResponse;
-      if (!currentSession()) return;
-      const updatedMembers = sessionMembers().map((item) =>
-        item.photoId === photoId
-          ? {
-              ...item,
-              ...(field === "selectionState"
-                ? { selectionState: value as SelectionState }
-                : { rating: value as number }),
-            }
-          : item,
-      );
-      updateCurrentFacts();
-      if (library) {
-        librarySession = updatedMembers;
-      } else {
-        photoSetSession = updatedMembers;
-        currentSet = { ...currentSet!, lastReviewedPhotoId: photoId };
-        sets = sets.map((item) =>
-          item.id === setId
-            ? {
-                ...item,
-                members: item.members.map((member) =>
-                  member.photoId === photoId
-                    ? {
-                        ...member,
-                        ...(field === "selectionState"
-                          ? { selectionState: value as SelectionState }
-                          : { rating: value as number }),
-                      }
-                    : member,
-                ),
-                lastReviewedPhotoId: photoId,
-              }
-            : item,
-        );
-      }
-      undo = {
-        ...result.undo,
-        advanced: advance && priorIndex < updatedMembers.length - 1,
+      const updated = {
+        ...photo,
+        ...(field === "selectionState"
+          ? { selectionState: value as SelectionState }
+          : { rating: value as number }),
       };
+      loaded.set(currentIndex, updated);
+      undo = { ...result.undo, advanced: advance && currentIndex < total - 1 };
       status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
       if (undo.advanced) {
-        index = priorIndex + 1;
-        await show();
-        const nextPhotoId = currentMember()!.photoId;
-        void persistProgress(nextPhotoId);
-      } else await show();
+        busy = false;
+        await moveTo(currentIndex + 1);
+      } else renderPhotoFacts();
     } catch {
-      if (currentSession()) {
-        undo = undefined;
-        setConnected(
-          false,
-          "Connection lost before the decision was confirmed. Retry to refresh current state.",
-        );
-      }
+      undo = undefined;
+      setConnected(
+        false,
+        "Connection lost before the change was confirmed. Retry to refresh.",
+      );
     } finally {
-      if (currentSession()) {
+      if (generation === sourceGeneration) {
         busy = false;
         updateControls();
       }
     }
   };
   const performUndo = async () => {
-    const set = currentSet;
-    const library = isLibrarySession();
-    if (!undo || !connected || busy || (!set && !library)) return;
     const action = undo;
-    const generation = sessionGeneration;
-    const setId = set?.id;
-    const affectedIndex = sessionMembers().findIndex(
-      (item) => item.photoId === action.photoId,
-    );
-    if (affectedIndex < 0) {
+    if (!action || !connected || busy) return;
+    const affectedIndex = Array.from(loaded.entries()).find(
+      ([, photo]) => photo.id === action.photoId,
+    )?.[0];
+    if (affectedIndex === undefined) {
       undo = undefined;
+      status.textContent =
+        "Undo is no longer available because that Photo left the loaded window.";
       updateControls();
       return;
     }
-    undo = undefined;
-    clearPointer();
+    const photo = loaded.get(affectedIndex)!;
     busy = true;
-    updateControls();
-    const currentSession = () =>
-      generation === sessionGeneration &&
-      (library ? isLibrarySession() : currentSet?.id === setId);
+    undo = undefined;
     try {
       const response = await fetcher(`/api/photos/${action.photoId}/state`, {
         method: "POST",
@@ -601,122 +807,51 @@ export function renderApp(
           field: action.field,
           value: action.priorValue,
           expectedCurrent: action.expectedCurrent,
-          ...(setId ? { photoSetId: setId } : {}),
+          ...(sourceSetId ? { photoSetId: sourceSetId } : {}),
         }),
       });
       if (!response.ok) {
-        if (currentSession()) {
-          if (response.status === 409) {
-            setConnected(
-              false,
-              "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
-            );
-          } else {
-            undo = action;
-            status.textContent =
-              "Undo could not be saved. Try Undo again or Retry the connection.";
-          }
+        if (response.status === 409) {
+          setConnected(
+            false,
+            "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
+          );
+        } else {
+          status.textContent =
+            "Undo could not be saved. Try Undo again or Retry the connection.";
         }
         return;
       }
-      if (!currentSession()) return;
-      const members = sessionMembers().map((item) =>
-        item.photoId === action.photoId
-          ? {
-              ...item,
-              ...(action.field === "selectionState"
-                ? { selectionState: action.priorValue as SelectionState }
-                : { rating: action.priorValue as number }),
-            }
-          : item,
-      );
-      const fact = photoFacts.get(action.photoId);
-      if (fact)
-        photoFacts.set(action.photoId, {
-          ...fact,
-          ...(action.field === "selectionState"
-            ? { selectionState: action.priorValue as SelectionState }
-            : { rating: action.priorValue as number }),
-        });
-      if (library) {
-        librarySession = members;
-      } else {
-        photoSetSession = members;
-        currentSet = { ...currentSet!, lastReviewedPhotoId: action.photoId };
-        sets = sets.map((item) =>
-          item.id === setId
-            ? {
-                ...item,
-                members: item.members.map((member) =>
-                  member.photoId === action.photoId
-                    ? {
-                        ...member,
-                        ...(action.field === "selectionState"
-                          ? {
-                              selectionState:
-                                action.priorValue as SelectionState,
-                            }
-                          : { rating: action.priorValue as number }),
-                      }
-                    : member,
-                ),
-                lastReviewedPhotoId: action.photoId,
-              }
-            : item,
-        );
-      }
-      index = affectedIndex;
-      await show();
+      const updated = {
+        ...photo,
+        ...(action.field === "selectionState"
+          ? { selectionState: action.priorValue as SelectionState }
+          : { rating: action.priorValue as number }),
+      };
+      loaded.set(affectedIndex, updated);
+      currentIndex = affectedIndex;
+      currentPhotoMode = true;
+      gridView.hidden = true;
+      photoView.hidden = false;
+      photoView.focus();
+      resetTransform();
+      renderPhotoShell();
+      busy = false;
+      updateControls();
+      await showPreview(requestGeneration);
+      await persistPosition();
       status.textContent = "Last change undone.";
     } catch {
-      if (currentSession()) {
-        undo = undefined;
-        setConnected(
-          false,
-          "Connection lost before Undo was confirmed. Retry to refresh the current state.",
-        );
-      }
-    } finally {
-      if (currentSession()) {
-        busy = false;
-        updateControls();
-      }
-    }
-  };
-  const reconnect = async () => {
-    if (busy) return;
-    busy = true;
-    clearPointer();
-    status.textContent = "Reconnecting…";
-    updateControls();
-    try {
-      await refreshFacts();
-      if (currentSet || isLibrarySession()) {
-        await show();
-        const photoId = currentMember()?.photoId;
-        if (currentSet && photoId && !(await persistProgress(photoId))) return;
-      } else renderSets();
-      setConnected(true);
-      status.textContent = "Connected. Current state refreshed.";
-    } catch {
-      setConnected(false, "Still disconnected. Check the server and retry.");
+      setConnected(false, "Connection lost before Undo was confirmed.");
     } finally {
       busy = false;
       updateControls();
     }
   };
-  const toggleDetail = () => {
-    if (!stage.querySelector("img")) return;
-    zoomed = !zoomed;
-    panX = 0;
-    panY = 0;
-    detail.setAttribute("aria-pressed", String(zoomed));
-    detail.textContent = zoomed ? "Exit Detail" : "Detail Review";
-    applyTransform();
-  };
+
   const pointerDown = (event: PointerEvent) => {
-    const member = currentMember();
-    if (pointer || !event.isPrimary || busy || !connected || !member) return;
+    const photo = currentPhoto();
+    if (pointer || !event.isPrimary || busy || !connected || !photo) return;
     pointer = {
       id: event.pointerId,
       startX: event.clientX,
@@ -725,10 +860,19 @@ export function renderApp(
       lastY: event.clientY,
       startedAt: event.timeStamp,
       vertical: false,
-      sessionGeneration,
-      photoId: member.photoId,
+      generation: requestGeneration,
+      photoId: photo.id,
     };
     preview.setPointerCapture(event.pointerId);
+  };
+  const clearPointer = () => {
+    const id = pointer?.id;
+    pointer = undefined;
+    if (id !== undefined && preview.hasPointerCapture(id))
+      preview.releasePointerCapture(id);
+    stage.style.transform = "";
+    selectFeedback.classList.remove("pending");
+    rejectFeedback.classList.remove("pending");
   };
   const pointerMove = (event: PointerEvent) => {
     if (!pointer || pointer.id !== event.pointerId) return;
@@ -764,17 +908,17 @@ export function renderApp(
       cancelled ||
       active.vertical ||
       !connected ||
-      active.sessionGeneration !== sessionGeneration ||
-      currentMember()?.photoId !== active.photoId
+      active.generation !== requestGeneration ||
+      currentPhoto()?.id !== active.photoId
     )
       return;
     const dx = event.clientX - active.startX;
     const elapsed = Math.max(1, event.timeStamp - active.startedAt);
     const velocity = Math.abs(dx) / elapsed;
-    const commit =
+    if (
       Math.abs(dx) >= swipeCommitPixels ||
-      (Math.abs(dx) >= 48 && velocity >= swipeCommitVelocity);
-    if (commit)
+      (Math.abs(dx) >= 48 && velocity >= swipeCommitVelocity)
+    )
       void mutate("selectionState", dx > 0 ? "selected" : "rejected", true);
   };
   const keydown = (event: KeyboardEvent) => {
@@ -792,9 +936,9 @@ export function renderApp(
       void performUndo();
       return;
     }
-    if (modifier || event.shiftKey) return;
-    if (event.key === "ArrowLeft") moveTo(index - 1);
-    else if (event.key === "ArrowRight") moveTo(index + 1);
+    if (modifier || event.shiftKey || !currentPhotoMode) return;
+    if (event.key === "ArrowLeft") void moveTo(currentIndex - 1);
+    else if (event.key === "ArrowRight") void moveTo(currentIndex + 1);
     else if (event.key.toLowerCase() === "p")
       void mutate("selectionState", "selected", true);
     else if (event.key.toLowerCase() === "x")
@@ -805,6 +949,66 @@ export function renderApp(
       void mutate("rating", Number(event.key), false);
   };
 
+  gridViewport.addEventListener("scroll", () => {
+    renderGrid();
+    const count = columns();
+    void loadWindow(
+      Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * count,
+    );
+  });
+  const onResize = () => {
+    requestAnimationFrame(() => {
+      if (gridView.hidden || columns() === renderedColumns) return;
+      gridViewport.scrollTop =
+        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+      renderGrid();
+    });
+  };
+  window.addEventListener("resize", onResize);
+  back.addEventListener("click", showGrid);
+  refresh.addEventListener(
+    "click",
+    () =>
+      void openSource(
+        sourceKind,
+        sourceKind === "photo-set"
+          ? sets.find((set) => set.id === sourceSetId)
+          : undefined,
+      ),
+  );
+  retry.addEventListener("click", () => void loadOverview());
+  retryPhoto.addEventListener("click", () => {
+    void (async () => {
+      busy = true;
+      status.textContent = "Reconnecting…";
+      updateControls();
+      const start = alignedStart(currentIndex);
+      const end = Math.min(total, start + WINDOW_SIZE);
+      for (let index = start; index < end; index += 1) loaded.delete(index);
+      await loadWindow(start, sourceGeneration, true);
+      const refreshed = await showPreview(requestGeneration);
+      const persisted = refreshed && (await persistPosition());
+      if (refreshed && persisted) {
+        setConnected(true);
+        status.textContent = "Connected. Current state refreshed.";
+      }
+      busy = false;
+      updateControls();
+    })();
+  });
+  previous.addEventListener("click", () => void moveTo(currentIndex - 1));
+  next.addEventListener("click", () => void moveTo(currentIndex + 1));
+  undoButton.addEventListener("click", () => void performUndo());
+  detail.addEventListener("click", () => {
+    if (!stage.querySelector("img")) return;
+    zoomed = !zoomed;
+    panX = 0;
+    panY = 0;
+    detail.setAttribute("aria-pressed", String(zoomed));
+    detail.textContent = zoomed ? "Exit Detail" : "Detail Review";
+    applyTransform();
+  });
+  stage.addEventListener("dblclick", () => detail.click());
   select.addEventListener(
     "click",
     () => void mutate("selectionState", "selected", true),
@@ -824,14 +1028,6 @@ export function renderApp(
     if (button)
       void mutate("rating", Number(button.dataset.ratingValue), false);
   });
-  previous.addEventListener("click", () => moveTo(index - 1));
-  next.addEventListener("click", () => moveTo(index + 1));
-  undoButton.addEventListener("click", () => void performUndo());
-  detail.addEventListener("click", toggleDetail);
-  stage.addEventListener("dblclick", toggleDetail);
-  leave.addEventListener("click", leaveSession);
-  retry.addEventListener("click", () => void loadSets());
-  retryReview.addEventListener("click", () => void reconnect());
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
@@ -842,8 +1038,12 @@ export function renderApp(
     finishPointer(event, true),
   );
   window.addEventListener("keydown", keydown);
-  void loadSets();
-  return () => window.removeEventListener("keydown", keydown);
+  void loadOverview();
+  return () => {
+    window.removeEventListener("keydown", keydown);
+    window.removeEventListener("resize", onResize);
+    if (token) void closeBrowse(token);
+  };
 }
 
 function required<T extends Element>(root: ParentNode, selector: string): T {

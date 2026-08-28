@@ -571,6 +571,13 @@ fn process_invalid_source(
             kind: PreviewFailureKind::Malformed,
         })),
         DerivativeResult::Failed(_failure) => {
+            // Thumbnail targets stay derivative cache/manifest state only; they
+            // never publish persisted Review Preview facts.
+            if job.target != DerivativeTarget::Review2560 {
+                return Ok(PreviewRequestResult::Unavailable(PreviewUnavailable {
+                    reason: PreviewUnavailableReason::NoUsableSource,
+                }));
+            }
             let publication = inner.state.lock().expect("Preview service poisoned");
             if publication.closed {
                 return Err(PreviewServiceError::Closed);
@@ -629,6 +636,13 @@ fn process_job(
             return process_invalid_source(inner, job, &context, invalid);
         }
         Some(Inspection::Unavailable(unavailable)) => {
+            // Thumbnail targets stay derivative cache/manifest state only; they
+            // never publish persisted Review Preview facts.
+            if job.target != DerivativeTarget::Review2560 {
+                return Ok(PreviewRequestResult::Unavailable(PreviewUnavailable {
+                    reason: PreviewUnavailableReason::NoUsableSource,
+                }));
+            }
             let publication = inner.state.lock().expect("Preview service poisoned");
             if publication.closed {
                 return Err(PreviewServiceError::Closed);
@@ -693,6 +707,12 @@ fn process_job(
         )),
         DerivativeResult::Ready(ready) => {
             context.verify_source(inspected.actual_source)?;
+            let ready = ready_result(&ready, job.target);
+            // Thumbnail targets stay derivative cache/manifest state only; they
+            // never publish persisted Review Preview facts.
+            if job.target != DerivativeTarget::Review2560 {
+                return Ok(PreviewRequestResult::Current(ready));
+            }
             // This lock is the publication linearization point.  Shutdown marks the
             // service closed before waiting for active jobs, so a closed service never
             // seeds a successful completion after this check.
@@ -711,9 +731,7 @@ fn process_job(
                 actual_source: Some(inspected.actual_source),
                 actual_source_revision: Some(inspected.actual_revision),
             })? {
-                PreviewSeedResult::Applied => Ok(PreviewRequestResult::Current(ready_result(
-                    &ready, job.target,
-                ))),
+                PreviewSeedResult::Applied => Ok(PreviewRequestResult::Current(ready)),
                 PreviewSeedResult::StaleIgnored => Ok(PreviewRequestResult::StaleIgnored),
             }
         }
@@ -721,19 +739,23 @@ fn process_job(
             let result = PreviewRequestResult::Failed(PreviewFailure {
                 kind: map_failure_kind(failure.kind),
             });
-            let publication = inner.state.lock().expect("Preview service poisoned");
-            if !publication.closed {
-                let _ = inner.library.seed_preview_blocking(PreviewSeed {
-                    photo_id: context.photo.id,
-                    state: PreviewState::Failed,
-                    expected_candidate: inspected.expected_candidate,
-                    expected_source_revision: inspected.expected_revision,
-                    width: None,
-                    height: None,
-                    cache_revision: None,
-                    actual_source: None,
-                    actual_source_revision: None,
-                });
+            // Thumbnail targets stay derivative cache/manifest state only; they
+            // never publish persisted Review Preview facts.
+            if job.target == DerivativeTarget::Review2560 {
+                let publication = inner.state.lock().expect("Preview service poisoned");
+                if !publication.closed {
+                    let _ = inner.library.seed_preview_blocking(PreviewSeed {
+                        photo_id: context.photo.id,
+                        state: PreviewState::Failed,
+                        expected_candidate: inspected.expected_candidate,
+                        expected_source_revision: inspected.expected_revision,
+                        width: None,
+                        height: None,
+                        cache_revision: None,
+                        actual_source: None,
+                        actual_source_revision: None,
+                    });
+                }
             }
             Ok(result)
         }
@@ -1164,6 +1186,127 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn thumbnail_requests_never_overwrite_review_preview_facts() {
+        let review_fixture = fixture(Some(&jpeg(80, 40)));
+        let id = photo_id(&review_fixture.library);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let review = runtime
+            .block_on(
+                review_fixture
+                    .service
+                    .review(id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        let PreviewRequestResult::Current(review_ready) = review else {
+            panic!("expected a current Review Preview")
+        };
+        assert_eq!(review_ready.target, DerivativeTarget::Review2560);
+        let facts = |library: &Library, id: &str| {
+            let photo = runtime
+                .block_on(library.snapshot())
+                .unwrap()
+                .photos
+                .into_iter()
+                .find(|photo| photo.id == id)
+                .unwrap();
+            (
+                photo.preview_state,
+                photo.preview_source,
+                photo.preview_width,
+                photo.preview_height,
+                photo.cache_revision,
+            )
+        };
+        let established = facts(&review_fixture.library, &id);
+        assert_eq!(established.0, PreviewState::Ready);
+
+        let thumbnail = runtime
+            .block_on(
+                review_fixture
+                    .service
+                    .thumbnail(id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        let PreviewRequestResult::Current(thumbnail_ready) = thumbnail else {
+            panic!("expected a current thumbnail")
+        };
+        assert_eq!(thumbnail_ready.target, DerivativeTarget::Thumbnail512);
+        assert_ne!(thumbnail_ready.cache_key, review_ready.cache_key);
+        assert_eq!(facts(&review_fixture.library, &id), established);
+
+        review_fixture.service.shutdown().unwrap();
+        review_fixture.library.shutdown().unwrap();
+        let config = LibraryConfig {
+            library_root: review_fixture.base.join("originals"),
+            state_directory: review_fixture.base.join("state"),
+            database_basename: "library.sqlite".to_owned(),
+            limits: ScanLimits::default(),
+            command_capacity: NonZeroUsize::new(64).unwrap(),
+        };
+        let library = Arc::new(Library::open(config).unwrap());
+        let service =
+            PreviewService::new(library.clone(), review_fixture.base.join("cache")).unwrap();
+        assert_eq!(facts(&library, &id), established);
+        let cached = runtime
+            .block_on(service.thumbnail(id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(cached_ready) = cached else {
+            panic!("expected the reopened thumbnail cache hit")
+        };
+        assert!(!cached_ready.generated);
+        assert_eq!(cached_ready.cache_key, thumbnail_ready.cache_key);
+        assert_eq!(facts(&library, &id), established);
+        service.shutdown().unwrap();
+        library.shutdown().unwrap();
+
+        // A thumbnail failure must not persist unavailable facts, while the
+        // Review pipeline still owns that publication for the same photo.
+        let malformed_fixture = fixture(Some(b"not jpeg"));
+        let malformed_id = photo_id(&malformed_fixture.library);
+        let failed = runtime
+            .block_on(
+                malformed_fixture
+                    .service
+                    .thumbnail(malformed_id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        assert!(matches!(
+            failed,
+            PreviewRequestResult::Unavailable(PreviewUnavailable {
+                reason: PreviewUnavailableReason::NoUsableSource
+            })
+        ));
+        let photo = runtime
+            .block_on(malformed_fixture.library.snapshot())
+            .unwrap()
+            .photos
+            .into_iter()
+            .find(|photo| photo.id == malformed_id)
+            .unwrap();
+        assert_eq!(photo.preview_state, PreviewState::InspectionPending);
+        assert!(photo.preview_source.is_none());
+        assert!(photo.cache_revision.is_none());
+        assert!(matches!(
+            runtime.block_on(
+                malformed_fixture
+                    .service
+                    .review(malformed_id, DerivativePriority::Current)
+            ),
+            Ok(PreviewRequestResult::Unavailable(PreviewUnavailable {
+                reason: PreviewUnavailableReason::NoUsableSource
+            }))
+        ));
+        let photo = runtime
+            .block_on(malformed_fixture.library.snapshot())
+            .unwrap()
+            .photos
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(photo.preview_state, PreviewState::Unavailable);
     }
 
     #[test]

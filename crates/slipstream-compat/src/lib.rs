@@ -444,7 +444,13 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(vectors.len() >= 9);
+        vectors.extend(
+            serde_json::from_slice::<Vec<Value>>(
+                &fs::read(contract_path("protocol/browse-vectors.json")).unwrap(),
+            )
+            .unwrap(),
+        );
+        assert!(vectors.len() >= 20);
         for vector in &vectors {
             assert!(vector["request"]["method"].is_string());
             assert!(
@@ -452,6 +458,20 @@ mod tests {
             );
             assert!(vector["expected"]["status"].is_number());
         }
+        let browse: Vec<Value> = serde_json::from_slice(
+            &fs::read(contract_path("protocol/browse-vectors.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(browse.iter().any(|vector| {
+            vector["request"]["method"] == "POST"
+                && vector["request"]["path"] == "/api/browse"
+                && vector["expected"]["body"]["token"] == "$token"
+        }));
+        assert!(
+            browse
+                .iter()
+                .any(|vector| vector["expected"]["status"] == 404)
+        );
         let values: Vec<Value> =
             serde_json::from_slice(&fs::read(contract_path("protocol/responses.json")).unwrap())
                 .unwrap();
