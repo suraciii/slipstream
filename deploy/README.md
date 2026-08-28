@@ -40,7 +40,7 @@ test "$(realpath -- "$SLIPSTREAM_LIBRARY_ROOT")" = "$SLIPSTREAM_LIBRARY_ROOT"
 install -d -o 1000 -g 1000 -m 0700 "$SLIPSTREAM_STATE_DIRECTORY" "$SLIPSTREAM_CACHE_DIRECTORY"
 ```
 
-Do not place state or cache inside the Library Folder. SQLite stores the admitted canonical Library Folder path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts the Folder read-only at that same path inside the container. A 0.1 deployment must not change it after initialization. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
+Do not place state or cache inside the Library Folder. SQLite stores the admitted canonical Library Folder path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts the Folder read-only at that same path inside the container. Change the Folder only through the stopped, verified Library Expansion procedure below. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
 
 ## Pre-cutover checks
 
@@ -80,6 +80,32 @@ docker compose --env-file /path/to/slipstream.env -f compose.yaml config >/dev/n
 `backup-state.sh` uses SQLite's backup API to create a transactionally consistent snapshot instead of sequentially copying database bytes. It fails when a journal/WAL/SHM sidecar or any unexpected state entry exists, SQLite integrity or foreign-key checks fail, or the extracted archive differs from the verified snapshot. It never checkpoints, repairs, or rewrites the source database. Stopping the service remains the deployment precondition so the backup and image cutover share one quiescent boundary; the backup API also prevents a torn copy if that operational step is accidentally violated. A filesystem snapshot is acceptable only when it provides equivalently proven consistency and is verified before use.
 
 The backup is an operator recovery copy. Do not remove SQLite journal, WAL, or shared-memory sidecars by hand; Slipstream's startup admission must classify those files and require operator recovery when appropriate.
+
+## Library Expansion
+
+Use this operation only to replace the current Library Folder with a canonical ancestor that contains the same current Folder. It does not support an unrelated move, multiple roots, or per-file relinking.
+
+1. Stop every Slipstream process using the state database. Preserve sidecars for recovery instead of deleting them.
+2. With `SLIPSTREAM_LIBRARY_ROOT` still set to the current Folder, create and record a verified canonical schema-v4 backup:
+
+   ```sh
+   export SLIPSTREAM_EXPECTED_SCHEMA_VERSION=4
+   export SLIPSTREAM_BACKUP_OUTPUT="/data/slipstream/backups/state-before-expansion-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+   ./scripts/backup-state.sh
+   ```
+
+3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep the state directory and database basename unchanged. Ensure the proposed Folder is mounted read-only at the same absolute path inside the container.
+4. Run the candidate image once without starting the service:
+
+   ```sh
+   docker compose --env-file /path/to/expanded-library.env -f compose.yaml run --rm --no-deps slipstream expand-library
+   ```
+
+   The command opens the old configured Folder from SQLite, proves it is the same descriptor-confined descendant of the proposed Folder, preflights the complete proposed Folder within scan limits, and then performs one admitted transaction. It prefixes all remembered Original Locations, updates Photo sort paths, changes the binding, and invalidates Location-derived Capture, Preview, and cache facts while retaining IDs and user-owned state. It completes a normal scan before reporting success.
+
+5. Start the service and run production acceptance against schema version 4, the proposed Folder, the exact pre-expansion user-state projection, and representative Original hashes.
+
+If preflight or the transaction fails, keep the prior Folder configuration; SQLite remains bound to it. If the post-commit scan fails, do not expose the service as ready. Correct the root-level failure and retry startup, or restore the verified pre-expansion v4 backup and prior Folder. To roll back the v3-to-v4 migration itself, restore the verified pre-migration v3 backup before starting the compatible v3 image; a v3 binary rejects v4 state.
 
 ## Cutover
 

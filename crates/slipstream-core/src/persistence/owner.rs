@@ -1,19 +1,25 @@
-use super::{DatabaseName, SchemaVersion, StateDirectory, StateError, validate_canonical_schema};
+use super::{
+    DatabaseName, SchemaVersion, StateDirectory, StateError, StateFileIdentity,
+    admission::StateDatabaseLock, validate_canonical_schema,
+};
 use crate::{
-    CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, OriginalErrorCategory,
-    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoSetMember,
-    PhotoSetMutation, PhotoSetMutationResult, PhotoSetRecord, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
-    PreviewSeedResult, PreviewState, ScanSnapshot, SelectionState,
-    identity::{original_id, source_revision},
+    CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, LibraryRoot,
+    OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
+    PhotoRecord, PhotoSetMember, PhotoSetMutation, PhotoSetMutationResult, PhotoSetRecord,
+    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
+    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
+    ScanLimits, ScanSnapshot, SelectionState,
+    identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use std::{
+    collections::{HashMap, HashSet},
     fmt,
     num::NonZeroUsize,
+    path::Path,
     sync::{
         Arc, Mutex,
         mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
@@ -39,6 +45,8 @@ pub enum PersistenceError {
     NewerSchema,
     RootMismatch,
     InvalidLegacyData,
+    InvalidExpansion,
+    IdCollision,
     Storage,
     OwnerStopped,
 }
@@ -54,6 +62,8 @@ impl fmt::Display for PersistenceError {
             Self::NewerSchema => "SQLite schema version is newer than this Slipstream build",
             Self::RootMismatch => "SQLite database belongs to a different Photo Library root",
             Self::InvalidLegacyData => "SQLite legacy data cannot be migrated safely",
+            Self::InvalidExpansion => "Photo Library expansion could not be proven safely",
+            Self::IdCollision => "SQLite identity allocation collided with existing state",
             Self::Storage => "SQLite persistence failed",
             Self::OwnerStopped => "SQLite persistence owner stopped unexpectedly",
         })
@@ -105,6 +115,8 @@ fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
         | PersistenceError::NewerSchema
         | PersistenceError::RootMismatch
         | PersistenceError::InvalidLegacyData
+        | PersistenceError::InvalidExpansion
+        | PersistenceError::IdCollision
         | PersistenceError::Storage => MutationError::Persistence,
     }
 }
@@ -242,6 +254,16 @@ impl Persistence {
             }
             return Err(PersistenceError::RecoveryRequired);
         }
+        let database_lock = match state.lock_database(&database_name) {
+            Ok(lock) => lock,
+            Err(error) => {
+                if created {
+                    state.remove_created_empty_database(&database_name, identity)?;
+                }
+                return Err(error.into());
+            }
+        };
+        state.verify_database(&database_name, identity)?;
         let (sender, receiver) = sync_channel(capacity.get());
         let (startup_send, startup_receive) = std::sync::mpsc::channel();
         let join = thread::Builder::new()
@@ -251,6 +273,7 @@ impl Persistence {
                     state,
                     database_name,
                     identity,
+                    database_lock,
                     canonical_root,
                     receiver,
                     startup_send,
@@ -503,7 +526,8 @@ impl Drop for Inner {
 fn owner_main(
     state: StateDirectory,
     database_name: DatabaseName,
-    identity: super::StateFileIdentity,
+    identity: StateFileIdentity,
+    _database_lock: StateDatabaseLock,
     canonical_root: String,
     receiver: Receiver<Command>,
     startup: std::sync::mpsc::Sender<Result<(), PersistenceError>>,
@@ -626,10 +650,18 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
+    preflight_schema_for_max_version(connection, canonical_root, 4)
+}
+
+fn preflight_schema_for_max_version(
+    connection: &Connection,
+    canonical_root: &str,
+    maximum_version: u32,
+) -> Result<(), PersistenceError> {
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 3 {
+    if version > maximum_version {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -641,6 +673,8 @@ fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(),
         2 => validate_canonical_schema(connection, SchemaVersion::V2)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         3 => validate_canonical_schema(connection, SchemaVersion::V3)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        4 => validate_canonical_schema(connection, SchemaVersion::V4)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -678,7 +712,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 3 {
+    if version > 4 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -690,19 +724,27 @@ fn startup_schema(
         0 => {
             migrate_v0(&transaction)?;
             migrate_v2(&transaction)?;
+            migrate_v3(&transaction)?;
         }
         1 => {
             validate_canonical_schema(&transaction, SchemaVersion::V1)
                 .map_err(|_| PersistenceError::UnsupportedSchema)?;
             migrate_v1(&transaction)?;
             migrate_v2(&transaction)?;
+            migrate_v3(&transaction)?;
         }
         2 => {
             validate_canonical_schema(&transaction, SchemaVersion::V2)
                 .map_err(|_| PersistenceError::UnsupportedSchema)?;
             migrate_v2(&transaction)?;
+            migrate_v3(&transaction)?;
         }
-        3 => validate_canonical_schema(&transaction, SchemaVersion::V3)
+        3 => {
+            validate_canonical_schema(&transaction, SchemaVersion::V3)
+                .map_err(|_| PersistenceError::UnsupportedSchema)?;
+            migrate_v3(&transaction)?;
+        }
+        4 => validate_canonical_schema(&transaction, SchemaVersion::V4)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
@@ -723,7 +765,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V3)
+    validate_canonical_schema(&transaction, SchemaVersion::V4)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -819,6 +861,12 @@ fn migrate_v2(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::Storage)
 }
 
+fn migrate_v3(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    transaction
+        .execute_batch("PRAGMA user_version = 4;")
+        .map_err(|_| PersistenceError::Storage)
+}
+
 fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
     let tables = names(connection, "table")?;
     if tables != ["library_metadata", "original_files", "photos"] {
@@ -899,6 +947,326 @@ fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
         return Err(PersistenceError::Storage);
     }
     Ok(())
+}
+
+type PreservedOriginal = (
+    String,
+    String,
+    i64,
+    f64,
+    i64,
+    Option<String>,
+    Option<String>,
+);
+type PreservedPhoto = (
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+    String,
+    i64,
+);
+
+#[derive(Debug, PartialEq)]
+struct ExpansionProjection {
+    originals: Vec<PreservedOriginal>,
+    photos: Vec<PreservedPhoto>,
+    photo_sets: Vec<(String, String, i64)>,
+    members: Vec<(String, String, i64)>,
+    progress: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+struct ExpansionPlan {
+    originals: Vec<(String, String, String)>,
+    photo_sort_paths: Vec<(String, String)>,
+}
+
+pub(crate) fn expand_library_binding(
+    proposed_root: &LibraryRoot,
+    state: StateDirectory,
+    database_name: DatabaseName,
+    limits: ScanLimits,
+    fail_after_first_update: bool,
+) -> Result<(), PersistenceError> {
+    let identity = state.prepare_existing_database(&database_name)?;
+    let _database_lock = state.lock_database(&database_name)?;
+    state.verify_database(&database_name, identity)?;
+    let readonly = Connection::open_with_flags(
+        state.sqlite_immutable_uri(&database_name),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(&readonly, SchemaVersion::V4)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    let stored_root = required_root_binding(&readonly)?;
+    drop(readonly);
+
+    let prefix = expansion_prefix(proposed_root.canonical_path(), &stored_root)?;
+    let old_root =
+        LibraryRoot::open(&stored_root).map_err(|_| PersistenceError::InvalidExpansion)?;
+    let confined_old = proposed_root
+        .descendant(
+            RelativeOriginalPath::parse(prefix.clone())
+                .map_err(|_| PersistenceError::InvalidExpansion)?,
+        )
+        .map_err(|_| PersistenceError::InvalidExpansion)?;
+    if !old_root
+        .identifies_same_directory(&confined_old)
+        .map_err(|_| PersistenceError::InvalidExpansion)?
+    {
+        return Err(PersistenceError::InvalidExpansion);
+    }
+    proposed_root
+        .scan(limits)
+        .map_err(|_| PersistenceError::InvalidExpansion)?;
+    let confined_after_scan = proposed_root
+        .descendant(
+            RelativeOriginalPath::parse(prefix.clone())
+                .map_err(|_| PersistenceError::InvalidExpansion)?,
+        )
+        .map_err(|_| PersistenceError::InvalidExpansion)?;
+    if !old_root
+        .identifies_same_directory(&confined_after_scan)
+        .map_err(|_| PersistenceError::InvalidExpansion)?
+    {
+        return Err(PersistenceError::InvalidExpansion);
+    }
+
+    state.verify_database(&database_name, identity)?;
+    state.admit_sidecars(&database_name)?;
+    let mut connection = Connection::open(state.sqlite_path(&database_name))
+        .map_err(|_| PersistenceError::Storage)?;
+    state.verify_database(&database_name, identity)?;
+    state.admit_sidecars(&database_name)?;
+    let journal: String = connection
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|_| PersistenceError::Storage)?;
+    if !journal.eq_ignore_ascii_case("delete") {
+        return Err(PersistenceError::UnsupportedSchema);
+    }
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(&connection, SchemaVersion::V4)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    if required_root_binding(&connection)? != stored_root {
+        return Err(PersistenceError::RootMismatch);
+    }
+    validate_database(&connection)?;
+    let plan = expansion_plan(&connection, &prefix)?;
+    let preserved = expansion_projection(&connection)?;
+
+    state.admit_sidecars(&database_name)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(&transaction, SchemaVersion::V4)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    if required_root_binding(&transaction)? != stored_root
+        || expansion_projection(&transaction)? != preserved
+    {
+        return Err(PersistenceError::InvalidExpansion);
+    }
+    for (index, (id, old_path, new_path)) in plan.originals.iter().enumerate() {
+        let changed = transaction
+            .execute(
+                "UPDATE original_files SET relative_path=?,capture_metadata_state='pending',capture_order_key=NULL,capture_time_field=NULL,capture_offset_minutes=NULL,capture_source_revision=NULL WHERE id=? AND relative_path=?",
+                params![new_path, id, old_path],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        if changed != 1 {
+            return Err(PersistenceError::InvalidExpansion);
+        }
+        if fail_after_first_update && index == 0 {
+            return Err(PersistenceError::Storage);
+        }
+    }
+    for (id, sort_path) in &plan.photo_sort_paths {
+        let changed = transaction
+            .execute(
+                "UPDATE photos SET sort_path=?,preview_state='inspection-pending',preview_candidate=NULL,preview_source=NULL,preview_source_revision=NULL,preview_width=NULL,preview_height=NULL,cache_revision=NULL WHERE id=?",
+                params![sort_path, id],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        if changed != 1 {
+            return Err(PersistenceError::InvalidExpansion);
+        }
+    }
+    if transaction
+        .execute(
+            "UPDATE library_metadata SET value=? WHERE key='canonical_root' AND value=?",
+            params![
+                proposed_root
+                    .canonical_path()
+                    .to_str()
+                    .ok_or(PersistenceError::InvalidExpansion)?,
+                stored_root
+            ],
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        != 1
+        || expansion_projection(&transaction)? != preserved
+    {
+        return Err(PersistenceError::InvalidExpansion);
+    }
+    validate_database(&transaction)?;
+    validate_canonical_schema(&transaction, SchemaVersion::V4)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction.commit().map_err(|_| PersistenceError::Storage)
+}
+
+fn required_root_binding(connection: &Connection) -> Result<String, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key='canonical_root'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?
+        .ok_or(PersistenceError::InvalidExpansion)
+}
+
+fn expansion_prefix(proposed: &Path, stored: &str) -> Result<String, PersistenceError> {
+    let stored = Path::new(stored);
+    let relative = stored
+        .strip_prefix(proposed)
+        .map_err(|_| PersistenceError::InvalidExpansion)?;
+    let prefix = relative
+        .to_str()
+        .ok_or(PersistenceError::InvalidExpansion)?;
+    RelativeOriginalPath::parse(prefix.to_owned())
+        .map(|path| path.as_str().to_owned())
+        .map_err(|_| PersistenceError::InvalidExpansion)
+}
+
+fn expansion_plan(
+    connection: &Connection,
+    prefix: &str,
+) -> Result<ExpansionPlan, PersistenceError> {
+    let originals = connection
+        .prepare("SELECT id,relative_path,kind FROM original_files ORDER BY id")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    let mut paths_by_id = HashMap::new();
+    let mut targets = HashSet::new();
+    let mut mapped = Vec::with_capacity(originals.len());
+    for (id, old_path, kind) in originals {
+        let old = RelativeOriginalPath::parse(old_path.clone())
+            .map_err(|_| PersistenceError::InvalidExpansion)?;
+        let classified = old
+            .as_str()
+            .rsplit('/')
+            .next()
+            .and_then(classify_name)
+            .ok_or(PersistenceError::InvalidExpansion)?;
+        if (classified == OriginalKind::Raw) != (kind == "raw")
+            || !matches!(kind.as_str(), "raw" | "jpeg")
+        {
+            return Err(PersistenceError::InvalidExpansion);
+        }
+        let new_path = RelativeOriginalPath::parse(format!("{prefix}/{}", old.as_str()))
+            .map_err(|_| PersistenceError::InvalidExpansion)?
+            .as_str()
+            .to_owned();
+        if !targets.insert(new_path.clone()) {
+            return Err(PersistenceError::InvalidExpansion);
+        }
+        paths_by_id.insert(id.clone(), new_path.clone());
+        mapped.push((id, old_path, new_path));
+    }
+    let photos = connection
+        .prepare("SELECT id,raw_original_id,jpeg_original_id FROM photos ORDER BY id")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    let mut photo_sort_paths = Vec::with_capacity(photos.len());
+    for (id, raw, jpeg) in photos {
+        let source = raw
+            .as_ref()
+            .or(jpeg.as_ref())
+            .ok_or(PersistenceError::InvalidExpansion)?;
+        let sort_path = paths_by_id
+            .get(source)
+            .ok_or(PersistenceError::InvalidExpansion)?
+            .clone();
+        photo_sort_paths.push((id, sort_path));
+    }
+    Ok(ExpansionPlan {
+        originals: mapped,
+        photo_sort_paths,
+    })
+}
+
+fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, PersistenceError> {
+    macro_rules! rows {
+        ($sql:literal, $map:expr) => {{
+            connection
+                .prepare($sql)
+                .map_err(|_| PersistenceError::Storage)?
+                .query_map([], $map)
+                .map_err(|_| PersistenceError::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| PersistenceError::Storage)?
+        }};
+    }
+    Ok(ExpansionProjection {
+        originals: rows!(
+            "SELECT id,kind,size,mtime_ms,available,error_category,error_message FROM original_files ORDER BY id",
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?
+            ))
+        ),
+        photos: rows!(
+            "SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,selection_state,rating FROM photos ORDER BY id",
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?
+            ))
+        ),
+        photo_sets: rows!(
+            "SELECT id,name,created_at FROM photo_sets ORDER BY id",
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ),
+        members: rows!(
+            "SELECT photo_set_id,photo_id,position FROM photo_set_members ORDER BY photo_set_id,photo_id",
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ),
+        progress: rows!(
+            "SELECT photo_set_id,photo_id FROM review_progress ORDER BY photo_set_id",
+            |row| Ok((row.get(0)?, row.get(1)?))
+        ),
+    })
 }
 
 fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
@@ -1151,8 +1519,29 @@ fn apply_scan(
         .iter()
         .map(|original| (original.relative_path.as_str().to_owned(), original.clone()))
         .collect::<std::collections::HashMap<_, _>>();
-    let reconciled = reconcile(discovered, &before.photos);
     write_transaction(state, database_name, connection, |transaction| {
+        let existing_ids = before
+            .originals
+            .iter()
+            .map(|original| {
+                (
+                    original.relative_path.as_str().to_owned(),
+                    original.id.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut reserved_ids = HashSet::new();
+        let mut original_ids = HashMap::with_capacity(discovered.len());
+        for original in discovered {
+            let id = match existing_ids.get(original.path.as_str()) {
+                Some(id) => id.clone(),
+                None => allocate_library_id(transaction, &mut reserved_ids)?,
+            };
+            original_ids.insert(original.path.as_str().to_owned(), id);
+        }
+        let reconciled = reconcile(discovered, &before.photos, &original_ids, || {
+            allocate_library_id(transaction, &mut reserved_ids)
+        })?;
         transaction
             .execute("UPDATE original_files SET available=0", [])
             .map_err(|_| PersistenceError::Storage)?;
@@ -1167,7 +1556,7 @@ fn apply_scan(
                     capture_offset_minutes,capture_source_revision)
                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(relative_path) DO UPDATE SET
-                   id=excluded.id,kind=excluded.kind,size=excluded.size,mtime_ms=excluded.mtime_ms,
+                   kind=excluded.kind,size=excluded.size,mtime_ms=excluded.mtime_ms,
                    available=excluded.available,error_category=excluded.error_category,error_message=excluded.error_message,
                    capture_metadata_state=excluded.capture_metadata_state,
                    capture_order_key=excluded.capture_order_key,
@@ -1178,7 +1567,9 @@ fn apply_scan(
             .map_err(|_| PersistenceError::Storage)?;
         for (index, original) in discovered.iter().enumerate() {
             validate_capture_fact(&original.capture).map_err(|_| PersistenceError::Storage)?;
-            let id = original_id(original.path.as_str());
+            let id = original_ids
+                .get(original.path.as_str())
+                .expect("assigned Original identity");
             upsert_original
                 .execute(params![
                     id,
@@ -1419,7 +1810,7 @@ fn write_transaction<T>(
     Ok(result)
 }
 
-fn uuid_v4() -> Result<String, MutationError> {
+fn random_uuid_v4() -> Result<String, PersistenceError> {
     let mut bytes = [0_u8; 16];
     let mut offset = 0;
     while offset < bytes.len() {
@@ -1432,12 +1823,12 @@ fn uuid_v4() -> Result<String, MutationError> {
             if error.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            return Err(MutationError::Persistence);
+            return Err(PersistenceError::Storage);
         }
         if result == 0 {
-            return Err(MutationError::Persistence);
+            return Err(PersistenceError::Storage);
         }
-        offset += usize::try_from(result).map_err(|_| MutationError::Persistence)?;
+        offset += usize::try_from(result).map_err(|_| PersistenceError::Storage)?;
     }
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
@@ -1460,6 +1851,38 @@ fn uuid_v4() -> Result<String, MutationError> {
         bytes[14],
         bytes[15]
     ))
+}
+
+fn allocate_library_id(
+    transaction: &Transaction<'_>,
+    reserved: &mut HashSet<String>,
+) -> Result<String, PersistenceError> {
+    let id = random_uuid_v4()?;
+    reserve_library_id(transaction, reserved, id)
+}
+
+fn reserve_library_id(
+    transaction: &Transaction<'_>,
+    reserved: &mut HashSet<String>,
+    id: String,
+) -> Result<String, PersistenceError> {
+    let collision = reserved.contains(&id)
+        || transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM original_files WHERE id=?) OR EXISTS(SELECT 1 FROM photos WHERE id=?)",
+                params![id, id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+    if collision {
+        return Err(PersistenceError::IdCollision);
+    }
+    reserved.insert(id.clone());
+    Ok(id)
+}
+
+fn uuid_v4() -> Result<String, MutationError> {
+    random_uuid_v4().map_err(|_| MutationError::Persistence)
 }
 
 fn unix_millis() -> i64 {
@@ -1880,7 +2303,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LibraryRoot;
+    use crate::{LibraryRoot, identity::original_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -1967,7 +2390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initializes_exact_v3_and_runs_fifo_writes() {
+    async fn initializes_exact_v4_and_runs_fifo_writes() {
         let (_base, library, state, name, path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -1988,11 +2411,29 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
+    }
+
+    #[test]
+    fn legacy_v3_binary_fence_rejects_canonical_v4() {
+        let (_base, library, _state, _name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
+        );
+        let connection = Connection::open(path).unwrap();
+        assert!(matches!(
+            preflight_schema_for_max_version(
+                &connection,
+                library.canonical_path().to_str().unwrap(),
+                3,
+            ),
+            Err(PersistenceError::NewerSchema)
+        ));
     }
 
     #[tokio::test]
-    async fn migrates_shared_v0_and_v1_to_v3_and_rejects_malformed_v2() {
+    async fn migrates_shared_v0_and_v1_to_v4_and_rejects_malformed_v2() {
         for sql in [
             include_str!("../../../../compatibility/sqlite/v0.sql"),
             include_str!("../../../../compatibility/sqlite/v1.sql"),
@@ -2007,7 +2448,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -2069,11 +2510,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_migration_preserves_identity_membership_decisions_preview_and_progress() {
+    async fn v3_migration_preserves_every_row_identity_and_user_owned_state() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
-            include_str!("../../../../compatibility/sqlite/schema-v2.sql"),
+            include_str!("../../../../compatibility/sqlite/schema-v3.sql"),
         );
         let original_id = original_id("shoot/A.JPG");
         let photo_id = "photo-preserved";
@@ -2081,7 +2522,7 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
-                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO original_files VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![
                     original_id,
                     "shoot/A.JPG",
@@ -2090,7 +2531,12 @@ mod tests {
                     1_000.0_f64,
                     1_i64,
                     Option::<String>::None,
-                    Option::<String>::None
+                    Option::<String>::None,
+                    "known",
+                    "2026-01-01T10:00:00.000000000",
+                    "date-time-original",
+                    60_i64,
+                    "capture-revision"
                 ],
             )
             .unwrap();
@@ -2160,7 +2606,16 @@ mod tests {
         assert!(original.available);
         assert_eq!(original.error_category, None);
         assert_eq!(original.error_message, None);
-        assert_eq!(original.capture, CaptureFact::pending());
+        assert_eq!(
+            original.capture,
+            CaptureFact {
+                state: CaptureMetadataState::Known,
+                order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
+                field: Some(CaptureTimeField::DateTimeOriginal),
+                offset_minutes: Some(60),
+                source_revision: Some("capture-revision".to_owned()),
+            }
+        );
         let set = persistence.list_photo_sets().await.unwrap().remove(0);
         assert_eq!(set.id, set_id);
         assert_eq!(set.name, "Preserved");
@@ -2173,7 +2628,7 @@ mod tests {
         assert_eq!(set.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V3).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
     }
 
     #[tokio::test]
@@ -2375,6 +2830,32 @@ mod tests {
             error_message: None,
             capture: CaptureFact::pending(),
         }
+    }
+
+    #[test]
+    fn new_library_id_collision_is_rejected_before_insertion() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../../compatibility/sqlite/schema-v4.sql"
+            ))
+            .unwrap();
+        connection.execute(
+            "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state) VALUES('collision','a.JPG','jpeg',1,1,1,'pending')",
+            [],
+        ).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        assert!(matches!(
+            reserve_library_id(&transaction, &mut HashSet::new(), "collision".to_owned()),
+            Err(PersistenceError::IdCollision)
+        ));
+        assert_eq!(
+            transaction
+                .query_row("SELECT count(*) FROM original_files", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

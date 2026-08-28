@@ -17,4 +17,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+rusqlite.workspace = true
 tower.workspace = true

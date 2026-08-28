@@ -86,6 +86,14 @@ cargo run --locked -p slipstream-server
 
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
 
+To expand a stopped schema-v4 Library to an ancestor Folder, first create and record a verified backup with `scripts/backup-state.sh`. Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
+
+```sh
+cargo run --locked -p slipstream-server -- expand-library
+```
+
+The offline command rejects a running database, sidecars, non-v4 state, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes once, then completes a normal scan before reporting success.
+
 ## Container verification
 
 The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and a Debian runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Run the focused static and Compose checks with:

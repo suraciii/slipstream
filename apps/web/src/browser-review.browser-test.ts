@@ -31,16 +31,6 @@ test.afterEach(async () => {
 async function jpeg() {
   return readFile(new URL("../test-fixtures/review.jpg", import.meta.url));
 }
-function photoIdFor(relativePath: string): string {
-  const originalId = createHash("sha256")
-    .update("original\0")
-    .update(relativePath)
-    .digest("hex");
-  return createHash("sha256")
-    .update("photo\0")
-    .update(originalId)
-    .digest("hex");
-}
 function withCaptureTime(source: Uint8Array, captureTime: string): Uint8Array {
   const value = new TextEncoder().encode(`${captureTime}\0`);
   const dataOffset = 8 + 2 + 12 + 4;
@@ -646,8 +636,9 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   const photos = (await (
     await fetch(`${running.url}/api/photos`)
   ).json()) as PhotoListResponse;
-  const zId = photoIdFor("Z.jpg");
-  const aId = photoIdFor("A.jpg");
+  const [zPhoto, aPhoto] = photos.photos;
+  const zId = zPhoto!.id;
+  const aId = aPhoto!.id;
   expect(photos.photos.map((photo) => photo.id)).toEqual([zId, aId]);
   const previewRequests: string[] = [];
   const stateBodies: unknown[] = [];
@@ -702,8 +693,10 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
     withCaptureTime(source, "2026:01:01 09:00:00"),
   );
   const running = await server(base, root);
-  const zId = photoIdFor("Z.jpg");
-  const bId = photoIdFor("B.jpg");
+  const photos = (await (
+    await fetch(`${running.url}/api/photos`)
+  ).json()) as PhotoListResponse;
+  const zId = photos.photos[0]!.id;
   const previews: string[] = [];
   page.on("request", (request) => {
     if (request.url().includes("/preview")) previews.push(request.url());
@@ -726,7 +719,16 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await page.getByRole("button", { name: "Photo Sets" }).click();
   await page.getByRole("button", { name: /Library Review/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
-  await expect.poll(() => previews.some((url) => url.includes(bId))).toBe(true);
+  const expandedPhotos = (await (
+    await fetch(`${running.url}/api/photos`)
+  ).json()) as PhotoListResponse;
+  const bPhoto = expandedPhotos.photos.find(
+    (photo) => !photos.photos.some((prior) => prior.id === photo.id),
+  );
+  expect(bPhoto).toBeDefined();
+  await expect
+    .poll(() => previews.some((url) => url.includes(bPhoto!.id)))
+    .toBe(true);
 });
 
 test("Photo Set Review snapshots explicit members across rescan and reconnect", async ({
@@ -743,9 +745,11 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
     withCaptureTime(source, "2026:01:01 09:00:00"),
   );
   const running = await server(base, root);
-  const aId = photoIdFor("A.jpg");
-  const zId = photoIdFor("Z.jpg");
-  const bId = photoIdFor("B.jpg");
+  const initialPhotos = (await (
+    await fetch(`${running.url}/api/photos`)
+  ).json()) as PhotoListResponse;
+  const aId = initialPhotos.photos[1]!.id;
+  const zId = initialPhotos.photos[0]!.id;
   const { setId } = await createSet(running.url, "Snapshot");
   await post(running.url, `/api/photo-sets/${setId}/order`, {
     photoIds: [aId, zId],
@@ -758,8 +762,15 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
     withCaptureTime(source, "2026:01:01 08:00:00"),
   );
   await post(running.url, "/api/scan", {});
+  const rescannedPhotos = (await (
+    await fetch(`${running.url}/api/photos`)
+  ).json()) as PhotoListResponse;
+  const bPhoto = rescannedPhotos.photos.find(
+    (photo) => !initialPhotos.photos.some((prior) => prior.id === photo.id),
+  );
+  expect(bPhoto).toBeDefined();
   await post(running.url, `/api/photo-sets/${setId}/members`, {
-    photoIds: [bId],
+    photoIds: [bPhoto!.id],
   });
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.getByRole("button", { name: "Next" }).click();

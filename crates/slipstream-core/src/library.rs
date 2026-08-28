@@ -5,6 +5,7 @@ use crate::{
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
+        expand_library_binding,
     },
 };
 use std::{
@@ -180,6 +181,24 @@ pub struct Library {
     scanner: Scanner,
     lifecycle: Mutex<Lifecycle>,
     shutdown: Mutex<Option<Result<(), LibraryError>>>,
+}
+
+pub fn expand_library(config: LibraryConfig) -> Result<(), LibraryError> {
+    let root = LibraryRoot::open(&config.library_root)?;
+    root.canonical_path()
+        .to_str()
+        .ok_or(LibraryError::UnsupportedRootEncoding)?;
+    let state = StateDirectory::open_or_create(&root, &config.state_directory)?;
+    let database = DatabaseName::parse(config.database_basename).map_err(LibraryError::State)?;
+    expand_library_binding(&root, state, database, config.limits, false).map_err(Into::into)
+}
+
+#[cfg(test)]
+fn expand_library_with_transaction_failure(config: LibraryConfig) -> Result<(), LibraryError> {
+    let root = LibraryRoot::open(&config.library_root)?;
+    let state = StateDirectory::open_or_create(&root, &config.state_directory)?;
+    let database = DatabaseName::parse(config.database_basename).map_err(LibraryError::State)?;
+    expand_library_binding(&root, state, database, config.limits, true).map_err(Into::into)
 }
 
 impl Drop for Library {
@@ -547,7 +566,12 @@ fn scanner_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OriginalKind, persistence::PersistenceError};
+    use crate::{
+        OriginalKind,
+        identity::{original_id, paired_photo_id},
+        persistence::PersistenceError,
+    };
+    use rusqlite::{Connection, params};
     use std::{
         fs,
         os::unix::ffi::OsStringExt,
@@ -807,6 +831,340 @@ mod tests {
         assert!(matches!(result, Err(LibraryError::Confinement(_))));
         assert_eq!(failed_library.snapshot().await.unwrap(), initial);
         failed_library.shutdown().unwrap();
+    }
+
+    fn expansion_fixture() -> (TempTree, LibraryConfig, PathBuf) {
+        let base = TempTree::new();
+        let proposed = base.0.join("originals");
+        let old = proposed.join("shoot");
+        let state = base.0.join("state");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir(&state).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(old.join("a.ARW"), b"raw-original").unwrap();
+        fs::write(old.join("a.JPG"), b"jpeg-original").unwrap();
+        let database = state.join("library.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v4.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('canonical_root',?)",
+                [old.to_str().unwrap()],
+            )
+            .unwrap();
+        let raw_id = original_id("a.ARW");
+        let jpeg_id = original_id("a.JPG");
+        let missing_id = original_id("missing.JPG");
+        for (
+            id,
+            path,
+            kind,
+            size,
+            available,
+            capture_state,
+            capture_key,
+            capture_field,
+            capture_revision,
+        ) in [
+            (
+                &raw_id,
+                "a.ARW",
+                "raw",
+                12_i64,
+                1_i64,
+                "known",
+                Some("2026-01-01T10:00:00.000000000"),
+                Some("date-time-original"),
+                Some("old-capture"),
+            ),
+            (
+                &jpeg_id,
+                "a.JPG",
+                "jpeg",
+                13_i64,
+                1_i64,
+                "missing",
+                None,
+                None,
+                Some("old-jpeg-capture"),
+            ),
+            (
+                &missing_id,
+                "missing.JPG",
+                "jpeg",
+                7_i64,
+                0_i64,
+                "failed",
+                None,
+                None,
+                Some("retained-failure"),
+            ),
+        ] {
+            connection.execute(
+                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state,capture_order_key,capture_time_field,capture_source_revision) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                params![id,path,kind,size,1.0_f64,available,capture_state,capture_key,capture_field,capture_revision],
+            ).unwrap();
+        }
+        let pair_id = paired_photo_id(&raw_id, &jpeg_id);
+        let missing_photo_id = "legacy-missing-photo";
+        connection.execute(
+            "INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,preview_source,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?,?,?,0,1,'ready','matching-jpeg','matching-jpeg','old-preview',800,600,'old-cache','a.ARW','selected',5)",
+            params![pair_id,raw_id,jpeg_id],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,0,0,'unavailable','missing.JPG','rejected',2)",
+            params![missing_photo_id,missing_id],
+        ).unwrap();
+        connection
+            .execute("INSERT INTO photo_sets VALUES('set','Keep',1)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members VALUES('set',?,0)",
+                [&pair_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members VALUES('set',?,1)",
+                [missing_photo_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress VALUES('set',?)",
+                [missing_photo_id],
+            )
+            .unwrap();
+        drop(connection);
+        (
+            base,
+            LibraryConfig {
+                library_root: proposed,
+                state_directory: state,
+                database_basename: "library.sqlite".to_owned(),
+                ..LibraryConfig::default()
+            },
+            database,
+        )
+    }
+
+    #[tokio::test]
+    async fn expansion_preserves_legacy_identity_and_user_state_then_discovers_sibling() {
+        let (base, config, database) = expansion_fixture();
+        let old_raw = fs::read(config.library_root.join("shoot/a.ARW")).unwrap();
+        let old_jpeg = fs::read(config.library_root.join("shoot/a.JPG")).unwrap();
+        fs::write(config.library_root.join("a.ARW"), b"sibling-raw").unwrap();
+        let legacy_original = original_id("a.ARW");
+        let legacy_photo = paired_photo_id(&legacy_original, &original_id("a.JPG"));
+
+        expand_library(config.clone()).unwrap();
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM library_metadata WHERE key='canonical_root'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            config.library_root.to_str().unwrap()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT relative_path FROM original_files WHERE id=?",
+                    [&legacy_original],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "shoot/a.ARW"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT capture_metadata_state FROM original_files WHERE id=?",
+                    [&legacy_original],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "pending"
+        );
+        let photo: (String, String, i64, String, i64) = connection.query_row(
+            "SELECT sort_path,preview_state,rating,selection_state,(SELECT position FROM photo_set_members WHERE photo_set_id='set' AND photo_id=photos.id) FROM photos WHERE id=?",
+            [&legacy_photo], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            photo,
+            (
+                "shoot/a.ARW".to_owned(),
+                "inspection-pending".to_owned(),
+                5,
+                "selected".to_owned(),
+                0
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT photo_id FROM review_progress WHERE photo_set_id='set'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "legacy-missing-photo"
+        );
+        drop(connection);
+
+        let library = Library::open(config.clone()).unwrap();
+        let snapshot = library.scan().await.unwrap();
+        assert!(
+            snapshot
+                .originals
+                .iter()
+                .any(|item| item.id == legacy_original
+                    && item.relative_path.as_str() == "shoot/a.ARW")
+        );
+        assert!(snapshot.photos.iter().any(|item| item.id == legacy_photo));
+        let sibling = snapshot
+            .originals
+            .iter()
+            .find(|item| item.relative_path.as_str() == "a.ARW")
+            .unwrap();
+        assert_ne!(sibling.id, legacy_original);
+        assert_eq!(sibling.id.len(), 36);
+        let sibling_photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| photo.raw_original_id.as_deref() == Some(sibling.id.as_str()))
+            .unwrap();
+        assert_ne!(sibling_photo.id, legacy_photo);
+        assert_eq!(sibling_photo.id.len(), 36);
+        let sets = library.list_photo_sets().await.unwrap();
+        assert_eq!(
+            sets[0]
+                .members
+                .iter()
+                .map(|member| (member.photo_id.as_str(), member.position))
+                .collect::<Vec<_>>(),
+            [(legacy_photo.as_str(), 0), ("legacy-missing-photo", 1)]
+        );
+        assert_eq!(
+            sets[0].last_reviewed_photo_id.as_deref(),
+            Some("legacy-missing-photo")
+        );
+        library.shutdown().unwrap();
+        assert_eq!(
+            fs::read(config.library_root.join("shoot/a.ARW")).unwrap(),
+            old_raw
+        );
+        assert_eq!(
+            fs::read(config.library_root.join("shoot/a.JPG")).unwrap(),
+            old_jpeg
+        );
+        drop(base);
+    }
+
+    #[test]
+    fn expansion_failures_leave_binding_and_locations_unchanged() {
+        for case in [
+            "transaction",
+            "scan-limit",
+            "sidecar",
+            "non-ancestor",
+            "running-service",
+            "invalid-location",
+            "schema",
+        ] {
+            let (base, mut config, database) = expansion_fixture();
+            let old_root = config.library_root.join("shoot");
+            let result = match case {
+                "transaction" => expand_library_with_transaction_failure(config.clone()),
+                "scan-limit" => {
+                    config.limits = ScanLimits::new(1, 1, 1).unwrap();
+                    expand_library(config.clone())
+                }
+                "sidecar" => {
+                    fs::write(database.with_file_name("library.sqlite-wal"), b"recovery").unwrap();
+                    expand_library(config.clone())
+                }
+                "non-ancestor" => {
+                    let unrelated = base.0.join("unrelated");
+                    fs::create_dir(&unrelated).unwrap();
+                    config.library_root = unrelated;
+                    expand_library(config.clone())
+                }
+                "running-service" => {
+                    let running = Library::open(LibraryConfig {
+                        library_root: old_root.clone(),
+                        ..config.clone()
+                    })
+                    .unwrap();
+                    let result = expand_library(config.clone());
+                    running.shutdown().unwrap();
+                    result
+                }
+                "invalid-location" => {
+                    let connection = Connection::open(&database).unwrap();
+                    connection
+                        .execute(
+                            "UPDATE original_files SET relative_path='unsupported.txt' WHERE id=?",
+                            [original_id("a.ARW")],
+                        )
+                        .unwrap();
+                    drop(connection);
+                    expand_library(config.clone())
+                }
+                "schema" => {
+                    let connection = Connection::open(&database).unwrap();
+                    connection.pragma_update(None, "user_version", 3).unwrap();
+                    drop(connection);
+                    expand_library(config.clone())
+                }
+                _ => unreachable!(),
+            };
+            assert!(result.is_err(), "{case}");
+            let connection = Connection::open(&database).unwrap();
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT value FROM library_metadata WHERE key='canonical_root'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                old_root.to_str().unwrap(),
+                "{case}"
+            );
+            let expected_path = if case == "invalid-location" {
+                "unsupported.txt"
+            } else {
+                "a.ARW"
+            };
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT relative_path FROM original_files WHERE id=?",
+                        [original_id("a.ARW")],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                expected_path,
+                "{case}"
+            );
+        }
     }
 
     #[test]

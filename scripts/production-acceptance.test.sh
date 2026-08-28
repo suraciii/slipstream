@@ -11,7 +11,7 @@ trap cleanup EXIT
 mkdir -p "$work_dir/bin" "$work_dir/library" "$work_dir/state" "$work_dir/cache" "$work_dir/backups"
 printf 'original bytes' >"$work_dir/library/sample.ARW"
 original_sha=$(sha256sum "$work_dir/library/sample.ARW" | awk '{print $1}')
-python3 - "$work_dir/state/library.sqlite" "$work_dir/library" "$repo_root/compatibility/sqlite/schema-v2.sql" <<'PY'
+python3 - "$work_dir/state/library.sqlite" "$work_dir/library" "$repo_root/compatibility/sqlite/schema-v4.sql" <<'PY'
 import sqlite3, sys
 connection = sqlite3.connect(sys.argv[1])
 with open(sys.argv[3], encoding="utf-8") as source:
@@ -93,7 +93,7 @@ base_env=(
   SLIPSTREAM_EXPECTED_PHOTO_COUNT=2
   SLIPSTREAM_EXPECTED_PHOTO_SET=Shoot
   SLIPSTREAM_EXPECTED_MEMBER_COUNT=2
-  SLIPSTREAM_EXPECTED_SCHEMA_VERSION=2
+  SLIPSTREAM_EXPECTED_SCHEMA_VERSION=4
   SLIPSTREAM_CONTAINER=slipstream-test
   SLIPSTREAM_LIBRARY_ROOT="$work_dir/library"
   SLIPSTREAM_STATE_DIRECTORY="$work_dir/state"
@@ -274,7 +274,7 @@ PY
 
 backup="$work_dir/backups/state.tgz"
 export SLIPSTREAM_LIBRARY_ROOT="$work_dir/library"
-export SLIPSTREAM_EXPECTED_SCHEMA_VERSION=2
+export SLIPSTREAM_EXPECTED_SCHEMA_VERSION=4
 if env SLIPSTREAM_STATE_DIRECTORY="$work_dir/state" SLIPSTREAM_BACKUP_OUTPUT="$work_dir/state/new-output/backup.tgz" \
   "$repo_root/scripts/backup-state.sh" >"$work_dir/backup-inside-state.log" 2>&1; then
   printf 'backup output inside state was accepted\n' >&2
@@ -334,7 +334,7 @@ for case in bad-schema bad-root; do
   python3 - "$work_dir/$case-state/library.sqlite" "$work_dir/library" "$case" <<'PY'
 import sqlite3, sys
 connection = sqlite3.connect(sys.argv[1])
-connection.execute(f"PRAGMA user_version = {999 if sys.argv[3] == 'bad-schema' else 2}")
+connection.execute(f"PRAGMA user_version = {999 if sys.argv[3] == 'bad-schema' else 4}")
 connection.execute("CREATE TABLE library_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 root = "/wrong/root" if sys.argv[3] == "bad-root" else sys.argv[2]
 connection.execute("INSERT INTO library_metadata VALUES ('canonical_root', ?)", (root,))
