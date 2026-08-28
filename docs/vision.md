@@ -10,12 +10,12 @@ Slipstream reduces the cost of deciding what to keep. It does not replace RAW de
 
 ## Initial Focus
 
-Slipstream initially serves one Photographer with an existing local or network-mounted Photo Library containing mostly RAW files and some JPEG files.
+Slipstream initially serves one Photographer with one existing local or network-mounted Photo Library containing mostly RAW files and some JPEG files. One configured Library Folder defines which files belong to that Library.
 
 The first product must support this complete path:
 
 1. The Photographer opens Slipstream in a browser.
-2. Slipstream indexes an existing directory without moving or changing Original Files.
+2. Slipstream indexes the configured Library Folder without moving or changing Original Files.
 3. Slipstream pairs a RAW Original and matching JPEG Original as one Photo when they have the same base name in the same directory.
 4. The Photographer creates or opens a Photo Set.
 5. The Photographer reviews one Photo at a time.

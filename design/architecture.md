@@ -29,7 +29,7 @@ One server process owns:
 
 - configuration and application-data paths;
 - SQLite initialization and migration;
-- one configured Photo Library root;
+- one configured Library Folder;
 - indexing and Preview work queues;
 - the HTTP server and browser event transport;
 - process shutdown.
@@ -42,15 +42,19 @@ The first deployment binds loopback by default and may explicitly bind a LAN int
 
 One Photo Library Scope owns:
 
-- the canonical configured root;
-- read-only path containment;
+- the configured Library Folder and its admitted storage binding;
+- read-only containment;
 - supported-file discovery;
+- stable Original File and Photo identities;
+- current Original Locations;
 - deterministic RAW/JPEG pairing;
 - Photo records and availability;
 - Photo Set membership;
 - Preview requests.
 
-Every Original File read must resolve under the canonical root. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation.
+Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation.
+
+The Library Folder is a location and discovery boundary, not Photo Library identity. Persisted Original File and Photo IDs are opaque after creation. Ordinary rescan does not infer moves. The explicit ancestor-expansion contract in [Photo Library Identity and Expansion](library-identity.md) is the only first-product operation that may change remembered Original Locations while preserving identity.
 
 ### Review Scope
 
@@ -66,9 +70,9 @@ Indexing discovers supported files and records lightweight facts needed for pair
 
 A scan proceeds incrementally:
 
-1. Walk paths below the configured root.
+1. Walk paths below the configured Library Folder.
 2. Classify recognized RAW and JPEG files.
-3. Record relative path, size, modification time, and availability.
+3. Record Original Location, size, modification time, and availability.
 4. Pair an unambiguous same-directory, same-base-name RAW and JPEG.
 5. Queue thumbnail work only as needed for visible browsing.
 
@@ -81,8 +85,9 @@ SQLite uses explicit mutable state. A generic event log is not required.
 At minimum, SQLite stores:
 
 - schema version;
-- configured Photo Library identity and canonical runtime path;
-- Original File relative path, kind, size, modification time, availability, and derived Capture Time inspection facts;
+- the admitted Library Folder binding;
+- stable Original File and Photo IDs;
+- Original Location, kind, size, modification time, availability, and derived Capture Time inspection facts;
 - Photo identity and RAW/JPEG references;
 - Preview source, dimensions, cache revision, and failure state;
 - Photo Set identity, name, order, and membership;
@@ -195,7 +200,7 @@ The first-slice gate must prove:
 - selection and Rating transactions survive restart;
 - swipe actions do not fire while Detail Review is zoomed;
 - failed mutations do not silently advance;
-- cache invalidation follows source path, size, modification time, and derivative version;
+- cache invalidation follows current Original Location, source revision, and derivative version;
 - the complete path runs through the real browser-server protocol.
 
 A camera sample corpus must include the Photographer's actual RAW formats. Unsupported targets and unavailable devices must be reported rather than inferred.

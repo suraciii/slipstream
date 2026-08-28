@@ -79,17 +79,17 @@ Filtered Library order is:
 ```text literal
 capture key present before capture key absent,
 authoritative capture ordering key by UTF-8 bytes,
-Photo ordering path by UTF-8 bytes,
+Photo ordering Location by UTF-8 bytes,
 Photo ID by UTF-8 bytes
 ```
 
-The Photo ordering path is the RAW relative path when the Photo contains RAW; otherwise it is the JPEG relative path.
+The Photo ordering Location is the RAW Original Location when the Photo contains RAW; otherwise it is the JPEG Original Location.
 
 Photo Set queries continue to order only by `photo_set_members.position`.
 
 ## Confinement and Resource Bounds
 
-Metadata inspection begins from the Library-owned Original capability. It opens the Original read-only beneath the retained canonical Library descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
+Metadata inspection begins from the Library-owned Original capability. It opens the Original read-only beneath the retained Library Folder descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
 
 The parser must not receive an Original filesystem path or reopen the Original by name. Direct parsing uses bounded reads from the retained descriptor. The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor. The same descriptor is revision-checked before and after inspection and compared to the discovery device, inode, size, and modification time. Traversal, symlink escape, inode substitution, and mid-read revision changes fail only the affected fact.
 

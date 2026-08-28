@@ -40,7 +40,7 @@ test "$(realpath -- "$SLIPSTREAM_LIBRARY_ROOT")" = "$SLIPSTREAM_LIBRARY_ROOT"
 install -d -o 1000 -g 1000 -m 0700 "$SLIPSTREAM_STATE_DIRECTORY" "$SLIPSTREAM_CACHE_DIRECTORY"
 ```
 
-Do not place state or cache inside the Originals directory. The SQLite root binding stores the canonical Library path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts Originals read-only at that same path inside the container. Do not change it after deployment. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
+Do not place state or cache inside the Library Folder. SQLite stores the admitted canonical Library Folder path, so `SLIPSTREAM_LIBRARY_ROOT` must already be the canonical absolute path, not a symlink or lexical alias. Compose mounts the Folder read-only at that same path inside the container. A 0.1 deployment must not change it after initialization. State and cache mount at `/state` and `/cache` as separate application-owned persistent directories.
 
 ## Pre-cutover checks
 

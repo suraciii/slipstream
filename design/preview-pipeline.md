@@ -106,7 +106,7 @@ The encoder applies no creative adjustment. Ordinary resize filtering and encode
 A Derivative cache identity includes:
 
 - Photo identity;
-- selected Original File relative path;
+- selected Original Location;
 - selected Original File size;
 - selected Original File modification time;
 - embedded-candidate identity when the source is inside RAW;
