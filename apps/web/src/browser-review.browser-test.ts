@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFile,
@@ -6,6 +7,7 @@ import {
   readFile,
   rm,
   writeFile,
+  chmod,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
@@ -62,6 +64,17 @@ async function fixture() {
 async function server(base: string, root: string) {
   const running = await startBrowserServer({ base, root });
   servers.push(running);
+  // The server binds before its owned startup scan finishes, so tests wait
+  // for the Library to settle before driving the UI.
+  await expect
+    .poll(
+      async () => {
+        const response = await fetch(`${running.url}/api/status`);
+        return ((await response.json()) as { state: string }).state;
+      },
+      { timeout: 60_000 },
+    )
+    .toBe("idle");
   return running;
 }
 async function post(url: string, path: string, body: unknown) {
@@ -1176,4 +1189,102 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   await expect(page.getByText("58 / 70")).toBeVisible();
   await expect(page.getByRole("button", { name: /^Select/ })).toBeEnabled();
   expect(boundaryRequests).toBeGreaterThanOrEqual(1);
+});
+
+test("a persisted 40,000-Photo Library is served from persisted state and stays browsable across the startup rescan", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const base = await mkdtemp(join(tmpdir(), "slipstream-browser-40k-"));
+  temporary.push(base);
+  const root = join(base, "originals");
+  await mkdir(root);
+  await mkdir(join(base, "state"));
+  await mkdir(join(base, "cache"));
+  await chmod(join(base, "state"), 0o700);
+  // The test process runs under Playwright's Node loader, so the canonical
+  // v4 state is generated through Bun's SQLite in a child process.
+  const generator = `
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(process.env.STATE_DB);
+    database.exec(await Bun.file(process.env.SCHEMA_PATH).text());
+    const insertOriginal = database.prepare(
+      "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available) VALUES(?1,?2,'jpeg',1,1.0,1)",
+    );
+    const insertPhoto = database.prepare(
+      "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path) VALUES(?1,?2,0,1,'inspection-pending',?3)",
+    );
+    const insertBinding = database.prepare(
+      "INSERT INTO library_metadata VALUES('canonical_root',?1)",
+    );
+    database.exec("BEGIN");
+    for (let index = 0; index < 40000; index += 1) {
+      const path = String(index).padStart(6, "0") + ".jpg";
+      const originalId = index.toString(16).padStart(8, "0").repeat(8);
+      const photoId = (0x100000 + index).toString(16).padStart(8, "0").repeat(8);
+      insertOriginal.run(originalId, path);
+      insertPhoto.run(photoId, originalId, path);
+    }
+    database.exec("COMMIT");
+    insertBinding.run(process.env.ROOT);
+    database.close();
+  `;
+  execFileSync("bun", ["-e", generator], {
+    env: {
+      ...process.env,
+      STATE_DB: join(base, "state", "library.sqlite"),
+      ROOT: root,
+      SCHEMA_PATH: join(process.cwd(), "compatibility/sqlite/schema-v4.sql"),
+    },
+    stdio: "inherit",
+  });
+
+  const running = await server(base, root);
+  // The published Library is served immediately from persisted state; the
+  // overview stays bounded instead of transferring 40,000 Photo facts.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "All Photos 40000 Photos" }),
+  ).toBeVisible();
+  const overviewBytes = await page.evaluate(
+    async () => (await (await fetch("/api/overview")).text()).length,
+  );
+  expect(overviewBytes).toBeLessThan(20_000);
+
+  await page.getByRole("button", { name: /Photo 1 of 40000/ }).click();
+  await expect(page.getByText("1 / 40000")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+
+  // The owned startup rescan settles without emptying or reordering the
+  // source; late-window browsing stays bounded afterward.
+  await expect
+    .poll(
+      async () => {
+        const response = await fetch(`${running.url}/api/status`);
+        return ((await response.json()) as { state: string }).state;
+      },
+      { timeout: 120_000 },
+    )
+    .toBe("idle");
+  const lateWindow: { total: number; photos: unknown[] } = await page.evaluate(
+    async () => {
+      const opened = (await (
+        await fetch("/api/browse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "library" }),
+        })
+      ).json()) as { token: string };
+      const window = (await (
+        await fetch(`/api/browse/${opened.token}?start=39940&limit=60`)
+      ).json()) as { total: number; photos: unknown[] };
+      return window;
+    },
+  );
+  expect(lateWindow.total).toBe(40_000);
+  expect(lateWindow.photos).toHaveLength(60);
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
 });

@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slipstream_core::{
     CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoSetRecord,
-    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewReady, PreviewService, PreviewState,
-    ScanLimits, SelectionState,
+    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewService, PreviewState, ScanLimits,
+    ScanPhase, SelectionState,
 };
 use std::{
     env,
@@ -31,7 +31,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -189,6 +189,7 @@ pub enum ServerError {
     BrowseNotFound,
     BrowseLimit,
     Join(String),
+    NotPublished,
 }
 
 impl fmt::Display for ServerError {
@@ -207,6 +208,9 @@ impl fmt::Display for ServerError {
             Self::BrowseNotFound => formatter.write_str("Browse source is no longer available"),
             Self::BrowseLimit => formatter.write_str("Browse window is invalid"),
             Self::Join(error) => formatter.write_str(error),
+            Self::NotPublished => formatter.write_str(
+                "Library is initializing; the first completed scan has not published a Library yet",
+            ),
         }
     }
 }
@@ -334,10 +338,106 @@ struct BrowseSnapshot {
     last_used: Instant,
 }
 
+/// The published Library plus shared scan-lifecycle flags. The snapshot is
+/// refreshed from persisted state at every publication, so facts committed
+/// after a scan's apply (Selection State, Rating, Review Preview seeds) can
+/// never be reverted by the completed scan. `publication` serializes
+/// publications against in-place fact patches: a patch either happens before
+/// the publication's persisted read (the read includes its committed fact) or
+/// after the swap (the patch applies to the new snapshot).
+struct SharedLibrary {
+    snapshot: RwLock<Option<Published>>,
+    published: AtomicBool,
+    failed: AtomicBool,
+    awaiting_scan: AtomicUsize,
+    runs_started: AtomicU64,
+    runs_completed: AtomicU64,
+    publication: tokio::sync::Mutex<()>,
+}
+
+impl SharedLibrary {
+    /// Replaces the published snapshot with the current persisted state read
+    /// while holding `publication`. The scan has already applied its result
+    /// transactionally, so the fresh read is the authoritative merge of
+    /// scan-owned changes (availability, order, source selection, Preview
+    /// invalidation for changed revisions) plus every later committed fact.
+    async fn publish_fresh(&self, library: &Library) -> Result<(), LibraryError> {
+        let _publication = self.publication.lock().await;
+        let persisted = library.snapshot().await?;
+        *self.snapshot.write().expect("published Library poisoned") =
+            Some(Published::new(persisted));
+        self.failed.store(false, Ordering::Relaxed);
+        self.published.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Patches one mutable Photo fact in place. Called only after the
+    /// owning SQLite write committed, under `publication`, so the patch can
+    /// never be applied to a snapshot a concurrent publication is replacing.
+    async fn patch_photo(
+        &self,
+        photo_id: &str,
+        apply: impl FnOnce(&mut slipstream_core::PhotoRecord),
+    ) {
+        let _publication = self.publication.lock().await;
+        let mut guard = self.snapshot.write().expect("published Library poisoned");
+        let Some(published) = guard.as_mut() else {
+            return;
+        };
+        let Some(position) = published.photos_by_id.get(photo_id).copied() else {
+            return;
+        };
+        let Some(photo) = published.snapshot.photos.get_mut(position) else {
+            return;
+        };
+        apply(photo);
+    }
+
+    /// One owned scan cycle shared by the background startup rescan and
+    /// explicit rescan requests; the Library coalesces concurrent waiters.
+    /// The optional publish gate (test-only) parks this cycle after the scan's
+    /// apply and before publication so tests can commit facts in between.
+    async fn run_scan(
+        &self,
+        library: &Library,
+        publish_gate: Option<oneshot::Receiver<()>>,
+    ) -> Result<(), LibraryError> {
+        self.runs_started.fetch_add(1, Ordering::Relaxed);
+        self.awaiting_scan.fetch_add(1, Ordering::Relaxed);
+        let outcome = match library.scan().await {
+            Ok(_) => {
+                if let Some(gate) = publish_gate {
+                    let _ = gate.await;
+                }
+                match self.publish_fresh(library).await {
+                    Ok(()) => Ok(()),
+                    Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => {
+                        Err(error)
+                    }
+                    Err(error) => {
+                        self.failed.store(true, Ordering::Relaxed);
+                        Err(error)
+                    }
+                }
+            }
+            // Shutdown drained this admitted scan; it is not a Library failure.
+            Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => Err(error),
+            Err(error) => {
+                self.failed.store(true, Ordering::Relaxed);
+                Err(error)
+            }
+        };
+        self.awaiting_scan.fetch_sub(1, Ordering::Relaxed);
+        self.runs_completed.fetch_add(1, Ordering::Relaxed);
+        outcome
+    }
+}
+
 pub struct Application {
     library: Arc<Library>,
     preview: PreviewService,
-    published: RwLock<Published>,
+    shared: Arc<SharedLibrary>,
+    background_scan: Mutex<Option<JoinHandle<()>>>,
     browse_snapshots: Mutex<std::collections::HashMap<String, BrowseSnapshot>>,
     browse_namespace: u128,
     browse_counter: AtomicU64,
@@ -346,27 +446,43 @@ pub struct Application {
 
 impl Application {
     pub async fn open(config: &Config) -> Result<Arc<Self>, ServerError> {
+        Self::open_with_gate(config, ScanLimits::default(), None, None).await
+    }
+
+    async fn open_with_gate(
+        config: &Config,
+        scan_limits: ScanLimits,
+        scan_gate: Option<oneshot::Receiver<()>>,
+        publish_gate: Option<oneshot::Receiver<()>>,
+    ) -> Result<Arc<Self>, ServerError> {
         validate_storage_layout(config)?;
         let cache = CacheDirectory::open(&config.cache_directory, &config.library_root)?;
         let library_config = LibraryConfig {
             library_root: config.library_root.clone(),
             state_directory: config.state_directory.clone(),
             database_basename: config.database_basename.clone(),
-            limits: ScanLimits::default(),
+            limits: scan_limits,
             ..LibraryConfig::default()
         };
         let library = tokio::task::spawn_blocking(move || Library::open(library_config))
             .await
             .map_err(|error| ServerError::Join(error.to_string()))??;
         let library = Arc::new(library);
-        let snapshot = match library.scan().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let library_for_close = Arc::clone(&library);
-                let _ = tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
-                return Err(error.into());
-            }
-        };
+        // Admission is complete: serve the last committed Library immediately
+        // while the ordinary startup rescan runs in the background. A store
+        // without a published Library stays initializing until its first scan
+        // publishes one.
+        let persisted = library.snapshot().await?;
+        let published_initial = !persisted.photos.is_empty() || !persisted.originals.is_empty();
+        let shared = Arc::new(SharedLibrary {
+            snapshot: RwLock::new(published_initial.then(|| Published::new(persisted))),
+            published: AtomicBool::new(published_initial),
+            failed: AtomicBool::new(false),
+            awaiting_scan: AtomicUsize::new(0),
+            runs_started: AtomicU64::new(0),
+            runs_completed: AtomicU64::new(0),
+            publication: tokio::sync::Mutex::new(()),
+        });
         let library_for_preview = Arc::clone(&library);
         let preview = match tokio::task::spawn_blocking(move || {
             PreviewService::from_cache(library_for_preview, cache)
@@ -387,10 +503,21 @@ impl Application {
             .as_nanos()
             ^ (u128::from(std::process::id()) << 64)
             ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
+        let background_scan = {
+            let library = Arc::clone(&library);
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move {
+                if let Some(gate) = scan_gate {
+                    let _ = gate.await;
+                }
+                let _ = shared.run_scan(&library, publish_gate).await;
+            })
+        };
         Ok(Arc::new(Self {
             library,
             preview,
-            published: RwLock::new(Published::new(snapshot)),
+            shared,
+            background_scan: Mutex::new(Some(background_scan)),
             browse_snapshots: Mutex::new(std::collections::HashMap::new()),
             browse_namespace,
             browse_counter: AtomicU64::new(0),
@@ -398,8 +525,78 @@ impl Application {
         }))
     }
 
+    /// Truthful Library status: the scanner owns measurable phases and
+    /// counters, and the shared flags decide idle, failed, or initializing.
+    fn scan_status(&self) -> ScanStatusWire {
+        let progress = self.library.scan_progress();
+        match progress.phase {
+            ScanPhase::Discovering => ScanStatusWire {
+                state: "discovering",
+                completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
+                total: None,
+            },
+            ScanPhase::Inspecting => ScanStatusWire {
+                state: "inspecting",
+                completed: Some(usize::try_from(progress.inspected).unwrap_or(usize::MAX)),
+                total: progress
+                    .inspect_total
+                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+            },
+            ScanPhase::Applying => ScanStatusWire {
+                state: "applying",
+                completed: None,
+                total: None,
+            },
+            ScanPhase::Idle => {
+                if self.shared.awaiting_scan.load(Ordering::Relaxed) > 0 {
+                    // The scan finished; its result is being published.
+                    ScanStatusWire {
+                        state: "applying",
+                        completed: None,
+                        total: None,
+                    }
+                } else if self.shared.failed.load(Ordering::Relaxed) {
+                    ScanStatusWire {
+                        state: "failed",
+                        completed: None,
+                        total: None,
+                    }
+                } else if self.shared.published.load(Ordering::Relaxed) {
+                    let photo_count = self.published_photo_count();
+                    ScanStatusWire {
+                        state: "idle",
+                        completed: Some(photo_count),
+                        total: Some(photo_count),
+                    }
+                } else {
+                    ScanStatusWire {
+                        state: "initializing",
+                        completed: None,
+                        total: None,
+                    }
+                }
+            }
+        }
+    }
+
+    fn published_photo_count(&self) -> usize {
+        self.shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .map_or(0, |published| published.snapshot.photos.len())
+    }
+
     pub fn photos(&self) -> PhotoListResponse {
-        let published = self.published.read().expect("published Library poisoned");
+        let guard = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned");
+        let Some(published) = guard.as_ref() else {
+            return PhotoListResponse { photos: Vec::new() };
+        };
         PhotoListResponse {
             photos: published
                 .snapshot
@@ -424,21 +621,10 @@ impl Application {
             .into_iter()
             .map(photo_set_summary)
             .collect();
-        let photo_count = self
-            .published
-            .read()
-            .expect("published Library poisoned")
-            .snapshot
-            .photos
-            .len();
         Ok(LibraryOverviewResponse {
-            published: true,
-            photo_count,
-            scan: ScanStatusWire {
-                state: "idle",
-                completed: Some(photo_count),
-                total: Some(photo_count),
-            },
+            published: self.shared.published.load(Ordering::Relaxed),
+            photo_count: self.published_photo_count(),
+            scan: self.scan_status(),
             photo_sets,
         })
     }
@@ -450,10 +636,15 @@ impl Application {
     ) -> Result<BrowseOpenResponse, ServerError> {
         let (photo_ids, position): (Vec<String>, usize) = match source {
             BrowseSourceRequest::Library => {
-                let photo_ids = self
-                    .published
+                let guard = self
+                    .shared
+                    .snapshot
                     .read()
-                    .expect("published Library poisoned")
+                    .expect("published Library poisoned");
+                let Some(published) = guard.as_ref() else {
+                    return Err(ServerError::NotPublished);
+                };
+                let photo_ids = published
                     .snapshot
                     .photos
                     .iter()
@@ -577,7 +768,14 @@ impl Application {
                 .collect::<Vec<_>>();
             (ids, total)
         };
-        let source = self.published.read().expect("published Library poisoned");
+        let source_guard = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned");
+        let Some(source) = source_guard.as_ref() else {
+            return Err(ServerError::NotPublished);
+        };
         let photos = ids
             .iter()
             .filter_map(|id| source.photos_by_id.get(id).copied())
@@ -613,8 +811,7 @@ impl Application {
     }
 
     pub async fn rescan(&self) -> Result<PhotoListResponse, ServerError> {
-        let snapshot = self.library.scan().await?;
-        *self.published.write().expect("published Library poisoned") = Published::new(snapshot);
+        self.shared.run_scan(&self.library, None).await?;
         Ok(self.photos())
     }
 
@@ -634,11 +831,8 @@ impl Application {
         let field = mutation.field;
         let value = mutation.value;
         let result = self.library.mutate_photo_state(mutation).await?;
-        let mut published = self.published.write().expect("published Library poisoned");
-        if let Some(position) = published.photos_by_id.get(&photo_id).copied()
-            && let Some(photo) = published.snapshot.photos.get_mut(position)
-        {
-            match (field, value) {
+        self.shared
+            .patch_photo(&photo_id, |photo| match (field, value) {
                 (PhotoStateField::SelectionState, PhotoStateValue::Selection(selection)) => {
                     photo.selection_state = selection;
                 }
@@ -646,9 +840,8 @@ impl Application {
                     photo.rating = rating;
                 }
                 _ => {}
-            }
-        }
-        drop(published);
+            })
+            .await;
         Ok(result)
     }
 
@@ -691,7 +884,15 @@ impl Application {
         let response = match result {
             Ok(slipstream_core::PreviewRequestResult::Current(ready)) => {
                 if target == DerivativeTarget::Review2560 {
-                    self.update_preview_ready(photo_id, &ready);
+                    self.shared
+                        .patch_photo(photo_id, |photo| {
+                            photo.preview_state = PreviewState::Ready;
+                            photo.preview_source = Some(ready.source);
+                            photo.preview_width = Some(ready.width);
+                            photo.preview_height = Some(ready.height);
+                            photo.cache_revision = Some(ready.cache_key.clone());
+                        })
+                        .await;
                 }
                 PreviewResponse::ready(photo_id, &ready, false)
             }
@@ -703,7 +904,8 @@ impl Application {
                     && unavailable.reason
                         == slipstream_core::PreviewUnavailableReason::NoUsableSource
                 {
-                    self.update_preview_state(photo_id, PreviewState::Unavailable);
+                    self.patch_preview_state(photo_id, PreviewState::Unavailable)
+                        .await;
                 }
                 let message = match unavailable.reason {
                     slipstream_core::PreviewUnavailableReason::PhotoNotFound => "Unknown Photo",
@@ -718,7 +920,8 @@ impl Application {
             }
             Ok(slipstream_core::PreviewRequestResult::Failed(_)) => {
                 if target == DerivativeTarget::Review2560 {
-                    self.update_preview_state(photo_id, PreviewState::Failed);
+                    self.patch_preview_state(photo_id, PreviewState::Failed)
+                        .await;
                 }
                 PreviewResponse::failed("Preview generation failed")
             }
@@ -737,30 +940,16 @@ impl Application {
         Ok(response)
     }
 
-    fn update_preview_ready(&self, photo_id: &str, ready: &PreviewReady) {
-        let mut published = self.published.write().expect("published Library poisoned");
-        if let Some(position) = published.photos_by_id.get(photo_id).copied()
-            && let Some(photo) = published.snapshot.photos.get_mut(position)
-        {
-            photo.preview_state = PreviewState::Ready;
-            photo.preview_source = Some(ready.source);
-            photo.preview_width = Some(ready.width);
-            photo.preview_height = Some(ready.height);
-            photo.cache_revision = Some(ready.cache_key.clone());
-        }
-    }
-
-    fn update_preview_state(&self, photo_id: &str, state: PreviewState) {
-        let mut published = self.published.write().expect("published Library poisoned");
-        if let Some(position) = published.photos_by_id.get(photo_id).copied()
-            && let Some(photo) = published.snapshot.photos.get_mut(position)
-        {
-            photo.preview_state = state;
-            photo.preview_source = None;
-            photo.preview_width = None;
-            photo.preview_height = None;
-            photo.cache_revision = None;
-        }
+    async fn patch_preview_state(&self, photo_id: &str, state: PreviewState) {
+        self.shared
+            .patch_photo(photo_id, |photo| {
+                photo.preview_state = state;
+                photo.preview_source = None;
+                photo.preview_width = None;
+                photo.preview_height = None;
+                photo.cache_revision = None;
+            })
+            .await;
     }
 
     pub async fn derivative(
@@ -817,6 +1006,16 @@ impl Application {
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), ServerError> {
+        // Drain the admitted background scan before closing the Library so a
+        // completed scan is always published and shutdown observes no torn work.
+        let background = self
+            .background_scan
+            .lock()
+            .expect("background scan poisoned")
+            .take();
+        if let Some(handle) = background {
+            let _ = handle.await;
+        }
         let application = Arc::clone(self);
         tokio::task::spawn_blocking(move || application.shutdown_blocking())
             .await
@@ -1342,8 +1541,8 @@ async fn overview(
     Ok(Json(state.application.overview().await?))
 }
 
-async fn status(State(state): State<HttpState>) -> Result<Json<ScanStatusWire>, ApiError> {
-    Ok(Json(state.application.overview().await?.scan))
+async fn status(State(state): State<HttpState>) -> Json<ScanStatusWire> {
+    Json(state.application.scan_status())
 }
 
 async fn list_photos(State(state): State<HttpState>) -> Json<PhotoListResponse> {
@@ -2012,6 +2211,10 @@ impl From<ServerError> for ApiError {
                 status: StatusCode::BAD_REQUEST,
                 message: "Browse window is invalid",
             },
+            ServerError::NotPublished => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "Library is initializing; retry after the first scan completes",
+            },
             ServerError::PreviewUnavailable => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "Preview service unavailable",
@@ -2250,6 +2453,24 @@ mod tests {
         }
     }
 
+    /// Waits until the background scan opened by `Application::open` has
+    /// completed, so tests observe the same published state an operator sees
+    /// once startup work settles. Deterministic even when the scan finishes
+    /// between status polls.
+    async fn wait_for_scan_settled(application: &Application) {
+        let started = application.shared.runs_started.load(Ordering::Relaxed);
+        let target = started.max(1);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            if application.shared.runs_completed.load(Ordering::Relaxed) >= target {
+                return;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("Library scan did not settle before the test deadline");
+    }
+
     fn prepare_fixture() -> (PathBuf, Config) {
         let base = unique_base();
         let web_root = base.join("web");
@@ -2421,6 +2642,7 @@ mod tests {
     async fn post_to_static_path_is_rejected_without_reading_or_mutating() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let response = tower::ServiceExt::oneshot(
             router,
@@ -2445,6 +2667,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, base.join("web").join("escape.txt")).unwrap();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let response = tower::ServiceExt::oneshot(
             router,
@@ -2520,6 +2743,7 @@ mod tests {
     async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let vectors: Vec<serde_json::Value> = serde_json::from_slice(
             &fs::read(
@@ -2590,6 +2814,7 @@ mod tests {
     async fn browse_protocol_fixtures_execute_with_captured_token() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let vectors: Vec<serde_json::Value> = serde_json::from_slice(
             &fs::read(
@@ -2689,6 +2914,7 @@ mod tests {
         capture_metadata_fixture(&config.library_root.join("z.JPG"), "2026:01:01 09:00:00");
         capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 10:00:00");
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let photos = serde_json::to_value(application.photos()).unwrap();
         let list = photos["photos"].as_array().unwrap();
         assert_eq!(list.len(), 2);
@@ -2739,6 +2965,7 @@ mod tests {
     async fn healthz_is_exact_json_and_head_api_has_no_body() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let response = tower::ServiceExt::oneshot(
             router.clone(),
@@ -2801,6 +3028,7 @@ mod tests {
     async fn header_limit_rejects_only_values_over_sixteen_kib() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let exact = "x".repeat(MAXIMUM_HEADER_BYTES - "x-test".len());
         let response = tower::ServiceExt::oneshot(
@@ -2916,6 +3144,7 @@ mod tests {
             }
         }
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         application.rescan().await.unwrap();
         let router = create_router(Arc::clone(&application), config.web_root());
 
@@ -2985,6 +3214,7 @@ mod tests {
             jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
         }
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         application.rescan().await.unwrap();
         let ids = application
             .photos()
@@ -3037,6 +3267,8 @@ mod tests {
         let (base_b, config_b) = prepare_fixture();
         let application_a = Application::open(&config_a).await.unwrap();
         let application_b = Application::open(&config_b).await.unwrap();
+        wait_for_scan_settled(&application_a).await;
+        wait_for_scan_settled(&application_b).await;
         let opened_a = application_a
             .browse_open(BrowseSourceRequest::Library, None)
             .await
@@ -3087,6 +3319,7 @@ mod tests {
         let (base, config) = prepare_fixture();
         jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let opened = response_json(
             post_json(
@@ -3149,6 +3382,7 @@ mod tests {
             jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
         }
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         application.rescan().await.unwrap();
         let ids = application
             .photos()
@@ -3220,6 +3454,7 @@ mod tests {
             jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
         }
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let ids = application
             .photos()
@@ -3273,6 +3508,499 @@ mod tests {
             after["photos"].as_array().unwrap().len(),
             before["photos"].as_array().unwrap().len()
         );
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn publication_preserves_facts_committed_between_scan_and_publication() {
+        let (base, config) = prepare_fixture();
+        for name in ["a.jpg", "b.jpg"] {
+            jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+        }
+        // First boot persists the initial scan so the second boot publishes
+        // from stored state and the background rescan is the cycle under test.
+        {
+            let application = Application::open(&config).await.unwrap();
+            wait_for_scan_settled(&application).await;
+            application.shutdown().await.unwrap();
+        }
+        // Park the background rescan after its apply and before publication.
+        let (publish_sender, publish_receiver) = tokio::sync::oneshot::channel();
+        let application = Application::open_with_gate(
+            &config,
+            ScanLimits::default(),
+            None,
+            Some(publish_receiver),
+        )
+        .await
+        .unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let ids = application
+            .photos()
+            .photos
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect::<Vec<_>>();
+
+        // Commit a Selection State and a Review Preview seed while the
+        // completed scan is parked before publication.
+        assert_eq!(
+            post_json(
+                &router,
+                &format!("http://camera.local/api/photos/{}/state", ids[0]),
+                serde_json::json!({"field": "selectionState", "value": "selected"}),
+                Some("http://camera.local"),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let preview = application.preview(&ids[0]).await.unwrap();
+        assert_eq!(preview.state, "ready");
+
+        // Release publication. The fresh persisted read must retain both
+        // committed facts instead of reverting to the scan's apply snapshot.
+        drop(publish_sender);
+        wait_for_scan_settled(&application).await;
+        let opened = application
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        let window = application
+            .browse_window(&opened.token, 0, 10)
+            .await
+            .unwrap();
+        let first = window
+            .photos
+            .iter()
+            .find(|photo| photo.id == ids[0])
+            .unwrap();
+        assert_eq!(first.selection_state, "selected");
+        assert_eq!(first.preview.state, "ready");
+        assert_eq!(first.preview.width, Some(8));
+        assert_eq!(first.preview.height, Some(4));
+        application.browse_close(&opened.token);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn publication_keeps_scan_owned_invalidation_availability_and_user_state() {
+        let (base, config) = prepare_fixture();
+        for name in ["a.jpg", "b.jpg"] {
+            jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+        }
+        let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
+        let ids = application
+            .photos()
+            .photos
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect::<Vec<_>>();
+        assert_eq!(application.preview(&ids[0]).await.unwrap().state, "ready");
+        assert_eq!(
+            application
+                .mutate_photo_state(slipstream_core::PhotoStateMutation {
+                    photo_id: ids[0].clone(),
+                    field: slipstream_core::PhotoStateField::SelectionState,
+                    value: slipstream_core::PhotoStateValue::Selection(SelectionState::Selected),
+                    expected_current: None,
+                    photo_set_id: None,
+                })
+                .await
+                .unwrap()
+                .photo_id,
+            ids[0]
+        );
+
+        // A changed source revision and a removed Original are scan-owned
+        // facts. The publication must keep the invalidation and availability
+        // while the committed user decision survives the fresh read.
+        jpeg_fixture(&config.library_root.join("a.jpg"), 9, 5, [10, 20, 30]);
+        fs::remove_file(config.library_root.join("b.jpg")).unwrap();
+        application.rescan().await.unwrap();
+
+        let opened = application
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        let window = application
+            .browse_window(&opened.token, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(window.total, 2);
+        let first = window
+            .photos
+            .iter()
+            .find(|photo| photo.id == ids[0])
+            .unwrap();
+        assert_eq!(first.selection_state, "selected");
+        assert_eq!(first.preview.state, "inspection-pending");
+        assert_eq!(first.preview.source, None);
+        assert_eq!(first.preview.width, None);
+        let second = window
+            .photos
+            .iter()
+            .find(|photo| photo.id == ids[1])
+            .unwrap();
+        assert!(!second.available);
+        application.browse_close(&opened.token);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publication() {
+        let (base, config) = prepare_fixture();
+        let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+        let application =
+            Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+                .await
+                .unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["published"], false);
+        assert_eq!(overview["photoCount"], 0);
+        assert_eq!(overview["scan"]["state"], "initializing");
+
+        let status: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status["state"], "initializing");
+
+        let photos: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/photos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(photos["photos"].as_array().unwrap().len(), 0);
+
+        let rejected = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            None,
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        drop(gate_sender);
+        wait_for_scan_settled(&application).await;
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["published"], true);
+        assert_eq!(overview["scan"]["state"], "idle");
+        let opened = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            None,
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn persisted_library_serves_immediately_while_background_rescan_runs() {
+        let (base, config) = prepare_fixture();
+        capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+        capture_metadata_fixture(&config.library_root.join("z.jpg"), "2026:01:01 10:00:00");
+        {
+            let application = Application::open(&config).await.unwrap();
+            wait_for_scan_settled(&application).await;
+            assert_eq!(application.photos().photos.len(), 2);
+            application.shutdown().await.unwrap();
+        }
+
+        let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+        let application =
+            Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+                .await
+                .unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+
+        // The published Library must be served before the background rescan
+        // has run at all.
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["published"], true);
+        assert_eq!(overview["photoCount"], 2);
+        assert_eq!(overview["scan"]["state"], "idle");
+
+        let opened = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            None,
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened: serde_json::Value = response_json(opened).await;
+        assert_eq!(opened["total"], 2);
+
+        drop(gate_sender);
+        wait_for_scan_settled(&application).await;
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["photoCount"], 2);
+        assert_eq!(overview["scan"]["state"], "idle");
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn background_scan_failure_keeps_prior_published_library_and_reports_failed() {
+        let (base, config) = prepare_fixture();
+        capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+        {
+            let application = Application::open(&config).await.unwrap();
+            wait_for_scan_settled(&application).await;
+            application.shutdown().await.unwrap();
+        }
+        fs::write(config.library_root.join("b.jpg"), b"jpeg").unwrap();
+        let application = Application::open_with_gate(
+            &config,
+            ScanLimits::new(100, 1, 25_000).unwrap(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        wait_for_scan_settled(&application).await;
+        let router = create_router(Arc::clone(&application), config.web_root());
+
+        assert_eq!(application.scan_status().state, "failed");
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["published"], true);
+        assert_eq!(overview["photoCount"], 1);
+        assert_eq!(overview["scan"]["state"], "failed");
+        assert_eq!(application.photos().photos.len(), 1);
+
+        // An explicit rescan under the same failing limit reports the failure
+        // and keeps the prior published Library browsable.
+        let rescanned = send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/scan")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rescanned.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(application.scan_status().state, "failed");
+        assert_eq!(application.photos().photos.len(), 1);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_background_scan_before_closing() {
+        let (base, config) = prepare_fixture();
+        capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+        let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+        let application =
+            Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+                .await
+                .unwrap();
+        drop(gate_sender);
+        application.shutdown().await.unwrap();
+        for suffix in ["-journal", "-wal", "-shm"] {
+            assert!(
+                !config
+                    .state_directory
+                    .join("library.sqlite".to_owned() + suffix)
+                    .exists()
+            );
+        }
+        let reopened = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&reopened).await;
+        assert_eq!(reopened.published_photo_count(), 1);
+        assert_eq!(reopened.scan_status().state, "idle");
+        reopened.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_rescan_completes()
+     {
+        let (base, config) = prepare_fixture();
+        fs::create_dir(config.state_directory.clone()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                config.state_directory.clone(),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let database =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        database
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v4.sql"))
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO library_metadata VALUES('canonical_root',?)",
+                [config.library_root.to_str().unwrap()],
+            )
+            .unwrap();
+        database.execute("BEGIN", []).unwrap();
+        for index in 0..40_000_u32 {
+            let padded = format!("{index:06}");
+            let original_id = format!("{:08x}", index).repeat(8);
+            let photo_id = format!("{:08x}", 1_000_000 + index).repeat(8);
+            let path = format!("{padded}.jpg");
+            database
+                .execute(
+                    "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available) VALUES(?1,?2,'jpeg',1,1.0,1)",
+                    rusqlite::params![original_id, path],
+                )
+                .unwrap();
+            database
+                .execute(
+                    "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path) VALUES(?1,?2,0,1,'inspection-pending',?3)",
+                    rusqlite::params![photo_id, original_id, path],
+                )
+                .unwrap();
+        }
+        database.execute("COMMIT", []).unwrap();
+        drop(database);
+
+        let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+        let application =
+            Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+                .await
+                .unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+
+        // Served from the persisted Library before the background rescan runs.
+        let overview_response = send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/overview")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(overview_response.status(), StatusCode::OK);
+        let overview_bytes = axum::body::to_bytes(overview_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(overview_bytes.len() < 20_000);
+        let overview: serde_json::Value = serde_json::from_slice(&overview_bytes).unwrap();
+        assert_eq!(overview["published"], true);
+        assert_eq!(overview["photoCount"], 40_000);
+
+        let opened = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            None,
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened: serde_json::Value = response_json(opened).await;
+        let token = opened["token"].as_str().unwrap();
+        let window: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!(
+                        "http://camera.local/api/browse/{token}?start=39940&limit=60"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(window["start"], 39_940);
+        assert_eq!(window["total"], 40_000);
+        assert_eq!(window["photos"].as_array().unwrap().len(), 60);
+
+        drop(gate_sender);
+        wait_for_scan_settled(&application).await;
+        let overview: serde_json::Value = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri("http://camera.local/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(overview["photoCount"], 40_000);
+        assert_eq!(overview["scan"]["state"], "idle");
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
@@ -3349,6 +4077,7 @@ mod tests {
         jpeg_fixture(&config.library_root.join("c.jpg"), 8, 4, [32, 64, 192]);
         config.port = 0;
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let ids = application
             .photos()
@@ -3588,6 +4317,7 @@ mod tests {
         application.shutdown().await.unwrap();
 
         let reopened = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&reopened).await;
         let reopened_photos = reopened.photos();
         assert_eq!(reopened_photos.photos.len(), 3);
         let persisted = reopened_photos
@@ -3614,6 +4344,7 @@ mod tests {
     async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let foreign = response_json(
             post_json(
@@ -3670,6 +4401,7 @@ mod tests {
     async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
         let (base, config) = prepare_fixture();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let request = |body: Body, length: Option<&str>| {
             let mut builder = Request::builder()
@@ -3748,6 +4480,7 @@ mod tests {
         let original = config.library_root.join("photo.jpg");
         jpeg_fixture(&original, 90, 45, [192, 64, 32]);
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let photo_id = application.photos().photos[0].id.clone();
         let preview = response_json(
@@ -3947,6 +4680,7 @@ mod tests {
         let original = config.library_root.join("photo.jpg");
         jpeg_fixture(&original, 90, 45, [192, 64, 32]);
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
         let photo_id = application.photos().photos[0].id.clone();
         let preview = response_json(
@@ -4015,6 +4749,7 @@ mod tests {
         // The persisted facts and both derivative identities survive reopen.
         application.shutdown().await.unwrap();
         let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
         assert_eq!(facts(&application, &photo_id), established);
         let router = create_router(Arc::clone(&application), config.web_root());
         let reopened = response_json(

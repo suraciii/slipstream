@@ -226,6 +226,46 @@ export function renderApp(
     return button;
   };
 
+  const scanLabel = (scan: LibraryOverviewResponse["scan"]): string => {
+    const completed = scan.completed?.toLocaleString();
+    switch (scan.state) {
+      case "idle":
+        return "Library ready";
+      case "initializing":
+        return "Preparing Photo Library…";
+      case "discovering":
+        return completed
+          ? `Checking Library Folder… ${completed} found`
+          : "Checking Library Folder…";
+      case "inspecting":
+        return scan.total
+          ? `Inspecting Capture Time… ${completed ?? 0} / ${scan.total.toLocaleString()}`
+          : "Inspecting Capture Time…";
+      case "applying":
+        return "Applying Library updates…";
+      case "failed":
+        return "Library check failed; the last complete Library remains available";
+      default:
+        return `Library ${scan.state}`;
+    }
+  };
+  let statusPoll = 0;
+  const pollUntilPublished = async () => {
+    const generation = ++statusPoll;
+    while (generation === statusPoll && overview && !overview.published) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      if (generation !== statusPoll) return;
+      try {
+        const response = await fetcher("/api/status");
+        if (!response.ok) continue;
+        const scan = (await response.json()) as LibraryOverviewResponse["scan"];
+        summaryStatus.textContent = scanLabel(scan);
+        if (scan.state === "idle") await loadOverview();
+      } catch {
+        /* keep polling; the connection status reflects hard failures */
+      }
+    }
+  };
   const loadOverview = async () => {
     summaryStatus.textContent = "Loading Library summary…";
     try {
@@ -233,13 +273,11 @@ export function renderApp(
       if (!response.ok) throw new Error("overview failed");
       overview = (await response.json()) as LibraryOverviewResponse;
       sets = overview.photoSets;
-      summaryStatus.textContent =
-        overview.scan.state === "idle"
-          ? "Library ready"
-          : `Library ${overview.scan.state}`;
+      summaryStatus.textContent = scanLabel(overview.scan);
       setConnected(true);
       renderSources();
-      if (!token) await openSource("library");
+      if (!token && overview.published) await openSource("library");
+      else if (!overview.published) void pollUntilPublished();
     } catch {
       summaryStatus.textContent =
         "Could not reach Slipstream. Check the server and retry.";

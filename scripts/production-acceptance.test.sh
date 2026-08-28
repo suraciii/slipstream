@@ -67,6 +67,7 @@ for argument in "$@"; do
 done
 case "$url" in
   */healthz) printf '%s' "${FAKE_HEALTH:-{\"status\":\"ok\"}}" ;;
+  */api/status) printf '{"state":"%s"}' "${FAKE_SCAN_STATE:-idle}" ;;
   */api/overview)
     if [[ -n "${FAKE_MUTATE_STATE:-}" ]]; then
       python3 - "$FAKE_MUTATE_STATE" <<'PY'
@@ -352,6 +353,8 @@ with open(sys.argv[2], "w", encoding="utf-8") as output:
 PY
 expect_failure wrong-state SLIPSTREAM_EXPECTED_STATE_SNAPSHOT="$work_dir/wrong-state.json"
 expect_failure wrong-health FAKE_HEALTH='{"status":"starting"}'
+expect_failure failed-scan FAKE_SCAN_STATE=failed
+expect_failure stuck-scan FAKE_SCAN_STATE=discovering SLIPSTREAM_SCAN_WAIT_SECONDS=1
 expect_failure missing-original SLIPSTREAM_ORIGINAL_SAMPLE=
 expect_failure wrong-original SLIPSTREAM_EXPECTED_ORIGINAL_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 printf outside >"$work_dir/outside.ARW"

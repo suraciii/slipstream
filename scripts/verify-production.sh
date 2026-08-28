@@ -205,6 +205,25 @@ health=$(curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/h
   || fail '/healthz request failed'
 [[ "$health" == '{"status":"ok"}' ]] || fail '/healthz response is not exact'
 
+# Process health and Library publication are separate truths. Exact state
+# comparison must run against a settled Library, so wait for the owned scan
+# lifecycle to report idle and fail closed on a failed or stuck scan.
+scan_wait=${SLIPSTREAM_SCAN_WAIT_SECONDS:-3600}
+[[ "$scan_wait" =~ ^[0-9]+$ ]] || fail 'scan wait seconds must be an integer'
+scan_deadline=$(( $(date +%s) + scan_wait ))
+while :; do
+  scan_state=$(curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/api/status" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))') \
+    || fail '/api/status request failed'
+  [[ "$scan_state" == idle ]] && break
+  if [[ "$scan_state" == failed ]]; then
+    fail 'Library scan reported failed; the last published Library is stale'
+  fi
+  (( $(date +%s) < scan_deadline )) \
+    || fail 'timed out waiting for the Library scan to become idle'
+  sleep 2
+done
+
 curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/" >"$work_dir/index.html" \
   || fail 'Web entry request failed'
 grep -Fq 'Slipstream' "$work_dir/index.html" || fail 'Web entry does not identify Slipstream'

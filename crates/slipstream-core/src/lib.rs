@@ -40,7 +40,7 @@ pub use domain::{
 pub use identity::{
     InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,
 };
-pub use library::{Library, LibraryConfig, LibraryError, expand_library};
+pub use library::{Library, LibraryConfig, LibraryError, ScanPhase, ScanProgress, expand_library};
 pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
