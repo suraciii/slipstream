@@ -4,13 +4,13 @@ A Photographer already owns files and directory organization. Slipstream must ad
 
 ## Opening a Photo Library
 
-Slipstream must index an existing configured directory. The directory may contain nested directories, RAW files, JPEG files, and unrelated files.
+The server operator configures one Library Folder. Slipstream must index supported files below that Folder, including files in nested directories. Unsupported and unrelated files must remain unchanged and must not appear as Photos.
 
-Indexing must not move, rename, rewrite, or delete an Original File. Unsupported and unrelated files must remain unchanged and must not appear as Photos.
+The Library Folder defines discovery and read-only containment. Its filesystem location must not define the identity of an existing Original File or Photo.
 
-The first product may require the server operator to configure the directory at startup. Selecting an arbitrary server filesystem directory from the browser is not required.
+Indexing must not move, rename, rewrite, or delete an Original File. Selecting an arbitrary server filesystem directory from the browser is not required.
 
-If the configured path does not exist, is not a directory, or cannot be read, Slipstream must identify the failure and must not present a partially indexed directory as current.
+If the configured Library Folder does not exist, is not a directory, or cannot be read, Slipstream must identify the failure and must not present a partially indexed Folder as current.
 
 ## Photos
 
@@ -30,11 +30,36 @@ The JPEG Original is not a disposable derivative. It remains an Original File an
 
 ## Stable Identity
 
-Slipstream must retain Photo Set membership, Selection State, and Rating across an ordinary rescan when an Original File remains at the same relative path with the same file size and modification time.
+An Original File and Photo must keep their persisted identities after first discovery. Their current Original Locations must not be their identities.
 
-Moving or renaming Original Files outside Slipstream may create a new Photo and leave the prior Photo unavailable. Automatic move detection is not part of the first product.
+Slipstream must retain Photo Set membership, Selection State, and Rating across an ordinary rescan when an Original File remains at the same Location with the same file size and modification time.
+
+Moving or renaming Original Files outside Slipstream may create a new Photo and leave the prior Photo unavailable. Ordinary rescan must not guess a move or silently transfer state by filename, Capture Time, camera metadata, inode, content similarity, or another heuristic.
 
 An unavailable Photo must retain its recorded state until the Photographer removes it from Slipstream. Slipstream must not silently transfer that state to a different file.
+
+## Expanding a Photo Library
+
+The server operator may expand the Photo Library by replacing its current Library Folder with an ancestor directory that contains it. This is a controlled Library operation, not automatic move detection.
+
+Before changing state, Slipstream must prove that the current Library Folder is the same directory found beneath the proposed Folder. It must not guess individual file moves.
+
+A successful expansion must:
+
+- preserve every existing Original File and Photo identity;
+- preserve Selection State, Rating, Photo Set membership and order, and saved Photo Set progress;
+- preserve remembered unavailable Photos;
+- discover supported files outside the former Folder as new Photos;
+- leave Photo Set membership unchanged unless the Photographer changes it; and
+- leave every Original File unchanged.
+
+Slipstream may invalidate and rebuild Capture Time inspection facts, Preview facts, and cached derivatives when their revisions include an old Location. These are derived state and must not replace or reset Photographer-owned review state.
+
+Expansion requires a stopped Library and a verified backup. If Slipstream cannot prove the ancestor relationship or preserve every remembered Original Location without conflict, it must reject the expansion without changing the current Library.
+
+The first product does not support arbitrary per-file relinking, automatic move detection, multiple Library Folders, or moving the Library to an unrelated directory.
+
+For example, expanding `/photos/26-spring` to `/photos` keeps `26-spring/a.ARW` as the same Original File and discovers supported files in sibling directories. Changing `/photos/26-spring` to unrelated `/archive` is not a Library Expansion.
 
 ## Capture Time
 
@@ -77,7 +102,7 @@ The Photographer must be able to request a rescan. Slipstream may also scan at s
 
 A rescan must:
 
-- add newly discovered supported files;
+- add newly discovered supported files below the current Library Folder;
 - refresh a changed file's Preview state;
 - mark missing files unavailable;
 - inspect Capture Time for newly discovered or changed available Originals;

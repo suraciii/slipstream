@@ -15,10 +15,10 @@ Filtered Library Review must use this deterministic order:
 
 1. Photos with a valid authoritative Capture Time, ordered by normalized camera-local Capture Time.
 2. Photos without a valid authoritative Capture Time.
-3. For equal Capture Times and throughout the missing-time partition, the Photo ordering path by UTF-8 bytes.
+3. For equal Capture Times and throughout the missing-time partition, the Photo's ordering Location by UTF-8 bytes.
 4. Photo ID by UTF-8 bytes when all earlier values tie.
 
-The Photo ordering path is the RAW Original's relative path when the Photo contains RAW. Otherwise it is the JPEG Original's relative path.
+The Photo's ordering Location is its RAW Original Location when the Photo contains RAW. Otherwise it is its JPEG Original Location.
 
 Photo Set Review must use membership position only. Capture metadata, availability changes, Selection State, Rating, Preview state, and rescans must not reorder a Photo Set.
 
@@ -134,7 +134,7 @@ The Photographer rejects a Photo by mistake, then chooses Undo. Slipstream resto
 
 A filtered Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. The expected Review order is `Z`, then `A`, even though the filenames sort in the opposite order.
 
-A filtered Library contains `shoot/a.JPG` and `shoot/b.JPG` with the same Capture Time. The expected order is `a`, then `b`. If Capture Time and ordering path also tie, Photo ID `1a...` sorts before Photo ID `2b...`.
+A filtered Library contains `shoot/a.JPG` and `shoot/b.JPG` with the same Capture Time. The expected order is `a`, then `b`. If Capture Time and ordering Location also tie, Photo ID `1a...` sorts before Photo ID `2b...`.
 
 A filtered Library contains `shoot/C.JPG` with a valid Capture Time, `shoot/A.JPG` with malformed `DateTimeOriginal` and no valid fallback, and `shoot/B.JPG` with no recognized capture field. The expected order is `C`, `A`, `B`.
 

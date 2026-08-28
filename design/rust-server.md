@@ -17,7 +17,7 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 The Rust service is one modular monolith with these boundaries:
 
 - **Application and HTTP** own configuration, startup order, request limits, protocol mapping, static Web delivery, readiness, and graceful shutdown.
-- **Library and Confinement** own the canonical Library descriptor, deterministic traversal, Original capabilities, pairing, identity, and revision facts. Paths do not confer authority.
+- **Library and Confinement** own the current Library Folder descriptor, deterministic traversal, Original capabilities, stable persisted identity, Original Locations, pairing, and revision facts. Paths do not confer authority or identity.
 - **Persistence** owns one SQLite connection on one dedicated thread with a bounded typed command queue. It owns schema validation, migration, sidecar admission, transactions, and durable state.
 - **Preview and Native** own bounded matching-JPEG reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
 - **Derivative and Cache** own orientation, color, resize, encoding, scheduling, identity, atomic publication, stale fallback, and immutable delivery facts.
@@ -29,7 +29,7 @@ The modules exchange domain values and typed failures. HTTP types do not enter P
 Startup proceeds in one direction:
 
 1. Parse and validate configuration.
-2. Open the canonical Library, state, and cache directories.
+2. Open the canonical Library Folder, state directory, and cache directory.
 3. Admit and open SQLite, validate or migrate it, and start its bounded owner thread.
 4. Complete the initial scan, including required Capture Time inspection or schema-v2 backfill for available Originals.
 5. Start bounded Preview workers.
@@ -45,9 +45,9 @@ Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous 
 
 ## Compatibility
 
-The checked-in files under [`../compatibility/`](../compatibility/) are the authority for deterministic identities, JSON omission behavior, startup configuration, canonical SQLite v2 migration input, canonical SQLite v3 shape, Capture Time vectors, and ordering examples. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
+The checked-in files under [`../compatibility/`](../compatibility/) are the authority for JSON omission behavior, startup configuration, canonical SQLite migration inputs and shapes, Capture Time vectors, ordering examples, and legacy deterministic IDs that must survive migration. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
 
-HTTP response shapes, SQLite v2 migration input, cache records, and deterministic identities remain compatible. SQLite v3 is the current writable schema after the lossless transition defined in [`capture-time-ordering.md`](capture-time-ordering.md). Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
+HTTP response shapes, SQLite v2 and v3 migration inputs, cache records, and existing persisted IDs remain compatible. Deterministic v3 identity vectors define preserved legacy values, not the allocator for new v4 records. SQLite v4 is the writable identity fence defined by [Photo Library Identity and Expansion](library-identity.md); older binaries reject it. Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
 
 Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
 
@@ -105,8 +105,11 @@ The service preserves:
 
 - the current HTTP routes, statuses, path-free JSON, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
-- SQLite schema version 3, lossless migration from canonical v2, canonical-root binding, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
-- Original and Photo SHA-256 identities, source revision text, and cache/manifest identity serialization, including Unicode and fractional modification times;
+- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
+- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 as a preserved migration input and v4 as the required writable identity fence;
+- exact preservation of existing Original File and Photo IDs as opaque values across migration and Library expansion, without recomputing them from the current Original Location;
+- Location-independent, state-store-unique allocation for every new Original File and Photo ID under v4;
+- source revision text and cache/manifest identity serialization, including Unicode and fractional modification times;
 - matching JPEG before largest usable embedded RAW JPEG;
 - descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
 - required absolute startup paths, loopback default, startup cleanup, signals, and idempotent close.
@@ -117,4 +120,4 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 schema shape, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 and v4 schema shapes, legacy-ID preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.
