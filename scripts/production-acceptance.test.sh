@@ -18,6 +18,22 @@ with open(sys.argv[3], encoding="utf-8") as source:
     connection.executescript(source.read())
 connection.execute("INSERT INTO library_metadata VALUES ('canonical_root', ?)", (sys.argv[2],))
 connection.execute("INSERT INTO library_metadata VALUES ('probe', 'persisted')")
+connection.execute(
+    "INSERT INTO original_files VALUES ('o1','a/one.ARW','raw',13,1.0,1,NULL,NULL,'pending',NULL,NULL,NULL,NULL)"
+)
+connection.execute(
+    "INSERT INTO original_files VALUES ('o2','a/two.JPG','jpeg',13,1.0,1,NULL,NULL,'pending',NULL,NULL,NULL,NULL)"
+)
+connection.execute(
+    "INSERT INTO photos VALUES ('one','o1',NULL,0,1,'ready','embedded-raw-jpeg','embedded-raw-jpeg','rev',2560,1707,'key','a/one.ARW','selected',5)"
+)
+connection.execute(
+    "INSERT INTO photos VALUES ('two',NULL,'o2',0,1,'unavailable',NULL,NULL,NULL,NULL,NULL,NULL,'a/two.JPG','rejected',0)"
+)
+connection.execute("INSERT INTO photo_sets VALUES ('set','Shoot',1)")
+connection.execute("INSERT INTO photo_set_members VALUES ('set','one',0)")
+connection.execute("INSERT INTO photo_set_members VALUES ('set','two',1)")
+connection.execute("INSERT INTO review_progress VALUES ('set','two')")
 connection.commit()
 connection.close()
 PY
@@ -45,9 +61,13 @@ cat >"$work_dir/bin/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 url=${!#}
+body_arg=''
+for argument in "$@"; do
+  case "$argument" in '{'*'}') body_arg=$argument ;; esac
+done
 case "$url" in
   */healthz) printf '%s' "${FAKE_HEALTH:-{\"status\":\"ok\"}}" ;;
-  */api/photos)
+  */api/overview)
     if [[ -n "${FAKE_MUTATE_STATE:-}" ]]; then
       python3 - "$FAKE_MUTATE_STATE" <<'PY'
 import sqlite3, sys
@@ -57,9 +77,100 @@ connection.commit()
 connection.close()
 PY
     fi
-    cat "$FAKE_PHOTOS"
+    python3 - "$FAKE_PHOTOS" "$FAKE_SETS" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: photos = json.load(source)["photos"]
+with open(sys.argv[2], encoding="utf-8") as source: sets = json.load(source)["photoSets"]
+print(json.dumps({
+    "published": True,
+    "photoCount": len(photos),
+    "scan": {"state": "idle", "completed": len(photos), "total": len(photos)},
+    "photoSets": [
+        {
+            "id": value["id"],
+            "name": value["name"],
+            "photoCount": len(value["members"]),
+            "hasSavedPosition": "lastReviewedPhotoId" in value,
+        }
+        for value in sets
+    ],
+}))
+PY
     ;;
-  */api/photo-sets) cat "$FAKE_SETS" ;;
+  */api/browse)
+    kind=$(printf '%s' "$body_arg" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("source", ""))')
+    if [[ "$kind" == library ]]; then
+      python3 - "$FAKE_PHOTOS" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: photos = json.load(source)["photos"]
+print(json.dumps({"token": "tok-library", "total": len(photos), "position": 0}))
+PY
+    else
+      python3 - "$FAKE_SETS" "${FAKE_SET_POSITION:-}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source)["photoSets"][0]
+members = value["members"]
+photo_ids = [member["photoId"] for member in members]
+saved = value.get("lastReviewedPhotoId")
+saved_index = photo_ids.index(saved) if saved in photo_ids else None
+
+def available(index):
+    return members[index]["available"]
+
+if not members:
+    position = 0
+elif saved_index is not None and available(saved_index):
+    position = saved_index
+elif saved_index is not None:
+    position = next(
+        (
+            (saved_index + offset) % len(members)
+            for offset in range(1, len(members) + 1)
+            if available((saved_index + offset) % len(members))
+        ),
+        saved_index,
+    )
+else:
+    position = next(
+        (index for index, member in enumerate(members) if member["available"]),
+        saved_index if saved_index is not None else 0,
+    )
+override = sys.argv[2]
+if override:
+    position = int(override)
+print(json.dumps({"token": "tok-set", "total": len(members), "position": position}))
+PY
+    fi
+    ;;
+  */api/browse/tok-library*)
+    start=$(printf '%s' "$url" | sed -n 's/.*[?&]start=\([0-9]*\).*/\1/p')
+    python3 - "$FAKE_PHOTOS" "$start" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: photos = json.load(source)["photos"]
+start = int(sys.argv[2])
+print(json.dumps({"start": start, "total": len(photos), "photos": photos[start:start + 60]}))
+PY
+    ;;
+  */api/browse/tok-set*)
+    start=$(printf '%s' "$url" | sed -n 's/.*[?&]start=\([0-9]*\).*/\1/p')
+    python3 - "$FAKE_PHOTOS" "$FAKE_SETS" "$start" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    photos = {value["id"]: value for value in json.load(source)["photos"]}
+with open(sys.argv[2], encoding="utf-8") as source:
+    members = json.load(source)["photoSets"][0]["members"]
+start = int(sys.argv[3])
+window = []
+for member in members[start:start + 60]:
+    photo = dict(photos[member["photoId"]])
+    photo["available"] = member["available"]
+    photo["selectionState"] = member["selectionState"]
+    photo["rating"] = member["rating"]
+    window.append(photo)
+print(json.dumps({"start": start, "total": len(members), "photos": window}))
+PY
+    ;;
   */api/photos/one/preview) printf '%s' '{"state":"ready","source":"embedded-raw-jpeg","stale":false,"url":"/api/derivatives/one/key.jpg"}' ;;
   */api/derivatives/one/key.jpg)
     if [[ -n "${FAKE_CACHE_DIRECTORY:-}" ]]; then
@@ -129,9 +240,35 @@ with open(sys.argv[3], "w", encoding="utf-8") as output: json.dump(sets, output)
 with open(sys.argv[2], encoding="utf-8") as source: photos = json.load(source)["photos"]
 with open(sys.argv[4], "w", encoding="utf-8") as output: json.dump({"photos": photos, "photoSets": sets["photoSets"]}, output)
 PY
+mkdir -p "$work_dir/state-no-progress"
+cp "$work_dir/state/library.sqlite" "$work_dir/state-no-progress/library.sqlite"
+python3 - "$work_dir/state-no-progress/library.sqlite" <<'PY'
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("DELETE FROM review_progress")
+connection.commit()
+connection.close()
+PY
+python3 - "$work_dir/container.json" "$work_dir/container-no-progress.json" "$work_dir/state" "$work_dir/state-no-progress" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: value = json.load(source)
+for mount in value[0]["Mounts"]:
+    if mount["Source"] == sys.argv[3]: mount["Source"] = sys.argv[4]
+with open(sys.argv[2], "w", encoding="utf-8") as output: json.dump(value, output)
+PY
 env "${base_env[@]}" FAKE_SETS="$work_dir/sets-no-progress.json" \
   SLIPSTREAM_EXPECTED_STATE_SNAPSHOT="$work_dir/state-no-progress.json" \
+  SLIPSTREAM_STATE_DIRECTORY="$work_dir/state-no-progress" \
+  FAKE_DOCKER_INSPECT="$work_dir/container-no-progress.json" \
   "$repo_root/scripts/verify-production.sh" >"$work_dir/no-progress-pass.log"
+python3 - "$work_dir/expected-state.json" "$work_dir/wrong-saved.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source: value = json.load(source)
+value["photoSets"][0]["lastReviewedPhotoId"] = "one"
+with open(sys.argv[2], "w", encoding="utf-8") as output: json.dump(value, output)
+PY
+expect_failure wrong-saved-position SLIPSTREAM_EXPECTED_STATE_SNAPSHOT="$work_dir/wrong-saved.json"
+expect_failure wrong-browse-position FAKE_SET_POSITION=0
 mkdir -p "$work_dir/restore/state" "$work_dir/restore/cache/metadata/manifests" "$work_dir/restore/cache/metadata/failures"
 cp "$work_dir/state/library.sqlite" "$work_dir/restore/state/library.sqlite"
 python3 - "$work_dir/container.json" "$work_dir/restore-container.json" "$work_dir/state" "$work_dir/cache" "$work_dir/restore/state" "$work_dir/restore/cache" <<'PY'

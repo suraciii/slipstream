@@ -105,6 +105,102 @@ finally:
 PY
 state_sha=$(sha256sum -- "$SLIPSTREAM_STATE_DATABASE" | awk '{print $1}')
 
+verify_saved_positions() {
+  python3 - "$SLIPSTREAM_STATE_DATABASE" "$work_dir/photo-sets.json" \
+    "$SLIPSTREAM_EXPECTED_STATE_SNAPSHOT" <<'PY' \
+    || fail 'persisted Photo Set membership or saved position does not match'
+import json, sqlite3, sys
+
+database, actual_path, expected_path = sys.argv[1:4]
+with open(actual_path, encoding="utf-8") as source:
+    actual = {value["id"]: value for value in json.load(source)["photoSets"]}
+with open(expected_path, encoding="utf-8") as source:
+    expected = json.load(source)["photoSets"]
+connection = sqlite3.connect(f"file:{database}?mode=ro&immutable=1", uri=True)
+try:
+    for value in expected:
+        set_id = value["id"]
+        summary = actual.get(set_id)
+        if summary is None:
+            raise SystemExit(f"Photo Set {set_id} is missing from the overview")
+        members = connection.execute(
+            "SELECT photo_id FROM photo_set_members WHERE photo_set_id=? ORDER BY position",
+            (set_id,),
+        ).fetchall()
+        if [row[0] for row in members] != [member["photoId"] for member in value["members"]]:
+            raise SystemExit(f"persisted membership order does not match for Photo Set {set_id}")
+        row = connection.execute(
+            "SELECT photo_id FROM review_progress WHERE photo_set_id=?", (set_id,)
+        ).fetchone()
+        saved = row[0] if row else None
+        expected_saved = value.get("lastReviewedPhotoId")
+        if saved != expected_saved:
+            raise SystemExit(f"persisted saved position does not match for Photo Set {set_id}")
+        if summary.get("hasSavedPosition") is not (saved is not None):
+            raise SystemExit(
+                f"overview saved-position summary does not match SQLite for Photo Set {set_id}"
+            )
+finally:
+    connection.close()
+PY
+}
+
+verify_browse_position() {
+  python3 - "$SLIPSTREAM_BASE_URL" "$SLIPSTREAM_EXPECTED_STATE_SNAPSHOT" \
+    "$SLIPSTREAM_EXPECTED_PHOTO_SET" <<'PY' \
+    || fail 'browse open returned an unexpected saved position'
+import json, subprocess, sys
+
+base, expected_path, set_name = sys.argv[1:4]
+with open(expected_path, encoding="utf-8") as source:
+    named = [value for value in json.load(source)["photoSets"] if value.get("name") == set_name]
+if len(named) != 1:
+    raise SystemExit("expected exactly one named Photo Set")
+members = named[0]["members"]
+photo_ids = [member["photoId"] for member in members]
+saved = named[0].get("lastReviewedPhotoId")
+saved_index = photo_ids.index(saved) if saved in photo_ids else None
+
+def available(index):
+    return members[index]["available"]
+
+if not members:
+    resolved = 0
+elif saved_index is not None and available(saved_index):
+    resolved = saved_index
+elif saved_index is not None:
+    resolved = next(
+        (
+            (saved_index + offset) % len(members)
+            for offset in range(1, len(members) + 1)
+            if available((saved_index + offset) % len(members))
+        ),
+        saved_index,
+    )
+else:
+    resolved = next(
+        (index for index, member in enumerate(members) if member["available"]),
+        saved_index if saved_index is not None else 0,
+    )
+opened = json.loads(
+    subprocess.run(
+        [
+            "curl", "--noproxy", "*", "--fail", "--silent", "--show-error",
+            "-H", "Content-Type: application/json", "-X", "POST",
+            "--data-binary",
+            json.dumps({"source": "photo-set", "photoSetId": named[0]["id"]}),
+            f"{base}/api/browse",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+)
+if opened.get("position") != resolved or opened.get("total") != len(members):
+    raise SystemExit("browse open position mismatch")
+PY
+}
+
 health=$(curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/healthz") \
   || fail '/healthz request failed'
 [[ "$health" == '{"status":"ok"}' ]] || fail '/healthz response is not exact'
@@ -113,24 +209,115 @@ curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/" >"$work_
   || fail 'Web entry request failed'
 grep -Fq 'Slipstream' "$work_dir/index.html" || fail 'Web entry does not identify Slipstream'
 
-curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/api/photos" >"$work_dir/photos.json" \
-  || fail 'Photo list request failed'
-curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/api/photo-sets" >"$work_dir/photo-sets.json" \
-  || fail 'Photo Set request failed'
+collect_state() {
+  python3 - "$SLIPSTREAM_BASE_URL" "$work_dir" <<'PY' || fail 'bounded Library state collection failed'
+import json, subprocess, sys
 
-python3 - "$work_dir/photos.json" "$work_dir/photo-sets.json" "$SLIPSTREAM_EXPECTED_STATE_SNAPSHOT" \
-  "$SLIPSTREAM_EXPECTED_PHOTO_COUNT" "$SLIPSTREAM_EXPECTED_PHOTO_SET" \
-  "$SLIPSTREAM_EXPECTED_MEMBER_COUNT" <<'PY' || fail 'Photo or Photo Set state does not match'
+base, work = sys.argv[1:3]
+LIMIT = 60
+
+
+def curl_json(args):
+    result = subprocess.run(
+        ["curl", "--noproxy", "*", "--fail", "--silent", "--show-error"] + args,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"request failed: {args[-1]}")
+    return json.loads(result.stdout)
+
+
+def collect(body):
+    opened = curl_json(
+        [
+            "-H",
+            "Content-Type: application/json",
+            "-X",
+            "POST",
+            "--data-binary",
+            json.dumps(body),
+            f"{base}/api/browse",
+        ]
+    )
+    token, total = opened["token"], opened["total"]
+    start, items = 0, []
+    while True:
+        window = curl_json([f"{base}/api/browse/{token}?start={start}&limit={LIMIT}"])
+        if window["start"] != start or window["total"] != total:
+            raise SystemExit("browse window metadata is inconsistent")
+        items.extend(window["photos"])
+        start += LIMIT
+        if start >= total or not window["photos"]:
+            break
+    if len(items) != total:
+        raise SystemExit("browse window traversal is incomplete")
+    ids = [item["id"] for item in items]
+    if len(set(ids)) != len(ids):
+        raise SystemExit("duplicate Photo ids in browse traversal")
+    return items
+
+
+overview = curl_json([f"{base}/api/overview"])
+if overview.get("published") is not True:
+    raise SystemExit("Library overview is not published")
+photos = collect({"source": "library"})
+if len(photos) != overview.get("photoCount"):
+    raise SystemExit("Library overview count does not match the traversal")
+photo_sets = []
+for summary in overview["photoSets"]:
+    members = collect({"source": "photo-set", "photoSetId": summary["id"]})
+    if len(members) != summary.get("photoCount"):
+        raise SystemExit("Photo Set overview count does not match the traversal")
+    photo_sets.append(
+        {
+            "id": summary["id"],
+            "name": summary["name"],
+            "photoCount": summary["photoCount"],
+            "hasSavedPosition": summary["hasSavedPosition"],
+            "members": [
+                {
+                    "photoId": member["id"],
+                    "position": position,
+                    "available": member["available"],
+                    "selectionState": member["selectionState"],
+                    "rating": member["rating"],
+                }
+                for position, member in enumerate(members)
+            ],
+        }
+    )
+with open(f"{work}/photos.json", "w", encoding="utf-8") as output:
+    json.dump({"photos": photos}, output)
+with open(f"{work}/photo-sets.json", "w", encoding="utf-8") as output:
+    json.dump({"photoSets": photo_sets}, output)
+with open(f"{work}/overview.json", "w", encoding="utf-8") as output:
+    json.dump(overview, output)
+PY
+}
+
+compare_state() {
+  python3 - "$work_dir/photos.json" "$work_dir/photo-sets.json" "$work_dir/overview.json" \
+    "$SLIPSTREAM_EXPECTED_STATE_SNAPSHOT" "$SLIPSTREAM_EXPECTED_PHOTO_COUNT" \
+    "$SLIPSTREAM_EXPECTED_PHOTO_SET" "$SLIPSTREAM_EXPECTED_MEMBER_COUNT" <<'PY' \
+    || fail 'Photo or Photo Set state does not match'
 import json, sys
-photos_path, sets_path, expected_path, expected_photos, expected_set, expected_members = sys.argv[1:]
+photos_path, sets_path, overview_path, expected_path, expected_photos, expected_set, expected_members = sys.argv[1:]
 with open(photos_path, encoding="utf-8") as source:
     photos = json.load(source)
 with open(sets_path, encoding="utf-8") as source:
     sets = json.load(source)
+with open(overview_path, encoding="utf-8") as source:
+    overview = json.load(source)
 with open(expected_path, encoding="utf-8") as source:
     expected = json.load(source)
-if expected != {"photos": photos.get("photos"), "photoSets": sets.get("photoSets")}:
-    raise SystemExit("exact persisted state snapshot mismatch")
+if overview.get("photoCount") != int(expected_photos):
+    raise SystemExit("Library overview Photo count mismatch")
+named = [value for value in overview.get("photoSets", []) if value.get("name") == expected_set]
+if len(named) != 1:
+    raise SystemExit("expected exactly one named Photo Set in the overview")
+if named[0].get("photoCount") != int(expected_members):
+    raise SystemExit("overview Photo Set member count mismatch")
 if set(photos) != {"photos"} or not isinstance(photos["photos"], list):
     raise SystemExit("invalid Photo response")
 if len(photos["photos"]) != int(expected_photos):
@@ -143,16 +330,41 @@ for photo in photos["photos"]:
         raise SystemExit("Photo decision facts are invalid")
 if set(sets) != {"photoSets"} or not isinstance(sets["photoSets"], list):
     raise SystemExit("invalid Photo Set response")
-matches = [value for value in sets["photoSets"] if value.get("name") == expected_set]
-if len(matches) != 1:
-    raise SystemExit("expected exactly one named Photo Set")
-if len(matches[0].get("members", [])) != int(expected_members):
-    raise SystemExit("Photo Set member count mismatch")
 member_fields = {"photoId", "position", "available", "selectionState", "rating"}
-for member in matches[0]["members"]:
-    if not member_fields.issubset(member):
-        raise SystemExit("Photo Set member omits order or review state")
+for actual in sets["photoSets"]:
+    if not {"id", "name", "photoCount", "hasSavedPosition", "members"}.issubset(actual):
+        raise SystemExit("Photo Set reconstruction omits persisted facts")
+    for member in actual["members"]:
+        if not member_fields.issubset(member):
+            raise SystemExit("Photo Set member omits order or review state")
+# The snapshot keeps the legacy Photo Set shape; normalize it to the bounded
+# overview shape so the comparison stays exact over the same persisted facts.
+normalized_sets = []
+for value in expected.get("photoSets", []):
+    has_saved = "lastReviewedPhotoId" in value
+    members = value.get("members")
+    if not isinstance(members, list):
+        raise SystemExit("expected Photo Set omits members")
+    normalized_sets.append(
+        {
+            "id": value.get("id"),
+            "name": value.get("name"),
+            "photoCount": len(members),
+            "hasSavedPosition": has_saved,
+            "members": members,
+        }
+    )
+expected_normalized = {"photos": expected.get("photos"), "photoSets": normalized_sets}
+actual = {"photos": photos.get("photos"), "photoSets": sets.get("photoSets")}
+if expected_normalized != actual:
+    raise SystemExit("exact persisted state snapshot mismatch")
 PY
+}
+
+collect_state
+compare_state
+verify_saved_positions
+verify_browse_position
 
 python3 - "$work_dir/photos.json" "$SLIPSTREAM_PREVIEW_PHOTO_ID" "$SLIPSTREAM_EXPECTED_PREVIEW_SOURCE" <<'PY' \
   || fail 'persisted Preview facts do not match'
@@ -241,18 +453,10 @@ PY
   if ! find "$SLIPSTREAM_CACHE_DIRECTORY" -mindepth 1 -type f -print -quit | grep -q .; then
     fail 'isolated Preview request did not populate the empty cache'
   fi
-  curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/api/photos" >"$work_dir/photos-after.json" \
-    || fail 'post-Preview Photo state request failed'
-  curl --noproxy '*' --fail --silent --show-error "$SLIPSTREAM_BASE_URL/api/photo-sets" >"$work_dir/sets-after.json" \
-    || fail 'post-Preview Photo Set state request failed'
-  python3 - "$work_dir/photos-after.json" "$work_dir/sets-after.json" "$SLIPSTREAM_EXPECTED_STATE_SNAPSHOT" <<'PY' \
-    || fail 'user review state changed during isolated Preview verification'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as source: photos = json.load(source)["photos"]
-with open(sys.argv[2], encoding="utf-8") as source: sets = json.load(source)["photoSets"]
-with open(sys.argv[3], encoding="utf-8") as source: expected = json.load(source)
-if {"photos": photos, "photoSets": sets} != expected: raise SystemExit("state mismatch")
-PY
+  collect_state
+  compare_state
+  verify_saved_positions
+  verify_browse_position
 elif [[ "${SLIPSTREAM_ALLOW_DERIVED_WRITES:-0}" != 0 ]]; then
   fail 'SLIPSTREAM_ALLOW_DERIVED_WRITES must be 0 or 1'
 fi

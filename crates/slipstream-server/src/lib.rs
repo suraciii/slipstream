@@ -11,13 +11,14 @@ use axum::{
     http::{Request, Response, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slipstream_core::{
-    CacheDirectory, Library, LibraryConfig, LibraryError, PhotoSetRecord, PreviewCandidate,
-    PreviewService, PreviewState, ScanLimits, SelectionState,
+    CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoSetRecord,
+    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewReady, PreviewService, PreviewState,
+    ScanLimits, SelectionState,
 };
 use std::{
     env,
@@ -28,7 +29,11 @@ use std::{
         unix::fs::OpenOptionsExt,
     },
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::TcpListener,
@@ -181,6 +186,8 @@ pub enum ServerError {
     StorageLayout,
     Io(io::Error),
     Cache(String),
+    BrowseNotFound,
+    BrowseLimit,
     Join(String),
 }
 
@@ -197,6 +204,8 @@ impl fmt::Display for ServerError {
             }
             Self::Io(error) => error.fmt(formatter),
             Self::Cache(error) => formatter.write_str(error),
+            Self::BrowseNotFound => formatter.write_str("Browse source is no longer available"),
+            Self::BrowseLimit => formatter.write_str("Browse window is invalid"),
             Self::Join(error) => formatter.write_str(error),
         }
     }
@@ -284,10 +293,54 @@ fn canonicalize_layout_path(path: &Path) -> io::Result<PathBuf> {
     Ok(existing)
 }
 
+const MAX_BROWSE_WINDOW: usize = 60;
+const MAX_BROWSE_SNAPSHOTS: usize = 8;
+const BROWSE_SNAPSHOT_IDLE: Duration = Duration::from_secs(30 * 60);
+
+static NEXT_BROWSE_NAMESPACE: AtomicU64 = AtomicU64::new(0);
+
+/// The published Library plus id indices, rebuilt atomically on each snapshot
+/// replacement so bounded window requests never rescan the whole Library.
+struct Published {
+    snapshot: slipstream_core::ScanSnapshot,
+    photos_by_id: std::collections::HashMap<String, usize>,
+    originals_by_id: std::collections::HashMap<String, usize>,
+}
+
+impl Published {
+    fn new(snapshot: slipstream_core::ScanSnapshot) -> Self {
+        let photos_by_id = snapshot
+            .photos
+            .iter()
+            .enumerate()
+            .map(|(position, photo)| (photo.id.clone(), position))
+            .collect();
+        let originals_by_id = snapshot
+            .originals
+            .iter()
+            .enumerate()
+            .map(|(position, original)| (original.id.clone(), position))
+            .collect();
+        Self {
+            snapshot,
+            photos_by_id,
+            originals_by_id,
+        }
+    }
+}
+
+struct BrowseSnapshot {
+    photo_ids: Vec<String>,
+    last_used: Instant,
+}
+
 pub struct Application {
     library: Arc<Library>,
     preview: PreviewService,
-    snapshot: RwLock<slipstream_core::ScanSnapshot>,
+    published: RwLock<Published>,
+    browse_snapshots: Mutex<std::collections::HashMap<String, BrowseSnapshot>>,
+    browse_namespace: u128,
+    browse_counter: AtomicU64,
     shutdown: Mutex<bool>,
 }
 
@@ -328,23 +381,223 @@ impl Application {
                 return Err(ServerError::Preview(error.to_string()));
             }
         };
+        let browse_namespace = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            ^ (u128::from(std::process::id()) << 64)
+            ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
         Ok(Arc::new(Self {
             library,
             preview,
-            snapshot: RwLock::new(snapshot),
+            published: RwLock::new(Published::new(snapshot)),
+            browse_snapshots: Mutex::new(std::collections::HashMap::new()),
+            browse_namespace,
+            browse_counter: AtomicU64::new(0),
             shutdown: Mutex::new(false),
         }))
     }
 
     pub fn photos(&self) -> PhotoListResponse {
-        let snapshot = self.snapshot.read().expect("application snapshot poisoned");
+        let published = self.published.read().expect("published Library poisoned");
         PhotoListResponse {
-            photos: snapshot
+            photos: published
+                .snapshot
                 .photos
                 .iter()
-                .map(|photo| photo_summary(photo, &snapshot.originals))
+                .map(|photo| {
+                    photo_summary_indexed(
+                        photo,
+                        &published.snapshot.originals,
+                        &published.originals_by_id,
+                    )
+                })
                 .collect(),
         }
+    }
+
+    pub async fn overview(&self) -> Result<LibraryOverviewResponse, ServerError> {
+        let photo_sets = self
+            .library
+            .list_photo_sets()
+            .await?
+            .into_iter()
+            .map(photo_set_summary)
+            .collect();
+        let photo_count = self
+            .published
+            .read()
+            .expect("published Library poisoned")
+            .snapshot
+            .photos
+            .len();
+        Ok(LibraryOverviewResponse {
+            published: true,
+            photo_count,
+            scan: ScanStatusWire {
+                state: "idle",
+                completed: Some(photo_count),
+                total: Some(photo_count),
+            },
+            photo_sets,
+        })
+    }
+
+    pub async fn browse_open(
+        &self,
+        source: BrowseSourceRequest,
+        preferred_photo_id: Option<&str>,
+    ) -> Result<BrowseOpenResponse, ServerError> {
+        let (photo_ids, position): (Vec<String>, usize) = match source {
+            BrowseSourceRequest::Library => {
+                let photo_ids = self
+                    .published
+                    .read()
+                    .expect("published Library poisoned")
+                    .snapshot
+                    .photos
+                    .iter()
+                    .map(|photo| photo.id.clone())
+                    .collect::<Vec<_>>();
+                let position = preferred_photo_id
+                    .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
+                    .unwrap_or(0);
+                (photo_ids, position)
+            }
+            BrowseSourceRequest::PhotoSet(id) => {
+                let set = self
+                    .library
+                    .list_photo_sets()
+                    .await?
+                    .into_iter()
+                    .find(|set| set.id == id)
+                    .ok_or(ServerError::BrowseNotFound)?;
+                let preferred = preferred_photo_id.and_then(|preferred| {
+                    set.members
+                        .iter()
+                        .position(|member| member.photo_id == preferred)
+                });
+                let saved = set.last_reviewed_photo_id.and_then(|saved| {
+                    set.members
+                        .iter()
+                        .position(|member| member.photo_id == saved)
+                });
+                let position = preferred.unwrap_or_else(|| {
+                    saved
+                        .filter(|saved| set.members[*saved].available)
+                        .or_else(|| {
+                            saved.and_then(|saved| {
+                                (1..=set.members.len())
+                                    .map(|offset| (saved + offset) % set.members.len())
+                                    .find(|index| set.members[*index].available)
+                            })
+                        })
+                        .or_else(|| set.members.iter().position(|member| member.available))
+                        .or(saved)
+                        .unwrap_or(0)
+                });
+                (
+                    set.members
+                        .into_iter()
+                        .map(|member| member.photo_id)
+                        .collect(),
+                    position,
+                )
+            }
+        };
+        let token = format!(
+            "b{:032x}{:016x}",
+            self.browse_namespace,
+            self.browse_counter.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut snapshots = self
+            .browse_snapshots
+            .lock()
+            .expect("browse snapshots poisoned");
+        let now = Instant::now();
+        snapshots
+            .retain(|_, snapshot| now.duration_since(snapshot.last_used) < BROWSE_SNAPSHOT_IDLE);
+        while snapshots.len() >= MAX_BROWSE_SNAPSHOTS {
+            let Some(oldest) = snapshots
+                .iter()
+                .min_by_key(|(_, snapshot)| snapshot.last_used)
+                .map(|(token, _)| token.clone())
+            else {
+                break;
+            };
+            snapshots.remove(&oldest);
+        }
+        let total = photo_ids.len();
+        snapshots.insert(
+            token.clone(),
+            BrowseSnapshot {
+                photo_ids,
+                last_used: now,
+            },
+        );
+        Ok(BrowseOpenResponse {
+            token,
+            total,
+            position,
+        })
+    }
+
+    pub async fn browse_window(
+        &self,
+        token: &str,
+        start: usize,
+        limit: usize,
+    ) -> Result<BrowseWindowResponse, ServerError> {
+        if limit == 0 || limit > MAX_BROWSE_WINDOW {
+            return Err(ServerError::BrowseLimit);
+        }
+        let (ids, total) = {
+            let mut snapshots = self
+                .browse_snapshots
+                .lock()
+                .expect("browse snapshots poisoned");
+            let now = Instant::now();
+            if snapshots.get(token).is_some_and(|snapshot| {
+                now.duration_since(snapshot.last_used) >= BROWSE_SNAPSHOT_IDLE
+            }) {
+                snapshots.remove(token);
+                return Err(ServerError::BrowseNotFound);
+            }
+            let snapshot = snapshots
+                .get_mut(token)
+                .ok_or(ServerError::BrowseNotFound)?;
+            snapshot.last_used = now;
+            let total = snapshot.photo_ids.len();
+            let ids = snapshot
+                .photo_ids
+                .iter()
+                .skip(start)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            (ids, total)
+        };
+        let source = self.published.read().expect("published Library poisoned");
+        let photos = ids
+            .iter()
+            .filter_map(|id| source.photos_by_id.get(id).copied())
+            .filter_map(|position| source.snapshot.photos.get(position))
+            .map(|photo| {
+                photo_summary_indexed(photo, &source.snapshot.originals, &source.originals_by_id)
+            })
+            .collect();
+        Ok(BrowseWindowResponse {
+            start,
+            total,
+            photos,
+        })
+    }
+
+    pub fn browse_close(&self, token: &str) {
+        self.browse_snapshots
+            .lock()
+            .expect("browse snapshots poisoned")
+            .remove(token);
     }
 
     pub async fn photo_sets(&self) -> Result<PhotoSetResponse, ServerError> {
@@ -361,10 +614,7 @@ impl Application {
 
     pub async fn rescan(&self) -> Result<PhotoListResponse, ServerError> {
         let snapshot = self.library.scan().await?;
-        *self
-            .snapshot
-            .write()
-            .expect("application snapshot poisoned") = snapshot;
+        *self.published.write().expect("published Library poisoned") = Published::new(snapshot);
         Ok(self.photos())
     }
 
@@ -380,33 +630,81 @@ impl Application {
         &self,
         mutation: slipstream_core::PhotoStateMutation,
     ) -> Result<slipstream_core::PhotoStateMutationResult, ServerError> {
+        let photo_id = mutation.photo_id.clone();
+        let field = mutation.field;
+        let value = mutation.value;
         let result = self.library.mutate_photo_state(mutation).await?;
-        *self
-            .snapshot
-            .write()
-            .expect("application snapshot poisoned") = self.library.snapshot().await?;
+        let mut published = self.published.write().expect("published Library poisoned");
+        if let Some(position) = published.photos_by_id.get(&photo_id).copied()
+            && let Some(photo) = published.snapshot.photos.get_mut(position)
+        {
+            match (field, value) {
+                (PhotoStateField::SelectionState, PhotoStateValue::Selection(selection)) => {
+                    photo.selection_state = selection;
+                }
+                (PhotoStateField::Rating, PhotoStateValue::Rating(rating)) => {
+                    photo.rating = rating;
+                }
+                _ => {}
+            }
+        }
+        drop(published);
         Ok(result)
     }
 
     pub async fn preview(&self, photo_id: &str) -> Result<PreviewResponse, ServerError> {
+        self.preview_with_priority(photo_id, slipstream_core::DerivativePriority::Current)
+            .await
+    }
+
+    pub async fn preview_with_priority(
+        &self,
+        photo_id: &str,
+        priority: slipstream_core::DerivativePriority,
+    ) -> Result<PreviewResponse, ServerError> {
+        self.preview_target(photo_id, DerivativeTarget::Review2560, priority)
+            .await
+    }
+
+    pub async fn thumbnail(&self, photo_id: &str) -> Result<PreviewResponse, ServerError> {
+        self.preview_target(
+            photo_id,
+            DerivativeTarget::Thumbnail512,
+            slipstream_core::DerivativePriority::VisibleGrid,
+        )
+        .await
+    }
+
+    async fn preview_target(
+        &self,
+        photo_id: &str,
+        target: DerivativeTarget,
+        priority: slipstream_core::DerivativePriority,
+    ) -> Result<PreviewResponse, ServerError> {
         if !valid_id(photo_id) {
             return Ok(PreviewResponse::unavailable("Unknown Photo"));
         }
         let result = self
             .preview
-            .review(
-                photo_id.to_owned(),
-                slipstream_core::DerivativePriority::Current,
-            )
+            .request(photo_id.to_owned(), target, priority)
             .await;
-        Ok(match result {
+        let response = match result {
             Ok(slipstream_core::PreviewRequestResult::Current(ready)) => {
+                if target == DerivativeTarget::Review2560 {
+                    self.update_preview_ready(photo_id, &ready);
+                }
                 PreviewResponse::ready(photo_id, &ready, false)
             }
             Ok(slipstream_core::PreviewRequestResult::Stale(ready)) => {
                 PreviewResponse::ready(photo_id, &ready, true)
             }
             Ok(slipstream_core::PreviewRequestResult::Unavailable(unavailable)) => {
+                if target == DerivativeTarget::Review2560
+                    && unavailable.reason
+                        == slipstream_core::PreviewUnavailableReason::NoUsableSource
+                {
+                    self.update_preview_state(photo_id, PreviewState::Unavailable);
+                }
                 let message = match unavailable.reason {
                     slipstream_core::PreviewUnavailableReason::PhotoNotFound => "Unknown Photo",
                     slipstream_core::PreviewUnavailableReason::OriginalUnavailable => {
@@ -419,6 +717,9 @@ impl Application {
                 PreviewResponse::unavailable(message)
             }
             Ok(slipstream_core::PreviewRequestResult::Failed(_)) => {
+                if target == DerivativeTarget::Review2560 {
+                    self.update_preview_state(photo_id, PreviewState::Failed);
+                }
                 PreviewResponse::failed("Preview generation failed")
             }
             Ok(slipstream_core::PreviewRequestResult::StaleIgnored) => {
@@ -432,21 +733,50 @@ impl Application {
                 return Err(ServerError::PreviewUnavailable);
             }
             Err(_) => PreviewResponse::failed("Request failed"),
-        })
+        };
+        Ok(response)
+    }
+
+    fn update_preview_ready(&self, photo_id: &str, ready: &PreviewReady) {
+        let mut published = self.published.write().expect("published Library poisoned");
+        if let Some(position) = published.photos_by_id.get(photo_id).copied()
+            && let Some(photo) = published.snapshot.photos.get_mut(position)
+        {
+            photo.preview_state = PreviewState::Ready;
+            photo.preview_source = Some(ready.source);
+            photo.preview_width = Some(ready.width);
+            photo.preview_height = Some(ready.height);
+            photo.cache_revision = Some(ready.cache_key.clone());
+        }
+    }
+
+    fn update_preview_state(&self, photo_id: &str, state: PreviewState) {
+        let mut published = self.published.write().expect("published Library poisoned");
+        if let Some(position) = published.photos_by_id.get(photo_id).copied()
+            && let Some(photo) = published.snapshot.photos.get_mut(position)
+        {
+            photo.preview_state = state;
+            photo.preview_source = None;
+            photo.preview_width = None;
+            photo.preview_height = None;
+            photo.cache_revision = None;
+        }
     }
 
     pub async fn derivative(
         &self,
         photo_id: &str,
         cache_key: &str,
+        target: DerivativeTarget,
     ) -> Result<Option<DerivativeDelivery>, ServerError> {
         if !valid_id(photo_id) || !is_hex_key(cache_key) {
             return Ok(None);
         }
         let result = self
             .preview
-            .review(
+            .request(
                 photo_id.to_owned(),
+                target,
                 slipstream_core::DerivativePriority::Current,
             )
             .await;
@@ -498,6 +828,56 @@ impl Application {
 #[serde(rename_all = "camelCase")]
 pub struct PhotoListResponse {
     pub photos: Vec<PhotoSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryOverviewResponse {
+    pub published: bool,
+    pub photo_count: usize,
+    pub scan: ScanStatusWire,
+    pub photo_sets: Vec<PhotoSetSummaryWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStatusWire {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoSetSummaryWire {
+    pub id: String,
+    pub name: String,
+    pub photo_count: usize,
+    pub has_saved_position: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseOpenResponse {
+    pub token: String,
+    pub total: usize,
+    pub position: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseWindowResponse {
+    pub start: usize,
+    pub total: usize,
+    pub photos: Vec<PhotoSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub enum BrowseSourceRequest {
+    Library,
+    PhotoSet(String),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -561,15 +941,16 @@ pub struct PreviewWire {
     pub message: Option<&'static str>,
 }
 
-fn photo_summary(
+fn photo_summary_indexed(
     photo: &slipstream_core::PhotoRecord,
-    all_originals: &[slipstream_core::OriginalRecord],
+    originals: &[slipstream_core::OriginalRecord],
+    originals_by_id: &std::collections::HashMap<String, usize>,
 ) -> PhotoSummary {
     let original = |id: &Option<String>, kind: &'static str| {
         id.as_ref().and_then(|id| {
-            all_originals
-                .iter()
-                .find(|original| &original.id == id)
+            originals_by_id
+                .get(id)
+                .and_then(|position| originals.get(*position))
                 .map(|original| OriginalWire {
                     kind,
                     available: original.available,
@@ -603,6 +984,15 @@ fn photo_summary(
                 .map(|(width, height)| width.max(height) < 2560),
             message: (!photo.available).then_some("Original File is unavailable"),
         },
+    }
+}
+
+fn photo_set_summary(record: PhotoSetRecord) -> PhotoSetSummaryWire {
+    PhotoSetSummaryWire {
+        id: record.id,
+        name: record.name,
+        photo_count: record.members.len(),
+        has_saved_position: record.last_reviewed_photo_id.is_some(),
     }
 }
 
@@ -649,6 +1039,13 @@ fn preview_candidate(candidate: PreviewCandidate) -> &'static str {
     }
 }
 
+fn derivative_target_name(target: DerivativeTarget) -> &'static str {
+    match target {
+        DerivativeTarget::Thumbnail512 => "thumbnail",
+        DerivativeTarget::Review2560 => "review",
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewResponse {
@@ -679,8 +1076,10 @@ impl PreviewResponse {
             height: Some(ready.height),
             limited_detail: Some(ready.width.max(ready.height) < 2560),
             url: Some(format!(
-                "/api/derivatives/{}/{}.jpg",
-                photo_id, ready.cache_key
+                "/api/derivatives/{}/{}/{}.jpg",
+                photo_id,
+                derivative_target_name(ready.target),
+                ready.cache_key
             )),
             message: stale.then_some("Showing a stale Preview because current generation failed"),
         }
@@ -846,8 +1245,16 @@ pub fn create_router(application: Arc<Application>, web_root: impl Into<PathBuf>
 fn create_router_with_web_root(application: Arc<Application>, web_root: WebRoot) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(healthz))
+        .route("/api/overview", get(overview))
+        .route("/api/status", get(status))
+        .route("/api/browse", post(open_browse))
+        .route(
+            "/api/browse/{token}",
+            get(get_browse_window).delete(close_browse),
+        )
         .route("/api/photos", get(list_photos))
         .route("/api/photos/{id}/preview", get(get_preview))
+        .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
         .route(
             "/api/photo-sets",
             get(list_photo_sets).post(create_photo_set),
@@ -882,7 +1289,7 @@ fn create_router_with_web_root(application: Arc<Application>, web_root: WebRoot)
         )
         .route("/api/scan", get(method_not_allowed).post(scan))
         .route(
-            "/api/derivatives/{photo_id}/{filename}",
+            "/api/derivatives/{photo_id}/{target}/{filename}",
             get(get_derivative),
         )
         .fallback(static_web)
@@ -929,8 +1336,105 @@ async fn healthz(State(state): State<HttpState>) -> Response<Body> {
     Json(HealthResponse { status: "ok" }).into_response()
 }
 
+async fn overview(
+    State(state): State<HttpState>,
+) -> Result<Json<LibraryOverviewResponse>, ApiError> {
+    Ok(Json(state.application.overview().await?))
+}
+
+async fn status(State(state): State<HttpState>) -> Result<Json<ScanStatusWire>, ApiError> {
+    Ok(Json(state.application.overview().await?.scan))
+}
+
 async fn list_photos(State(state): State<HttpState>) -> Json<PhotoListResponse> {
     Json(state.application.photos())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowseOpenBody {
+    source: String,
+    #[serde(default)]
+    photo_set_id: Option<String>,
+    #[serde(default)]
+    photo_id: Option<String>,
+}
+
+async fn open_browse(State(state): State<HttpState>, request: Request<Body>) -> Response<Body> {
+    if !mutation_allowed(&request) {
+        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
+    }
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Ok(body) = serde_json::from_value::<BrowseOpenBody>(body) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid browse source");
+    };
+    let preferred_photo_id = match body.photo_id {
+        Some(id) if valid_id(&id) => Some(id),
+        Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid preferred Photo"),
+        None => None,
+    };
+    let source = match body.source.as_str() {
+        "library" if body.photo_set_id.is_none() => BrowseSourceRequest::Library,
+        "photo-set" => match body.photo_set_id.filter(|id| valid_id(id)) {
+            Some(id) => BrowseSourceRequest::PhotoSet(id),
+            None => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo Set source"),
+        },
+        _ => return api_error(StatusCode::BAD_REQUEST, "Invalid browse source"),
+    };
+    match state
+        .application
+        .browse_open(source, preferred_photo_id.as_deref())
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn get_browse_window(
+    State(state): State<HttpState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some((start, limit)) = browse_query(request.uri().query()) else {
+        return api_error(StatusCode::BAD_REQUEST, "Browse window is invalid");
+    };
+    match state.application.browse_window(&token, start, limit).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn close_browse(
+    State(state): State<HttpState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if !mutation_allowed(&request) {
+        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
+    }
+    state.application.browse_close(&token);
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .expect("valid response")
+}
+
+fn browse_query(query: Option<&str>) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut limit = None;
+    for part in query?.split('&') {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "start" => start = value.parse().ok(),
+            "limit" => limit = value.parse().ok(),
+            _ => {}
+        }
+    }
+    Some((start?, limit?))
 }
 
 async fn list_photo_sets(
@@ -1198,11 +1702,34 @@ fn rating_value(value: slipstream_core::PhotoStateValue) -> Value {
     }
 }
 
-async fn get_preview(
+async fn get_thumbnail(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response<Body> {
-    match state.application.preview(&id).await {
+    match state.application.thumbnail(&id).await {
+        Ok(result) => {
+            let status = if result.state == "ready" {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            json_response(status, &result)
+        }
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn get_preview(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let priority = if request.uri().query() == Some("priority=adjacent") {
+        slipstream_core::DerivativePriority::Adjacent
+    } else {
+        slipstream_core::DerivativePriority::Current
+    };
+    match state.application.preview_with_priority(&id, priority).await {
         Ok(result) => {
             let status = if result.state == "ready" {
                 StatusCode::OK
@@ -1217,16 +1744,25 @@ async fn get_preview(
 
 async fn get_derivative(
     State(state): State<HttpState>,
-    axum::extract::Path((photo_id, filename)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((photo_id, target, filename)): axum::extract::Path<(
+        String,
+        String,
+        String,
+    )>,
     request: Request<Body>,
 ) -> Response<Body> {
+    let target = match target.as_str() {
+        "thumbnail" => DerivativeTarget::Thumbnail512,
+        "review" => DerivativeTarget::Review2560,
+        _ => return api_error(StatusCode::NOT_FOUND, "Derivative not found"),
+    };
     let Some(key) = filename.strip_suffix(".jpg") else {
         return api_error(StatusCode::NOT_FOUND, "Derivative not found");
     };
     if !is_hex_key(key) {
         return api_error(StatusCode::NOT_FOUND, "Derivative not found");
     }
-    let delivery = match state.application.derivative(&photo_id, key).await {
+    let delivery = match state.application.derivative(&photo_id, key, target).await {
         Ok(Some(delivery)) => delivery,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "Derivative not found"),
         Err(error) => return ApiError::from(error).into_response(),
@@ -1423,12 +1959,18 @@ async fn request_policy(request: Request<Body>, next: Next) -> Response<Body> {
             "Request headers are too large",
         );
     }
-    if !matches!(request.method().as_str(), "GET" | "HEAD" | "POST") {
+    if !matches!(
+        request.method().as_str(),
+        "GET" | "HEAD" | "POST" | "DELETE"
+    ) {
         return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
-    if request.method() == http::Method::POST {
+    if matches!(request.method().as_str(), "POST" | "DELETE") {
         let path = request.uri().path();
-        if !(path == "/api" || path.starts_with("/api/")) {
+        let api_path = path == "/api" || path.starts_with("/api/");
+        let admitted = api_path
+            && (!request.method().as_str().eq("DELETE") || path.starts_with("/api/browse/"));
+        if !admitted {
             return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
         }
     }
@@ -1462,6 +2004,14 @@ impl From<ServerError> for ApiError {
             };
         }
         match error {
+            ServerError::BrowseNotFound => Self {
+                status: StatusCode::NOT_FOUND,
+                message: "Browse source expired or not found",
+            },
+            ServerError::BrowseLimit => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Browse window is invalid",
+            },
             ServerError::PreviewUnavailable => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 message: "Preview service unavailable",
@@ -2037,6 +2587,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browse_protocol_fixtures_execute_with_captured_token() {
+        let (base, config) = prepare_fixture();
+        let application = Application::open(&config).await.unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let vectors: Vec<serde_json::Value> = serde_json::from_slice(
+            &fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../compatibility/protocol/browse-vectors.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(vectors.len() >= 12);
+        fn substitute(value: &serde_json::Value, token: &str) -> serde_json::Value {
+            match value {
+                serde_json::Value::String(text) => {
+                    serde_json::Value::String(text.replace("$token", token))
+                }
+                serde_json::Value::Array(values) => serde_json::Value::Array(
+                    values.iter().map(|item| substitute(item, token)).collect(),
+                ),
+                serde_json::Value::Object(entries) => serde_json::Value::Object(
+                    entries
+                        .iter()
+                        .map(|(name, item)| (name.clone(), substitute(item, token)))
+                        .collect(),
+                ),
+                other => other.clone(),
+            }
+        }
+        let mut token = String::new();
+        for vector in vectors {
+            let name = vector["name"].as_str().unwrap().to_owned();
+            let request_definition = &vector["request"];
+            let method = request_definition["method"].as_str().unwrap();
+            let path = request_definition["path"]
+                .as_str()
+                .unwrap()
+                .replace("$token", &token);
+            let mut builder = Request::builder().method(method).uri(&path);
+            if let Some(headers) = request_definition["headers"].as_object() {
+                for (header_name, value) in headers {
+                    builder = builder.header(header_name, value.as_str().unwrap());
+                }
+            }
+            let body = request_definition
+                .get("body")
+                .map(|body| Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap_or_else(Body::empty);
+            let request = builder.body(body).unwrap();
+            let response = tower::ServiceExt::oneshot(router.clone(), request)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                vector["expected"]["status"].as_u64().unwrap() as u16,
+                "{name}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
+                Some(serde_json::from_slice(&body).unwrap())
+            } else {
+                None
+            };
+            if let Some(actual_value) = &actual
+                && method == "POST"
+                && path == "/api/browse"
+                && let Some(new_token) = actual_value.get("token").and_then(|value| value.as_str())
+            {
+                token = new_token.to_owned();
+                assert!(token.len() >= 36, "{name} token is not opaque");
+            }
+            if let (Some(actual_value), Some(expected)) =
+                (actual.as_ref(), vector["expected"]["body"].as_object())
+            {
+                assert_eq!(
+                    actual_value.as_object().unwrap(),
+                    substitute(&serde_json::Value::Object(expected.clone()), &token)
+                        .as_object()
+                        .unwrap(),
+                    "{name}"
+                );
+            }
+        }
+        assert!(!token.is_empty(), "fixtures must exercise a captured token");
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
     async fn photo_json_omits_optional_values_and_preserves_original_order() {
         let contract: serde_json::Value = serde_json::from_str(include_str!(
             "../../../compatibility/protocol/capture-order-omission.json"
@@ -2255,6 +2897,383 @@ mod tests {
         drop(blocker);
         let server = start_server(config).await.unwrap();
         server.close().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() {
+        let (base, config) = prepare_fixture();
+        for directory in ["a", "b"] {
+            fs::create_dir(base.join("originals").join(directory)).unwrap();
+            for index in 0..20_000 {
+                fs::write(
+                    base.join("originals")
+                        .join(directory)
+                        .join(format!("{index:05}.jpg")),
+                    b"not-a-decodable-jpeg",
+                )
+                .unwrap();
+            }
+        }
+        let application = Application::open(&config).await.unwrap();
+        application.rescan().await.unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+
+        let overview_response = send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/overview")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(overview_response.status(), StatusCode::OK);
+        let overview_bytes = axum::body::to_bytes(overview_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let overview: serde_json::Value = serde_json::from_slice(&overview_bytes).unwrap();
+        assert_eq!(overview["photoCount"], 40_000);
+        assert!(overview_bytes.len() < 20_000);
+
+        let opened = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            None,
+        )
+        .await;
+        assert_eq!(opened.status(), StatusCode::OK);
+        let opened: serde_json::Value = response_json(opened).await;
+        let token = opened["token"].as_str().unwrap();
+        let window = send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{}?start=39940&limit=60",
+                    token
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(window.status(), StatusCode::OK);
+        let window: serde_json::Value = response_json(window).await;
+        assert_eq!(window["start"], 39_940);
+        assert_eq!(window["total"], 40_000);
+        assert_eq!(window["photos"].as_array().unwrap().len(), 60);
+
+        let oversized = send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{}?start=0&limit=61",
+                    token
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn photo_set_browse_open_resolves_saved_position_without_members_response() {
+        let (base, config) = prepare_fixture();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+        }
+        let application = Application::open(&config).await.unwrap();
+        application.rescan().await.unwrap();
+        let ids = application
+            .photos()
+            .photos
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect::<Vec<_>>();
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::Create {
+                name: "Picks".to_owned(),
+            })
+            .await
+            .unwrap();
+        let set_id = application
+            .photo_sets()
+            .await
+            .unwrap()
+            .photo_sets
+            .into_iter()
+            .find(|set| set.name == "Picks")
+            .unwrap()
+            .id;
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::AddMembers {
+                photo_set_id: set_id.clone(),
+                photo_ids: ids.clone(),
+            })
+            .await
+            .unwrap();
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::SetProgress {
+                photo_set_id: set_id.clone(),
+                photo_id: ids[1].clone(),
+            })
+            .await
+            .unwrap();
+        let opened = application
+            .browse_open(BrowseSourceRequest::PhotoSet(set_id), None)
+            .await
+            .unwrap();
+        assert_eq!(opened.total, 3);
+        assert_eq!(opened.position, 1);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn browse_tokens_are_process_unique_and_expiry_is_enforced() {
+        let (base_a, config_a) = prepare_fixture();
+        let (base_b, config_b) = prepare_fixture();
+        let application_a = Application::open(&config_a).await.unwrap();
+        let application_b = Application::open(&config_b).await.unwrap();
+        let opened_a = application_a
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        let opened_b = application_b
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        assert_ne!(opened_a.token, opened_b.token);
+        assert_eq!(opened_a.token.len(), 49);
+        assert!(
+            opened_a
+                .token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert!(matches!(
+            application_b.browse_window(&opened_a.token, 0, 10).await,
+            Err(ServerError::BrowseNotFound)
+        ));
+        {
+            let mut snapshots = application_a
+                .browse_snapshots
+                .lock()
+                .expect("browse snapshots poisoned");
+            let snapshot = snapshots.get_mut(&opened_a.token).unwrap();
+            snapshot.last_used -= BROWSE_SNAPSHOT_IDLE + Duration::from_secs(1);
+        }
+        assert!(matches!(
+            application_a.browse_window(&opened_a.token, 0, 10).await,
+            Err(ServerError::BrowseNotFound)
+        ));
+        assert!(
+            !application_a
+                .browse_snapshots
+                .lock()
+                .unwrap()
+                .contains_key(&opened_a.token)
+        );
+        application_a.shutdown().await.unwrap();
+        application_b.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base_a);
+        let _ = fs::remove_dir_all(base_b);
+    }
+
+    #[tokio::test]
+    async fn browse_delete_releases_the_snapshot() {
+        let (base, config) = prepare_fixture();
+        jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
+        let application = Application::open(&config).await.unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let opened = response_json(
+            post_json(
+                &router,
+                "/api/browse",
+                serde_json::json!({"source":"library"}),
+                Some("http://camera.local"),
+            )
+            .await,
+        )
+        .await;
+        let token = opened["token"].as_str().unwrap().to_owned();
+        async fn window(router: &Router, token: &str) -> Response<Body> {
+            send(
+                router,
+                Request::builder()
+                    .uri(format!(
+                        "http://camera.local/api/browse/{token}?start=0&limit=10"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        }
+        assert_eq!(window(&router, &token).await.status(), StatusCode::OK);
+        let cross_origin = send(
+            &router,
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("http://camera.local/api/browse/{token}"))
+                .header(header::ORIGIN, "http://elsewhere.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN);
+        let removed = send(
+            &router,
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("http://camera.local/api/browse/{token}"))
+                .header(header::ORIGIN, "http://camera.local")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            window(&router, &token).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
+        let (base, config) = prepare_fixture();
+        for name in ["a.jpg", "b.jpg", "c.jpg"] {
+            jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+        }
+        let application = Application::open(&config).await.unwrap();
+        application.rescan().await.unwrap();
+        let ids = application
+            .photos()
+            .photos
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect::<Vec<_>>();
+        let library = application
+            .browse_open(BrowseSourceRequest::Library, Some(&ids[2]))
+            .await
+            .unwrap();
+        assert_eq!(library.position, 2);
+        let fallback = application
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        assert_eq!(fallback.position, 0);
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::Create {
+                name: "Picks".to_owned(),
+            })
+            .await
+            .unwrap();
+        let set_id = application
+            .photo_sets()
+            .await
+            .unwrap()
+            .photo_sets
+            .into_iter()
+            .find(|set| set.name == "Picks")
+            .unwrap()
+            .id;
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::AddMembers {
+                photo_set_id: set_id.clone(),
+                photo_ids: ids.clone(),
+            })
+            .await
+            .unwrap();
+        application
+            .mutate_photo_set(slipstream_core::PhotoSetMutation::SetProgress {
+                photo_set_id: set_id.clone(),
+                photo_id: ids[0].clone(),
+            })
+            .await
+            .unwrap();
+        let preferred = application
+            .browse_open(BrowseSourceRequest::PhotoSet(set_id), Some(&ids[2]))
+            .await
+            .unwrap();
+        assert_eq!(preferred.position, 2);
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let invalid = post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library","photoId":"NOT-A-ID"}),
+            Some("http://camera.local"),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
+        let (base, config) = prepare_fixture();
+        for name in ["a.jpg", "b.jpg"] {
+            jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+        }
+        let application = Application::open(&config).await.unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let ids = application
+            .photos()
+            .photos
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect::<Vec<_>>();
+        let opened = response_json(
+            post_json(
+                &router,
+                "/api/browse",
+                serde_json::json!({"source":"library"}),
+                Some("http://camera.local"),
+            )
+            .await,
+        )
+        .await;
+        let token = opened["token"].as_str().unwrap().to_owned();
+        let window = || async {
+            response_json(
+                send(
+                    &router,
+                    Request::builder()
+                        .uri(format!(
+                            "http://camera.local/api/browse/{token}?start=0&limit=10"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await
+        };
+        let before = window().await;
+        assert_eq!(before["photos"][0]["selectionState"], "undecided");
+        assert_eq!(
+            post_json(
+                &router,
+                &format!("http://camera.local/api/photos/{}/state", ids[0]),
+                serde_json::json!({"field": "selectionState", "value": "selected"}),
+                Some("http://camera.local"),
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let after = window().await;
+        assert_eq!(after["photos"][0]["selectionState"], "selected");
+        assert_eq!(after["photos"][1]["selectionState"], "undecided");
+        assert_eq!(
+            after["photos"].as_array().unwrap().len(),
+            before["photos"].as_array().unwrap().len()
+        );
+        application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
 
@@ -2918,6 +3937,113 @@ mod tests {
                 .contains("Original")
         );
         assert!(!unavailable.to_string().contains(base.to_str().unwrap()));
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn thumbnail_requests_keep_review_preview_facts_exact() {
+        let (base, config) = prepare_fixture();
+        let original = config.library_root.join("photo.jpg");
+        jpeg_fixture(&original, 90, 45, [192, 64, 32]);
+        let application = Application::open(&config).await.unwrap();
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let photo_id = application.photos().photos[0].id.clone();
+        let preview = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(preview["state"], "ready");
+        assert_eq!(preview["source"], "matching-jpeg");
+        let review_url = preview["url"].as_str().unwrap().to_owned();
+        let review_key = review_url
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .trim_end_matches(".jpg");
+        let facts = |application: &Application, photo_id: &str| {
+            let photo = application
+                .photos()
+                .photos
+                .into_iter()
+                .find(|photo| photo.id == photo_id)
+                .unwrap();
+            (
+                photo.preview.state,
+                photo.preview.source,
+                photo.preview.width,
+                photo.preview.height,
+            )
+        };
+        let established = facts(&application, &photo_id);
+        assert_eq!(
+            established,
+            ("ready", Some("matching-jpeg"), Some(90), Some(45))
+        );
+
+        let thumbnail = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!(
+                        "http://camera.local/api/photos/{photo_id}/thumbnail"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(thumbnail["state"], "ready");
+        let thumbnail_url = thumbnail["url"].as_str().unwrap();
+        assert!(thumbnail_url.contains("/thumbnail/"));
+        let thumbnail_key = thumbnail_url
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .trim_end_matches(".jpg");
+        assert_ne!(thumbnail_key, review_key);
+        assert_eq!(facts(&application, &photo_id), established);
+
+        // The persisted facts and both derivative identities survive reopen.
+        application.shutdown().await.unwrap();
+        let application = Application::open(&config).await.unwrap();
+        assert_eq!(facts(&application, &photo_id), established);
+        let router = create_router(Arc::clone(&application), config.web_root());
+        let reopened = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!(
+                        "http://camera.local/api/photos/{photo_id}/thumbnail"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(reopened["url"].as_str().unwrap(), thumbnail_url);
+        let review = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(review["url"].as_str().unwrap(), review_url);
+        assert_eq!(facts(&application, &photo_id), established);
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }

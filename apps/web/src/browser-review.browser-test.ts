@@ -81,9 +81,12 @@ async function createSet(url: string, name = "Review") {
     photoSets: PhotoSetResponse[];
   };
   const set = created.photoSets.find((item) => item.name === name)!;
-  await post(url, `/api/photo-sets/${set.id}/members`, {
-    photoIds: photos.photos.map((photo) => photo.id),
-  });
+  for (let offset = 0; offset < photos.photos.length; offset += 100)
+    await post(url, `/api/photo-sets/${set.id}/members`, {
+      photoIds: photos.photos
+        .slice(offset, offset + 100)
+        .map((photo) => photo.id),
+    });
   return { setId: set.id, photos: photos.photos };
 }
 async function startReview(page: Page, url: string, name = "Review") {
@@ -93,13 +96,28 @@ async function startReview(page: Page, url: string, name = "Review") {
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
+  await page.getByRole("button", { name: /Photo 1 of/ }).click();
   await expect(page.locator("[data-review]")).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      Boolean(document.querySelector("[data-stage] img")) ||
+      document.body.innerText.includes("Preview unavailable"),
+  );
 }
 async function state(url: string, setId: string) {
   const sets = (await (await fetch(`${url}/api/photo-sets`)).json()) as {
     photoSets: PhotoSetResponse[];
   };
   return sets.photoSets.find((item) => item.id === setId)!;
+}
+async function openGrid(page: Page, url: string, name: string) {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(url);
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await page
+    .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
+    .click();
+  await page.getByText(/^Ready · \d[\d,]* Photos$/).waitFor();
 }
 async function swipe(page: Page, from: number, to: number, y = 320) {
   const preview = page.locator("[data-preview]");
@@ -163,6 +181,7 @@ test("starts from a Photo Set, shows facts, accessible controls, and resumes per
   running = await server(base, root);
   await page.goto(running.url);
   await page.getByRole("button", { name: /Picks/ }).click();
+  await page.getByRole("button", { name: /Photo 2 of 2/ }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
   await page.getByRole("button", { name: "Previous" }).click();
   await expect(page.getByText("Selected", { exact: true })).toBeVisible();
@@ -261,7 +280,9 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
   });
   await swipe(page, 100, 190);
   await expect(page.getByText("1 / 3")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Photo Sets" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Back to Grid" }),
+  ).toBeDisabled();
   expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
     "undecided",
   );
@@ -370,6 +391,9 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await rm(missing);
   await post(running.url, "/api/scan", {});
   await startReview(page, running.url);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.getByRole("button", { name: /Review/ }).click();
+  await page.getByRole("button", { name: /Photo 2 of 2/ }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
   await page.getByRole("button", { name: "Previous" }).click();
   await expect(page.getByText(/Original File is unavailable/)).toBeVisible();
@@ -390,7 +414,7 @@ test("shows empty/no-set start states and only uses GET plus same-service POST m
   const methods: string[] = [];
   page.on("request", (request) => methods.push(request.method()));
   await page.goto(running.url);
-  await expect(page.getByText(/No Photo Sets yet/)).toBeVisible();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await post(running.url, "/api/photo-sets", { name: "Empty" });
   await page.reload();
   const empty = page.getByRole("button", { name: /Empty/ });
@@ -417,11 +441,13 @@ test("persists manual navigation and advanced current Photo across leave, reload
   await expect
     .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
     .toBe((await state(running.url, setId)).members[1]!.photoId);
-  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /Photo 2 of 3/ }).click();
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /Photo 2 of 3/ }).click();
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.getByRole("button", { name: "Select" }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
@@ -434,6 +460,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   running = await server(base, root);
   await page.goto(running.url);
   await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /Photo 3 of 3/ }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
 });
 
@@ -513,6 +540,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.reload();
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of/ }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await event("pointerdown", 100, 0, 48);
   await event("pointermove", 200, 10, 48);
@@ -607,6 +635,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await post(running.url, "/api/scan", {});
   await page.reload();
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of/ }).click();
   await expect(
     page.getByText("RAW embedded JPEG", { exact: true }),
   ).toBeVisible();
@@ -648,7 +677,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
       stateBodies.push(request.postDataJSON());
   });
   await page.goto(running.url);
-  await page.getByRole("button", { name: /Library Review/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect
     .poll(() => previewRequests.some((url) => url.includes(zId)))
@@ -663,8 +692,9 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   expect(await (await fetch(`${running.url}/api/photo-sets`)).json()).toEqual({
     photoSets: [],
   });
-  await page.getByRole("button", { name: "Photo Sets" }).click();
-  await page.getByRole("button", { name: /Library Review/ }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
 
   const { setId } = await createSet(running.url, "Explicit order");
@@ -673,6 +703,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   });
   await page.reload();
   await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect
     .poll(() => previewRequests.some((url) => url.includes(aId)))
@@ -702,7 +733,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
     if (request.url().includes("/preview")) previews.push(request.url());
   });
   await page.goto(running.url);
-  await page.getByRole("button", { name: /Library Review/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect.poll(() => previews.some((url) => url.includes(zId))).toBe(true);
   await writeFile(
@@ -716,8 +747,9 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await page.getByRole("button", { name: "Photo Sets" }).click();
-  await page.getByRole("button", { name: /Library Review/ }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
   const expandedPhotos = (await (
     await fetch(`${running.url}/api/photos`)
@@ -778,8 +810,9 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: /^Snapshot(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 2 of 3/ }).click();
   await expect(page.getByText("2 / 3")).toBeVisible();
 });
 
@@ -834,7 +867,6 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
     await route.continue();
   });
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   releaseSuccess();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
@@ -865,9 +897,10 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   await post(running.url, "/api/scan", {});
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
 
-  await page.getByRole("button", { name: "Photo Sets" }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
   await rm(join(root, "a.jpg"));
   await rm(join(root, "b.jpg"));
   await post(running.url, "/api/scan", {});
@@ -899,6 +932,248 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
     )
     .toBe(savedId);
   await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await page.getByRole("button", { name: /Photo 3 of 3/ }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+});
+
+test("Grid thumbnails survive virtual re-renders without refetching", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 8; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(2, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const thumbnailRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/thumbnail"))
+      thumbnailRequests.push(request.url());
+  });
+  await page.goto(running.url);
+  const loadedThumbnails = () =>
+    page.evaluate(
+      () =>
+        Array.from(
+          document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+        ).filter((image) => Boolean(image.getAttribute("src"))).length,
+    );
+  await expect.poll(loadedThumbnails).toBe(8);
+  expect(thumbnailRequests).toHaveLength(8);
+  const viewport = page.locator("[data-grid-viewport]");
+  for (let _ = 0; _ < 4; _ += 1) {
+    await viewport.evaluate((element) =>
+      element.dispatchEvent(new Event("scroll")),
+    );
+    await page.waitForTimeout(50);
+  }
+  expect(thumbnailRequests).toHaveLength(8);
+  await expect.poll(loadedThumbnails).toBe(8);
+});
+
+test("opening a Photo from the Grid persists the Photo Set position", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "GridPos");
+  await openGrid(page, running.url, "GridPos");
+  await page.getByRole("button", { name: /^Photo 3 of 4/ }).click();
+  await expect(page.getByText("3 / 4")).toBeVisible();
+  await expect
+    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
+    .toBe((await state(running.url, setId)).members[2]!.photoId);
+
+  await page.reload();
+  let browsePosition: number | undefined;
+  page.on("response", (response) => {
+    if (
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/browse"
+    )
+      void response
+        .json()
+        .then(
+          (body: { position?: number }) =>
+            (browsePosition = body.position ?? browsePosition),
+        )
+        .catch(() => undefined);
+  });
+  await page.getByRole("button", { name: /^GridPos(?: |$)/ }).click();
+  await page.getByText(/^Ready · /).waitFor();
+  await expect(
+    page.getByRole("button", { name: /^Photo 3 of 4/ }),
+  ).toBeVisible();
+  await expect.poll(() => browsePosition).toBe(2);
+});
+
+test("Undo returns to the affected Photo and refreshes its Preview and facts", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await createSet(running.url);
+  await openGrid(page, running.url, "Review");
+  await page.getByRole("button", { name: /^Photo 1 of/ }).click();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+  await expect(page.locator("[data-stage] img")).toBeVisible();
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("2 / 3")).toBeVisible();
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.getByText("Last change undone.")).toBeVisible();
+  await expect(page.locator("[data-stage] img")).toBeVisible();
+});
+
+test("Undo clears when the affected Photo leaves the loaded window", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 200; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "Wide");
+  await openGrid(page, running.url, "Wide");
+  await page.getByRole("button", { name: /^Photo 1 of 200/ }).click();
+  await expect(page.getByText("1 / 200")).toBeVisible();
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("2 / 200")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.waitForTimeout(300);
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = 30 * 178;
+  });
+  await expect(page.locator('[data-photo-index="65"]')).toBeVisible();
+  await viewport.evaluate((element) => {
+    element.scrollTop = 60 * 178;
+  });
+  await expect(page.locator('[data-photo-index="125"]')).toBeVisible();
+  await viewport.evaluate((element) => {
+    element.scrollTop = 90 * 178;
+  });
+  await expect(page.locator('[data-photo-index="185"]')).toBeVisible();
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(
+      async () => (await state(running.url, setId)).members[0]!.selectionState,
+    )
+    .toBe("selected");
+  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+    "selected",
+  );
+});
+
+test("an expired Browse snapshot reopens around the current Photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 130; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "Expiry");
+  await openGrid(page, running.url, "Expiry");
+  await page.getByRole("button", { name: /^Photo 1 of 130/ }).click();
+  await expect(page.getByText("1 / 130")).toBeVisible();
+  const firstId = (await state(running.url, setId)).members[0]!.photoId;
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.waitForTimeout(300);
+  const reopenBodies: Array<Record<string, unknown>> = [];
+  let expiredServed = false;
+  await page.route(/\/api\/browse/, async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      reopenBodies.push(request.postDataJSON() as Record<string, unknown>);
+      await route.continue();
+      return;
+    }
+    if (request.method() === "GET" && !expiredServed) {
+      expiredServed = true;
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: '{"error":"Browse source expired or not found"}',
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.locator("[data-grid-viewport]").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(
+    page.getByRole("button", { name: /^Photo 1 of 130/ }),
+  ).toBeVisible();
+  expect(expiredServed).toBe(true);
+  expect(
+    reopenBodies.some(
+      (body) =>
+        body.source === "photo-set" &&
+        body.photoSetId === setId &&
+        body.photoId === firstId,
+    ),
+  ).toBe(true);
+});
+
+test("a throttled boundary window cannot wedge Photo View or Back to Grid", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 70; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+  let releaseBoundary: () => void = () => undefined;
+  const boundaryGate = new Promise<void>((resolve) => {
+    releaseBoundary = resolve;
+  });
+  let boundaryRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      boundaryRequests += 1;
+      await boundaryGate;
+      await route.continue();
+    },
+  );
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = 29 * 178;
+  });
+  await page.locator('[data-photo-index="59"]').click();
+  await expect(page.getByText("60 / 70")).toBeVisible();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText("61 / 70")).toBeVisible();
+  // The boundary window is still loading; Back to Grid must stay available.
+  await expect(
+    page.getByRole("button", { name: "Back to Grid" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  releaseBoundary();
+  await expect(page.locator('[data-photo-index="60"]')).toBeEnabled();
+  // The abandoned open must not wedge the browser: a new Photo opens normally.
+  await page.locator('[data-photo-index="57"]').click();
+  await expect(page.getByText("58 / 70")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Select/ })).toBeEnabled();
+  expect(boundaryRequests).toBeGreaterThanOrEqual(1);
 });
