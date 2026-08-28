@@ -11,7 +11,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 ## Core Experience
 
 - [Photo Library and Photo Sets](photo-library.md): indexing existing files, RAW/JPEG pairing, grouping, and original-file ownership
-- [Review and Selection](review-and-selection.md): review order, gestures, selection state, rating, detail inspection, and undo
+- [Library Browsing and Selection](library-browsing-and-selection.md): progressive Grid and Photo views, source order, loading feedback, gestures, selection state, rating, detail inspection, and undo
 - [Photo Previews](previews.md): acceptable preview sources, visible provenance, quality limits, caching behavior, and failures
 
 ## Support and Release

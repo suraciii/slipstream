@@ -1,10 +1,10 @@
-# Capture-Time Review Ordering
+# Capture-Time Library Ordering
 
-Slipstream needs camera capture ordering without discarding explicit Photo Set sequence, inventing timezone facts, or letting a rescan reorder an active Review Session.
+Slipstream needs camera capture ordering without discarding explicit Photo Set sequence, inventing timezone facts, or letting a rescan reorder a source that the Photographer is already browsing.
 
 ## Design Drivers
 
-- Existing SQLite v2 state persists explicit Photo Set membership positions and Photo-ID review progress.
+- Existing SQLite v2 state persists explicit Photo Set membership positions and saved Photo Set positions.
 - Camera files often omit timezone and subsecond metadata.
 - A RAW/JPEG pair may contain missing, invalid, or conflicting metadata.
 - Every Original read remains descriptor-confined and read-only.
@@ -14,13 +14,13 @@ Slipstream needs camera capture ordering without discarding explicit Photo Set s
 
 ## Order Ownership
 
-A filtered Photo Library query owns Capture Time order. A Photo Set owns explicit membership order. A Review Session snapshots the ordered Photo IDs supplied by its source when the Session starts.
+The `All Photos` Library source owns Capture Time order. A Photo Set owns explicit membership order. Opening either source creates a hidden Browse Snapshot of its ordered Photo IDs within the Library Browser.
 
 This keeps one owner for each order:
 
-- `GET /api/photos` returns filtered Library order;
-- `GET /api/photo-sets` returns members by persisted membership position;
-- a rescan may change a future filtered Library Session but never an active Session or Photo Set positions.
+- a Library Browse Snapshot copies the current published Capture Time order;
+- a Photo Set Browse Snapshot copies persisted membership position; and
+- a rescan may change a newly opened Library source but never an already open Snapshot or Photo Set positions.
 
 ## Original Capture Fact
 
@@ -95,19 +95,19 @@ The parser must not receive an Original filesystem path or reopen the Original b
 
 Metadata input, parser allocation, blocking workers, and queued work are bounded. Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers may own an independent budget. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
 
-## Scan and Session Lifecycle
+## Scan and Browse Lifecycle
 
-Initial startup and explicit rescan inspect newly discovered and changed available Originals before atomically publishing the new Library snapshot. An unchanged Original reuses its persisted fact when the inspected source revision matches.
+A completed scan atomically publishes one Library snapshot. An unchanged Original reuses its persisted fact when the inspected source revision matches. When compatible persisted state already contains a completed published snapshot, an ordinary startup may serve that snapshot while a background rescan builds its replacement. A new state store must finish its first scan before Browse Snapshots are available.
 
-After a v2-to-v3 migration, available Originals begin as `pending` and are inspected during the initial scan before readiness. This one-time backfill may lengthen the first upgraded startup, but it prevents the server from publishing a temporary path order that changes after readiness. Preview generation remains demand-driven.
+After a v2-to-v3 migration, available Originals begin as `pending` and are inspected before the first v3 ordered snapshot is published. This one-time backfill may lengthen the first upgraded initialization, but it prevents the server from publishing temporary path order that changes as metadata work completes. Preview generation remains demand-driven.
 
 An unavailable Original retains its last completed capture fact. When it becomes readable with a changed revision, the result from the current bytes replaces the retained fact, including `missing`, `invalid`, or `failed`; an old key must not remain authoritative for changed bytes.
 
 A per-file capture failure does not abort valid sibling Photos. A root-level scan or persistence failure leaves the previously committed snapshot authoritative.
 
-An active Review Session keeps its snapshotted Photo-ID sequence. Availability and Preview facts may refresh, but a rescan does not insert, remove, or reorder the active sequence. A later filtered Library Session may observe the newly published order.
+An open Browse Snapshot keeps its ordered Photo-ID sequence. Availability, Selection State, Rating, and Preview facts may refresh, but a rescan does not insert, remove, or reorder that Snapshot. Reopening `All Photos` may observe the newly published order.
 
-When a Photo Set resumes at an unavailable saved Photo, it searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member; without saved progress it starts at the first available member or, if none are available, the first member. A disconnected Photo Set Retry keeps all controls disabled until refreshed current progress is POSTed successfully. Library Review has no durable progress POST and reconnects after refreshed facts and Preview state.
+When a Photo Set opens at an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member; without a saved Photo Set position it starts at the first available member or, if none are available, the first member. A disconnected Photo Set keeps mutation controls disabled until refreshed current facts and saved position are confirmed. `All Photos` has no durable position and reconnects through its current bounded window.
 
 ## Persistence
 
@@ -137,7 +137,7 @@ Application validation enforces:
 
 Do not add a winning timestamp or disagreement column to `photos`. Query and domain mapping derive RAW-first authority and disagreement from the joined Original rows.
 
-The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction. It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and progress record. Exact canonical-shape validation remains mandatory.
+The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction. It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and saved Photo Set position. Exact canonical-shape validation remains mandatory.
 
 ## Rollback
 
@@ -147,7 +147,7 @@ Rollback stops the v3 process and restores the pre-upgrade v2 backup. There is n
 
 ## Protocol
 
-`GET /api/photos` exposes the authoritative filtered-Library order. `GET /api/photo-sets` continues to expose members by explicit position.
+The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](library-browsing.md). The protocol must not expose one unbounded complete-Library response. A Library Snapshot uses Capture Time order; a Photo Set Snapshot uses explicit membership position.
 
 The first browser protocol does not expose Capture Time, offset, inspection state, or pair disagreement. The user-visible contract is deterministic Library order. Capture failures must not disable selection, Rating, navigation, or Preview behavior.
 
@@ -155,11 +155,11 @@ The first browser protocol does not expose Capture Time, offset, inspection stat
 
 ### Selected: Separate Library and Photo Set Order Owners
 
-Filtered Library Review uses Capture Time order. Photo Set Review uses membership position. This preserves explicit durable state and gives each source one order owner.
+`All Photos` uses Capture Time order. A Photo Set uses membership position. This preserves explicit durable state and gives each source one order owner.
 
-### Rejected: Capture Order for Every Review
+### Rejected: Capture Order for Every Source
 
-This would make membership positions and explicit reorder ineffective during Photo Set Review and unexpectedly change existing production sequences.
+This would make membership positions and explicit reorder ineffective while browsing a Photo Set and unexpectedly change existing production sequences.
 
 ### Selected: RAW-First Capture Authority
 
@@ -181,19 +181,19 @@ This turns an unknown fact into an assumed instant and can move mixed camera fil
 
 Capture inspection is part of initial scan and rescan completion. This preserves one stable published order.
 
-### Rejected: Lazy Reordering After Readiness
+### Rejected: Lazy Reordering Inside an Open Source
 
-A lazy backfill would expose temporary path order and reorder later Sessions as background work completes.
+A lazy backfill would expose temporary path order and move Grid cells or Photo navigation as background work completes.
 
 ## Compatibility Fixtures
 
 - `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns RAW/JPEG authority, tie, missing-partition, and camera-local-offset ordering vectors.
 - `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the writable identity-fence shape, while canonical v2 remains a migration input.
-- Migration fixtures prove preservation of Photo identity, Photo Sets, positions, Selection State, Rating, Preview facts, and progress.
+- Migration fixtures prove preservation of Photo identity, Photo Sets, membership positions, Selection State, Rating, Preview facts, and saved Photo Set positions.
 - `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
 - Browser tests own the filename-versus-capture-order example and the explicit Photo Set order example.
 - Generated metadata fixtures are minimal and redistributable. Real camera Originals remain opt-in and retain their SHA.
 
 ## Verification
 
-Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3 migrated state, stable active Session order, future-session rescan reorder, unchanged Photo Set positions, exact protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.
+Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Photo Set positions, bounded protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.

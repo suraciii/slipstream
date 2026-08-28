@@ -1,13 +1,13 @@
 # Rust Server Architecture
 
-Slipstream needs one production server that keeps Original Files read-only while it owns indexing, durable review state, Preview generation, and browser delivery. The production server is Rust. Bun and TypeScript own the Web application, browser tests, and repository tooling only.
+Slipstream needs one production server that keeps Original Files read-only while it owns indexing, durable Library and selection state, Preview generation, and browser delivery. The production server is Rust. Bun and TypeScript own the Web application, browser tests, and repository tooling only.
 
 This decision corrects an earlier language-boundary drift. Selecting Bun for Web tooling did not select TypeScript as the production server language.
 
 ## Design Drivers
 
 - Original Files are irreplaceable and require descriptor-confined access.
-- Existing SQLite review state and browser behavior must remain stable.
+- Existing SQLite Library, Photo Set, Selection State, Rating, and saved-position behavior must remain stable.
 - LibRaw and image processing are blocking native work and must remain bounded.
 - One Photographer and one Photo Library do not justify distributed services, an ORM, or an actor framework.
 - The service must support operator-controlled restart and rollback without modifying Original Files.
@@ -31,11 +31,12 @@ Startup proceeds in one direction:
 1. Parse and validate configuration.
 2. Open the canonical Library Folder, state directory, and cache directory.
 3. Admit and open SQLite, validate or migrate it, and start its bounded owner thread.
-4. Complete the initial scan, including required Capture Time inspection or schema-v2 backfill for available Originals.
+4. Load the last complete Published Library when one exists.
 5. Start bounded Preview workers.
-6. Bind HTTP and report readiness.
+6. Bind HTTP and expose Library Overview and Loading Status.
+7. Run an ordinary rescan in the background; a new state store remains initializing until its first complete scan publishes the Library.
 
-The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` only after the initial scan, Preview worker startup, and HTTP bind have completed. Startup failures never expose a ready listener. Shutdown stops HTTP admission before closing Preview and Library resources.
+The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` after storage admission, Preview worker startup, and HTTP bind complete. `GET /api/status` separately reports whether a Published Library is available, initializing, scanning, idle, or failed. A root binding, schema, sidecar, or storage-layout admission failure never exposes a listener. Shutdown stops HTTP admission before closing Preview and Library resources.
 
 A failure closes resources in reverse order. Shutdown stops admission, drains already accepted mutations, stops Preview publication, closes SQLite, and then completes. Repeated shutdown requests share one completion path.
 
@@ -103,7 +104,7 @@ The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.
 
 The service preserves:
 
-- the current HTTP routes, statuses, path-free JSON, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
+- the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
 - canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
 - the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 as a preserved migration input and v4 as the required writable identity fence;
@@ -120,4 +121,4 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 and v4 schema shapes, legacy-ID preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser review behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 and v4 schema shapes, legacy-ID preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.

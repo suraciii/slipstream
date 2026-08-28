@@ -1,13 +1,13 @@
 # Photo Library Identity and Expansion
 
-Slipstream initially configured one shoot directory as the Library Folder. A Photographer now needs to expand that Library to an ancestor directory without losing the Photos and review state already recorded below the original Folder.
+Slipstream initially configured one shoot directory as the Library Folder. A Photographer now needs to expand that Library to an ancestor directory without losing the Photos, Selection State, Ratings, Photo Sets, or saved Photo Set positions already recorded below the original Folder.
 
 A filesystem location tells Slipstream where to find an Original File. It must not become the identity of the Original File or Photo. At the same time, Slipstream must not silently reinterpret one state database against an unrelated directory.
 
 ## Design Drivers
 
 - Original Files remain read-only and may be irreplaceable.
-- Selection State, Rating, Photo Set membership, membership order, and progress belong to existing Photos.
+- Selection State, Rating, Photo Set membership, membership order, and saved Photo Set positions belong to existing Photos.
 - One state store owns one Photo Library and one configured Library Folder.
 - The current need is expansion to an ancestor directory, not arbitrary file relocation or multiple storage roots.
 - Ordinary rescans must not guess that two paths refer to the same Original File.
@@ -37,7 +37,7 @@ File size, modification time, device, and inode are revision or admission facts,
 
 A Photo has one stable persisted identity and refers to one RAW Original File, one JPEG Original File, or an unambiguous pair. Its ID remains unchanged when a supported Library expansion changes its Original Locations. The state store assigns a new Photo ID independently of those Locations when reconciliation cannot preserve an existing Photo.
 
-Selection State, Rating, Photo Set membership, membership order, and progress continue to refer to the stable Photo.
+Selection State, Rating, Photo Set membership, membership order, and saved Photo Set positions continue to refer to the stable Photo.
 
 ## Library Expansion
 
@@ -62,7 +62,7 @@ The operation must run while the service is stopped and after a verified state b
 7. begin one admitted `BEGIN IMMEDIATE` transaction;
 8. update the Folder binding, every persisted Location, and every location-derived ordering value;
 9. invalidate every rebuildable fact whose identity includes an old Location;
-10. validate that every Original File ID, Photo ID, user decision, Photo Set membership position, and saved progress remains unchanged; and
+10. validate that every Original File ID, Photo ID, user decision, Photo Set membership position, and saved Photo Set position remains unchanged; and
 11. commit the transaction, then complete a normal scan before reporting readiness.
 
 Prefixing every old Location preserves same-directory RAW/JPEG pairing within the former Folder. The subsequent scan discovers supported files in sibling directories as new Original Files and Photos. It does not create Photo Sets from directories.
@@ -92,7 +92,7 @@ SQLite schema version 4 is the writable identity fence for this contract. The ex
 
 Expansion is admitted only against canonical v4 state and a verified pre-expansion v4 backup. Its one transaction changes the admitted Folder binding, persisted Locations, location-derived ordering values, and rebuildable derived facts. It must not change user-owned state.
 
-Capture inspection facts and Preview/cache records whose source revision includes the old Location may be reset or invalidated in that transaction. They are derived state and may be rebuilt from the same read-only Original File. Selection State, Rating, Photo Sets, membership order, and progress must not be reset.
+Capture inspection facts and Preview/cache records whose source revision includes the old Location may be reset or invalidated in that transaction. They are derived state and may be rebuilt from the same read-only Original File. Selection State, Rating, Photo Sets, membership order, and saved Photo Set positions must not be reset.
 
 Rollback across the identity migration stops the v4 process, restores the verified pre-migration v3 backup, restores the prior Library Folder configuration, and starts the compatible v3 image. There is no in-place down migration. Rollback of an expansion while remaining on v4 restores the verified pre-expansion v4 backup and prior Library Folder.
 
@@ -114,7 +114,7 @@ The same file has a different relative Location after expansion. Current path-de
 
 ### Rejected: Create a New State Database and Copy Decisions
 
-An external copy would need to reproduce identity, pairing, membership, progress, Preview, and failure semantics outside the owning persistence boundary. It turns one domain operation into an ad hoc migration and makes rollback harder to audit.
+An external copy would need to reproduce identity, pairing, membership, saved-position, Preview, and failure semantics outside the owning persistence boundary. It turns one domain operation into an ad hoc migration and makes rollback harder to audit.
 
 ### Rejected: Continue Assigning New IDs from Original Location
 
@@ -140,10 +140,10 @@ Verification must prove:
 - an ancestor expansion preserves every existing Original File ID and Photo ID;
 - all old Locations receive exactly one prefix and still resolve beneath the new Folder;
 - a newly discovered sibling whose Location equals one legacy pre-expansion Location receives distinct Original File and Photo IDs;
-- Selection State, Rating, Photo Set membership/order, and progress are byte-for-byte equivalent projections before and after expansion;
+- Selection State, Rating, Photo Set membership/order, and saved Photo Set positions are byte-for-byte equivalent projections before and after expansion;
 - an unavailable Original File retains its state and prefixed Location;
 - sibling directories add new Photos without changing old Photo Set positions;
-- Capture Time order for future Library Review includes the expanded Library while active Sessions remain unaffected because expansion requires stopped service;
+- Capture Time order for a newly opened `All Photos` source includes the expanded Library while no open Browse Snapshot can exist because expansion requires stopped service;
 - derived Preview/cache facts rebuild without modifying Original Files;
 - non-ancestor, descriptor mismatch, Location collision, ID collision, sidecar, schema, and transaction failures leave the old state unchanged;
 - a root-level post-commit scan failure exposes no ready service and supports retry or verified restore;

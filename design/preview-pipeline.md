@@ -43,13 +43,13 @@ A Derivative is an immutable cached JPEG produced for a target class:
 - `thumbnail-512`;
 - `review-2560`.
 
-A Derivative records the selected source, actual dimensions, color handling, and cache revision. It does not become an Original File.
+A Derivative records the selected source, actual dimensions, color handling, and cache revision. It does not become an Original File. Completed Derivatives persist in the configured cache directory across browser reload and server restart until an operator removes rebuildable cache data.
 
 ### Preview Capability
 
 Preview Capability describes what the selected source can support:
 
-- `normal-review` when it can reasonably fill the review surface;
+- `normal-review` when it can reasonably fill Photo View;
 - `detail-limited` when magnification reaches source pixels before useful focus inspection;
 - `unavailable` when no allowed source can be decoded.
 
@@ -123,12 +123,12 @@ Preview work is demand-driven.
 
 Priority order is:
 
-1. current review Photo;
-2. immediately next and previous review Photos;
-3. visible grid Photos;
-4. background work explicitly justified by measured benefit.
+1. the current Photo in Photo View;
+2. the immediately next and previous Photos after the current Preview is ready;
+3. visible Grid View Photos;
+4. bounded Grid look-ahead work explicitly justified by measured benefit.
 
-A scan does not automatically generate every review Derivative. Duplicate requests for one cache identity share one in-flight job.
+A scan does not automatically generate every `review-2560` Derivative. Duplicate requests for one cache identity share one in-flight job.
 
 Leaving a Photo does not require cancelling extraction if completion is near and the result remains reusable. The scheduler may cancel queued work that has no remaining consumer.
 
@@ -136,9 +136,9 @@ Leaving a Photo does not require cancelling extraction if completion is near and
 
 The browser requests a derivative by Photo identity and target class. It does not provide an Original File path.
 
-A derivative response uses ordinary HTTP cache validation tied to the cache identity. Reconnect and reload may reuse browser-cached data when the identity remains current.
+A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File. A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`. Reconnect and reload may reuse browser-cached data when the identity remains current.
 
-The response also makes Preview Source, actual dimensions, and Preview Capability available to the review UI. These facts must not be inferred only from the derivative URL.
+The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts must not be inferred only from the derivative URL.
 
 ## Failure Behavior
 
@@ -170,7 +170,7 @@ Direct return is attractive, but camera JPEG metadata, orientation, profiles, ve
 
 ### Rejected: Precompute Every Derivative During Indexing
 
-Full precomputation delays first use and performs expensive I/O for Photos the Photographer may never review. Demand-driven generation serves the current selection workflow with less work.
+Full precomputation delays first use and performs expensive I/O for Photos the Photographer may never review. Demand-driven generation serves current browsing and selection with less work.
 
 ## Verification
 
@@ -187,6 +187,8 @@ Implementation tests must prove:
 - valid profile preservation and sRGB conversion behave as specified;
 - source changes invalidate the cache;
 - concurrent duplicate requests perform one generation job;
+- completed thumbnail and review Derivatives survive process restart and reuse cache bytes without reopening the Original;
+- current work outranks adjacent and Grid work, while adjacent prefetch remains bounded;
 - interrupted generation does not publish a partial file;
 - malformed inputs remain within resource limits;
 - failures stay isolated to one Photo;

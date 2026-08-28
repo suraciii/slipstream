@@ -14,7 +14,7 @@ If the configured Library Folder does not exist, is not a directory, or cannot b
 
 ## Photos
 
-Slipstream presents one logical Photo for one reviewable capture.
+Slipstream presents one logical Photo for one photograph.
 
 A RAW Original and JPEG Original must form one Photo when all of these conditions hold:
 
@@ -47,13 +47,13 @@ Before changing state, Slipstream must prove that the current Library Folder is 
 A successful expansion must:
 
 - preserve every existing Original File and Photo identity;
-- preserve Selection State, Rating, Photo Set membership and order, and saved Photo Set progress;
+- preserve Selection State, Rating, Photo Set membership and order, and saved Photo Set positions;
 - preserve remembered unavailable Photos;
 - discover supported files outside the former Folder as new Photos;
 - leave Photo Set membership unchanged unless the Photographer changes it; and
 - leave every Original File unchanged.
 
-Slipstream may invalidate and rebuild Capture Time inspection facts, Preview facts, and cached derivatives when their revisions include an old Location. These are derived state and must not replace or reset Photographer-owned review state.
+Slipstream may invalidate and rebuild Capture Time inspection facts, Preview facts, and cached derivatives when their revisions include an old Location. These are derived state and must not replace or reset Selection State, Rating, Photo Sets, membership order, or saved Photo Set positions.
 
 Expansion requires a stopped Library and a verified backup. If Slipstream cannot prove the ancestor relationship or preserve every remembered Original Location without conflict, it must reject the expansion without changing the current Library.
 
@@ -63,7 +63,7 @@ For example, expanding `/photos/26-spring` to `/photos` keeps `26-spring/a.ARW` 
 
 ## Capture Time
 
-Capture Time is optional camera metadata. Slipstream uses it to order filtered Photo Library Review. Capture Time must not determine pairing or change a Photo Set's membership order.
+Capture Time is optional camera metadata. Slipstream uses it to order `All Photos` in the Library Browser. Capture Time must not determine pairing or change a Photo Set's membership order.
 
 Slipstream must inspect each available Original independently. It must use the first valid base field in this order:
 
@@ -80,7 +80,7 @@ Slipstream must not use EXIF `DateTime`, GPS time, filesystem modification time,
 
 For a RAW/JPEG pair, a valid RAW Capture Time is authoritative. A valid matching JPEG Capture Time is used only when RAW has no valid Capture Time. If both Originals have valid values that differ, Slipstream must retain the disagreement and use RAW for ordering. If both have valid timezone offsets that differ, that is also a disagreement. A known offset on one Original and an unknown offset on the other is not a disagreement.
 
-Missing, invalid, or failed capture metadata must not make an otherwise readable Photo unavailable. A Photo without an authoritative Capture Time remains reviewable and sorts in the missing-time partition.
+Missing, invalid, or failed capture metadata must not make an otherwise readable Photo unavailable. A Photo without an authoritative Capture Time remains browsable and sorts in the missing-time partition.
 
 When an Original becomes unavailable, Slipstream must retain its last successfully inspected Capture Time for ordering. When that Original returns with changed file revision facts, Slipstream must replace the retained fact with the result of inspecting the current bytes.
 
@@ -88,7 +88,7 @@ When an Original becomes unavailable, Slipstream must retain its last successful
 
 The Photographer may create, rename, and delete a Photo Set.
 
-A Photo Set contains explicitly ordered references to Photos. Its membership positions are authoritative whenever the Photographer reviews that Photo Set. Capture metadata and rescans must not silently change those positions.
+A Photo Set contains explicitly ordered references to Photos. Its membership positions are authoritative whenever the Photographer browses that Photo Set. Capture metadata and rescans must not silently change those positions.
 
 One Photo may belong to multiple Photo Sets. New members append in the order supplied by the add operation. Only an explicit reorder operation may change the order of existing members. Deleting a Photo Set must not delete or modify a Photo or Original File.
 
