@@ -12,6 +12,7 @@ use std::{
     fmt,
     num::NonZeroUsize,
     path::PathBuf,
+    sync::atomic::AtomicU64,
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
 };
@@ -22,6 +23,33 @@ use std::sync::OnceLock;
 const MAX_SCAN_WAITERS: usize = 64;
 
 const DEFAULT_SCAN_CAPACITY: usize = 1;
+
+/// The phase of the scan currently owned by the Library scanner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// No scan is running and none has been admitted.
+    #[default]
+    Idle,
+    /// Walking the Library Folder for supported Original Files.
+    Discovering,
+    /// Inspecting Capture Time facts for discovered files.
+    Inspecting,
+    /// Applying one completed scan result to the state store.
+    Applying,
+}
+
+/// Truthful, measurable progress for the scan currently owned by the scanner.
+/// Counters are absent where the corresponding total is not yet known.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    /// Supported files discovered so far during the current walk.
+    pub discovered: u64,
+    /// Originals whose Capture Time fact has been resolved so far.
+    pub inspected: u64,
+    /// Total originals to inspect once the walk has completed.
+    pub inspect_total: Option<u64>,
+}
 
 #[cfg(test)]
 struct ScannerTestHook {
@@ -179,6 +207,7 @@ pub struct Library {
     native_work: NativeWorkBudget,
     persistence: Persistence,
     scanner: Scanner,
+    progress: Arc<Mutex<ScanProgress>>,
     lifecycle: Mutex<Lifecycle>,
     shutdown: Mutex<Option<Result<(), LibraryError>>>,
 }
@@ -233,10 +262,12 @@ impl Library {
             Condvar::new(),
         ));
         let native_work = NativeWorkBudget::new();
+        let progress = Arc::new(Mutex::new(ScanProgress::default()));
         let worker_root = root.clone();
         let worker_native_work = native_work.clone();
         let worker_persistence = persistence.clone();
         let worker_state = state.clone();
+        let worker_progress = Arc::clone(&progress);
         let join = thread::Builder::new()
             .name("slipstream-scanner".to_owned())
             .spawn(move || {
@@ -247,6 +278,7 @@ impl Library {
                     config.limits,
                     receiver,
                     worker_state,
+                    worker_progress,
                 )
             })
             .map_err(|_| LibraryError::ScannerStopped)?;
@@ -259,6 +291,7 @@ impl Library {
                 state,
                 join: Mutex::new(Some(join)),
             },
+            progress,
             lifecycle: Mutex::new(Lifecycle { open: true }),
             shutdown: Mutex::new(None),
         })
@@ -266,6 +299,11 @@ impl Library {
 
     pub fn canonical_root(&self) -> &std::path::Path {
         self.root.canonical_path()
+    }
+
+    /// Current observable progress of the scan owned by the scanner thread.
+    pub fn scan_progress(&self) -> ScanProgress {
+        *self.progress.lock().unwrap()
     }
 
     pub(crate) fn native_work_budget(&self) -> NativeWorkBudget {
@@ -470,12 +508,14 @@ fn inspect_capture_facts(
     native_work: &NativeWorkBudget,
     originals: &mut [crate::DiscoveredOriginal],
     previous: &[crate::OriginalRecord],
+    progress: &Mutex<ScanProgress>,
 ) {
     let previous = previous
         .iter()
         .map(|original| (original.relative_path.as_str(), original))
         .collect::<std::collections::HashMap<_, _>>();
-    for original in originals {
+    for (index, original) in originals.iter_mut().enumerate() {
+        progress.lock().unwrap().inspected = u64::try_from(index + 1).unwrap_or(u64::MAX);
         let prior = previous.get(original.path.as_str()).copied();
         if original.error_category.is_some() {
             if let Some(prior) = prior {
@@ -517,31 +557,52 @@ fn scanner_main(
     limits: ScanLimits,
     receiver: std::sync::mpsc::Receiver<ScanCommand>,
     state: Arc<(Mutex<ScanState>, Condvar)>,
+    progress: Arc<Mutex<ScanProgress>>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
             ScanCommand::Stop => break,
             ScanCommand::Scan => {
+                {
+                    let mut progress = progress.lock().unwrap();
+                    *progress = ScanProgress {
+                        phase: ScanPhase::Discovering,
+                        ..ScanProgress::default()
+                    };
+                }
                 #[cfg(test)]
                 scanner_test_hook(&root);
+                let discovered = AtomicU64::new(0);
                 let result = root
-                    .scan(limits)
+                    .scan_with_progress(limits, &discovered)
                     .map_err(LibraryError::from)
                     .and_then(|mut result: ScanResult| {
                         let previous = persistence
                             .snapshot_blocking()
                             .map_err(LibraryError::from)?;
+                        {
+                            let mut progress = progress.lock().unwrap();
+                            progress.discovered =
+                                discovered.load(std::sync::atomic::Ordering::Relaxed);
+                            progress.inspected = 0;
+                            progress.inspect_total =
+                                Some(u64::try_from(result.originals.len()).unwrap_or(u64::MAX));
+                            progress.phase = ScanPhase::Inspecting;
+                        }
                         inspect_capture_facts(
                             &root,
                             &native_work,
                             &mut result.originals,
                             &previous.originals,
+                            &progress,
                         );
+                        progress.lock().unwrap().phase = ScanPhase::Applying;
                         persistence
                             .apply_scan_blocking(result.originals, result.errors)
                             .map_err(LibraryError::from)
                     })
                     .map(Arc::new);
+                progress.lock().unwrap().phase = ScanPhase::Idle;
                 let (lock, signal) = &*state;
                 let mut guard = lock.lock().unwrap();
                 if let Some(waiters) = guard.in_flight.take() {
@@ -811,6 +872,39 @@ mod tests {
         assert_eq!(busy, 1);
         assert_eq!(completed, MAX_SCAN_WAITERS - 1);
         assert!(first.await.unwrap().is_ok());
+        library.shutdown().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_progress_reports_truthful_phases_and_counters() {
+        let (base, config) = fixture();
+        fs::write(base.0.join("originals/one.JPG"), b"jpeg").unwrap();
+        fs::write(base.0.join("originals/two.JPG"), b"jpeg").unwrap();
+        let library = Arc::new(Library::open(config).unwrap());
+        assert_eq!(
+            library.scan_progress(),
+            ScanProgress {
+                phase: ScanPhase::Idle,
+                ..ScanProgress::default()
+            }
+        );
+        let hook = ScannerHookGuard::install(library.canonical_root().to_owned());
+        let scan_library = library.clone();
+        let scan = tokio::spawn(async move { scan_library.scan().await });
+        hook.wait_for_entries(1);
+        assert_eq!(
+            library.scan_progress().phase,
+            ScanPhase::Discovering,
+            "the admitted scan must report discovery before publication"
+        );
+        hook.release();
+        let snapshot = scan.await.unwrap().unwrap();
+        assert_eq!(snapshot.originals.len(), 2);
+        let progress = library.scan_progress();
+        assert_eq!(progress.phase, ScanPhase::Idle);
+        assert_eq!(progress.discovered, 2);
+        assert_eq!(progress.inspect_total, Some(2));
+        assert_eq!(progress.inspected, 2);
         library.shutdown().unwrap();
     }
 

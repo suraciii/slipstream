@@ -127,8 +127,14 @@ If preflight or the transaction fails, keep the prior Folder configuration; SQLi
    ```
 
    The health endpoint must return exactly `{"status":"ok"}`. A healthy
-   response proves process readiness; continue with the browser and state
-   checks before declaring the deployment verified.
+   response proves process readiness only: storage, schema, sidecar, and
+   cache admission, the Preview workers, and the HTTP bind. It does not prove
+   that a Library scan has finished. Check the Library separately with
+   `GET /api/status`, which reports `initializing`, `discovering`,
+   `inspecting`, `applying`, `idle`, or `failed`; an existing published
+   Library stays browsable while an ordinary background rescan runs. Then
+   continue with the browser and state checks before declaring the
+   deployment verified.
 
 5. Run the fail-closed, read-only production acceptance command with exact expected values:
 
@@ -153,7 +159,7 @@ If preflight or the transaction fails, keep the prior Folder configuration; SQLi
    ./scripts/verify-production.sh
    ```
 
-   The expected state snapshot contains the exact `photos` and `photoSets` arrays recorded before backup. It binds Photo identities/order, availability, Selection State, Rating, Photo Set membership/order, review progress, and persisted Preview facts. The command validates exact health, that complete state snapshot, required persisted current Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache. Missing inputs or skipped checks fail closed.
+   The expected state snapshot contains the exact `photos` and `photoSets` arrays recorded before backup. It binds Photo identities/order, availability, Selection State, Rating, Photo Set membership/order, review progress, and persisted Preview facts. The command validates exact health, waits for `GET /api/status` to report `idle` (configurable with `SLIPSTREAM_SCAN_WAIT_SECONDS`, default 3600, failing closed on `failed` or a timeout), that complete state snapshot, required persisted current Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache. Missing inputs or skipped checks fail closed.
 
 6. Check the interactive browser review flow. Confirm that any intended state mutation survives a restart and generated derivatives remain below the cache mount.
 7. Keep rollback artifacts according to the retirement criteria in the

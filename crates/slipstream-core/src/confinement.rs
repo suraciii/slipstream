@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -177,12 +177,23 @@ impl LibraryRoot {
     }
 
     pub fn scan(&self, limits: ScanLimits) -> Result<ScanResult, ConfinementError> {
+        self.scan_with_progress(limits, &AtomicU64::new(0))
+    }
+
+    /// Walks the Library and reports each recognized supported file through
+    /// `discovered` as it is accepted, before inspection or publication.
+    pub fn scan_with_progress(
+        &self,
+        limits: ScanLimits,
+        discovered: &AtomicU64,
+    ) -> Result<ScanResult, ConfinementError> {
         self.ensure_open()?;
         let mut scan = Scanner {
             root: self,
             limits,
             total_entries: 0,
             recognized_files: 0,
+            discovered: Some(discovered),
             originals: Vec::new(),
             errors: Vec::new(),
         };
@@ -399,6 +410,7 @@ struct Scanner<'a> {
     limits: ScanLimits,
     total_entries: usize,
     recognized_files: usize,
+    discovered: Option<&'a AtomicU64>,
     originals: Vec<DiscoveredOriginal>,
     errors: Vec<OriginalScanError>,
 }
@@ -438,6 +450,9 @@ impl Scanner<'_> {
                 continue;
             }
             self.recognized_files += 1;
+            if let Some(discovered) = self.discovered {
+                discovered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if self.recognized_files > self.limits.maximum_files {
                 return Err(ConfinementError::ResourceLimit(
                     "Photo Library exceeds recognized file limit",
