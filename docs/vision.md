@@ -1,6 +1,6 @@
 # Product Vision
 
-Slipstream is a browser-based photo selection workspace. It lets a Photographer review a shoot quickly from a phone, tablet, or desktop browser, group Photos into Photo Sets, and record keep and reject decisions without modifying Original Files.
+Slipstream is a browser-based photo selection workspace. It lets a Photographer browse a Photo Library quickly from a phone, tablet, or desktop browser, group Photos into Photo Sets, and record keep and reject decisions without modifying Original Files.
 
 ## Goal
 
@@ -14,14 +14,14 @@ Slipstream initially serves one Photographer with one existing local or network-
 
 The first product must support this complete path:
 
-1. The Photographer opens Slipstream in a browser.
+1. The Photographer opens Slipstream in a browser and immediately sees a progressively loaded Photo Library.
 2. Slipstream indexes the configured Library Folder without moving or changing Original Files.
 3. Slipstream pairs a RAW Original and matching JPEG Original as one Photo when they have the same base name in the same directory.
-4. The Photographer creates or opens a Photo Set.
-5. The Photographer reviews one Photo at a time.
+4. The Photographer browses `All Photos` or opens a Photo Set in Grid View.
+5. The Photographer opens one Photo in Photo View from the Grid.
 6. A right swipe selects the Photo and a left swipe rejects it.
 7. The Photographer may assign a zero-to-five-star Rating, inspect available Preview detail, and undo a recent decision.
-8. Slipstream retains the Photo Set, review progress, Selection State, and Rating.
+8. Slipstream retains generated Previews, the Photo Set, saved Photo Set position, Selection State, and Rating.
 
 ## Preview Trust
 
@@ -36,8 +36,9 @@ Slipstream must identify the Preview Source. It must not describe an unavailable
 - **Selection first**: Every first-product capability must help the Photographer group, compare, select, reject, rate, or resume Photos.
 - **Camera-produced preview**: Prefer the camera's JPEG result over a new generic RAW interpretation.
 - **Original ownership**: Original Files remain in place and unchanged.
-- **Touch-native review**: Core selection works through direct gestures and also remains accessible through visible controls and keyboard input.
-- **Fast continuation**: The Photographer can resume a Review Session without reconstructing prior progress.
+- **Touch-native browsing**: Core selection works through direct gestures and also remains accessible through visible controls and keyboard input.
+- **Progressive use**: The Library Browser becomes useful without downloading every Photo fact or generating every Preview.
+- **Fast continuation**: The Photographer can reopen a Photo Set at its saved Photo without reconstructing the prior browsing position.
 - **Focused core**: Slipstream proves Photo Sets, trustworthy Previews, and selection before adding editing or automation.
 
 ## What Slipstream Is Not

@@ -25,7 +25,7 @@ Slipstream does not promise:
 - monitor calibration beyond the browser and operating system's normal color handling;
 - identical appearance across uncalibrated displays.
 
-The review surface must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. It must identify limited detail when the Preview is smaller than the display or requested zoom requires.
+Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. It must identify limited detail when the Preview is smaller than the display or requested zoom requires.
 
 ## Preview Normalization
 
@@ -50,13 +50,19 @@ The first product does not convert Previews to Display P3, provide soft proofing
 
 If normalization cannot preserve a valid source profile, Slipstream must convert the derivative to sRGB rather than attach an incorrect profile.
 
-## Loading Behavior
+## Loading and Cache Behavior
 
-The current Photo's review Preview has highest priority. The immediately previous and next Photos may load in the background.
+Visible Grid cells may request thumbnails progressively. Grid loading must not wait for thumbnails outside the current viewport and bounded look-ahead.
+
+The current Photo's review Preview has highest priority. After it is ready, the immediately next and previous Photos may load in the background. Adjacent work must not delay a newly requested current Photo.
 
 A thumbnail may appear while the review Preview loads. Slipstream must not change Selection State because a higher-quality Preview becomes available.
 
-A reload or reconnect may reuse a valid cached Preview. Cache reuse must not present a derivative from an older version of the Original File as current.
+A generated thumbnail or review Preview must remain in the configured derivative cache across browser reload and server restart. A current cache hit must not re-extract or reprocess the Original File. Derivative responses must use identity-bearing immutable browser caching so reconnect and reload may reuse valid bytes.
+
+Cache reuse must not present a derivative from an older version of the Original File as current. The cache remains rebuildable: deleting cached derivatives may require regeneration but must not remove Photo state or modify Original Files.
+
+Slipstream must not automatically generate every Library Preview. Demand-driven generation and bounded nearby prefetch keep mounted-storage I/O, native work, and cache growth proportional to actual browsing.
 
 ## Failure Behavior
 
