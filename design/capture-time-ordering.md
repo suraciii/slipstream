@@ -188,7 +188,7 @@ A lazy backfill would expose temporary path order and reorder later Sessions as 
 ## Compatibility Fixtures
 
 - `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns RAW/JPEG authority, tie, missing-partition, and camera-local-offset ordering vectors.
-- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own canonical v3 shape; canonical v2 remains a migration input.
+- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the writable identity-fence shape, while canonical v2 remains a migration input.
 - Migration fixtures prove preservation of Photo identity, Photo Sets, positions, Selection State, Rating, Preview facts, and progress.
 - `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
 - Browser tests own the filename-versus-capture-order example and the explicit Photo Set order example.

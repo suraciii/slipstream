@@ -523,13 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn canonical_schema_snapshot_executes_with_bundled_sqlite() {
+    fn canonical_schema_v4_snapshot_executes_with_bundled_sqlite() {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(&fs::read_to_string(contract_path("sqlite/schema-v2.sql")).unwrap())
+            .execute_batch(&fs::read_to_string(contract_path("sqlite/schema-v4.sql")).unwrap())
             .unwrap();
         let expected: Value =
-            serde_json::from_slice(&fs::read(contract_path("sqlite/schema-v2.json")).unwrap())
+            serde_json::from_slice(&fs::read(contract_path("sqlite/schema-v4.json")).unwrap())
                 .unwrap();
         assert_eq!(schema_manifest(&connection), expected);
         assert_eq!(

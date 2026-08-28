@@ -148,6 +148,30 @@ impl LibraryRoot {
         })
     }
 
+    pub(crate) fn descendant(&self, path: RelativeOriginalPath) -> Result<Self, ConfinementError> {
+        let file = self.open_confined(&path, true)?;
+        let descriptor: OwnedFd = file.into();
+        let canonical_path = canonical_path_for_descriptor(descriptor.as_raw_fd())?;
+        Ok(Self(Arc::new(RootInner {
+            descriptor,
+            canonical_path,
+            closed: AtomicBool::new(false),
+        })))
+    }
+
+    pub(crate) fn identifies_same_directory(&self, other: &Self) -> Result<bool, ConfinementError> {
+        self.ensure_open()?;
+        other.ensure_open()?;
+        let left =
+            sys::fstat(self.0.descriptor.as_raw_fd()).map_err(|_| ConfinementError::UnsafeOpen)?;
+        let right =
+            sys::fstat(other.0.descriptor.as_raw_fd()).map_err(|_| ConfinementError::UnsafeOpen)?;
+        Ok(left.st_mode & libc::S_IFMT == libc::S_IFDIR
+            && right.st_mode & libc::S_IFMT == libc::S_IFDIR
+            && left.st_dev == right.st_dev
+            && left.st_ino == right.st_ino)
+    }
+
     pub fn close(&self) {
         self.0.closed.store(true, Ordering::Release);
     }
@@ -1061,6 +1085,22 @@ mod tests {
             LibraryRoot::open(&alias),
             Err(ConfinementError::InvalidRoot)
         ));
+    }
+
+    #[test]
+    fn descendant_descriptor_identity_distinguishes_different_directories() {
+        let base = TempTree::new();
+        fs::create_dir(base.path().join("ancestor")).unwrap();
+        fs::create_dir(base.path().join("ancestor/old")).unwrap();
+        fs::create_dir(base.path().join("ancestor/other")).unwrap();
+        let ancestor = LibraryRoot::open(base.path().join("ancestor")).unwrap();
+        let confined = ancestor
+            .descendant(RelativeOriginalPath::parse("old").unwrap())
+            .unwrap();
+        let same = LibraryRoot::open(base.path().join("ancestor/old")).unwrap();
+        let other = LibraryRoot::open(base.path().join("ancestor/other")).unwrap();
+        assert!(confined.identifies_same_directory(&same).unwrap());
+        assert!(!confined.identifies_same_directory(&other).unwrap());
     }
 
     #[test]

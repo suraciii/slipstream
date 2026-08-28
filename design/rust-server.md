@@ -61,7 +61,7 @@ Actix Web `4.15.0` was considered. It supports the required HTTP surface, but it
 
 ### SQLite: rusqlite with bundled SQLite
 
-rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v2 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
+rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v4 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
 
 sqlx `0.9.0` was considered. Its pool, async facade, macro/offline metadata, and generic migration layer do not replace Slipstream's exact schema-shape validation and sidecar admission. It is rejected until concurrent connections or cross-database support become measured requirements.
 

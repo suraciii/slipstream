@@ -1,7 +1,7 @@
 use crate::{
     OriginalKind,
     domain::{DiscoveredOriginal, OriginalRecord, PhotoRecord, PreviewCandidate, PreviewState},
-    identity::{original_id, paired_photo_id, pairing_stem, standalone_photo_id},
+    identity::pairing_stem,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -19,10 +19,18 @@ pub struct ReconciledPhoto {
     pub prior: Option<PhotoRecord>,
 }
 
-pub fn reconcile(
+pub fn reconcile<E>(
     discovered: &[DiscoveredOriginal],
     existing: &[PhotoRecord],
-) -> Vec<ReconciledPhoto> {
+    original_ids: &HashMap<String, String>,
+    mut allocate_photo_id: impl FnMut() -> Result<String, E>,
+) -> Result<Vec<ReconciledPhoto>, E> {
+    let original_id = |original: &DiscoveredOriginal| {
+        original_ids
+            .get(original.path.as_str())
+            .expect("every discovered Original has an assigned identity")
+            .clone()
+    };
     let mut groups: BTreeMap<Vec<u8>, Vec<DiscoveredOriginal>> = BTreeMap::new();
     for original in discovered {
         let path = original.path.as_str();
@@ -67,8 +75,8 @@ pub fn reconcile(
         if raws.len() == 1 && jpegs.len() == 1 {
             let raw = raws.into_iter().next().unwrap();
             let jpeg = jpegs.into_iter().next().unwrap();
-            let raw_id = original_id(raw.path.as_str());
-            let jpeg_id = original_id(jpeg.path.as_str());
+            let raw_id = original_id(&raw);
+            let jpeg_id = original_id(&jpeg);
             let default_sort_path = raw.path.as_str().to_owned();
             let raw_prior = by_original.get(&raw_id);
             let jpeg_prior = by_original.get(&jpeg_id);
@@ -106,10 +114,10 @@ pub fn reconcile(
                 (Some(_), Some(_)) => None,
                 (None, None) => None,
             };
-            let id = prior
-                .as_ref()
-                .map(|photo| photo.id.clone())
-                .unwrap_or_else(|| paired_photo_id(&raw_id, &jpeg_id));
+            let id = match prior.as_ref() {
+                Some(photo) => photo.id.clone(),
+                None => allocate_photo_id()?,
+            };
             used.insert(id.clone());
             updates.push(ReconciledPhoto {
                 id,
@@ -130,7 +138,7 @@ pub fn reconcile(
         let prior_pairs = if ambiguous {
             let mut pairs = BTreeMap::new();
             for item in group {
-                if let Some(photo) = by_original.get(&original_id(item.path.as_str()))
+                if let Some(photo) = by_original.get(&original_id(item))
                     && photo.raw_original_id.is_some()
                     && photo.jpeg_original_id.is_some()
                 {
@@ -147,11 +155,11 @@ pub fn reconcile(
             let jpeg_id = prior.jpeg_original_id.clone().unwrap();
             let raw = group
                 .iter()
-                .find(|item| original_id(item.path.as_str()) == raw_id)
+                .find(|item| original_id(item) == raw_id)
                 .cloned();
             let jpeg = group
                 .iter()
-                .find(|item| original_id(item.path.as_str()) == jpeg_id)
+                .find(|item| original_id(item) == jpeg_id)
                 .cloned();
             pair_members.insert(raw_id.clone());
             pair_members.insert(jpeg_id.clone());
@@ -175,7 +183,7 @@ pub fn reconcile(
         }
 
         for item in group {
-            let item_id = original_id(item.path.as_str());
+            let item_id = original_id(item);
             if pair_members.contains(&item_id) {
                 continue;
             }
@@ -186,10 +194,10 @@ pub fn reconcile(
             {
                 continue;
             }
-            let id = prior
-                .as_ref()
-                .map(|photo| photo.id.clone())
-                .unwrap_or_else(|| standalone_photo_id(&item_id));
+            let id = match prior.as_ref() {
+                Some(photo) => photo.id.clone(),
+                None => allocate_photo_id()?,
+            };
             used.insert(id.clone());
             updates.push(ReconciledPhoto {
                 id,
@@ -215,11 +223,11 @@ pub fn reconcile(
         }
         let raw = discovered
             .iter()
-            .find(|item| Some(original_id(item.path.as_str())) == prior.raw_original_id)
+            .find(|item| Some(original_id(item)) == prior.raw_original_id)
             .cloned();
         let jpeg = discovered
             .iter()
-            .find(|item| Some(original_id(item.path.as_str())) == prior.jpeg_original_id)
+            .find(|item| Some(original_id(item)) == prior.jpeg_original_id)
             .cloned();
         {
             used.insert(prior.id.clone());
@@ -248,7 +256,7 @@ pub fn reconcile(
             .cmp(right.sort_path.as_bytes())
             .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
     });
-    updates
+    Ok(updates)
 }
 
 pub fn selected_source(photo: &ReconciledPhoto) -> Option<(&DiscoveredOriginal, PreviewCandidate)> {
@@ -356,7 +364,10 @@ pub fn preview_should_preserve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{OriginalErrorCategory, OriginalFacts, SelectionState};
+    use crate::{
+        domain::{OriginalErrorCategory, OriginalFacts, SelectionState},
+        identity::original_id,
+    };
 
     fn original(path: &str, kind: OriginalKind) -> DiscoveredOriginal {
         DiscoveredOriginal {
@@ -372,6 +383,28 @@ mod tests {
             error_message: None,
             capture: crate::CaptureFact::pending(),
         }
+    }
+
+    fn reconcile_test(
+        discovered: &[DiscoveredOriginal],
+        existing: &[PhotoRecord],
+    ) -> Vec<ReconciledPhoto> {
+        let original_ids = discovered
+            .iter()
+            .map(|original| {
+                (
+                    original.path.as_str().to_owned(),
+                    original_id(original.path.as_str()),
+                )
+            })
+            .collect();
+        let mut next = 0;
+        reconcile(discovered, existing, &original_ids, || {
+            let id = format!("new-photo-{next}");
+            next += 1;
+            Ok::<_, ()>(id)
+        })
+        .unwrap()
     }
 
     fn photo(id: &str, raw: Option<&str>, jpeg: Option<&str>, ambiguous: bool) -> PhotoRecord {
@@ -439,7 +472,7 @@ mod tests {
                 (first.kind == OriginalKind::Jpeg).then_some(first_id.as_str()),
                 false,
             );
-            let result = reconcile(&[first, second], &[prior]);
+            let result = reconcile_test(&[first, second], &[prior]);
             assert_eq!(result.len(), 1);
             assert_eq!(result[0].id, "stable");
             assert!(result[0].raw_present && result[0].jpeg_present);
@@ -454,13 +487,13 @@ mod tests {
         let raw_id = original_id(raw.path.as_str());
         let jpeg_id = original_id(jpeg.path.as_str());
         let prior = photo("paired", Some(&raw_id), Some(&jpeg_id), false);
-        let result = reconcile(std::slice::from_ref(&raw), std::slice::from_ref(&prior));
+        let result = reconcile_test(std::slice::from_ref(&raw), std::slice::from_ref(&prior));
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "paired");
         assert_eq!(result[0].raw_id.as_deref(), Some(raw_id.as_str()));
         assert_eq!(result[0].jpeg_id.as_deref(), Some(jpeg_id.as_str()));
         assert!(result[0].raw_present && !result[0].jpeg_present);
-        let restored = reconcile(&[raw, jpeg], &[prior]);
+        let restored = reconcile_test(&[raw, jpeg], &[prior]);
         assert_eq!(restored[0].id, "paired");
         assert!(restored[0].raw_present && restored[0].jpeg_present);
     }
@@ -473,7 +506,7 @@ mod tests {
         let raw_id = original_id(raw.path.as_str());
         let jpeg_id = original_id(jpeg.path.as_str());
         let prior = photo("paired", Some(&raw_id), Some(&jpeg_id), false);
-        let result = reconcile(&[raw, jpeg, conflict], &[prior]);
+        let result = reconcile_test(&[raw, jpeg, conflict], &[prior]);
         assert_eq!(result.len(), 2);
         let retained = result.iter().find(|item| item.id == "paired").unwrap();
         assert!(retained.ambiguous);
@@ -582,7 +615,7 @@ mod tests {
         let jpeg = original("one.JPG", OriginalKind::Jpeg);
         let raw_id = original_id(raw.path.as_str());
         let jpeg_id = original_id(jpeg.path.as_str());
-        let result = reconcile(
+        let result = reconcile_test(
             &[raw, jpeg],
             &[
                 photo("raw-singleton", Some(&raw_id), None, false),
@@ -592,7 +625,7 @@ mod tests {
         assert_eq!(result.len(), 3);
         let paired = result
             .iter()
-            .find(|item| item.id == paired_photo_id(&raw_id, &jpeg_id))
+            .find(|item| item.prior.is_none() && item.raw_present && item.jpeg_present)
             .unwrap();
         assert!(paired.prior.is_none());
         assert!(paired.raw_present && paired.jpeg_present);
@@ -607,7 +640,7 @@ mod tests {
             original("a.JPG", OriginalKind::Jpeg),
             original("春节.JPG", OriginalKind::Jpeg),
         ];
-        let result = reconcile(&values, &[]);
+        let result = reconcile_test(&values, &[]);
         let paths: Vec<_> = result.iter().map(|item| item.sort_path.as_str()).collect();
         assert_eq!(paths, ["a.JPG", "z.JPG", "春节.JPG"]);
     }

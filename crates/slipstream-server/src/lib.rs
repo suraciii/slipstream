@@ -779,6 +779,31 @@ impl RunningServer {
     }
 }
 
+pub async fn expand_library(config: Config) -> Result<(), ServerError> {
+    validate_storage_layout(&config)?;
+    let library_config = LibraryConfig {
+        library_root: config.library_root,
+        state_directory: config.state_directory,
+        database_basename: config.database_basename,
+        limits: ScanLimits::default(),
+        ..LibraryConfig::default()
+    };
+    let expansion_config = library_config.clone();
+    tokio::task::spawn_blocking(move || slipstream_core::expand_library(expansion_config))
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))??;
+    let library = tokio::task::spawn_blocking(move || Library::open(library_config))
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))??;
+    let scan_result = library.scan().await.map(|_| ());
+    let close_result = tokio::task::spawn_blocking(move || library.shutdown())
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))?;
+    scan_result?;
+    close_result?;
+    Ok(())
+}
+
 pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> {
     let web_root = open_web_root(config.web_root());
     if !web_root.ready {
@@ -2025,17 +2050,26 @@ mod tests {
         let photos = serde_json::to_value(application.photos()).unwrap();
         let list = photos["photos"].as_array().unwrap();
         assert_eq!(list.len(), 2);
+        let snapshot = application.library.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot
+                .photos
+                .iter()
+                .map(|photo| photo.sort_path.as_str())
+                .collect::<Vec<_>>(),
+            ordered_paths
+                .iter()
+                .map(|path| path.as_str().unwrap())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             list.iter()
                 .map(|photo| photo["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ordered_paths
+            snapshot
+                .photos
                 .iter()
-                .map(|path| {
-                    slipstream_core::standalone_photo_id(&slipstream_core::original_id(
-                        path.as_str().unwrap(),
-                    ))
-                })
+                .map(|photo| photo.id.as_str())
                 .collect::<Vec<_>>()
         );
         for photo in list {

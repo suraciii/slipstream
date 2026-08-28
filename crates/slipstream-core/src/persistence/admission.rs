@@ -48,6 +48,7 @@ pub enum StateError {
     UnsafeStateDirectory,
     UnsafeDatabase,
     ChangedDatabase,
+    DatabaseInUse,
     UnsafeSidecar,
     SidecarPresent,
     Io(&'static str),
@@ -64,6 +65,7 @@ impl fmt::Display for StateError {
             Self::UnsafeStateDirectory => "SQLite state directory is not safely owned",
             Self::UnsafeDatabase => "SQLite database inode is not safely owned",
             Self::ChangedDatabase => "SQLite database inode changed before startup",
+            Self::DatabaseInUse => "SQLite database is already in use",
             Self::UnsafeSidecar => "SQLite sidecar is not safely owned",
             Self::SidecarPresent => "SQLite sidecar requires operator recovery",
             Self::Io(message) => message,
@@ -76,6 +78,10 @@ impl std::error::Error for StateError {}
 pub struct StateDirectory {
     descriptor: OwnedFd,
     canonical_path: PathBuf,
+}
+
+pub(crate) struct StateDatabaseLock {
+    _descriptor: OwnedFd,
 }
 
 impl StateDirectory {
@@ -127,6 +133,35 @@ impl StateDirectory {
         let facts = sys::fstat(descriptor.as_raw_fd()).map_err(|_| StateError::UnsafeDatabase)?;
         let identity = safe_identity(&facts).ok_or(StateError::UnsafeDatabase)?;
         Ok((identity, !existed))
+    }
+
+    pub(crate) fn prepare_existing_database(
+        &self,
+        name: &DatabaseName,
+    ) -> Result<StateFileIdentity, StateError> {
+        self.admit_sidecars(name)?;
+        let descriptor = self.open_database(name, libc::O_RDWR | libc::O_NONBLOCK, 0)?;
+        let facts = sys::fstat(descriptor.as_raw_fd()).map_err(|_| StateError::UnsafeDatabase)?;
+        safe_identity(&facts).ok_or(StateError::UnsafeDatabase)
+    }
+
+    pub(crate) fn lock_database(
+        &self,
+        name: &DatabaseName,
+    ) -> Result<StateDatabaseLock, StateError> {
+        let descriptor = self.open_database(name, libc::O_RDWR | libc::O_NONBLOCK, 0)?;
+        sys::lock_exclusive(descriptor.as_raw_fd()).map_err(|error| {
+            if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+                || error.raw_os_error() == Some(libc::EAGAIN)
+            {
+                StateError::DatabaseInUse
+            } else {
+                StateError::UnsafeDatabase
+            }
+        })?;
+        Ok(StateDatabaseLock {
+            _descriptor: descriptor,
+        })
     }
 
     pub(crate) fn remove_created_empty_database(
@@ -387,6 +422,15 @@ mod sys {
     pub fn unlink_at(root: RawFd, name: &CString) -> io::Result<()> {
         // SAFETY: `name` is NUL-terminated and relative to the retained directory descriptor.
         if unsafe { libc::unlinkat(root, name.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub fn lock_exclusive(descriptor: RawFd) -> io::Result<()> {
+        // SAFETY: `descriptor` remains open for the lifetime of the admitted database owner.
+        if unsafe { libc::flock(descriptor, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
