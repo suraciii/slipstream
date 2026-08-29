@@ -159,7 +159,26 @@ If preflight or the transaction fails, keep the prior Folder configuration; SQLi
    ./scripts/verify-production.sh
    ```
 
-   The expected state snapshot contains the exact `photos` and `photoSets` arrays recorded before backup. It binds Photo identities/order, availability, Selection State, Rating, Photo Set membership/order, review progress, and persisted Preview facts. The command validates exact health, waits for `GET /api/status` to report `idle` (configurable with `SLIPSTREAM_SCAN_WAIT_SECONDS`, default 3600, failing closed on `failed` or a timeout), that complete state snapshot, required persisted current Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache. Missing inputs or skipped checks fail closed.
+   The expected state snapshot is an offline projection of the owned SQLite
+   state and is the only supported way to produce it. Stop the service (the
+   backup precondition above keeps the database quiescent), then run:
+
+   ```sh
+   python3 scripts/project-state.py /data/slipstream/state/library.sqlite \
+     > /path/to/pre-backup-state.json
+   ```
+
+   It opens the database read-only (`mode=ro&immutable=1`), fails closed on
+   journal/WAL/SHM sidecars, schema drift, or unreadable rows, and prints the
+   exact `photos` and `photoSets` arrays that the acceptance command compares
+   against live bounded traversal. The projection binds Photo identities and
+   Capture Time order, availability, ambiguity, Original kinds, Selection
+   State, Rating, persisted Preview facts, Photo Set membership/order, and the
+   saved Photo Set position. The command validates exact health, waits for
+   `GET /api/status` to report `idle` (configurable with
+   `SLIPSTREAM_SCAN_WAIT_SECONDS`, default 3600, failing closed on `failed` or
+   a timeout), that complete state snapshot, required persisted current
+   Preview facts, sidecar absence, unchanged SQLite bytes, image tag/ID/revision, container health and hardening, the exact three mounts, restricted binding, runtime contents, and the Original SHA before and after. It deliberately does not call the demand-driven Preview endpoint because that GET may populate derived state or cache, and it never materializes a complete-Photo or complete-membership HTTP response because those routes are retired. Missing inputs or skipped checks fail closed.
 
 6. Check the interactive browser review flow. Confirm that any intended state mutation survives a restart and generated derivatives remain below the cache mount.
 7. Keep rollback artifacts according to the retirement criteria in the
@@ -253,7 +272,8 @@ Do not delete state or cache during rollback.
    docker compose --env-file /path/to/slipstream.env -f compose.yaml up -d --no-build
    ```
 
-4. Verify `GET /healthz`, photo-set reads, one state mutation, undo, and a
+4. Verify `GET /healthz`, the Library Overview, a Photo Set browse read, one
+   state mutation, undo, and a
    derivative read. Compare the SQLite schema and database binding with the
    pre-cutover record. If startup reports recovery required, stop and use the
    state backup with the repository's controlled recovery process.

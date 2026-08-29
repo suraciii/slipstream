@@ -115,7 +115,7 @@ or:
 
 It returns the opaque token, total count, initial position, and optionally one bounded first window. The exact JSON belongs to the protocol compatibility fixtures; database rows and absolute Original Locations do not cross this boundary.
 
-The existing unbounded complete-Photo response is not part of the target browser contract. Operator verification must use bounded traversal or an explicit offline state check rather than rely on a production route that materializes every Photo fact.
+The protocol has no route that materializes every Photo fact or every Photo Set member. The legacy unbounded complete-Photo list and complete-membership list are retired: requests to them receive `404 Not found`. Photo Set mutations return bounded Photo Set summaries in the same shape as the Library Overview's Photo Set list, never member lists. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
 
 ### Order Ownership
 

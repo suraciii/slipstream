@@ -39,7 +39,7 @@ connection.close()
 PY
 
 cat >"$work_dir/photos.json" <<'JSON'
-{"photos":[{"id":"one","available":true,"ambiguous":false,"originals":[{"kind":"raw","available":true}],"selectionState":"selected","rating":5,"preview":{"state":"ready","source":"embedded-raw-jpeg","width":2560,"height":1707}},{"id":"two","available":true,"ambiguous":false,"originals":[{"kind":"jpeg","available":true}],"selectionState":"rejected","rating":0,"preview":{"state":"unavailable"}}]}
+{"photos":[{"id":"one","available":true,"ambiguous":false,"originals":[{"kind":"raw","available":true}],"selectionState":"selected","rating":5,"preview":{"state":"ready","source":"embedded-raw-jpeg","width":2560,"height":1707,"limitedDetail":false}},{"id":"two","available":true,"ambiguous":false,"originals":[{"kind":"jpeg","available":true}],"selectionState":"rejected","rating":0,"preview":{"state":"unavailable"}}]}
 JSON
 cat >"$work_dir/sets.json" <<'JSON'
 {"photoSets":[{"id":"set","name":"Shoot","lastReviewedPhotoId":"two","members":[{"photoId":"one","position":0,"available":true,"selectionState":"selected","rating":5},{"photoId":"two","position":1,"available":true,"selectionState":"rejected","rating":0}]}]}
@@ -53,6 +53,46 @@ with open(sys.argv[2], encoding="utf-8") as source:
 with open(sys.argv[3], "w", encoding="utf-8") as output:
     json.dump({"photos": photos, "photoSets": sets}, output)
 PY
+
+# The offline projector is the only supported snapshot path, so prove it
+# reproduces this fixture's expected state exactly and fails closed on a
+# SQLite sidecar, using the same normalization as production acceptance.
+python3 "$repo_root/scripts/project-state.py" "$work_dir/state/library.sqlite" \
+  >"$work_dir/projected-state.json"
+python3 - "$work_dir/projected-state.json" "$work_dir/expected-state.json" <<'PY'
+import json, sys
+
+
+def normalize(value):
+    return {
+        "id": value["id"],
+        "name": value["name"],
+        "lastReviewedPhotoId": value.get("lastReviewedPhotoId"),
+        "members": value["members"],
+    }
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    projected = json.load(source)
+with open(sys.argv[2], encoding="utf-8") as source:
+    expected = json.load(source)
+if projected["photos"] != expected["photos"]:
+    raise SystemExit("projector photos do not match the expected state")
+if [normalize(value) for value in projected["photoSets"]] != [
+    normalize(value) for value in expected["photoSets"]
+]:
+    raise SystemExit("projector Photo Sets do not match the expected state")
+PY
+sidecar_dir=$(mktemp -d)
+cp "$work_dir/state/library.sqlite" "$sidecar_dir/library.sqlite"
+touch "$sidecar_dir/library.sqlite-wal"
+if python3 "$repo_root/scripts/project-state.py" "$sidecar_dir/library.sqlite" \
+  >"$sidecar_dir/out.json" 2>"$sidecar_dir/err.txt"; then
+  echo 'projector accepted a database with a WAL sidecar' >&2
+  exit 1
+fi
+grep -q 'sidecar' "$sidecar_dir/err.txt"
+rm -rf -- "$sidecar_dir"
 cat >"$work_dir/container.json" <<JSON
 [{"Image":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","Config":{"Image":"slipstream:test","User":"1000:1000","Labels":{"org.opencontainers.image.revision":"625e5b4"},"Env":["SLIPSTREAM_LIBRARY_ROOT=$work_dir/library","SLIPSTREAM_STATE_DIRECTORY=/state","SLIPSTREAM_CACHE_DIRECTORY=/cache","SLIPSTREAM_DATABASE_BASENAME=library.sqlite"]},"HostConfig":{"ReadonlyRootfs":true},"State":{"Health":{"Status":"healthy"}},"Mounts":[{"Type":"bind","Source":"$work_dir/library","Destination":"$work_dir/library","RW":false,"Propagation":"rprivate"},{"Type":"bind","Source":"$work_dir/state","Destination":"/state","RW":true,"Propagation":"rprivate"},{"Type":"bind","Source":"$work_dir/cache","Destination":"/cache","RW":true,"Propagation":"rprivate"}],"NetworkSettings":{"Ports":{"3000/tcp":[{"HostIp":"127.0.0.1","HostPort":"7330"}]}}}]
 JSON

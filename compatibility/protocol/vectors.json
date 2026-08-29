@@ -1,8 +1,51 @@
 [
   {
-    "name": "list-photos",
+    "name": "retired-photo-list",
     "request": { "method": "GET", "path": "/api/photos" },
-    "expected": { "status": 200, "body": { "photos": [] } }
+    "expected": { "status": 404, "body": { "error": "Not found" } }
+  },
+  {
+    "name": "retired-photo-set-membership-list",
+    "request": { "method": "GET", "path": "/api/photo-sets" },
+    "expected": { "status": 404, "body": { "error": "Not found" } }
+  },
+  {
+    "name": "unsupported-method-on-retired-photo-list",
+    "request": { "method": "DELETE", "path": "/api/photos" },
+    "expected": {
+      "status": 405,
+      "body": { "error": "Method not allowed" }
+    }
+  },
+  {
+    "name": "scan-reports-status-without-photo-facts",
+    "request": { "method": "POST", "path": "/api/scan" },
+    "expected": {
+      "status": 200,
+      "body": { "state": "idle", "completed": 0, "total": 0 }
+    }
+  },
+  {
+    "name": "photo-set-create-returns-bounded-summaries",
+    "request": {
+      "method": "POST",
+      "path": "/api/photo-sets",
+      "headers": { "content-type": "application/json" },
+      "body": { "name": "Compat Set" }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "photoSets": [
+          {
+            "id": "$setId",
+            "name": "Compat Set",
+            "photoCount": 0,
+            "hasSavedPosition": false
+          }
+        ]
+      }
+    }
   },
   {
     "name": "invalid-photo-set",
@@ -25,11 +68,6 @@
       "status": 403,
       "body": { "error": "Cross-origin mutation rejected" }
     }
-  },
-  {
-    "name": "unsupported-method",
-    "request": { "method": "DELETE", "path": "/api/photos" },
-    "expected": { "status": 405, "body": { "error": "Method not allowed" } }
   },
   {
     "name": "api-no-spa-fallback",

@@ -56,23 +56,6 @@ export type BrowseWindowResponse = Readonly<{
   photos: ReadonlyArray<PhotoSummary>;
 }>;
 
-export type PhotoListResponse = Readonly<{
-  photos: ReadonlyArray<PhotoSummary>;
-}>;
-
-export type PhotoSetResponse = Readonly<{
-  id: string;
-  name: string;
-  lastReviewedPhotoId?: string;
-  members: ReadonlyArray<{
-    photoId: string;
-    position: number;
-    available: boolean;
-    selectionState: SelectionState;
-    rating: number;
-  }>;
-}>;
-
 export type PreviewResponse = Readonly<{
   state: "ready" | "unavailable" | "failed";
   source?: PreviewSource;

@@ -15,7 +15,6 @@ import { extname, join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
-import type { PhotoListResponse, PhotoSetResponse } from "./protocol.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 const temporary: string[] = [];
@@ -84,23 +83,59 @@ async function post(url: string, path: string, body: unknown) {
     body: JSON.stringify(body),
   });
 }
+type BrowsePhoto = {
+  id: string;
+  available: boolean;
+  selectionState: string;
+  rating: number;
+};
+type SetMember = BrowsePhoto & { photoId: string; position: number };
+type SetState = { id: string; position: number; members: SetMember[] };
+
+async function browseWindow(
+  url: string,
+  token: string,
+  start: number,
+): Promise<{ start: number; total: number; photos: BrowsePhoto[] }> {
+  const window = (await (
+    await fetch(`${url}/api/browse/${token}?start=${start}&limit=60`)
+  ).json()) as { start: number; total: number; photos: BrowsePhoto[] };
+  if (window.start !== start)
+    throw new Error("browse window start is inconsistent");
+  return window;
+}
+
+async function browseIds(url: string): Promise<string[]> {
+  const opened = (await (
+    await post(url, "/api/browse", { source: "library" })
+  ).json()) as { token: string; total: number };
+  const ids: string[] = [];
+  let start = 0;
+  for (;;) {
+    const window = await browseWindow(url, opened.token, start);
+    if (window.total !== opened.total)
+      throw new Error("browse window total is inconsistent");
+    ids.push(...window.photos.map((photo) => photo.id));
+    start += window.photos.length;
+    if (window.photos.length === 0 || start >= opened.total) break;
+  }
+  await fetch(`${url}/api/browse/${opened.token}`, { method: "DELETE" });
+  return ids;
+}
+
 async function createSet(url: string, name = "Review") {
-  const photos = (await (
-    await fetch(`${url}/api/photos`)
-  ).json()) as PhotoListResponse;
+  const photos = await browseIds(url);
   const created = (await (
     await post(url, "/api/photo-sets", { name })
   ).json()) as {
-    photoSets: PhotoSetResponse[];
+    photoSets: Array<{ id: string; name: string }>;
   };
   const set = created.photoSets.find((item) => item.name === name)!;
-  for (let offset = 0; offset < photos.photos.length; offset += 100)
+  for (let offset = 0; offset < photos.length; offset += 100)
     await post(url, `/api/photo-sets/${set.id}/members`, {
-      photoIds: photos.photos
-        .slice(offset, offset + 100)
-        .map((photo) => photo.id),
+      photoIds: photos.slice(offset, offset + 100),
     });
-  return { setId: set.id, photos: photos.photos };
+  return { setId: set.id };
 }
 async function startReview(page: Page, url: string, name = "Review") {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -117,11 +152,27 @@ async function startReview(page: Page, url: string, name = "Review") {
       document.body.innerText.includes("Preview unavailable"),
   );
 }
-async function state(url: string, setId: string) {
-  const sets = (await (await fetch(`${url}/api/photo-sets`)).json()) as {
-    photoSets: PhotoSetResponse[];
-  };
-  return sets.photoSets.find((item) => item.id === setId)!;
+// Membership order and per-member facts are observable only through a
+// fresh Photo Set Browse Snapshot. The resolved open position exposes the
+// saved Photo Set position under the unavailable-member fallback rules.
+async function state(url: string, setId: string): Promise<SetState> {
+  const opened = (await (
+    await post(url, "/api/browse", { source: "photo-set", photoSetId: setId })
+  ).json()) as { token: string; total: number; position: number };
+  const members: SetMember[] = [];
+  let start = 0;
+  for (;;) {
+    const window = await browseWindow(url, opened.token, start);
+    if (window.total !== opened.total)
+      throw new Error("browse window total is inconsistent");
+    window.photos.forEach((photo, index) =>
+      members.push({ ...photo, photoId: photo.id, position: start + index }),
+    );
+    start += window.photos.length;
+    if (window.photos.length === 0 || start >= opened.total) break;
+  }
+  await fetch(`${url}/api/browse/${opened.token}`, { method: "DELETE" });
+  return { id: setId, position: opened.position, members };
 }
 async function openGrid(page: Page, url: string, name: string) {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -186,7 +237,10 @@ test("starts from a Photo Set, shows facts, accessible controls, and resumes per
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Select" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
-  expect((await state(running.url, setId)).lastReviewedPhotoId).toBeDefined();
+  // The advanced Photo is the saved Photo Set position.
+  await expect
+    .poll(async () => (await state(running.url, setId)).position)
+    .toBe(1);
 
   await page.goto("about:blank");
   await running.close();
@@ -398,8 +452,9 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await writeFile(join(root, "b.jpg"), await jpeg());
   const running = await server(base, root);
   const { setId } = await createSet(running.url);
+  const initial = await state(running.url, setId);
   await post(running.url, `/api/photo-sets/${setId}/progress`, {
-    photoId: (await state(running.url, setId)).members[0]!.photoId,
+    photoId: initial.members[0]!.photoId,
   });
   await rm(missing);
   await post(running.url, "/api/scan", {});
@@ -452,8 +507,8 @@ test("persists manual navigation and advanced current Photo across leave, reload
   await startReview(page, running.url, "Progress");
   await page.getByRole("button", { name: "Next" }).click();
   await expect
-    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
-    .toBe((await state(running.url, setId)).members[1]!.photoId);
+    .poll(async () => (await state(running.url, setId)).position)
+    .toBe(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: /Progress/ }).click();
   await page.getByRole("button", { name: /Photo 2 of 3/ }).click();
@@ -465,8 +520,8 @@ test("persists manual navigation and advanced current Photo across leave, reload
   await page.getByRole("button", { name: "Select" }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect
-    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
-    .toBe((await state(running.url, setId)).members[2]!.photoId);
+    .poll(async () => (await state(running.url, setId)).position)
+    .toBe(2);
   await page.goto("about:blank");
   await running.close();
   servers.splice(servers.indexOf(running), 1);
@@ -675,13 +730,10 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
     withCaptureTime(source, "2026:01:01 09:00:00"),
   );
   const running = await server(base, root);
-  const photos = (await (
-    await fetch(`${running.url}/api/photos`)
-  ).json()) as PhotoListResponse;
-  const [zPhoto, aPhoto] = photos.photos;
-  const zId = zPhoto!.id;
-  const aId = aPhoto!.id;
-  expect(photos.photos.map((photo) => photo.id)).toEqual([zId, aId]);
+  const ordered = await browseIds(running.url);
+  expect(ordered).toHaveLength(2);
+  const zId = ordered[0]!;
+  const aId = ordered[1]!;
   const previewRequests: string[] = [];
   const stateBodies: unknown[] = [];
   page.on("request", (request) => {
@@ -702,9 +754,12 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
     value: "selected",
   });
   expect(stateBodies[0]).not.toHaveProperty("photoSetId");
-  expect(await (await fetch(`${running.url}/api/photo-sets`)).json()).toEqual({
-    photoSets: [],
-  });
+  const overview = (await (
+    await fetch(`${running.url}/api/overview`)
+  ).json()) as {
+    photoSets: unknown[];
+  };
+  expect(overview.photoSets).toEqual([]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
@@ -737,10 +792,8 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
     withCaptureTime(source, "2026:01:01 09:00:00"),
   );
   const running = await server(base, root);
-  const photos = (await (
-    await fetch(`${running.url}/api/photos`)
-  ).json()) as PhotoListResponse;
-  const zId = photos.photos[0]!.id;
+  const initialIds = await browseIds(running.url);
+  const zId = initialIds[0]!;
   const previews: string[] = [];
   page.on("request", (request) => {
     if (request.url().includes("/preview")) previews.push(request.url());
@@ -764,15 +817,11 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await page.getByRole("button", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
-  const expandedPhotos = (await (
-    await fetch(`${running.url}/api/photos`)
-  ).json()) as PhotoListResponse;
-  const bPhoto = expandedPhotos.photos.find(
-    (photo) => !photos.photos.some((prior) => prior.id === photo.id),
-  );
-  expect(bPhoto).toBeDefined();
+  const expandedIds = await browseIds(running.url);
+  const bId = expandedIds.find((id) => !initialIds.includes(id));
+  expect(bId).toBeDefined();
   await expect
-    .poll(() => previews.some((url) => url.includes(bPhoto!.id)))
+    .poll(() => previews.some((url) => url.includes(bId!)))
     .toBe(true);
 });
 
@@ -790,11 +839,9 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
     withCaptureTime(source, "2026:01:01 09:00:00"),
   );
   const running = await server(base, root);
-  const initialPhotos = (await (
-    await fetch(`${running.url}/api/photos`)
-  ).json()) as PhotoListResponse;
-  const aId = initialPhotos.photos[1]!.id;
-  const zId = initialPhotos.photos[0]!.id;
+  const initialIds = await browseIds(running.url);
+  const aId = initialIds[1]!;
+  const zId = initialIds[0]!;
   const { setId } = await createSet(running.url, "Snapshot");
   await post(running.url, `/api/photo-sets/${setId}/order`, {
     photoIds: [aId, zId],
@@ -807,15 +854,11 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
     withCaptureTime(source, "2026:01:01 08:00:00"),
   );
   await post(running.url, "/api/scan", {});
-  const rescannedPhotos = (await (
-    await fetch(`${running.url}/api/photos`)
-  ).json()) as PhotoListResponse;
-  const bPhoto = rescannedPhotos.photos.find(
-    (photo) => !initialPhotos.photos.some((prior) => prior.id === photo.id),
-  );
-  expect(bPhoto).toBeDefined();
+  const rescannedIds = await browseIds(running.url);
+  const bId = rescannedIds.find((id) => !initialIds.includes(id));
+  expect(bId).toBeDefined();
   await post(running.url, `/api/photo-sets/${setId}/members`, {
-    photoIds: [bPhoto!.id],
+    photoIds: [bId!],
   });
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.getByRole("button", { name: "Next" }).click();
@@ -886,8 +929,8 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/photo-sets/*/progress");
   await expect
-    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
-    .toBe((await state(running.url, setId)).members[2]!.photoId);
+    .poll(async () => (await state(running.url, setId)).position)
+    .toBe(2);
 });
 
 test("Photo Set resume wraps past an unavailable saved member and retains it when all are unavailable", async ({
@@ -917,33 +960,20 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   await rm(join(root, "a.jpg"));
   await rm(join(root, "b.jpg"));
   await post(running.url, "/api/scan", {});
-  await page.route("**/api/photo-sets", async (route) => {
-    await route.fulfill({
-      json: {
-        photoSets: [
-          {
-            ...initial,
-            lastReviewedPhotoId: savedId,
-            members: initial.members.map((member) => ({
-              ...member,
-              available: false,
-            })),
-          },
-        ],
-      },
-    });
-  });
+  // Every member is unavailable now, yet membership is retained; a fresh
+  // snapshot resolves the saved position to its member index under the
+  // fallback rules (the page moved the saved position to member 0 when it
+  // opened Photo 1 earlier).
   await page.reload();
   await expect
-    .poll(async () =>
-      page.evaluate(async () => {
-        const body = (await (await fetch("/api/photo-sets")).json()) as {
-          photoSets: PhotoSetResponse[];
-        };
-        return body.photoSets[0]?.lastReviewedPhotoId;
-      }),
-    )
-    .toBe(savedId);
+    .poll(async () => {
+      const retained = await state(running.url, setId);
+      return {
+        available: retained.members.map((member) => member.available),
+        position: retained.position,
+      };
+    })
+    .toEqual({ available: [false, false, false], position: 0 });
   await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
   await page.getByRole("button", { name: /Photo 3 of 3/ }).click();
   await expect(page.getByText("3 / 3")).toBeVisible();
@@ -999,8 +1029,8 @@ test("opening a Photo from the Grid persists the Photo Set position", async ({
   await page.getByRole("button", { name: /^Photo 3 of 4/ }).click();
   await expect(page.getByText("3 / 4")).toBeVisible();
   await expect
-    .poll(async () => (await state(running.url, setId)).lastReviewedPhotoId)
-    .toBe((await state(running.url, setId)).members[2]!.photoId);
+    .poll(async () => (await state(running.url, setId)).position)
+    .toBe(2);
 
   await page.reload();
   let browsePosition: number | undefined;
