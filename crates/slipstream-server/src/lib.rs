@@ -588,31 +588,6 @@ impl Application {
             .map_or(0, |published| published.snapshot.photos.len())
     }
 
-    pub fn photos(&self) -> PhotoListResponse {
-        let guard = self
-            .shared
-            .snapshot
-            .read()
-            .expect("published Library poisoned");
-        let Some(published) = guard.as_ref() else {
-            return PhotoListResponse { photos: Vec::new() };
-        };
-        PhotoListResponse {
-            photos: published
-                .snapshot
-                .photos
-                .iter()
-                .map(|photo| {
-                    photo_summary_indexed(
-                        photo,
-                        &published.snapshot.originals,
-                        &published.originals_by_id,
-                    )
-                })
-                .collect(),
-        }
-    }
-
     pub async fn overview(&self) -> Result<LibraryOverviewResponse, ServerError> {
         let photo_sets = self
             .library
@@ -798,27 +773,27 @@ impl Application {
             .remove(token);
     }
 
-    pub async fn photo_sets(&self) -> Result<PhotoSetResponse, ServerError> {
-        Ok(PhotoSetResponse {
+    pub async fn photo_sets(&self) -> Result<PhotoSetSummaryListResponse, ServerError> {
+        Ok(PhotoSetSummaryListResponse {
             photo_sets: self
                 .library
                 .list_photo_sets()
                 .await?
                 .into_iter()
-                .map(photo_set_wire)
+                .map(photo_set_summary)
                 .collect(),
         })
     }
 
-    pub async fn rescan(&self) -> Result<PhotoListResponse, ServerError> {
+    pub async fn rescan(&self) -> Result<ScanStatusWire, ServerError> {
         self.shared.run_scan(&self.library, None).await?;
-        Ok(self.photos())
+        Ok(self.scan_status())
     }
 
     pub async fn mutate_photo_set(
         &self,
         mutation: slipstream_core::PhotoSetMutation,
-    ) -> Result<PhotoSetResponse, ServerError> {
+    ) -> Result<PhotoSetSummaryListResponse, ServerError> {
         self.library.mutate_photo_set(mutation).await?;
         self.photo_sets().await
     }
@@ -1025,12 +1000,6 @@ impl Application {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PhotoListResponse {
-    pub photos: Vec<PhotoSummary>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LibraryOverviewResponse {
     pub published: bool,
     pub photo_count: usize,
@@ -1079,30 +1048,12 @@ pub enum BrowseSourceRequest {
     PhotoSet(String),
 }
 
+/// Bounded Photo Set mutation response: the same summaries the Library
+/// Overview exposes, never member lists.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PhotoSetResponse {
-    pub photo_sets: Vec<PhotoSetWire>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhotoSetWire {
-    pub id: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_reviewed_photo_id: Option<String>,
-    pub members: Vec<PhotoSetMemberWire>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PhotoSetMemberWire {
-    pub photo_id: String,
-    pub position: u32,
-    pub available: bool,
-    pub selection_state: &'static str,
-    pub rating: u8,
+pub struct PhotoSetSummaryListResponse {
+    pub photo_sets: Vec<PhotoSetSummaryWire>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1192,25 +1143,6 @@ fn photo_set_summary(record: PhotoSetRecord) -> PhotoSetSummaryWire {
         name: record.name,
         photo_count: record.members.len(),
         has_saved_position: record.last_reviewed_photo_id.is_some(),
-    }
-}
-
-fn photo_set_wire(record: PhotoSetRecord) -> PhotoSetWire {
-    PhotoSetWire {
-        id: record.id,
-        name: record.name,
-        last_reviewed_photo_id: record.last_reviewed_photo_id,
-        members: record
-            .members
-            .into_iter()
-            .map(|member| PhotoSetMemberWire {
-                photo_id: member.photo_id,
-                position: member.position,
-                available: member.available,
-                selection_state: selection_state(member.selection_state),
-                rating: member.rating,
-            })
-            .collect(),
     }
 }
 
@@ -1451,12 +1383,12 @@ fn create_router_with_web_root(application: Arc<Application>, web_root: WebRoot)
             "/api/browse/{token}",
             get(get_browse_window).delete(close_browse),
         )
-        .route("/api/photos", get(list_photos))
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
+        // The complete-membership list is retired; the path only creates sets.
         .route(
             "/api/photo-sets",
-            get(list_photo_sets).post(create_photo_set),
+            get(retired_photo_set_list).post(create_photo_set),
         )
         .route(
             "/api/photo-sets/{id}/rename",
@@ -1543,10 +1475,6 @@ async fn overview(
 
 async fn status(State(state): State<HttpState>) -> Json<ScanStatusWire> {
     Json(state.application.scan_status())
-}
-
-async fn list_photos(State(state): State<HttpState>) -> Json<PhotoListResponse> {
-    Json(state.application.photos())
 }
 
 #[derive(Deserialize)]
@@ -1636,11 +1564,8 @@ fn browse_query(query: Option<&str>) -> Option<(usize, usize)> {
     Some((start?, limit?))
 }
 
-async fn list_photo_sets(
-    State(state): State<HttpState>,
-) -> Result<Json<PhotoSetResponse>, ApiError> {
-    let response = state.application.photo_sets().await?;
-    Ok(Json(response))
+async fn retired_photo_set_list() -> Response<Body> {
+    api_error(StatusCode::NOT_FOUND, "Not found")
 }
 
 async fn method_not_allowed() -> Response<Body> {
@@ -2407,12 +2332,6 @@ fn plain_error(status: StatusCode, message: &'static str) -> Response<Body> {
         .expect("valid plain response")
 }
 
-impl From<PhotoSetRecord> for PhotoSetWire {
-    fn from(record: PhotoSetRecord) -> Self {
-        photo_set_wire(record)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2469,6 +2388,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("Library scan did not settle before the test deadline");
+    }
+
+    /// Bounded traversal of one Browse source. Tests must observe Library
+    /// state through the bounded protocol, never a complete-Photo route.
+    async fn browse_summaries(
+        application: &Application,
+        source: BrowseSourceRequest,
+    ) -> Vec<PhotoSummary> {
+        let opened = application
+            .browse_open(source, None)
+            .await
+            .expect("browse open succeeds");
+        let mut photos = Vec::new();
+        let mut start = 0;
+        loop {
+            let window = application
+                .browse_window(&opened.token, start, 60)
+                .await
+                .expect("browse window succeeds");
+            let total = window.total;
+            let count = window.photos.len();
+            photos.extend(window.photos);
+            start += count;
+            if count == 0 || start >= total {
+                break;
+            }
+        }
+        assert_eq!(photos.len(), opened.total, "browse traversal incomplete");
+        application.browse_close(&opened.token);
+        photos
+    }
+
+    async fn browse_photo_ids(
+        application: &Application,
+        source: BrowseSourceRequest,
+    ) -> Vec<String> {
+        browse_summaries(application, source)
+            .await
+            .into_iter()
+            .map(|photo| photo.id)
+            .collect()
+    }
+
+    async fn published_photo_summary(application: &Application, photo_id: &str) -> PhotoSummary {
+        browse_summaries(application, BrowseSourceRequest::Library)
+            .await
+            .into_iter()
+            .find(|photo| photo.id == photo_id)
+            .unwrap_or_else(|| panic!("photo {photo_id} is missing from the published Library"))
     }
 
     fn prepare_fixture() -> (PathBuf, Config) {
@@ -2739,6 +2707,27 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
+    fn substitute_captured_set_id(value: &serde_json::Value, set_id: &str) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                serde_json::Value::String(text.replace("$setId", set_id))
+            }
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|item| substitute_captured_set_id(item, set_id))
+                    .collect(),
+            ),
+            serde_json::Value::Object(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(name, item)| (name.clone(), substitute_captured_set_id(item, set_id)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     #[tokio::test]
     async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         let (base, config) = prepare_fixture();
@@ -2753,6 +2742,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let mut captured_set_id = String::new();
         for vector in vectors {
             let request_definition = &vector["request"];
             let method = request_definition["method"].as_str().unwrap();
@@ -2795,7 +2785,23 @@ mod tests {
                 .unwrap();
             if let Some(expected) = vector["expected"]["body"].as_object() {
                 let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(actual.as_object().unwrap(), expected, "{}", vector["name"]);
+                if captured_set_id.is_empty()
+                    && let Some(id) = actual["photoSets"][0]["id"].as_str()
+                {
+                    captured_set_id = id.to_owned();
+                }
+                let expected = serde_json::to_value(expected).unwrap();
+                let expected = if captured_set_id.is_empty() {
+                    expected
+                } else {
+                    substitute_captured_set_id(&expected, &captured_set_id)
+                };
+                assert_eq!(
+                    actual.as_object().unwrap(),
+                    expected.as_object().unwrap(),
+                    "{}",
+                    vector["name"]
+                );
             }
             if let Some(expected) = vector["expected"]["bodyText"].as_str() {
                 assert_eq!(
@@ -2915,7 +2921,16 @@ mod tests {
         capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 10:00:00");
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
-        let photos = serde_json::to_value(application.photos()).unwrap();
+        let opened = application
+            .browse_open(BrowseSourceRequest::Library, None)
+            .await
+            .unwrap();
+        let window = application
+            .browse_window(&opened.token, 0, 60)
+            .await
+            .unwrap();
+        application.browse_close(&opened.token);
+        let photos = serde_json::to_value(window).unwrap();
         let list = photos["photos"].as_array().unwrap();
         assert_eq!(list.len(), 2);
         let snapshot = application.library.snapshot().await.unwrap();
@@ -3006,7 +3021,7 @@ mod tests {
             router,
             Request::builder()
                 .method("HEAD")
-                .uri("/api/photos")
+                .uri("/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3034,7 +3049,7 @@ mod tests {
         let response = tower::ServiceExt::oneshot(
             router.clone(),
             Request::builder()
-                .uri("/api/photos")
+                .uri("/api/overview")
                 .header("x-test", exact)
                 .body(Body::empty())
                 .unwrap(),
@@ -3046,7 +3061,7 @@ mod tests {
         let response = tower::ServiceExt::oneshot(
             router,
             Request::builder()
-                .uri("/api/photos")
+                .uri("/api/overview")
                 .header("x-test", over)
                 .body(Body::empty())
                 .unwrap(),
@@ -3216,12 +3231,7 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         application.rescan().await.unwrap();
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
         application
             .mutate_photo_set(slipstream_core::PhotoSetMutation::Create {
                 name: "Picks".to_owned(),
@@ -3384,12 +3394,7 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         application.rescan().await.unwrap();
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
         let library = application
             .browse_open(BrowseSourceRequest::Library, Some(&ids[2]))
             .await
@@ -3456,12 +3461,7 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
         let opened = response_json(
             post_json(
                 &router,
@@ -3536,12 +3536,7 @@ mod tests {
         .await
         .unwrap();
         let router = create_router(Arc::clone(&application), config.web_root());
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
 
         // Commit a Selection State and a Review Preview seed while the
         // completed scan is parked before publication.
@@ -3593,12 +3588,7 @@ mod tests {
         }
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
         assert_eq!(application.preview(&ids[0]).await.unwrap().state, "ready");
         assert_eq!(
             application
@@ -3689,18 +3679,19 @@ mod tests {
         .await;
         assert_eq!(status["state"], "initializing");
 
-        let photos: serde_json::Value = response_json(
+        let overview: serde_json::Value = response_json(
             send(
                 &router,
                 Request::builder()
-                    .uri("http://camera.local/api/photos")
+                    .uri("http://camera.local/api/overview")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await,
         )
         .await;
-        assert_eq!(photos["photos"].as_array().unwrap().len(), 0);
+        assert_eq!(overview["published"], false);
+        assert_eq!(overview["photoCount"], 0);
 
         let rejected = post_json(
             &router,
@@ -3746,7 +3737,12 @@ mod tests {
         {
             let application = Application::open(&config).await.unwrap();
             wait_for_scan_settled(&application).await;
-            assert_eq!(application.photos().photos.len(), 2);
+            assert_eq!(
+                browse_photo_ids(&application, BrowseSourceRequest::Library)
+                    .await
+                    .len(),
+                2
+            );
             application.shutdown().await.unwrap();
         }
 
@@ -3840,7 +3836,12 @@ mod tests {
         assert_eq!(overview["published"], true);
         assert_eq!(overview["photoCount"], 1);
         assert_eq!(overview["scan"]["state"], "failed");
-        assert_eq!(application.photos().photos.len(), 1);
+        assert_eq!(
+            browse_photo_ids(&application, BrowseSourceRequest::Library)
+                .await
+                .len(),
+            1
+        );
 
         // An explicit rescan under the same failing limit reports the failure
         // and keeps the prior published Library browsable.
@@ -3855,7 +3856,12 @@ mod tests {
         .await;
         assert_eq!(rescanned.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(application.scan_status().state, "failed");
-        assert_eq!(application.photos().photos.len(), 1);
+        assert_eq!(
+            browse_photo_ids(&application, BrowseSourceRequest::Library)
+                .await
+                .len(),
+            1
+        );
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
@@ -4079,12 +4085,7 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
-        let ids = application
-            .photos()
-            .photos
-            .into_iter()
-            .map(|photo| photo.id)
-            .collect::<Vec<_>>();
+        let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
         assert_eq!(ids.len(), 3);
 
         let created = response_json(
@@ -4098,6 +4099,11 @@ mod tests {
         )
         .await;
         assert_eq!(created["photoSets"][0]["name"], "Picks");
+        // Mutation responses expose bounded summaries only, never members.
+        assert_eq!(created["photoSets"][0]["photoCount"], 0);
+        assert_eq!(created["photoSets"][0]["hasSavedPosition"], false);
+        assert!(created["photoSets"][0]["members"].is_null());
+        assert!(created["photoSets"][0]["lastReviewedPhotoId"].is_null());
         let set_a = created["photoSets"][0]["id"].as_str().unwrap().to_owned();
         assert_eq!(
             send(
@@ -4192,38 +4198,22 @@ mod tests {
             .status(),
             StatusCode::OK
         );
-        let sets = response_json(
-            send(
-                &router,
-                Request::builder()
-                    .uri("http://camera.local/api/photo-sets")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await,
-        )
-        .await;
-        let members = sets["photoSets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|set| set["id"] == set_a)
-            .unwrap()["members"]
-            .as_array()
-            .unwrap();
+        // Membership order is observable only through a fresh Photo Set
+        // Browse Snapshot; the mutation responses stay summary-only.
+        let ordered =
+            browse_photo_ids(&application, BrowseSourceRequest::PhotoSet(set_a.clone())).await;
         assert_eq!(
-            members
-                .iter()
-                .map(|member| member["photoId"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![ids[2].as_str(), ids[0].as_str(), ids[1].as_str()]
+            ordered,
+            vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
         );
-        assert!(sets["photoSets"].as_array().unwrap().iter().all(|set| {
-            set["members"].as_array().unwrap().iter().all(|member| {
-                member["photoId"] != ids[0]
-                    || (member["selectionState"] == "selected" && member["rating"] == 4)
-            })
-        }));
+        let set_b_photos =
+            browse_summaries(&application, BrowseSourceRequest::PhotoSet(set_b.clone())).await;
+        let shared = set_b_photos
+            .iter()
+            .find(|photo| photo.id == ids[0])
+            .unwrap();
+        assert_eq!(shared.selection_state, "selected");
+        assert_eq!(shared.rating, 4);
         assert_eq!(
             post_json(
                 &router,
@@ -4276,28 +4266,17 @@ mod tests {
             .status(),
             StatusCode::OK
         );
-        let sets = response_json(
-            send(
-                &router,
-                Request::builder()
-                    .uri("http://camera.local/api/photo-sets")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await,
-        )
-        .await;
-        assert!(
-            !sets["photoSets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|set| set["id"] == set_a)
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .contains_key("lastReviewedPhotoId")
-        );
+        // Removing the saved-position Photo clears the persisted progress;
+        // the summary-only mutation response proves the cleared flag.
+        let set_a_summary = application
+            .photo_sets()
+            .await
+            .unwrap()
+            .photo_sets
+            .into_iter()
+            .find(|set| set.id == set_a)
+            .unwrap();
+        assert!(!set_a_summary.has_saved_position);
         let before_original = fs::read(config.library_root.join("b.jpg")).unwrap();
         assert_eq!(
             post_json(
@@ -4318,13 +4297,13 @@ mod tests {
 
         let reopened = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&reopened).await;
-        let reopened_photos = reopened.photos();
-        assert_eq!(reopened_photos.photos.len(), 3);
-        let persisted = reopened_photos
-            .photos
-            .iter()
-            .find(|photo| photo.id == ids[0])
-            .unwrap();
+        assert_eq!(
+            browse_photo_ids(&reopened, BrowseSourceRequest::Library)
+                .await
+                .len(),
+            3
+        );
+        let persisted = published_photo_summary(&reopened, &ids[0]).await;
         assert_eq!(persisted.selection_state, "rejected");
         assert_eq!(persisted.rating, 4);
         assert!(
@@ -4337,6 +4316,46 @@ mod tests {
                 .all(|set| set.id != set_a)
         );
         reopened.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn unbounded_library_routes_are_retired() {
+        let (base, config) = prepare_fixture();
+        jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
+        let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
+        let router = create_router(Arc::clone(&application), config.web_root());
+        for uri in [
+            "http://camera.local/api/photos",
+            "http://camera.local/api/photo-sets",
+        ] {
+            let response = send(
+                &router,
+                Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                response_json(response).await,
+                serde_json::json!({"error": "Not found"}),
+                "{uri}"
+            );
+        }
+        let deleted = send(
+            &router,
+            Request::builder()
+                .method("DELETE")
+                .uri("http://camera.local/api/photos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        // The request policy admits DELETE only for /api/browse/{token}, so
+        // the retired list endpoint is rejected 405 before routing instead
+        // of reaching the API 404 fallback.
+        assert_eq!(deleted.status(), StatusCode::METHOD_NOT_ALLOWED);
+        application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
 
@@ -4451,23 +4470,22 @@ mod tests {
                 .status(),
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(
-            response_json(
-                send(
-                    &router,
-                    Request::builder()
-                        .method("POST")
-                        .uri("http://camera.local/api/scan")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await,
+        let scan = response_json(
+            send(
+                &router,
+                Request::builder()
+                    .method("POST")
+                    .uri("http://camera.local/api/scan")
+                    .body(Body::empty())
+                    .unwrap(),
             )
-            .await["photos"]
-                .as_array()
-                .unwrap()
-                .len(),
-            0
+            .await,
+        )
+        .await;
+        // The scan response is Loading Status and carries no Photo facts.
+        assert_eq!(
+            scan,
+            serde_json::json!({"state": "idle", "completed": 0, "total": 0})
         );
         assert_eq!(application.photo_sets().await.unwrap().photo_sets.len(), 0);
         application.shutdown().await.unwrap();
@@ -4482,7 +4500,11 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
-        let photo_id = application.photos().photos[0].id.clone();
+        let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+            .await
+            .into_iter()
+            .next()
+            .unwrap();
         let preview = response_json(
             send(
                 &router,
@@ -4682,7 +4704,11 @@ mod tests {
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
         let router = create_router(Arc::clone(&application), config.web_root());
-        let photo_id = application.photos().photos[0].id.clone();
+        let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+            .await
+            .into_iter()
+            .next()
+            .unwrap();
         let preview = response_json(
             send(
                 &router,
@@ -4702,21 +4728,19 @@ mod tests {
             .next()
             .unwrap()
             .trim_end_matches(".jpg");
-        let facts = |application: &Application, photo_id: &str| {
-            let photo = application
-                .photos()
-                .photos
-                .into_iter()
-                .find(|photo| photo.id == photo_id)
-                .unwrap();
+        async fn facts(
+            application: &Application,
+            photo_id: &str,
+        ) -> (&'static str, Option<&'static str>, Option<u32>, Option<u32>) {
+            let photo = published_photo_summary(application, photo_id).await;
             (
                 photo.preview.state,
                 photo.preview.source,
                 photo.preview.width,
                 photo.preview.height,
             )
-        };
-        let established = facts(&application, &photo_id);
+        }
+        let established = facts(&application, &photo_id).await;
         assert_eq!(
             established,
             ("ready", Some("matching-jpeg"), Some(90), Some(45))
@@ -4744,13 +4768,13 @@ mod tests {
             .unwrap()
             .trim_end_matches(".jpg");
         assert_ne!(thumbnail_key, review_key);
-        assert_eq!(facts(&application, &photo_id), established);
+        assert_eq!(facts(&application, &photo_id).await, established);
 
         // The persisted facts and both derivative identities survive reopen.
         application.shutdown().await.unwrap();
         let application = Application::open(&config).await.unwrap();
         wait_for_scan_settled(&application).await;
-        assert_eq!(facts(&application, &photo_id), established);
+        assert_eq!(facts(&application, &photo_id).await, established);
         let router = create_router(Arc::clone(&application), config.web_root());
         let reopened = response_json(
             send(
@@ -4778,7 +4802,7 @@ mod tests {
         )
         .await;
         assert_eq!(review["url"].as_str().unwrap(), review_url);
-        assert_eq!(facts(&application, &photo_id), established);
+        assert_eq!(facts(&application, &photo_id).await, established);
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }

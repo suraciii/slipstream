@@ -1,5 +1,7 @@
 [
   {
+    "start": 0,
+    "total": 1,
     "photos": [
       {
         "id": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
@@ -17,15 +19,8 @@
       {
         "id": "00000000-0000-4000-8000-000000000020",
         "name": "Review",
-        "members": [
-          {
-            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
-            "position": 0,
-            "available": true,
-            "selectionState": "selected",
-            "rating": 4
-          }
-        ]
+        "photoCount": 1,
+        "hasSavedPosition": false
       }
     ]
   },
