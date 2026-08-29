@@ -160,21 +160,15 @@ If preflight or the transaction fails, keep the prior Folder configuration; SQLi
    ```
 
    The expected state snapshot is an offline projection of the owned SQLite
-   state and is the only supported way to produce it. Stop the service (the
-   backup precondition above keeps the database quiescent), then run:
-
-   ```sh
-   python3 scripts/project-state.py /data/slipstream/state/library.sqlite \
-     > /path/to/pre-backup-state.json
-   ```
-
-   It opens the database read-only (`mode=ro&immutable=1`), fails closed on
-   journal/WAL/SHM sidecars, schema drift, or unreadable rows, and prints the
-   exact `photos` and `photoSets` arrays that the acceptance command compares
-   against live bounded traversal. The projection binds Photo identities and
-   Capture Time order, availability, ambiguity, Original kinds, Selection
-   State, Rating, persisted Preview facts, Photo Set membership/order, and the
-   saved Photo Set position. The command validates exact health, waits for
+   state produced with deployment-host tooling (for example
+   `/data/slipstream/bin/project-state.py`); no HTTP route materializes it.
+   Stop the service first (the backup precondition above keeps the database
+   quiescent), then project against the quiescent database. The snapshot
+   binds Photo identities and Capture Time order, availability, ambiguity,
+   Original kinds, Selection State, Rating, persisted Preview facts, Photo Set
+   membership/order, and the saved Photo Set position, in the exact `photos`
+   and `photoSets` arrays that the acceptance command compares against live
+   bounded traversal. The command validates exact health, waits for
    `GET /api/status` to report `idle` (configurable with
    `SLIPSTREAM_SCAN_WAIT_SECONDS`, default 3600, failing closed on `failed` or
    a timeout), that complete state snapshot, required persisted current
