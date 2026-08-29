@@ -953,8 +953,19 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   await post(running.url, "/api/scan", {});
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  // The saved position becomes durable only when the page's progress write
+  // is confirmed, and that write is asynchronous with Photo View. Waiting
+  // for the confirmed POST removes the race where a reload could discard a
+  // pending write and leave the saved member unchanged.
+  const progressConfirmed = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/api/photo-sets/${setId}/progress`) &&
+      response.request().method() === "POST" &&
+      response.status() === 200,
+  );
   await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
+  await progressConfirmed;
 
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await rm(join(root, "a.jpg"));
