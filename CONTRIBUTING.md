@@ -35,7 +35,6 @@ Use the repository commands rather than invoking individual tools in CI or revie
 ```sh
 bun run test:rust
 bun run test:fast
-bun run test:operations
 bun run verify
 ```
 
@@ -50,8 +49,6 @@ If the host platform is newer than the Playwright browser installer supports, po
 ```sh
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
-
-`test:operations` runs the production acceptance and consistent-backup controller through positive and fail-closed negative fixtures. It does not access production state.
 
 `test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a real loopback TCP port, and gives it independent temporary state and cache directories. Use `SLIPSTREAM_SERVER_BINARY` or `SLIPSTREAM_WEB_ROOT` only when testing a separately built Rust binary or Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 

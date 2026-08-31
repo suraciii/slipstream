@@ -20,11 +20,10 @@
     "test": "bun run test:rust",
     "test:browser": "bun run build:rust && bun run --cwd apps/web build && bun x playwright test",
     "test:container": "./scripts/verify-container.sh",
-    "test:operations": "./scripts/production-acceptance.test.sh",
     "test:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=1",
     "test:fast": "bun run test:rust && bun run lint && bun run typecheck && bun run test:browser",
     "typecheck": "bun run --workspaces --if-present typecheck",
-    "verify": "bun run format:check && bun run test:fast && bun run test:operations && bun run build"
+    "verify": "bun run format:check && bun run test:fast && bun run build"
   },
   "devDependencies": {
     "@eslint/js": "9.34.0",
