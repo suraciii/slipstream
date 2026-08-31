@@ -101,6 +101,7 @@ dl {
 }
 .grid-view {
   min-width: 0;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.75rem;
@@ -312,6 +313,17 @@ dt {
 }
 [hidden] {
   display: none !important;
+}
+@media (min-width: 761px) {
+  .app-shell {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100vh;
+    height: 100dvh;
+  }
+  .browser {
+    min-height: 0;
+  }
 }
 @media (max-width: 760px) {
   .browser {

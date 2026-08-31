@@ -1466,9 +1466,34 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   });
 
   const running = await server(base, root);
+  const gridMetrics = () =>
+    page.evaluate(() => {
+      const viewport = document.querySelector<HTMLElement>(
+        "[data-grid-viewport]",
+      );
+      if (!viewport) throw new Error("grid viewport is missing");
+      return {
+        viewportHeight: viewport.clientHeight,
+        scrollHeight: viewport.scrollHeight,
+        innerHeight: window.innerHeight,
+        cellCount: document.querySelectorAll(".photo-cell").length,
+        domCount: document.querySelectorAll("*").length,
+      };
+    });
+  const expectBoundedGrid = async () => {
+    const metrics = await gridMetrics();
+    expect(metrics.viewportHeight).toBeGreaterThan(0);
+    expect(metrics.viewportHeight).toBeLessThanOrEqual(metrics.innerHeight);
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.viewportHeight);
+    expect(metrics.cellCount).toBeGreaterThan(0);
+    expect(metrics.cellCount).toBeLessThan(200);
+    expect(metrics.domCount).toBeLessThan(2_000);
+    return metrics;
+  };
+
   // The published Library is served immediately from persisted state; the
   // overview stays bounded instead of transferring 40,000 Photo facts.
-  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(running.url);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
   await expect(
@@ -1478,14 +1503,59 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
     async () => (await (await fetch("/api/overview")).text()).length,
   );
   expect(overviewBytes).toBeLessThan(20_000);
+  const initialGrid = await expectBoundedGrid();
 
-  await page.getByRole("button", { name: /Photo 1 of 40000/ }).click();
+  await page.setViewportSize({ width: 1280, height: 1200 });
+  await expect
+    .poll(async () => (await gridMetrics()).cellCount)
+    .toBeGreaterThan(initialGrid.cellCount);
+  const tallGrid = await expectBoundedGrid();
+
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect
+    .poll(async () => (await gridMetrics()).cellCount)
+    .toBeLessThan(tallGrid.cellCount);
+  await expectBoundedGrid();
+
+  const firstCell = page.locator('[data-photo-index="0"]');
+  await expect(firstCell).toBeVisible();
+  await expect(firstCell).toBeEnabled();
+  await firstCell.click();
   await expect(page.getByText("1 / 40000")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
+  await waitForGridFrame(page);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
 
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const lastCell = page.locator('[data-photo-index="39999"]');
+  await expect(lastCell).toBeVisible({ timeout: 30_000 });
+  await expect(lastCell).toBeEnabled();
+  await expectBoundedGrid();
+  await lastCell.click();
+  await expect(page.getByText("40000 / 40000")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await waitForGridFrame(page);
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+
+  // Reducing the column count must restore the current late Photo after the
+  // virtual canvas grows for the narrower layout.
+  await page.setViewportSize({ width: 1100, height: 720 });
+  await expect(lastCell).toBeVisible();
+  await expectBoundedGrid();
+
+  // Re-check the original mobile viewport contract after exercising the
+  // desktop late-window path.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+  await expectBoundedGrid();
+
   // The owned startup rescan settles without emptying or reordering the
-  // source; late-window browsing stays bounded afterward.
+  // source; late-window protocol browsing stays bounded afterward.
   await expect
     .poll(
       async () => {
