@@ -81,9 +81,9 @@ SLIPSTREAM_PORT=3000 \
 cargo run --locked -p slipstream-server
 ```
 
-`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST=0.0.0.0` only for an explicitly trusted LAN deployment. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
+`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST` to whatever address you deploy on. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
 
-To expand a stopped schema-v4 Library to an ancestor Folder, first create and record a verified backup with the deployment-host backup tool (`/data/slipstream/bin/backup-state.sh`). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
+To expand a stopped schema-v4 Library to an ancestor Folder, first create and record a verified consistent backup with the service stopped (see [`docs/deployment.md`](docs/deployment.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
 
 ```sh
 cargo run --locked -p slipstream-server -- expand-library
@@ -93,21 +93,14 @@ The offline command rejects a running database, sidecars, non-v4 state, an unrel
 
 ## Container verification
 
-The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and a Debian runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Run the focused static and Compose checks with:
-
-```sh
-/data/slipstream/bin/verify-container.sh
-```
-
-Build and inspect an image before an operator-controlled deployment:
+The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and a Debian runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Build an image before an operator-controlled deployment:
 
 ```sh
 commit=$(git rev-parse HEAD)
 docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
-VERIFY_IMAGE=1 \
-SLIPSTREAM_IMAGE=slipstream:local \
-SLIPSTREAM_EXPECTED_COMMIT="$commit" \
-/data/slipstream/bin/verify-container.sh
 ```
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The repository-owned deployment and rollback procedure is [`deploy/README.md`](deploy/README.md).
+Inspect the digest, image user, and runtime contents; the deployment contract
+is in [`docs/deployment.md`](docs/deployment.md).
+
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The host-agnostic deployment contract is [`docs/deployment.md`](docs/deployment.md).
