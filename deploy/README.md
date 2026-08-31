@@ -47,8 +47,8 @@ Do not place state or cache inside the Library Folder. SQLite stores the admitte
 Run these checks from the repository checkout used to render Compose:
 
 ```sh
-./scripts/verify-container.sh
-SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" ./scripts/verify-container.sh
+/data/slipstream/bin/verify-container.sh
+SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" /data/slipstream/bin/verify-container.sh
 ```
 
 Build or pull the exact image tag, then inspect it before starting the service:
@@ -60,7 +60,7 @@ docker build \
 VERIFY_IMAGE=1 \
 SLIPSTREAM_IMAGE="$SLIPSTREAM_IMAGE" \
 SLIPSTREAM_EXPECTED_COMMIT="$SLIPSTREAM_VCS_REF" \
-./scripts/verify-container.sh
+/data/slipstream/bin/verify-container.sh
 ```
 
 Record the image digest, verify that the image user is `1000:1000`, and verify
@@ -73,11 +73,11 @@ Before deployment, stop every Slipstream process that uses the target state data
 
 ```sh
 export SLIPSTREAM_BACKUP_OUTPUT="/data/slipstream/backups/state-before-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-./scripts/backup-state.sh
+/data/slipstream/bin/backup-state.sh
 docker compose --env-file /path/to/slipstream.env -f compose.yaml config >/dev/null
 ```
 
-`backup-state.sh` uses SQLite's backup API to create a transactionally consistent snapshot instead of sequentially copying database bytes. It fails when a journal/WAL/SHM sidecar or any unexpected state entry exists, SQLite integrity or foreign-key checks fail, or the extracted archive differs from the verified snapshot. It never checkpoints, repairs, or rewrites the source database. Stopping the service remains the deployment precondition so the backup and image cutover share one quiescent boundary; the backup API also prevents a torn copy if that operational step is accidentally violated. A filesystem snapshot is acceptable only when it provides equivalently proven consistency and is verified before use.
+The deployment-host `backup-state.sh` uses SQLite's backup API to create a transactionally consistent snapshot instead of sequentially copying database bytes. It fails when a journal/WAL/SHM sidecar or any unexpected state entry exists, SQLite integrity or foreign-key checks fail, or the extracted archive differs from the verified snapshot. It never checkpoints, repairs, or rewrites the source database. Stopping the service remains the deployment precondition so the backup and image cutover share one quiescent boundary; the backup API also prevents a torn copy if that operational step is accidentally violated. A filesystem snapshot is acceptable only when it provides equivalently proven consistency and is verified before use.
 
 The backup is an operator recovery copy. Do not remove SQLite journal, WAL, or shared-memory sidecars by hand; Slipstream's startup admission must classify those files and require operator recovery when appropriate.
 
@@ -91,7 +91,7 @@ Use this operation only to replace the current Library Folder with a canonical a
    ```sh
    export SLIPSTREAM_EXPECTED_SCHEMA_VERSION=4
    export SLIPSTREAM_BACKUP_OUTPUT="/data/slipstream/backups/state-before-expansion-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
-   ./scripts/backup-state.sh
+   /data/slipstream/bin/backup-state.sh
    ```
 
 3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep the state directory and database basename unchanged. Ensure the proposed Folder is mounted read-only at the same absolute path inside the container.
