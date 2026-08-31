@@ -118,6 +118,7 @@ export function renderApp(
   let thumbnailFailures = new Set<string>();
   let lastCurrentPhotoId: string | undefined;
   let renderedColumns = 0;
+  let renderedViewportHeight = 0;
   let connected = false;
   let busy = false;
   let openingPhoto = false;
@@ -360,6 +361,8 @@ export function renderApp(
       1,
       Math.floor(Math.max(320, gridViewport.clientWidth) / GRID_CELL_WIDTH),
     );
+  const effectiveViewportHeight = () =>
+    Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
   const alignedStart = (index: number) =>
     Math.max(
       0,
@@ -486,22 +489,25 @@ export function renderApp(
       )
         loaded.delete(index);
   };
+  const syncGridHeight = (count: number) => {
+    const height = `${Math.ceil(total / count) * GRID_CELL_HEIGHT}px`;
+    gridCanvas.style.height = height;
+    gridLayer.style.height = height;
+  };
   const renderGrid = () => {
     const count = columns();
     renderedColumns = count;
-    const rows = Math.ceil(total / count);
-    gridCanvas.style.height = `${rows * GRID_CELL_HEIGHT}px`;
+    renderedViewportHeight = effectiveViewportHeight();
+    syncGridHeight(count);
     const firstRow = Math.max(
       0,
       Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
     );
     const visibleRows =
-      Math.ceil(Math.max(360, gridViewport.clientHeight) / GRID_CELL_HEIGHT) +
-      4;
+      Math.ceil(renderedViewportHeight / GRID_CELL_HEIGHT) + 4;
     const start = firstRow * count;
     const end = Math.min(total, start + visibleRows * count);
     gridLayer.replaceChildren();
-    gridLayer.style.height = `${rows * GRID_CELL_HEIGHT}px`;
     for (let index = start; index < end; index += 1) {
       const cell = document.createElement("button");
       cell.type = "button";
@@ -996,9 +1002,19 @@ export function renderApp(
   });
   const onResize = () => {
     requestAnimationFrame(() => {
-      if (gridView.hidden || columns() === renderedColumns) return;
-      gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+      if (gridView.hidden) return;
+      const nextColumns = columns();
+      const nextViewportHeight = effectiveViewportHeight();
+      if (
+        nextColumns === renderedColumns &&
+        nextViewportHeight === renderedViewportHeight
+      )
+        return;
+      if (nextColumns !== renderedColumns) {
+        syncGridHeight(nextColumns);
+        gridViewport.scrollTop =
+          Math.floor(currentIndex / nextColumns) * GRID_CELL_HEIGHT;
+      }
       renderGrid();
     });
   };
