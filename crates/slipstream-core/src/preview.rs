@@ -19,9 +19,131 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+const CACHE_LOOKUP_CAPACITY: usize = 2;
+
 pub const DEFAULT_PREVIEW_WORKERS: usize = 2;
 pub const DEFAULT_PREVIEW_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_PREVIEW_WAITER_CAPACITY: usize = 64;
+
+/// The bounded, immutable facts a server request received from its published
+/// Library. It contains one Photo and at most its two Original records; it
+/// never contains an Original capability or an opened file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewFacts {
+    pub photo: PhotoRecord,
+    pub originals: Vec<OriginalRecord>,
+}
+
+impl PreviewFacts {
+    pub fn from_records(photo: PhotoRecord, originals: Vec<OriginalRecord>) -> Self {
+        Self { photo, originals }
+    }
+
+    pub fn from_snapshot(snapshot: &ScanSnapshot, photo_id: &str) -> Option<Self> {
+        let photo = snapshot.photos.iter().find(|photo| photo.id == photo_id)?;
+        let originals = [
+            photo.jpeg_original_id.as_ref(),
+            photo.raw_original_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|id| {
+            snapshot
+                .originals
+                .iter()
+                .find(|original| &original.id == id)
+        })
+        .cloned()
+        .collect();
+        Some(Self::from_records(photo.clone(), originals))
+    }
+
+    fn selected_source(&self) -> Option<(PreviewCandidate, &OriginalRecord)> {
+        let find = |id: &Option<String>| {
+            id.as_ref().and_then(|id| {
+                self.originals.iter().find(|original| {
+                    &original.id == id && original.available && original.error_category.is_none()
+                })
+            })
+        };
+        find(&self.photo.jpeg_original_id)
+            .filter(|original| original.kind == crate::OriginalKind::Jpeg)
+            .map(|original| (PreviewCandidate::MatchingJpeg, original))
+            .or_else(|| {
+                find(&self.photo.raw_original_id)
+                    .filter(|original| original.kind == crate::OriginalKind::Raw)
+                    .map(|original| (PreviewCandidate::EmbeddedRawJpeg, original))
+            })
+    }
+
+    pub fn source_matches(&self, photo: &PhotoRecord, originals: &[OriginalRecord]) -> bool {
+        source_bundle_key(&self.photo, &self.originals) == source_bundle_key(photo, originals)
+    }
+
+    fn request_key(&self) -> String {
+        source_bundle_key(&self.photo, &self.originals)
+    }
+
+    fn durable_unavailable_current(&self) -> bool {
+        if self.photo.preview_state != PreviewState::Unavailable {
+            return false;
+        }
+        let Some((candidate, original)) = self.selected_source() else {
+            return true;
+        };
+        if self.photo.preview_candidate != Some(candidate)
+            || self.photo.preview_source != Some(candidate)
+        {
+            return false;
+        }
+        let Some(stored_revision) = self.photo.preview_source_revision.as_deref() else {
+            return false;
+        };
+        source_revision(
+            original.relative_path.as_str(),
+            original.facts.size,
+            original.facts.mtime_ms,
+        )
+        .is_ok_and(|revision| revision == stored_revision)
+    }
+}
+
+fn source_bundle_key(photo: &PhotoRecord, originals: &[OriginalRecord]) -> String {
+    let original_key = |id: &Option<String>| {
+        let Some(id) = id else {
+            return "none".to_owned();
+        };
+        let Some(original) = originals.iter().find(|original| &original.id == id) else {
+            return format!("missing:{id}");
+        };
+        let kind = match original.kind {
+            crate::OriginalKind::Raw => "raw",
+            crate::OriginalKind::Jpeg => "jpeg",
+        };
+        let error = match original.error_category {
+            None => "none",
+            Some(crate::OriginalErrorCategory::Unreadable) => "unreadable",
+            Some(crate::OriginalErrorCategory::Changed) => "changed",
+        };
+        format!(
+            "{id}\0{kind}\0{}\0{}\0{}\0{}\0{error}",
+            original.relative_path,
+            original.facts.size,
+            original.facts.mtime_ms.to_bits(),
+            original.available,
+        )
+    };
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        photo.id,
+        photo.raw_original_id.as_deref().unwrap_or("none"),
+        photo.jpeg_original_id.as_deref().unwrap_or("none"),
+        photo.available,
+        photo.ambiguous,
+        original_key(&photo.jpeg_original_id),
+        original_key(&photo.raw_original_id),
+    )
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewReady {
@@ -116,12 +238,19 @@ struct RequestKey {
     photo_id: String,
     target: DerivativeTarget,
     retry: bool,
+    published_source: Option<String>,
 }
-fn request_key(photo_id: &str, target: DerivativeTarget, retry: bool) -> RequestKey {
+fn request_key(
+    photo_id: &str,
+    target: DerivativeTarget,
+    retry: bool,
+    facts: Option<&PreviewFacts>,
+) -> RequestKey {
     RequestKey {
         photo_id: photo_id.to_owned(),
         target,
         retry,
+        published_source: facts.map(PreviewFacts::request_key),
     }
 }
 
@@ -166,6 +295,7 @@ struct PreviewJob {
     order: u64,
     key: RequestKey,
     retry: bool,
+    facts: Option<PreviewFacts>,
     cell: WaitCell,
 }
 
@@ -200,6 +330,7 @@ struct ServiceInner {
     worker_count: usize,
     queue_capacity: usize,
     waiter_capacity: usize,
+    cache_lookup: Arc<tokio::sync::Semaphore>,
     shutdown_lock: Mutex<()>,
     public_handles: std::sync::atomic::AtomicUsize,
 }
@@ -300,6 +431,7 @@ impl PreviewService {
             worker_count: options.workers,
             queue_capacity: options.queue_capacity,
             waiter_capacity: options.waiter_capacity,
+            cache_lookup: Arc::new(tokio::sync::Semaphore::new(CACHE_LOOKUP_CAPACITY)),
             shutdown_lock: Mutex::new(()),
             public_handles: std::sync::atomic::AtomicUsize::new(1),
         });
@@ -328,8 +460,91 @@ impl PreviewService {
         target: DerivativeTarget,
         priority: DerivativePriority,
     ) -> Result<PreviewRequestResult, PreviewServiceError> {
-        self.request_with_mode(photo_id, target, priority, false)
+        self.request_with_mode(photo_id, target, priority, false, None)
             .await
+    }
+
+    /// Resolves a request against one published Photo fact bundle before
+    /// admitting the normal source-inspection job. A valid current cache hit
+    /// never creates an Original capability or enters native work. Cache misses
+    /// retain the existing bounded request path.
+    pub async fn request_with_facts(
+        &self,
+        facts: PreviewFacts,
+        target: DerivativeTarget,
+        priority: DerivativePriority,
+    ) -> Result<PreviewRequestResult, PreviewServiceError> {
+        self.ensure_open()?;
+        if facts.durable_unavailable_current() {
+            return Ok(PreviewRequestResult::Unavailable(PreviewUnavailable {
+                reason: if facts.photo.available {
+                    PreviewUnavailableReason::NoUsableSource
+                } else {
+                    PreviewUnavailableReason::OriginalUnavailable
+                },
+            }));
+        }
+        if let Some(ready) = self.lookup_current(&facts, target).await? {
+            return Ok(PreviewRequestResult::Current(ready_result(&ready, target)));
+        }
+        self.request_with_mode(facts.photo.id.clone(), target, priority, false, Some(facts))
+            .await
+    }
+
+    /// Looks up one current derivative under bounded cache-read admission.
+    /// This is also used while hydrating bounded Browse Windows.
+    pub async fn lookup_current(
+        &self,
+        facts: &PreviewFacts,
+        target: DerivativeTarget,
+    ) -> Result<Option<CachedDerivative>, PreviewServiceError> {
+        self.ensure_open()?;
+        let permit = self
+            .inner
+            .cache_lookup
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PreviewServiceError::Closed)?;
+        self.ensure_open()?;
+        let cache = self.inner.scheduler.cache().clone();
+        let lookup_facts = facts.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            cache.lookup_current(&lookup_facts.photo, &lookup_facts.originals, target)
+        })
+        .await
+        .map_err(|_| PreviewServiceError::Closed)??;
+        drop(permit);
+        self.ensure_open()?;
+        Ok(result)
+    }
+
+    /// Returns a bounded, metadata-only current cache key for Browse Window
+    /// URL hydration. The eventual Preview/derivative request validates bytes.
+    pub async fn lookup_current_key(
+        &self,
+        facts: &PreviewFacts,
+        target: DerivativeTarget,
+    ) -> Result<Option<String>, PreviewServiceError> {
+        self.ensure_open()?;
+        let permit = self
+            .inner
+            .cache_lookup
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PreviewServiceError::Closed)?;
+        self.ensure_open()?;
+        let cache = self.inner.scheduler.cache().clone();
+        let lookup_facts = facts.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            cache.lookup_current_key(&lookup_facts.photo, &lookup_facts.originals, target)
+        })
+        .await
+        .map_err(|_| PreviewServiceError::Closed)??;
+        drop(permit);
+        self.ensure_open()?;
+        Ok(result)
     }
 
     /// Re-inspects a source even when the durable state says it is currently
@@ -341,8 +556,17 @@ impl PreviewService {
         target: DerivativeTarget,
         priority: DerivativePriority,
     ) -> Result<PreviewRequestResult, PreviewServiceError> {
-        self.request_with_mode(photo_id, target, priority, true)
+        self.request_with_mode(photo_id, target, priority, true, None)
             .await
+    }
+
+    fn ensure_open(&self) -> Result<(), PreviewServiceError> {
+        let state = self.inner.state.lock().expect("Preview service poisoned");
+        if state.closed {
+            Err(PreviewServiceError::Closed)
+        } else {
+            Ok(())
+        }
     }
 
     async fn request_with_mode(
@@ -351,9 +575,10 @@ impl PreviewService {
         target: DerivativeTarget,
         priority: DerivativePriority,
         retry: bool,
+        facts: Option<PreviewFacts>,
     ) -> Result<PreviewRequestResult, PreviewServiceError> {
         let photo_id = photo_id.into();
-        let key = request_key(&photo_id, target, retry);
+        let key = request_key(&photo_id, target, retry, facts.as_ref());
         let cell = {
             let mut state = self.inner.state.lock().expect("Preview service poisoned");
             if state.closed {
@@ -384,6 +609,7 @@ impl PreviewService {
                     order: state.next_order,
                     key: key.clone(),
                     retry,
+                    facts,
                     cell: cell.clone(),
                 });
                 state.in_flight.insert(key, job.clone());
@@ -610,8 +836,12 @@ fn process_job(
     inner: &ServiceInner,
     job: &PreviewJob,
 ) -> Result<PreviewRequestResult, PreviewServiceError> {
-    let snapshot = inner.library.snapshot_blocking()?;
-    let context = PreviewContext::compose(&inner.library, snapshot, &job.photo_id)?;
+    let context = if let Some(facts) = job.facts.clone() {
+        PreviewContext::compose_facts(&inner.library, facts)?
+    } else {
+        let snapshot = inner.library.snapshot_blocking()?;
+        PreviewContext::compose(&inner.library, snapshot, &job.photo_id)?
+    };
     let Some(context) = context else {
         return Ok(PreviewRequestResult::Unavailable(PreviewUnavailable {
             reason: PreviewUnavailableReason::PhotoNotFound,
@@ -872,17 +1102,27 @@ impl PreviewContext {
         else {
             return Ok(None);
         };
+        Self::compose_records(library, photo, snapshot.originals)
+    }
+
+    fn compose_facts(
+        library: &Library,
+        facts: PreviewFacts,
+    ) -> Result<Option<Self>, PreviewServiceError> {
+        Self::compose_records(library, facts.photo, facts.originals)
+    }
+
+    fn compose_records(
+        library: &Library,
+        photo: PhotoRecord,
+        originals: Vec<OriginalRecord>,
+    ) -> Result<Option<Self>, PreviewServiceError> {
         let lookup = |id: Option<String>| -> Result<
             Option<(OriginalRecord, OriginalCapability)>,
             PreviewServiceError,
         > {
             let Some(id) = id else { return Ok(None) };
-            let Some(original) = snapshot
-                .originals
-                .iter()
-                .find(|item| item.id == id)
-                .cloned()
-            else {
+            let Some(original) = originals.iter().find(|item| item.id == id).cloned() else {
                 return Ok(None);
             };
             if !original.available || original.error_category.is_some() {
@@ -921,17 +1161,21 @@ impl PreviewContext {
                     | crate::NativePreviewError::NoUsablePreview,
                 )) => {
                     let revision = revision_of(jpeg)?;
-                    let bytes = capability
+                    let checked = capability
                         .read_whole(128 * 1024 * 1024)
-                        .map_err(map_confinement_error)?
-                        .bytes;
+                        .map_err(map_confinement_error)?;
+                    if checked.facts.size != jpeg.facts.size
+                        || checked.facts.mtime_ms != jpeg.facts.mtime_ms
+                    {
+                        return Err(PreviewServiceError::Changed);
+                    }
                     return Ok(Some(Inspection::InvalidSource(InvalidSource {
                         expected_candidate: PreviewCandidate::MatchingJpeg,
                         expected_revision: revision.clone(),
                         actual_source: PreviewCandidate::MatchingJpeg,
                         actual_revision: revision,
                         actual: jpeg.clone(),
-                        jpeg: bytes,
+                        jpeg: checked.bytes,
                     })));
                 }
                 Err(error) => return Err(map_preview_error(error)),
@@ -1117,6 +1361,16 @@ mod tests {
         bytes
     }
 
+    fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&[0; 11]);
+        bytes.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0xff, 0xd9]);
+        bytes
+    }
+
     fn fixture(jpeg_original: Option<&[u8]>) -> Fixture {
         let base = std::env::temp_dir().join(format!(
             "slipstream-preview-service-{}-{}",
@@ -1186,6 +1440,141 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn published_cache_hits_reuse_derivatives_without_an_original() {
+        let fixture = fixture(Some(&jpeg(80, 40)));
+        let id = photo_id(&fixture.library);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .service
+                    .review(id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        runtime
+            .block_on(
+                fixture
+                    .service
+                    .thumbnail(id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
+        let facts = PreviewFacts::from_snapshot(&snapshot, &id).unwrap();
+        let original = fixture.base.join("originals/one.JPG");
+        fs::remove_file(original).unwrap();
+        let mut pending_facts = facts.clone();
+        pending_facts.photo.preview_state = PreviewState::InspectionPending;
+        pending_facts.photo.preview_source = None;
+        pending_facts.photo.cache_revision = None;
+
+        let review = runtime
+            .block_on(fixture.service.request_with_facts(
+                pending_facts.clone(),
+                DerivativeTarget::Review2560,
+                DerivativePriority::Current,
+            ))
+            .unwrap();
+        let PreviewRequestResult::Current(review) = review else {
+            panic!("expected a cached current Review Preview")
+        };
+        assert!(!review.generated);
+        assert_eq!(review.target, DerivativeTarget::Review2560);
+
+        let thumbnail = runtime
+            .block_on(fixture.service.request_with_facts(
+                pending_facts,
+                DerivativeTarget::Thumbnail512,
+                DerivativePriority::Current,
+            ))
+            .unwrap();
+        let PreviewRequestResult::Current(thumbnail) = thumbnail else {
+            panic!("expected a cached current thumbnail")
+        };
+        assert!(!thumbnail.generated);
+        assert_eq!(thumbnail.target, DerivativeTarget::Thumbnail512);
+
+        fixture.service.shutdown().unwrap();
+        fixture.library.shutdown().unwrap();
+        let config = LibraryConfig {
+            library_root: fixture.base.join("originals"),
+            state_directory: fixture.base.join("state"),
+            database_basename: "library.sqlite".to_owned(),
+            limits: ScanLimits::default(),
+            command_capacity: NonZeroUsize::new(64).unwrap(),
+        };
+        let reopened_library = Arc::new(Library::open(config).unwrap());
+        let reopened_service =
+            PreviewService::new(reopened_library.clone(), fixture.base.join("cache")).unwrap();
+        let reopened_snapshot = runtime.block_on(reopened_library.snapshot()).unwrap();
+        let reopened_facts = PreviewFacts::from_snapshot(&reopened_snapshot, &id).unwrap();
+        let reopened = runtime
+            .block_on(reopened_service.request_with_facts(
+                reopened_facts,
+                DerivativeTarget::Review2560,
+                DerivativePriority::Current,
+            ))
+            .unwrap();
+        let PreviewRequestResult::Current(reopened) = reopened else {
+            panic!("expected the reopened cached Review Preview")
+        };
+        assert!(!reopened.generated);
+        reopened_service.shutdown().unwrap();
+        reopened_library.shutdown().unwrap();
+    }
+
+    #[test]
+    fn current_cache_misses_regenerate_missing_or_corrupt_derivatives() {
+        let fixture = fixture(Some(&jpeg(80, 40)));
+        let id = photo_id(&fixture.library);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let first = runtime
+            .block_on(
+                fixture
+                    .service
+                    .review(id.clone(), DerivativePriority::Current),
+            )
+            .unwrap();
+        let PreviewRequestResult::Current(first) = first else {
+            panic!("expected an initial Review Preview")
+        };
+        let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
+        let facts = PreviewFacts::from_snapshot(&snapshot, &id).unwrap();
+        let path = fixture
+            .service
+            .scheduler()
+            .cache()
+            .root()
+            .join("rust-vips-v1")
+            .join(format!("{}.jpg", first.cache_key));
+
+        fs::remove_file(&path).unwrap();
+        let regenerated = runtime
+            .block_on(fixture.service.request_with_facts(
+                facts.clone(),
+                DerivativeTarget::Review2560,
+                DerivativePriority::Current,
+            ))
+            .unwrap();
+        let PreviewRequestResult::Current(regenerated) = regenerated else {
+            panic!("expected missing cache regeneration")
+        };
+        assert!(regenerated.generated);
+
+        fs::write(&path, marker_complete_corrupt_jpeg(80, 40)).unwrap();
+        let repaired = runtime
+            .block_on(fixture.service.request_with_facts(
+                facts,
+                DerivativeTarget::Review2560,
+                DerivativePriority::Current,
+            ))
+            .unwrap();
+        let PreviewRequestResult::Current(repaired) = repaired else {
+            panic!("expected corrupt cache regeneration")
+        };
+        assert!(repaired.generated);
     }
 
     #[test]
@@ -1397,22 +1786,36 @@ mod tests {
     }
 
     #[test]
-    fn explicit_retry_reinspects_after_rescan_and_recovers_unavailable_preview() {
-        let fixture = fixture(Some(b"not jpeg"));
+    fn explicit_retry_bypasses_durable_unavailable_without_rescan() {
+        let fixture = fixture(Some(&jpeg(64, 32)));
         let id = photo_id(&fixture.library);
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
+        let original = snapshot
+            .originals
+            .iter()
+            .find(|original| original.kind == crate::OriginalKind::Jpeg)
+            .unwrap();
+        let revision = source_revision(
+            original.relative_path.as_str(),
+            original.facts.size,
+            original.facts.mtime_ms,
+        )
+        .unwrap();
         assert!(matches!(
-            runtime
-                .block_on(
-                    fixture
-                        .service
-                        .review(id.clone(), DerivativePriority::Current)
-                )
-                .unwrap(),
-            PreviewRequestResult::Unavailable(_)
+            runtime.block_on(fixture.library.seed_preview(PreviewSeed {
+                photo_id: id.clone(),
+                state: PreviewState::Unavailable,
+                expected_candidate: PreviewCandidate::MatchingJpeg,
+                expected_source_revision: revision.clone(),
+                width: None,
+                height: None,
+                cache_revision: None,
+                actual_source: Some(PreviewCandidate::MatchingJpeg),
+                actual_source_revision: Some(revision),
+            })),
+            Ok(PreviewSeedResult::Applied)
         ));
-        fs::write(fixture.base.join("originals/one.JPG"), jpeg(64, 32)).unwrap();
-        runtime.block_on(fixture.library.scan()).unwrap();
         let retried = runtime
             .block_on(
                 fixture
@@ -1428,9 +1831,20 @@ mod tests {
     #[test]
     fn close_is_idempotent_and_rejects_new_requests() {
         let fixture = fixture(Some(&jpeg(16, 8)));
-        fixture.service.shutdown().unwrap();
-        fixture.service.shutdown().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
+        let id = photo_id(&fixture.library);
+        let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
+        let facts = PreviewFacts::from_snapshot(&snapshot, &id).unwrap();
+        fixture.service.shutdown().unwrap();
+        fixture.service.shutdown().unwrap();
+        assert!(matches!(
+            runtime.block_on(fixture.service.request_with_facts(
+                facts,
+                DerivativeTarget::Review2560,
+                DerivativePriority::Current,
+            )),
+            Err(PreviewServiceError::Closed)
+        ));
         assert!(matches!(
             runtime.block_on(fixture.service.review("photo", DerivativePriority::Current)),
             Err(PreviewServiceError::Closed)

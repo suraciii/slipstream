@@ -1706,6 +1706,16 @@ fn jpeg_fixture(path: &Path, width: u32, height: u32, color: [u8; 3]) {
         .unwrap();
 }
 
+fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(&width.to_be_bytes());
+    bytes.extend_from_slice(&[0; 11]);
+    bytes.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00]);
+    bytes.extend_from_slice(&[0xff, 0xd9]);
+    bytes
+}
+
 fn capture_metadata_fixture(path: &Path, capture_time: &str) {
     let mut value = capture_time.as_bytes().to_vec();
     value.push(0);
@@ -2174,6 +2184,9 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(preview["stale"], false);
     let url = preview["url"].as_str().unwrap().to_owned();
     let key = url.rsplit('/').next().unwrap().trim_end_matches(".jpg");
+    let summary = published_photo_summary(&application, &photo_id).await;
+    assert_eq!(summary.preview.state, "ready");
+    assert_eq!(summary.preview.url.as_deref(), Some(url.as_str()));
     let derivative = send(
         &router,
         Request::builder()
@@ -2198,6 +2211,59 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
         .await
         .unwrap();
     assert!(!body.is_empty());
+
+    // A marker-complete but truncated derivative must be rejected and rebuilt
+    // before the derivative route serves its bytes.
+    let cache_path = application
+        .preview
+        .scheduler()
+        .cache()
+        .root()
+        .join("rust-vips-v1")
+        .join(format!("{key}.jpg"));
+    fs::write(&cache_path, marker_complete_corrupt_jpeg(90, 45)).unwrap();
+    let repaired = send(
+        &router,
+        Request::builder()
+            .uri(format!("http://camera.local{url}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(repaired.status(), StatusCode::OK);
+    let repaired_body = axum::body::to_bytes(repaired.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(repaired_body.len() > marker_complete_corrupt_jpeg(90, 45).len());
+
+    // The published cache hit does not need the Original to remain present.
+    fs::remove_file(&original).unwrap();
+    let cached = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(cached["state"], "ready");
+    assert_eq!(cached["url"], url);
+    assert_eq!(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local{url}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    jpeg_fixture(&original, 90, 45, [192, 64, 32]);
     let head = send(
         &router,
         Request::builder()
@@ -2345,6 +2411,82 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             .contains("Original")
     );
     assert!(!unavailable.to_string().contains(base.to_str().unwrap()));
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
+    let (base, config) = prepare_fixture();
+    let original = config.library_root.join("photo.jpg");
+    fs::write(&original, b"not jpeg").unwrap();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let first = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(first["state"], "unavailable");
+    assert_eq!(first["message"], "No usable camera-produced Preview");
+
+    {
+        let published = application
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned");
+        let published = published.as_ref().expect("Library is published");
+        let position = published
+            .photos_by_id
+            .get(&photo_id)
+            .copied()
+            .expect("published Photo exists");
+        let photo = published
+            .snapshot
+            .photos
+            .get(position)
+            .expect("published Photo position exists");
+        assert_eq!(photo.preview_state, PreviewState::Unavailable);
+        assert_eq!(
+            photo.preview_candidate,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        assert_eq!(photo.preview_source, Some(PreviewCandidate::MatchingJpeg));
+        assert!(photo.preview_source_revision.is_some());
+    }
+
+    // The second request must use the durable seed without reopening the
+    // Original. Removing it makes any accidental slow-path inspection visible
+    // as a different Original-unavailable response.
+    fs::remove_file(&original).unwrap();
+    let second = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(second["state"], "unavailable");
+    assert_eq!(second["message"], first["message"]);
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

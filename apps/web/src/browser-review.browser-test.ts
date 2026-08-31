@@ -1149,6 +1149,50 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
+test("ready Preview facts render immediately during revalidation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "photo.jpg"), await jpeg());
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-stage] img")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await waitForGridFrame(page);
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/photos/*/preview", (route) =>
+    held.then(() => route.continue()),
+  );
+  const revalidated = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/photos/") &&
+      response.url().endsWith("/preview") &&
+      response.status() === 200,
+  );
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.locator("[data-stage] img")).toBeVisible();
+  await expect(page.getByText("Loading Preview…")).toHaveCount(0);
+  const ratingResponse = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/photos/") &&
+      response.url().endsWith("/state") &&
+      response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Rate 5 stars" }).click();
+  await ratingResponse;
+  await expect(page.getByText("5 stars")).toBeVisible();
+  release();
+  await revalidated;
+  await expect(page.getByText("5 stars")).toBeVisible();
+  await page.unroute("**/api/photos/*/preview");
+});
+
 test("Grid thumbnails survive virtual re-renders without refetching", async ({
   page,
 }) => {

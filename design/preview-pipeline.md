@@ -136,7 +136,9 @@ Leaving a Photo does not require cancelling extraction if completion is near and
 
 The browser requests a derivative by Photo identity and target class. It does not provide an Original File path.
 
-A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File. A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`. Reconnect and reload may reuse browser-cached data when the identity remains current.
+A current server-cache hit reads completed derivative bytes without reopening or reprocessing the Original File. Currentness is evaluated against the Published Library's selected source facts: candidate, Original Location, size, and modification time. Rescan is the invalidation boundary for those facts. Preview requests validate both the manifest and complete derivative bytes against that published bundle before returning a current result. Browse Window URL hydration may use only the bounded manifest, key, source-fact, and file-metadata checks; the subsequent Preview or derivative request remains the correctness-critical byte-validation boundary.
+
+A derivative response uses ordinary HTTP cache validation tied to the cache identity, including an immutable identity-bearing URL and `ETag`. Reconnect and reload may reuse browser-cached data when the identity remains current.
 
 The response also makes Preview Source, actual dimensions, and Preview Capability available to Photo View. These facts must not be inferred only from the derivative URL.
 

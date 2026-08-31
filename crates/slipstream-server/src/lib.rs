@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slipstream_core::{
     CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoSetRecord,
-    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewService, PreviewState, ScanLimits,
-    ScanPhase, SelectionState,
+    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewFacts, PreviewService, PreviewState,
+    ScanLimits, ScanPhase, SelectionState,
 };
 use std::{
     env,
@@ -61,7 +61,7 @@ pub use wire::{
     LibraryOverviewResponse, OriginalWire, PhotoSetSummaryListResponse, PhotoSetSummaryWire,
     PhotoSummary, PreviewResponse, ScanStatusWire,
 };
-pub(crate) use wire::{photo_set_summary, photo_summary_indexed, selection_state};
+pub(crate) use wire::{photo_set_summary, photo_summary_indexed_with_url, selection_state};
 
 #[cfg(test)]
 mod tests;
