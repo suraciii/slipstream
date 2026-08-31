@@ -156,7 +156,7 @@ If preflight or the transaction fails, keep the prior Folder configuration; SQLi
    # Required persisted real RAW Preview-fact assertion (does not generate a Preview):
    export SLIPSTREAM_PREVIEW_PHOTO_ID=<known-photo-id>
    export SLIPSTREAM_EXPECTED_PREVIEW_SOURCE=embedded-raw-jpeg
-   ./scripts/verify-production.sh
+   /data/slipstream/bin/verify-production.sh
    ```
 
    The expected state snapshot is an offline projection of the owned SQLite
@@ -192,7 +192,7 @@ A backup is not accepted until it starts and passes state checks in isolation. N
 3. Keep the same canonical `SLIPSTREAM_LIBRARY_ROOT`, mounted read-only.
 4. Select a non-production loopback port and a distinct Compose project name.
 5. Start the exact candidate image with the restored state and empty cache.
-6. Run `scripts/verify-production.sh` against the isolated listener with the expected Photo, Photo Set, member, image, Preview, and Original-SHA values.
+6. Run the deployment-host acceptance tool (`/data/slipstream/bin/verify-production.sh`) against the isolated listener with the expected Photo, Photo Set, member, image, Preview, and Original-SHA values.
 7. Stop the isolated project cleanly and verify that no journal/WAL/SHM sidecars remain.
 8. Delete only the temporary restored state and cache after recording the result. Do not delete the verified backup.
 
@@ -225,7 +225,7 @@ docker compose --project-name slipstream-restore \
 # expected bind/port/schema/state snapshot, and SLIPSTREAM_ALLOW_DERIVED_WRITES=1.
 # The isolated acceptance may generate and read the real Preview derivative;
 # derived writes remain below restore_root and never touch live state.
-./scripts/verify-production.sh
+/data/slipstream/bin/verify-production.sh
 docker compose --project-name slipstream-restore \
   --env-file /path/to/restore.env -f compose.yaml down || {
     printf 'restore shutdown failed; preserve and inspect %s\n' "$restore_root" >&2
