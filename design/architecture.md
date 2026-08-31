@@ -36,7 +36,7 @@ One server process owns:
 
 Importing a module must not scan files, create storage, or bind a port.
 
-The first deployment binds loopback by default and may explicitly bind a LAN interface so a phone or tablet on the same trusted network can connect. Public Internet exposure, accounts, and authorization are not part of the first architecture.
+Deployment topology is operator territory. Slipstream provides the binding capability — the server binds the configured host (default loopback), and an operator may expose it on any network they choose. The product ships no accounts or authorization; protecting an exposed listener is the operator's responsibility.
 
 ### Photo Library Scope
 
@@ -120,7 +120,7 @@ The server exposes the smallest required surfaces:
 
 Protocol types must not expose database rows, native library objects, absolute Original File paths, or internal errors.
 
-The initial browser mutation boundary assumes one Photographer on a trusted local network. It still must reject cross-origin mutations and must not expose Original File paths as arbitrary download parameters.
+The browser mutation boundary rejects cross-origin mutations and must not expose Original File paths as arbitrary download parameters. Authentication, accounts, and network-access policy are not product features in this architecture.
 
 ## Module Boundaries
 

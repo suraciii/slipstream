@@ -541,11 +541,6 @@ for item in mount_items:
     destination = os.path.normpath(item.get("Destination") or "")
     if destination != library and destination.startswith(library + os.sep):
         raise SystemExit("nested mount shadows the Original tree")
-import ipaddress
-address = ipaddress.ip_address(bind)
-shared_tailscale = address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10")
-if address.is_unspecified or not (address.is_loopback or address.is_private or shared_tailscale):
-    raise SystemExit("host bind is wildcard or not a trusted local/Tailscale address")
 published = value.get("NetworkSettings", {}).get("Ports", {})
 other_ports = [key for key, bindings in published.items() if key != "3000/tcp" and bindings]
 if other_ports:
