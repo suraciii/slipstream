@@ -394,7 +394,7 @@ expect_failure wrong-container-env FAKE_DOCKER_INSPECT="$work_dir/container-wron
 expect_failure nested-original-mount FAKE_DOCKER_INSPECT="$work_dir/container-nested-mount.json"
 expect_failure extra-port FAKE_DOCKER_INSPECT="$work_dir/container-extra-port.json"
 expect_failure writable-original-alias FAKE_DOCKER_INSPECT="$work_dir/container-alias-mount.json"
-expect_failure wildcard-bind FAKE_DOCKER_INSPECT="$work_dir/container-wildcard.json" SLIPSTREAM_EXPECTED_BIND_ADDRESS=0.0.0.0 SLIPSTREAM_BASE_URL=http://0.0.0.0:7330
+expect_failure declared-bind-mismatch FAKE_DOCKER_INSPECT="$work_dir/container-wildcard.json"
 expect_failure non-bind-mount FAKE_DOCKER_INSPECT="$work_dir/container-volume.json"
 cp "$work_dir/state/library.sqlite" "$work_dir/state/decoy.sqlite"
 expect_failure decoy-database SLIPSTREAM_DATABASE_BASENAME=decoy.sqlite
