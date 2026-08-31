@@ -8,6 +8,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+image.workspace = true
+lcms2.workspace = true
 libc.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -20,6 +22,4 @@ cc.workspace = true
 pkg-config.workspace = true
 
 [dev-dependencies]
-image.workspace = true
-lcms2.workspace = true
 serde.workspace = true

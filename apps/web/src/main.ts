@@ -627,9 +627,10 @@ export function renderApp(
     if (generation !== requestGeneration) return;
     const current = loaded.get(index);
     if (current) lastCurrentPhotoId = current.id;
-    renderPhotoShell();
+    const hasKnownPreview = renderPhotoShell();
     updateControls();
-    await showPreview(generation);
+    const previewRequest = showPreview(generation);
+    if (!hasKnownPreview) await previewRequest;
     await persistPosition();
     updateControls();
   };
@@ -640,20 +641,40 @@ export function renderApp(
     rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
     updateControls();
   };
-  const renderPhotoShell = () => {
+  const renderPhotoShell = (): boolean => {
     const photo = currentPhoto();
     photoTitle.textContent = sourceSetName;
     renderPhotoFacts();
-    source.textContent = "—";
-    limited.hidden = true;
-    stage.replaceChildren(
-      paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
-    );
+    source.textContent = photo?.preview.source
+      ? sourceLabel(photo.preview.source)
+      : "—";
+    limited.hidden = !photo?.preview.limitedDetail;
+    const knownUrl = photo?.preview.url;
+    if (knownUrl) {
+      const image = document.createElement("img");
+      image.alt = `Photo ${currentIndex + 1} of ${total}`;
+      image.draggable = false;
+      image.src = knownUrl;
+      image.addEventListener(
+        "error",
+        () => {
+          status.textContent =
+            "Preview could not be loaded. You can continue browsing.";
+        },
+        { once: true },
+      );
+      stage.replaceChildren(image);
+    } else {
+      stage.replaceChildren(
+        paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
+      );
+    }
     status.textContent =
       photo && !photo.available
         ? "Original File is unavailable. Decisions remain available."
         : "";
     updateControls();
+    return Boolean(knownUrl);
   };
   const showPreview = async (generation: number): Promise<boolean> => {
     const photo = currentPhoto();
@@ -676,29 +697,53 @@ export function renderApp(
       currentPhoto()!.id !== photo.id
     )
       return false;
+    const existingImage = stage.querySelector<HTMLImageElement>("img");
     if (result.state !== "ready" || !result.url) {
       status.textContent = result.message ?? "Preview unavailable";
-      stage.replaceChildren(paragraph("Preview unavailable"));
+      if (!existingImage)
+        stage.replaceChildren(paragraph("Preview unavailable"));
       return true;
     }
-    const image = document.createElement("img");
-    image.alt = `Photo ${currentIndex + 1} of ${total}`;
-    image.draggable = false;
-    image.src = result.url;
-    image.addEventListener(
-      "error",
-      () => {
-        status.textContent =
-          "Preview could not be loaded. You can continue browsing.";
-      },
-      { once: true },
-    );
-    stage.replaceChildren(image);
+    const resolvedUrl = new URL(result.url, window.location.href).href;
+    if (!existingImage || existingImage.src !== resolvedUrl) {
+      const image = document.createElement("img");
+      image.alt = `Photo ${currentIndex + 1} of ${total}`;
+      image.draggable = false;
+      image.src = result.url;
+      image.addEventListener(
+        "error",
+        () => {
+          status.textContent =
+            "Preview could not be loaded. You can continue browsing.";
+        },
+        { once: true },
+      );
+      stage.replaceChildren(image);
+    }
     source.textContent = sourceLabel(result.source);
     limited.hidden = !result.limitedDetail;
     status.textContent = result.stale
       ? (result.message ?? "Showing a stale Preview.")
       : "";
+    if (!result.stale) {
+      const latest = currentPhoto();
+      if (latest && latest.id === photo.id) {
+        loaded.set(currentIndex, {
+          ...latest,
+          preview: {
+            ...latest.preview,
+            state: "ready",
+            ...(result.source ? { source: result.source } : {}),
+            ...(result.width !== undefined ? { width: result.width } : {}),
+            ...(result.height !== undefined ? { height: result.height } : {}),
+            ...(result.limitedDetail !== undefined
+              ? { limitedDetail: result.limitedDetail }
+              : {}),
+            url: result.url,
+          },
+        });
+      }
+    }
     updateControls();
     void prefetchAdjacent(currentIndex - 1, generation);
     void prefetchAdjacent(currentIndex + 1, generation);

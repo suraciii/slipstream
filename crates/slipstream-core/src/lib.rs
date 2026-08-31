@@ -48,7 +48,8 @@ pub use native::{
 pub use persistence::MutationError;
 pub use preview::{
     DEFAULT_PREVIEW_QUEUE_CAPACITY, DEFAULT_PREVIEW_WAITER_CAPACITY, DEFAULT_PREVIEW_WORKERS,
-    PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult, PreviewService,
-    PreviewServiceError, PreviewServiceOptions, PreviewUnavailable, PreviewUnavailableReason,
+    PreviewFacts, PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult,
+    PreviewService, PreviewServiceError, PreviewServiceOptions, PreviewUnavailable,
+    PreviewUnavailableReason,
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};

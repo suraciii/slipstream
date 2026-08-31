@@ -93,6 +93,47 @@ impl SharedLibrary {
         apply(photo);
     }
 
+    /// Patches Preview facts only while the source bundle that produced them is
+    /// still the currently published bundle. Mutable Selection/Rating fields
+    /// are intentionally excluded from this guard.
+    async fn patch_photo_if_source_matches(
+        &self,
+        facts: &PreviewFacts,
+        apply: impl FnOnce(&mut slipstream_core::PhotoRecord),
+    ) -> bool {
+        let _publication = self.publication.lock().await;
+        let mut guard = self.snapshot.write().expect("published Library poisoned");
+        let Some(published) = guard.as_mut() else {
+            return false;
+        };
+        let Some(position) = published.photos_by_id.get(&facts.photo.id).copied() else {
+            return false;
+        };
+        let originals = {
+            let Some(photo) = published.snapshot.photos.get(position) else {
+                return false;
+            };
+            [
+                photo.jpeg_original_id.as_ref(),
+                photo.raw_original_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| published.originals_by_id.get(id))
+            .filter_map(|position| published.snapshot.originals.get(*position))
+            .cloned()
+            .collect::<Vec<_>>()
+        };
+        let Some(photo) = published.snapshot.photos.get_mut(position) else {
+            return false;
+        };
+        if !facts.source_matches(photo, &originals) {
+            return false;
+        }
+        apply(photo);
+        true
+    }
+
     /// One owned scan cycle shared by the background startup rescan and
     /// explicit rescan requests; the Library coalesces concurrent waiters.
     /// The optional publish gate (test-only) parks this cycle after the scan's
@@ -443,22 +484,63 @@ impl Application {
                 .collect::<Vec<_>>();
             (ids, total)
         };
-        let source_guard = self
-            .shared
-            .snapshot
-            .read()
-            .expect("published Library poisoned");
-        let Some(source) = source_guard.as_ref() else {
-            return Err(ServerError::NotPublished);
+        let facts = {
+            let source_guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let Some(source) = source_guard.as_ref() else {
+                return Err(ServerError::NotPublished);
+            };
+            ids.iter()
+                .filter_map(|id| source.photos_by_id.get(id).copied())
+                .filter_map(|position| source.snapshot.photos.get(position))
+                .map(|photo| {
+                    let originals = [
+                        photo.jpeg_original_id.as_ref(),
+                        photo.raw_original_id.as_ref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| source.originals_by_id.get(id))
+                    .filter_map(|position| source.snapshot.originals.get(*position))
+                    .cloned()
+                    .collect();
+                    PreviewFacts::from_records(photo.clone(), originals)
+                })
+                .collect::<Vec<_>>()
         };
-        let photos = ids
-            .iter()
-            .filter_map(|id| source.photos_by_id.get(id).copied())
-            .filter_map(|position| source.snapshot.photos.get(position))
-            .map(|photo| {
-                photo_summary_indexed(photo, &source.snapshot.originals, &source.originals_by_id)
-            })
-            .collect();
+        let mut photos = Vec::with_capacity(facts.len());
+        for facts in facts {
+            let preview_url = if facts.photo.preview_state != PreviewState::Unavailable {
+                self.preview
+                    .lookup_current_key(&facts, DerivativeTarget::Review2560)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|cache_key| {
+                        format!(
+                            "/api/derivatives/{}/review/{}.jpg",
+                            facts.photo.id, cache_key
+                        )
+                    })
+            } else {
+                None
+            };
+            let originals_by_id = facts
+                .originals
+                .iter()
+                .enumerate()
+                .map(|(position, original)| (original.id.clone(), position))
+                .collect::<std::collections::HashMap<_, _>>();
+            photos.push(photo_summary_indexed_with_url(
+                &facts.photo,
+                &facts.originals,
+                &originals_by_id,
+                preview_url,
+            ));
+        }
         Ok(BrowseWindowResponse {
             start,
             total,
@@ -520,6 +602,28 @@ impl Application {
         Ok(result)
     }
 
+    fn published_preview_facts(&self, photo_id: &str) -> Option<PreviewFacts> {
+        let guard = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned");
+        let published = guard.as_ref()?;
+        let position = published.photos_by_id.get(photo_id).copied()?;
+        let photo = published.snapshot.photos.get(position)?;
+        let originals = [
+            photo.jpeg_original_id.as_ref(),
+            photo.raw_original_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|id| published.originals_by_id.get(id))
+        .filter_map(|position| published.snapshot.originals.get(*position))
+        .cloned()
+        .collect();
+        Some(PreviewFacts::from_records(photo.clone(), originals))
+    }
+
     pub async fn preview(&self, photo_id: &str) -> Result<PreviewResponse, ServerError> {
         self.preview_with_priority(photo_id, slipstream_core::DerivativePriority::Current)
             .await
@@ -552,22 +656,40 @@ impl Application {
         if !valid_id(photo_id) {
             return Ok(PreviewResponse::unavailable("Unknown Photo"));
         }
-        let result = self
-            .preview
-            .request(photo_id.to_owned(), target, priority)
-            .await;
+        let published_facts = self.published_preview_facts(photo_id);
+        let result = if let Some(facts) = published_facts.clone() {
+            self.preview
+                .request_with_facts(facts, target, priority)
+                .await
+        } else {
+            self.preview
+                .request(photo_id.to_owned(), target, priority)
+                .await
+        };
         let response = match result {
             Ok(slipstream_core::PreviewRequestResult::Current(ready)) => {
                 if target == DerivativeTarget::Review2560 {
-                    self.shared
-                        .patch_photo(photo_id, |photo| {
-                            photo.preview_state = PreviewState::Ready;
-                            photo.preview_source = Some(ready.source);
-                            photo.preview_width = Some(ready.width);
-                            photo.preview_height = Some(ready.height);
-                            photo.cache_revision = Some(ready.cache_key.clone());
-                        })
-                        .await;
+                    if let Some(facts) = published_facts.as_ref() {
+                        self.shared
+                            .patch_photo_if_source_matches(facts, |photo| {
+                                photo.preview_state = PreviewState::Ready;
+                                photo.preview_source = Some(ready.source);
+                                photo.preview_width = Some(ready.width);
+                                photo.preview_height = Some(ready.height);
+                                photo.cache_revision = Some(ready.cache_key.clone());
+                            })
+                            .await;
+                    } else {
+                        self.shared
+                            .patch_photo(photo_id, |photo| {
+                                photo.preview_state = PreviewState::Ready;
+                                photo.preview_source = Some(ready.source);
+                                photo.preview_width = Some(ready.width);
+                                photo.preview_height = Some(ready.height);
+                                photo.cache_revision = Some(ready.cache_key.clone());
+                            })
+                            .await;
+                    }
                 }
                 PreviewResponse::ready(photo_id, &ready, false)
             }
@@ -579,8 +701,12 @@ impl Application {
                     && unavailable.reason
                         == slipstream_core::PreviewUnavailableReason::NoUsableSource
                 {
-                    self.patch_preview_state(photo_id, PreviewState::Unavailable)
-                        .await;
+                    if let Some(facts) = published_facts.as_ref() {
+                        self.sync_unavailable_preview_from_persisted(facts).await;
+                    } else {
+                        self.patch_preview_state(photo_id, PreviewState::Unavailable)
+                            .await;
+                    }
                 }
                 let message = match unavailable.reason {
                     slipstream_core::PreviewUnavailableReason::PhotoNotFound => "Unknown Photo",
@@ -595,8 +721,13 @@ impl Application {
             }
             Ok(slipstream_core::PreviewRequestResult::Failed(_)) => {
                 if target == DerivativeTarget::Review2560 {
-                    self.patch_preview_state(photo_id, PreviewState::Failed)
-                        .await;
+                    if let Some(facts) = published_facts.as_ref() {
+                        self.patch_preview_state_if_source_matches(facts, PreviewState::Failed)
+                            .await;
+                    } else {
+                        self.patch_preview_state(photo_id, PreviewState::Failed)
+                            .await;
+                    }
                 }
                 PreviewResponse::failed("Preview generation failed")
             }
@@ -627,6 +758,48 @@ impl Application {
             .await;
     }
 
+    async fn patch_preview_state_if_source_matches(
+        &self,
+        facts: &PreviewFacts,
+        state: PreviewState,
+    ) {
+        self.shared
+            .patch_photo_if_source_matches(facts, |photo| {
+                photo.preview_state = state;
+                photo.preview_source = None;
+                photo.preview_width = None;
+                photo.preview_height = None;
+                photo.cache_revision = None;
+            })
+            .await;
+    }
+
+    /// Mirrors the exact Preview fields committed by a durable NoUsableSource
+    /// seed. The persisted snapshot is authoritative; the source guards prevent
+    /// a concurrent rescan from copying newer facts onto an older publication.
+    async fn sync_unavailable_preview_from_persisted(&self, facts: &PreviewFacts) {
+        let Ok(snapshot) = self.library.snapshot().await else {
+            return;
+        };
+        let Some(persisted) = PreviewFacts::from_snapshot(&snapshot, &facts.photo.id) else {
+            return;
+        };
+        if !facts.source_matches(&persisted.photo, &persisted.originals) {
+            return;
+        }
+        self.shared
+            .patch_photo_if_source_matches(facts, |photo| {
+                photo.preview_state = persisted.photo.preview_state;
+                photo.preview_candidate = persisted.photo.preview_candidate;
+                photo.preview_source = persisted.photo.preview_source;
+                photo.preview_source_revision = persisted.photo.preview_source_revision.clone();
+                photo.preview_width = persisted.photo.preview_width;
+                photo.preview_height = persisted.photo.preview_height;
+                photo.cache_revision = persisted.photo.cache_revision.clone();
+            })
+            .await;
+    }
+
     pub async fn derivative(
         &self,
         photo_id: &str,
@@ -636,14 +809,19 @@ impl Application {
         if !valid_id(photo_id) || !is_hex_key(cache_key) {
             return Ok(None);
         }
-        let result = self
-            .preview
-            .request(
-                photo_id.to_owned(),
-                target,
-                slipstream_core::DerivativePriority::Current,
-            )
-            .await;
+        let result = if let Some(facts) = self.published_preview_facts(photo_id) {
+            self.preview
+                .request_with_facts(facts, target, slipstream_core::DerivativePriority::Current)
+                .await
+        } else {
+            self.preview
+                .request(
+                    photo_id.to_owned(),
+                    target,
+                    slipstream_core::DerivativePriority::Current,
+                )
+                .await
+        };
         let ready = match result {
             Ok(slipstream_core::PreviewRequestResult::Current(ready))
             | Ok(slipstream_core::PreviewRequestResult::Stale(ready))
@@ -655,7 +833,7 @@ impl Application {
         };
         let cache = self.preview.scheduler().cache().clone();
         let cache_key = cache_key.to_owned();
-        let bytes = tokio::task::spawn_blocking(move || cache.read_derivative(&cache_key))
+        let bytes = tokio::task::spawn_blocking(move || cache.read_derivative(&cache_key, target))
             .await
             .map_err(|error| ServerError::Join(error.to_string()))?
             .ok();
