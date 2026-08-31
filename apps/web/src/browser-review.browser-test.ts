@@ -186,13 +186,9 @@ async function startReview(
   name = "Review",
   setId?: string,
 ) {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(url);
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  await page
-    .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
-    .click();
-  const photo = page.getByRole("button", { name: /Photo 1 of/ });
+  await openGrid(page, url, name);
+  const photo = page.locator('[data-photo-index="0"]');
+  await expect(photo).toHaveAccessibleName(/Photo 1 of/);
   if (setId) {
     await openPhotoAndWaitForProgress(page, setId, photo);
     return;
@@ -235,6 +231,7 @@ async function openGrid(page: Page, url: string, name: string) {
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
   await page.getByText(/^Ready · \d[\d,]* Photos$/).waitFor();
+  await waitForGridFrame(page);
 }
 async function swipe(page: Page, from: number, to: number, y = 320) {
   const preview = page.locator("[data-preview]");
