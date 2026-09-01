@@ -170,6 +170,14 @@ Slipstream must not automatically prepare every Library Preview. Full precomputa
 
 Duplicate requests for one cache identity share one in-flight job. Leaving Photo View may leave a nearly complete reusable job running, but queued speculative work with no consumer may be dropped.
 
+### Client Work Scheduling
+
+The browser treats source control and current-Photo requests as foreground work. Grid thumbnail transfer, bounded look-ahead, adjacent Preview preparation, and scan progress are background work. Background work must not occupy browser network or rendering capacity in a way that delays a new source request or an already available control.
+
+Each source opening owns one client request generation. Starting a newer generation cancels fetch-based work from the prior generation, detaches its Grid cells, and rejects any late response or failure from changing current state. A stale Browse Snapshot opened after supersession is explicitly closed.
+
+Grid thumbnail transfer uses lower browser priority than source and window requests, and thumbnail decoding does not synchronously gate interaction. Scroll events may request the next bounded window immediately, but Grid DOM reconstruction is coalesced to at most one render per animation frame. Photo View's current Preview retains foreground priority.
+
 ### Loading Feedback
 
 The Web application owns presentation of asynchronous phases. It must remain responsive while requests run.
@@ -233,6 +241,18 @@ This makes repeat and next-Photo browsing fast while keeping I/O proportional to
 
 A full-Library warmup may consume tens of gigabytes and many hours of mounted-storage I/O while competing with the current Photo. The product has no current requirement for every Photo to be instantly available before browsing.
 
+### Selected: Generation-Scoped Cancellation and Foreground Request Priority
+
+This immediately retires obsolete fetches and prevents rebuildable thumbnail transfer from owning the browser connection pool ahead of a new source request. It preserves demand-driven derivatives and the existing bounded HTTP protocol without another service or transport.
+
+### Rejected: Let Background Requests Drain Before Switching
+
+Allowing old thumbnail or window requests to finish makes source-switch latency proportional to the previous viewport's remaining bytes and browser connection limits. It violates the requirement that background loading not block interaction.
+
+### Rejected: Serialize All Grid Thumbnail Requests
+
+Serial transfer would leave connection capacity available, but it would unnecessarily slow ordinary Grid completion and still would not define cancellation or stale-response ownership. Browser priority plus generation-scoped cancellation preserves useful concurrency.
+
 ### Selected: Status Polling
 
 A small status query is sufficient for one local Photographer and keeps process lifecycle simple.
@@ -259,5 +279,7 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - a source revision change cannot reuse an old derivative as current;
 - cache removal rebuilds derivatives without changing SQLite user state or Original File hashes;
 - background scan status reports real phases and counts and never publishes a partial Library;
-- disconnect, failed window, expired Snapshot, and retry behavior preserve already loaded content; and
+- disconnect, failed window, expired Snapshot, and retry behavior preserve already loaded content;
+- a source switch reaches its bounded ready state while prior Grid derivative responses remain held, cancels superseded fetches, and ignores late responses;
+- thumbnail requests retain lower browser priority than current source and Photo work, and repeated scroll events cause at most one Grid reconstruction per animation frame; and
 - mobile Chromium remains usable under throttled network and CPU conditions.

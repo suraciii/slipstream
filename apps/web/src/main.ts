@@ -126,6 +126,9 @@ export function renderApp(
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
   let sourceGeneration = 0;
+  let sourceAbortController = new AbortController();
+  let browseTokenGeneration = 0;
+  let gridRenderFrame: number | undefined;
   let progressQueue: Promise<void> = Promise.resolve();
   let zoomed = false;
   let panX = 0;
@@ -286,12 +289,22 @@ export function renderApp(
     }
   };
 
+  const cancelScheduledGridRender = () => {
+    if (gridRenderFrame === undefined) return;
+    cancelAnimationFrame(gridRenderFrame);
+    gridRenderFrame = undefined;
+  };
+
   const openSource = async (
     kind: "library" | "photo-set",
     set?: PhotoSetSummary,
     preferredPhotoId?: string,
   ) => {
     busy = true;
+    cancelScheduledGridRender();
+    gridLayer.replaceChildren();
+    sourceAbortController.abort();
+    sourceAbortController = new AbortController();
     sourceGeneration += 1;
     requestGeneration += 1;
     const generation = sourceGeneration;
@@ -330,8 +343,12 @@ export function renderApp(
       });
       if (!response.ok) throw new Error("browse open failed");
       const opened = (await response.json()) as BrowseOpenResponse;
-      if (generation !== sourceGeneration) return;
+      if (generation !== sourceGeneration) {
+        void closeBrowse(opened.token);
+        return;
+      }
       token = opened.token;
+      browseTokenGeneration = generation;
       if (priorToken && priorToken !== token) void closeBrowse(priorToken);
       total = opened.total;
       currentIndex = Math.min(opened.position, Math.max(0, total - 1));
@@ -339,11 +356,13 @@ export function renderApp(
         Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
       renderSources();
       await loadWindow(currentIndex, generation);
+      if (generation !== sourceGeneration) return;
       renderGrid();
       gridStatus.textContent = total
         ? `Ready · ${total.toLocaleString()} Photos`
         : "No Photos in this source";
     } catch {
+      if (generation !== sourceGeneration) return;
       token = "";
       if (priorToken) void closeBrowse(priorToken);
       gridStatus.textContent = "Could not load this source. Retry to continue.";
@@ -380,10 +399,18 @@ export function renderApp(
       /* bounded server expiry remains the fallback */
     }
   };
-  const reopenExpired = async (anchorIndex: number) => {
+  const reopenExpired = async (
+    anchorIndex: number,
+    expectedGeneration = sourceGeneration,
+  ) => {
+    if (expectedGeneration !== sourceGeneration) return;
+    busy = true;
     const oldToken = token;
     const anchorId =
       loaded.get(anchorIndex)?.id ?? lastCurrentPhotoId ?? currentPhoto()?.id;
+    sourceAbortController.abort();
+    sourceAbortController = new AbortController();
+    cancelScheduledGridRender();
     const generation = ++sourceGeneration;
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
@@ -405,8 +432,12 @@ export function renderApp(
       });
       if (!response.ok) throw new Error("browse reopen failed");
       const opened = (await response.json()) as BrowseOpenResponse;
-      if (generation !== sourceGeneration) return;
+      if (generation !== sourceGeneration) {
+        void closeBrowse(opened.token);
+        return;
+      }
       token = opened.token;
+      browseTokenGeneration = generation;
       total = opened.total;
       currentIndex = Math.min(opened.position, Math.max(0, total - 1));
       loaded = new Map();
@@ -416,6 +447,7 @@ export function renderApp(
       thumbnailFailures = new Set();
       if (oldToken && oldToken !== token) void closeBrowse(oldToken);
       await loadWindow(currentIndex, generation);
+      if (generation !== sourceGeneration) return;
       gridViewport.scrollTop =
         Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
@@ -423,11 +455,19 @@ export function renderApp(
         "Source reopened using the latest published Library order.";
       setConnected(true);
     } catch {
+      if (generation !== sourceGeneration) return;
+      loadingRanges.delete(alignedStart(anchorIndex));
+      browseTokenGeneration = generation;
       const failure =
         "This source expired and could not be reopened. Retry the connection.";
       gridStatus.textContent = failure;
       status.textContent = failure;
       setConnected(false);
+    } finally {
+      if (generation === sourceGeneration) {
+        busy = false;
+        updateControls();
+      }
     }
   };
   const windowLoaded = (start: number) => {
@@ -441,9 +481,16 @@ export function renderApp(
     generation = sourceGeneration,
     quiet = false,
   ) => {
-    if (!token || total === 0) return;
+    if (
+      generation !== sourceGeneration ||
+      !token ||
+      browseTokenGeneration !== sourceGeneration ||
+      total === 0
+    )
+      return;
     const start = alignedStart(index);
     if (loadingRanges.has(start) || windowLoaded(start)) return;
+    const signal = sourceAbortController.signal;
     loadingRanges.add(start);
     if (!quiet)
       gridStatus.textContent = `Loading Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)} of ${total.toLocaleString()}…`;
@@ -452,6 +499,7 @@ export function renderApp(
       try {
         response = await fetcher(
           `/api/browse/${encodeURIComponent(token)}?start=${start}&limit=${WINDOW_SIZE}`,
+          { signal },
         );
       } catch {
         if (generation === sourceGeneration)
@@ -459,7 +507,8 @@ export function renderApp(
         return;
       }
       if (response.status === 404) {
-        await reopenExpired(index);
+        if (generation === sourceGeneration)
+          await reopenExpired(index, generation);
         return;
       }
       if (!response.ok) throw new Error("window failed");
@@ -476,7 +525,7 @@ export function renderApp(
         gridStatus.textContent =
           "Some Photos could not load. Scroll or retry this range.";
     } finally {
-      loadingRanges.delete(start);
+      if (generation === sourceGeneration) loadingRanges.delete(start);
       updateControls();
     }
   };
@@ -533,9 +582,12 @@ export function renderApp(
     photo: PhotoSummary,
     index: number,
   ) => {
+    const generation = sourceGeneration;
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
     image.loading = "lazy";
+    image.fetchPriority = "low";
+    image.decoding = "async";
     image.draggable = false;
     image.className = "thumbnail";
     cell.append(image);
@@ -553,11 +605,17 @@ export function renderApp(
     caption.textContent = `${index + 1} · ${photo.rating ? `${photo.rating}★` : ""}`;
     cell.append(caption);
     if (photo.preview.state === "unavailable") {
-      markThumbnailUnavailable(photo.id, image);
+      markThumbnailUnavailable(photo.id, image, generation);
     } else if (photo.preview.thumbnailUrl) {
-      attachThumbnail(photo.id, image, photo.preview.thumbnailUrl, true);
+      attachThumbnail(
+        photo.id,
+        image,
+        photo.preview.thumbnailUrl,
+        true,
+        generation,
+      );
     } else {
-      void loadThumbnail(photo.id, image);
+      void loadThumbnail(photo.id, image, generation);
     }
   };
   const rememberThumbnail = (photoId: string, url: string) => {
@@ -572,7 +630,9 @@ export function renderApp(
   const markThumbnailUnavailable = (
     photoId: string,
     image: HTMLImageElement,
+    generation: number,
   ) => {
+    if (generation !== sourceGeneration) return;
     thumbnailFailures.add(photoId);
     image.removeAttribute("src");
     image.alt = "Thumbnail unavailable";
@@ -582,19 +642,25 @@ export function renderApp(
     image: HTMLImageElement,
     url?: string,
     attachDisconnected = false,
+    generation = sourceGeneration,
   ) => {
-    if (!url) return;
+    if (!url || generation !== sourceGeneration) return;
     if (thumbnailFailures.has(photoId)) {
       image.alt = "Thumbnail unavailable";
       return;
     }
-    image.onerror = () => markThumbnailUnavailable(photoId, image);
+    image.onerror = () => markThumbnailUnavailable(photoId, image, generation);
     if (attachDisconnected || image.isConnected) image.src = url;
   };
-  const loadThumbnail = (photoId: string, image: HTMLImageElement) => {
+  const loadThumbnail = (
+    photoId: string,
+    image: HTMLImageElement,
+    generation = sourceGeneration,
+  ) => {
+    if (generation !== sourceGeneration) return;
     const cached = thumbnailUrls.get(photoId);
     if (cached) {
-      attachThumbnail(photoId, image, cached, true);
+      attachThumbnail(photoId, image, cached, true, generation);
       return;
     }
     if (thumbnailFailures.has(photoId)) {
@@ -603,12 +669,17 @@ export function renderApp(
     }
     const pending = thumbnailRequests.get(photoId);
     if (pending) {
-      void pending.then((url) => attachThumbnail(photoId, image, url));
+      void pending.then((url) =>
+        attachThumbnail(photoId, image, url, false, generation),
+      );
       return;
     }
+    const signal = sourceAbortController.signal;
     const request = (async () => {
       try {
-        const response = await fetcher(`/api/photos/${photoId}/thumbnail`);
+        const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
+          signal,
+        });
         if (!response.ok) return undefined;
         const result = (await response.json()) as PreviewResponse;
         return result.url ?? undefined;
@@ -618,13 +689,14 @@ export function renderApp(
     })();
     thumbnailRequests.set(photoId, request);
     void request.then((url) => {
+      if (generation !== sourceGeneration) return;
       thumbnailRequests.delete(photoId);
       if (url) {
         rememberThumbnail(photoId, url);
         thumbnailFailures.delete(photoId);
-        attachThumbnail(photoId, image, url);
+        attachThumbnail(photoId, image, url, false, generation);
       } else {
-        markThumbnailUnavailable(photoId, image);
+        markThumbnailUnavailable(photoId, image, generation);
       }
     });
   };
@@ -795,7 +867,8 @@ export function renderApp(
     photoView.hidden = true;
     gridView.hidden = false;
     renderGrid();
-    requestAnimationFrame(() => {
+    cancelScheduledGridRender();
+    scheduleGridRender(() => {
       gridViewport.scrollTop =
         Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
@@ -1062,8 +1135,17 @@ export function renderApp(
       void mutate("rating", Number(event.key), false);
   };
 
+  const scheduleGridRender = (render = renderGrid) => {
+    if (gridRenderFrame !== undefined) return;
+    const generation = sourceGeneration;
+    gridRenderFrame = requestAnimationFrame(() => {
+      gridRenderFrame = undefined;
+      if (generation !== sourceGeneration) return;
+      render();
+    });
+  };
   gridViewport.addEventListener("scroll", () => {
-    renderGrid();
+    scheduleGridRender();
     const count = columns();
     void loadWindow(
       Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * count,
