@@ -112,10 +112,14 @@ export function renderApp(
   let sourceSetId: string | undefined;
   let sourceSetName = "All Photos";
   let loaded = new Map<number, PhotoSummary>();
-  let loadingRanges = new Set<number>();
+  let windowRequests = new Map<
+    number,
+    { promise: Promise<void>; signal: AbortSignal }
+  >();
   let thumbnailUrls = new Map<string, string>();
   let thumbnailRequests = new Map<string, Promise<string | undefined>>();
   let thumbnailFailures = new Set<string>();
+  let renderedThumbnailImages = new Map<string, HTMLImageElement>();
   let lastCurrentPhotoId: string | undefined;
   let renderedColumns = 0;
   let renderedViewportHeight = 0;
@@ -127,6 +131,8 @@ export function renderApp(
   let requestGeneration = 0;
   let sourceGeneration = 0;
   let sourceAbortController = new AbortController();
+  let gridAbortController = new AbortController();
+  let photoAbortController = new AbortController();
   let browseTokenGeneration = 0;
   let gridRenderFrame: number | undefined;
   let progressQueue: Promise<void> = Promise.resolve();
@@ -294,6 +300,18 @@ export function renderApp(
     cancelAnimationFrame(gridRenderFrame);
     gridRenderFrame = undefined;
   };
+  const cancelPendingImageLoads = (
+    container: ParentNode,
+    removeCompleted = false,
+  ) => {
+    for (const image of Array.from(
+      container.querySelectorAll<HTMLImageElement>("img"),
+    )) {
+      if (!removeCompleted && image.complete) continue;
+      image.onerror = null;
+      image.removeAttribute("src");
+    }
+  };
 
   const openSource = async (
     kind: "library" | "photo-set",
@@ -302,12 +320,21 @@ export function renderApp(
   ) => {
     busy = true;
     cancelScheduledGridRender();
-    gridLayer.replaceChildren();
-    sourceAbortController.abort();
-    sourceAbortController = new AbortController();
     sourceGeneration += 1;
     requestGeneration += 1;
     const generation = sourceGeneration;
+    openingPhoto = false;
+    cancelPendingImageLoads(gridLayer, true);
+    gridLayer.replaceChildren();
+    cancelPendingImageLoads(stage, true);
+    stage.replaceChildren();
+    sourceAbortController.abort();
+    sourceAbortController = new AbortController();
+    gridAbortController.abort();
+    gridAbortController = new AbortController();
+    photoAbortController.abort();
+    photoAbortController = new AbortController();
+    const signal = sourceAbortController.signal;
     currentPhotoMode = false;
     gridView.hidden = false;
     photoView.hidden = true;
@@ -318,7 +345,7 @@ export function renderApp(
     gridStatus.textContent = "Preparing Library order…";
     undo = undefined;
     loaded = new Map();
-    loadingRanges = new Set();
+    windowRequests = new Map();
     thumbnailUrls = new Map();
     thumbnailRequests = new Map();
     thumbnailFailures = new Set();
@@ -340,6 +367,8 @@ export function renderApp(
                 ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
               },
         ),
+        signal,
+        priority: "high",
       });
       if (!response.ok) throw new Error("browse open failed");
       const opened = (await response.json()) as BrowseOpenResponse;
@@ -405,13 +434,24 @@ export function renderApp(
   ) => {
     if (expectedGeneration !== sourceGeneration) return;
     busy = true;
+    const resumePhoto = currentPhotoMode;
+    const photoGeneration = ++requestGeneration;
+    photoAbortController.abort();
+    photoAbortController = new AbortController();
+    const photoSignal = photoAbortController.signal;
+    cancelPendingImageLoads(stage);
+    openingPhoto = false;
     const oldToken = token;
     const anchorId =
       loaded.get(anchorIndex)?.id ?? lastCurrentPhotoId ?? currentPhoto()?.id;
     sourceAbortController.abort();
     sourceAbortController = new AbortController();
+    gridAbortController.abort();
+    gridAbortController = new AbortController();
     cancelScheduledGridRender();
     const generation = ++sourceGeneration;
+    cancelPendingImageLoads(gridLayer);
+    const signal = sourceAbortController.signal;
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
     gridStatus.textContent = notice;
@@ -429,6 +469,8 @@ export function renderApp(
                 ...(anchorId ? { photoId: anchorId } : {}),
               },
         ),
+        signal,
+        priority: "high",
       });
       if (!response.ok) throw new Error("browse reopen failed");
       const opened = (await response.json()) as BrowseOpenResponse;
@@ -441,7 +483,7 @@ export function renderApp(
       total = opened.total;
       currentIndex = Math.min(opened.position, Math.max(0, total - 1));
       loaded = new Map();
-      loadingRanges = new Set();
+      windowRequests = new Map();
       thumbnailUrls = new Map();
       thumbnailRequests = new Map();
       thumbnailFailures = new Set();
@@ -454,9 +496,17 @@ export function renderApp(
       gridStatus.textContent =
         "Source reopened using the latest published Library order.";
       setConnected(true);
+      if (resumePhoto && photoGeneration === requestGeneration) {
+        gridView.hidden = true;
+        photoView.hidden = false;
+        renderPhotoShell(photoGeneration);
+        void showPreview(photoGeneration, photoSignal).then((refreshed) => {
+          if (refreshed && photoGeneration === requestGeneration)
+            void persistPosition();
+        });
+      }
     } catch {
       if (generation !== sourceGeneration) return;
-      loadingRanges.delete(alignedStart(anchorIndex));
       browseTokenGeneration = generation;
       const failure =
         "This source expired and could not be reopened. Retry the connection.";
@@ -476,58 +526,79 @@ export function renderApp(
       if (!loaded.has(index)) return false;
     return start < end;
   };
-  const loadWindow = async (
+  const loadWindow = (
     index: number,
     generation = sourceGeneration,
     quiet = false,
-  ) => {
+    signal = sourceAbortController.signal,
+    priority: "high" | "low" = quiet ? "low" : "high",
+  ): Promise<void> => {
     if (
       generation !== sourceGeneration ||
       !token ||
       browseTokenGeneration !== sourceGeneration ||
       total === 0
     )
-      return;
+      return Promise.resolve();
     const start = alignedStart(index);
-    if (loadingRanges.has(start) || windowLoaded(start)) return;
-    const signal = sourceAbortController.signal;
-    loadingRanges.add(start);
+    const existing = windowRequests.get(start);
+    if (existing && !existing.signal.aborted) return existing.promise;
+    if (existing) windowRequests.delete(start);
+    if (windowLoaded(start)) return Promise.resolve();
+    const browseToken = token;
     if (!quiet)
       gridStatus.textContent = `Loading Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)} of ${total.toLocaleString()}…`;
-    try {
-      let response: Response;
+    const request = (async () => {
       try {
-        response = await fetcher(
-          `/api/browse/${encodeURIComponent(token)}?start=${start}&limit=${WINDOW_SIZE}`,
-          { signal },
-        );
+        let response: Response;
+        try {
+          response = await fetcher(
+            `/api/browse/${encodeURIComponent(browseToken)}?start=${start}&limit=${WINDOW_SIZE}`,
+            { signal, priority },
+          );
+        } catch {
+          if (!signal.aborted && generation === sourceGeneration)
+            setConnected(
+              false,
+              "Connection lost. Retry to refresh this range.",
+            );
+          return;
+        }
+        if (response.status === 404) {
+          if (!signal.aborted && generation === sourceGeneration)
+            await reopenExpired(index, generation);
+          return;
+        }
+        if (!response.ok) throw new Error("window failed");
+        const result = (await response.json()) as BrowseWindowResponse;
+        if (generation !== sourceGeneration || signal.aborted) return;
+        for (const [offset, photo] of result.photos.entries())
+          loaded.set(result.start + offset, photo);
+        trimLoaded(index);
+        renderGrid();
+        if (!quiet)
+          gridStatus.textContent = `Ready · ${total.toLocaleString()} Photos`;
       } catch {
-        if (generation === sourceGeneration)
-          setConnected(false, "Connection lost. Retry to refresh this range.");
-        return;
+        if (!signal.aborted && generation === sourceGeneration)
+          gridStatus.textContent =
+            "Some Photos could not load. Scroll or retry this range.";
       }
-      if (response.status === 404) {
-        if (generation === sourceGeneration)
-          await reopenExpired(index, generation);
-        return;
-      }
-      if (!response.ok) throw new Error("window failed");
-      const result = (await response.json()) as BrowseWindowResponse;
-      if (generation !== sourceGeneration) return;
-      for (const [offset, photo] of result.photos.entries())
-        loaded.set(result.start + offset, photo);
-      trimLoaded(index);
-      renderGrid();
-      if (!quiet)
-        gridStatus.textContent = `Ready · ${total.toLocaleString()} Photos`;
-    } catch {
-      if (generation === sourceGeneration)
-        gridStatus.textContent =
-          "Some Photos could not load. Scroll or retry this range.";
-    } finally {
-      if (generation === sourceGeneration) loadingRanges.delete(start);
-      updateControls();
-    }
+    })();
+    const entry = {
+      signal,
+      promise: request.finally(() => {
+        if (windowRequests.get(start) === entry) windowRequests.delete(start);
+        if (
+          signal.aborted &&
+          generation === sourceGeneration &&
+          !gridView.hidden
+        )
+          scheduleGridRender();
+        updateControls();
+      }),
+    };
+    windowRequests.set(start, entry);
+    return entry.promise;
   };
   const trimLoaded = (anchor: number) => {
     if (loaded.size <= MAX_RETAINED_FACTS) return;
@@ -556,6 +627,8 @@ export function renderApp(
       Math.ceil(renderedViewportHeight / GRID_CELL_HEIGHT) + 4;
     const start = firstRow * count;
     const end = Math.min(total, start + visibleRows * count);
+    renderedThumbnailImages = new Map();
+    cancelPendingImageLoads(gridLayer);
     gridLayer.replaceChildren();
     for (let index = start; index < end; index += 1) {
       const cell = document.createElement("button");
@@ -590,6 +663,7 @@ export function renderApp(
     image.decoding = "async";
     image.draggable = false;
     image.className = "thumbnail";
+    renderedThumbnailImages.set(photo.id, image);
     cell.append(image);
     const badge = document.createElement("span");
     badge.className = `cell-state ${photo.selectionState}`;
@@ -632,10 +706,15 @@ export function renderApp(
     image: HTMLImageElement,
     generation: number,
   ) => {
-    if (generation !== sourceGeneration) return;
+    if (
+      generation !== sourceGeneration ||
+      renderedThumbnailImages.get(photoId) !== image
+    )
+      return;
     thumbnailFailures.add(photoId);
     image.removeAttribute("src");
-    image.alt = "Thumbnail unavailable";
+    if (!image.alt.includes("Thumbnail unavailable"))
+      image.alt = `${image.alt} — Thumbnail unavailable`;
   };
   const attachThumbnail = (
     photoId: string,
@@ -644,9 +723,15 @@ export function renderApp(
     attachDisconnected = false,
     generation = sourceGeneration,
   ) => {
-    if (!url || generation !== sourceGeneration) return;
+    if (
+      !url ||
+      generation !== sourceGeneration ||
+      renderedThumbnailImages.get(photoId) !== image
+    )
+      return;
     if (thumbnailFailures.has(photoId)) {
-      image.alt = "Thumbnail unavailable";
+      if (!image.alt.includes("Thumbnail unavailable"))
+        image.alt = `${image.alt} — Thumbnail unavailable`;
       return;
     }
     image.onerror = () => markThumbnailUnavailable(photoId, image, generation);
@@ -657,14 +742,19 @@ export function renderApp(
     image: HTMLImageElement,
     generation = sourceGeneration,
   ) => {
-    if (generation !== sourceGeneration) return;
+    if (
+      generation !== sourceGeneration ||
+      renderedThumbnailImages.get(photoId) !== image
+    )
+      return;
     const cached = thumbnailUrls.get(photoId);
     if (cached) {
       attachThumbnail(photoId, image, cached, true, generation);
       return;
     }
     if (thumbnailFailures.has(photoId)) {
-      image.alt = "Thumbnail unavailable";
+      if (!image.alt.includes("Thumbnail unavailable"))
+        image.alt = `${image.alt} — Thumbnail unavailable`;
       return;
     }
     const pending = thumbnailRequests.get(photoId);
@@ -674,11 +764,12 @@ export function renderApp(
       );
       return;
     }
-    const signal = sourceAbortController.signal;
+    const signal = gridAbortController.signal;
     const request = (async () => {
       try {
         const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
           signal,
+          priority: "low",
         });
         if (!response.ok) return undefined;
         const result = (await response.json()) as PreviewResponse;
@@ -689,7 +780,11 @@ export function renderApp(
     })();
     thumbnailRequests.set(photoId, request);
     void request.then((url) => {
-      if (generation !== sourceGeneration) return;
+      if (
+        generation !== sourceGeneration ||
+        thumbnailRequests.get(photoId) !== request
+      )
+        return;
       thumbnailRequests.delete(photoId);
       if (url) {
         rememberThumbnail(photoId, url);
@@ -706,13 +801,23 @@ export function renderApp(
     openingPhoto = true;
     currentIndex = index;
     const generation = ++requestGeneration;
+    photoAbortController.abort();
+    photoAbortController = new AbortController();
+    const signal = photoAbortController.signal;
+    cancelPendingImageLoads(stage, true);
+    renderedThumbnailImages = new Map();
+    gridAbortController.abort();
+    gridAbortController = new AbortController();
+    thumbnailRequests = new Map();
+    cancelPendingImageLoads(gridLayer);
     currentPhotoMode = true;
     gridView.hidden = true;
     photoView.hidden = false;
     photoView.focus();
     resetTransform();
     try {
-      if (!loaded.has(index)) await loadWindow(index, sourceGeneration, true);
+      if (!loaded.has(index))
+        await loadWindow(index, sourceGeneration, true, signal, "high");
     } finally {
       // Back to Grid or a superseding view may end this request while an
       // unloaded boundary window is still loading. Release the open gate so
@@ -723,9 +828,9 @@ export function renderApp(
     if (generation !== requestGeneration) return;
     const current = loaded.get(index);
     if (current) lastCurrentPhotoId = current.id;
-    const hasKnownPreview = renderPhotoShell();
+    const hasKnownPreview = renderPhotoShell(generation);
     updateControls();
-    const previewRequest = showPreview(generation);
+    const previewRequest = showPreview(generation, signal);
     if (!hasKnownPreview) await previewRequest;
     await persistPosition();
     updateControls();
@@ -737,7 +842,26 @@ export function renderApp(
     rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
     updateControls();
   };
-  const renderPhotoShell = (): boolean => {
+  const renderReviewImage = (url: string, generation = requestGeneration) => {
+    cancelPendingImageLoads(stage, true);
+    const image = document.createElement("img");
+    image.alt = `Photo ${currentIndex + 1} of ${total}`;
+    image.draggable = false;
+    image.fetchPriority = "high";
+    image.decoding = "async";
+    image.src = url;
+    image.addEventListener(
+      "error",
+      () => {
+        if (generation !== requestGeneration || !image.isConnected) return;
+        status.textContent =
+          "Preview could not be loaded. You can continue browsing.";
+      },
+      { once: true },
+    );
+    stage.replaceChildren(image);
+  };
+  const renderPhotoShell = (generation = requestGeneration): boolean => {
     const photo = currentPhoto();
     photoTitle.textContent = sourceSetName;
     renderPhotoFacts();
@@ -747,19 +871,7 @@ export function renderApp(
     limited.hidden = !photo?.preview.limitedDetail;
     const knownUrl = photo?.preview.url;
     if (knownUrl) {
-      const image = document.createElement("img");
-      image.alt = `Photo ${currentIndex + 1} of ${total}`;
-      image.draggable = false;
-      image.src = knownUrl;
-      image.addEventListener(
-        "error",
-        () => {
-          status.textContent =
-            "Preview could not be loaded. You can continue browsing.";
-        },
-        { once: true },
-      );
-      stage.replaceChildren(image);
+      renderReviewImage(knownUrl, generation);
     } else {
       stage.replaceChildren(
         paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
@@ -772,7 +884,11 @@ export function renderApp(
     updateControls();
     return Boolean(knownUrl);
   };
-  const showPreview = async (generation: number): Promise<boolean> => {
+  const showPreview = async (
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<boolean> => {
+    if (generation !== requestGeneration || signal.aborted) return false;
     const photo = currentPhoto();
     if (!photo) return false;
     let result: PreviewResponse;
@@ -780,11 +896,14 @@ export function renderApp(
       // Always contact the server, even for an unavailable Photo: a restored
       // Original must surface its Preview without a full reload, and Retry
       // must prove the server is reachable before reporting Connected.
-      const response = await fetcher(`/api/photos/${photo.id}/preview`);
+      const response = await fetcher(`/api/photos/${photo.id}/preview`, {
+        signal,
+        priority: "high",
+      });
       result = (await response.json()) as PreviewResponse;
     } catch {
-      if (generation === requestGeneration)
-        setConnected(false, "Connection lost. Retry to refresh this Photo.");
+      if (signal.aborted || generation !== requestGeneration) return false;
+      setConnected(false, "Connection lost. Retry to refresh this Photo.");
       return false;
     }
     if (
@@ -801,21 +920,8 @@ export function renderApp(
       return true;
     }
     const resolvedUrl = new URL(result.url, window.location.href).href;
-    if (!existingImage || existingImage.src !== resolvedUrl) {
-      const image = document.createElement("img");
-      image.alt = `Photo ${currentIndex + 1} of ${total}`;
-      image.draggable = false;
-      image.src = result.url;
-      image.addEventListener(
-        "error",
-        () => {
-          status.textContent =
-            "Preview could not be loaded. You can continue browsing.";
-        },
-        { once: true },
-      );
-      stage.replaceChildren(image);
-    }
+    if (!existingImage || existingImage.src !== resolvedUrl)
+      renderReviewImage(result.url, generation);
     source.textContent = sourceLabel(result.source);
     limited.hidden = !result.limitedDetail;
     status.textContent = result.stale
@@ -841,29 +947,40 @@ export function renderApp(
       }
     }
     updateControls();
-    void prefetchAdjacent(currentIndex - 1, generation);
-    void prefetchAdjacent(currentIndex + 1, generation);
+    void prefetchAdjacent(currentIndex - 1, generation, signal);
+    void prefetchAdjacent(currentIndex + 1, generation, signal);
     return true;
   };
-  const prefetchAdjacent = async (index: number, generation: number) => {
+  const prefetchAdjacent = async (
+    index: number,
+    generation: number,
+    signal: AbortSignal,
+  ) => {
     if (generation !== requestGeneration) return;
     if (index < 0 || index >= total) return;
     let photo = loaded.get(index);
     if (!photo) {
-      await loadWindow(index, sourceGeneration, true);
-      if (generation !== requestGeneration) return;
+      await loadWindow(index, sourceGeneration, true, signal);
+      if (generation !== requestGeneration || signal.aborted) return;
       photo = loaded.get(index);
     }
     if (!photo || !photo.available) return;
     try {
-      await fetcher(`/api/photos/${photo.id}/preview?priority=adjacent`);
+      await fetcher(`/api/photos/${photo.id}/preview?priority=adjacent`, {
+        signal,
+        priority: "low",
+      });
     } catch {
       /* adjacent work is best effort */
     }
   };
   const showGrid = () => {
     currentPhotoMode = false;
+    openingPhoto = false;
     requestGeneration += 1;
+    photoAbortController.abort();
+    photoAbortController = new AbortController();
+    cancelPendingImageLoads(stage, true);
     photoView.hidden = true;
     gridView.hidden = false;
     renderGrid();
@@ -878,28 +995,28 @@ export function renderApp(
   const persistPosition = (): Promise<boolean> => {
     if (sourceKind !== "photo-set" || !sourceSetId || !currentPhoto())
       return Promise.resolve(true);
+    const setId = sourceSetId;
     const photoId = currentPhoto()!.id;
+    const generation = sourceGeneration;
     const task = progressQueue.then(async () => {
       try {
-        const response = await fetcher(
-          `/api/photo-sets/${sourceSetId}/progress`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ photoId }),
-          },
-        );
+        const response = await fetcher(`/api/photo-sets/${setId}/progress`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ photoId }),
+        });
         if (!response.ok) throw new Error("position rejected");
         sets = sets.map((set) =>
-          set.id === sourceSetId ? { ...set, hasSavedPosition: true } : set,
+          set.id === setId ? { ...set, hasSavedPosition: true } : set,
         );
         renderSources();
         return true;
       } catch {
-        setConnected(
-          false,
-          "Photo Set position could not be saved. Retry before making more decisions.",
-        );
+        if (generation === sourceGeneration && sourceSetId === setId)
+          setConnected(
+            false,
+            "Photo Set position could not be saved. Retry before making more decisions.",
+          );
         return false;
       }
     });
@@ -918,6 +1035,8 @@ export function renderApp(
     const photo = currentPhoto();
     if (!photo || !connected || busy) return;
     const generation = sourceGeneration;
+    const photoIndex = currentIndex;
+    const setId = sourceSetId;
     const prior = undo;
     undo = undefined;
     busy = true;
@@ -930,10 +1049,11 @@ export function renderApp(
         body: JSON.stringify({
           field,
           value,
-          ...(sourceSetId ? { photoSetId: sourceSetId } : {}),
+          ...(setId ? { photoSetId: setId } : {}),
         }),
       });
       if (!response.ok) {
+        if (generation !== sourceGeneration) return;
         undo = prior;
         status.textContent =
           response.status === 409
@@ -943,20 +1063,26 @@ export function renderApp(
         return;
       }
       const result = (await response.json()) as MutationResponse;
+      if (
+        generation !== sourceGeneration ||
+        loaded.get(photoIndex)?.id !== photo.id
+      )
+        return;
       const updated = {
         ...photo,
         ...(field === "selectionState"
           ? { selectionState: value as SelectionState }
           : { rating: value as number }),
       };
-      loaded.set(currentIndex, updated);
-      undo = { ...result.undo, advanced: advance && currentIndex < total - 1 };
+      loaded.set(photoIndex, updated);
+      undo = { ...result.undo, advanced: advance && photoIndex < total - 1 };
       status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
       if (undo.advanced) {
         busy = false;
         await moveTo(currentIndex + 1);
       } else renderPhotoFacts();
     } catch {
+      if (generation !== sourceGeneration) return;
       undo = undefined;
       setConnected(
         false,
@@ -972,6 +1098,8 @@ export function renderApp(
   const performUndo = async () => {
     const action = undo;
     if (!action || !connected || busy) return;
+    const generation = sourceGeneration;
+    const setId = sourceSetId;
     const affectedIndex = Array.from(loaded.entries()).find(
       ([, photo]) => photo.id === action.photoId,
     )?.[0];
@@ -993,10 +1121,11 @@ export function renderApp(
           field: action.field,
           value: action.priorValue,
           expectedCurrent: action.expectedCurrent,
-          ...(sourceSetId ? { photoSetId: sourceSetId } : {}),
+          ...(setId ? { photoSetId: setId } : {}),
         }),
       });
       if (!response.ok) {
+        if (generation !== sourceGeneration) return;
         if (response.status === 409) {
           setConnected(
             false,
@@ -1008,6 +1137,11 @@ export function renderApp(
         }
         return;
       }
+      if (
+        generation !== sourceGeneration ||
+        loaded.get(affectedIndex)?.id !== action.photoId
+      )
+        return;
       const updated = {
         ...photo,
         ...(action.field === "selectionState"
@@ -1021,17 +1155,37 @@ export function renderApp(
       photoView.hidden = false;
       photoView.focus();
       resetTransform();
-      renderPhotoShell();
+      const previewGeneration = ++requestGeneration;
+      photoAbortController.abort();
+      photoAbortController = new AbortController();
+      const signal = photoAbortController.signal;
+      cancelPendingImageLoads(stage, true);
+      renderPhotoShell(previewGeneration);
       busy = false;
       updateControls();
-      await showPreview(requestGeneration);
-      await persistPosition();
-      status.textContent = "Last change undone.";
+      await showPreview(previewGeneration, signal);
+      if (
+        generation !== sourceGeneration ||
+        previewGeneration !== requestGeneration ||
+        currentPhoto()?.id !== action.photoId
+      )
+        return;
+      const persisted = await persistPosition();
+      if (
+        persisted &&
+        generation === sourceGeneration &&
+        previewGeneration === requestGeneration &&
+        currentPhoto()?.id === action.photoId
+      )
+        status.textContent = "Last change undone.";
     } catch {
-      setConnected(false, "Connection lost before Undo was confirmed.");
+      if (generation === sourceGeneration)
+        setConnected(false, "Connection lost before Undo was confirmed.");
     } finally {
-      busy = false;
-      updateControls();
+      if (generation === sourceGeneration) {
+        busy = false;
+        updateControls();
+      }
     }
   };
 
@@ -1186,19 +1340,45 @@ export function renderApp(
     void (async () => {
       busy = true;
       status.textContent = "Reconnecting…";
+      const sourceOwner = sourceGeneration;
+      const photoId = currentPhoto()?.id;
+      const generation = ++requestGeneration;
+      photoAbortController.abort();
+      photoAbortController = new AbortController();
+      const signal = photoAbortController.signal;
+      cancelPendingImageLoads(stage, true);
       updateControls();
-      const start = alignedStart(currentIndex);
-      const end = Math.min(total, start + WINDOW_SIZE);
-      for (let index = start; index < end; index += 1) loaded.delete(index);
-      await loadWindow(start, sourceGeneration, true);
-      const refreshed = await showPreview(requestGeneration);
-      const persisted = refreshed && (await persistPosition());
-      if (refreshed && persisted) {
-        setConnected(true);
-        status.textContent = "Connected. Current state refreshed.";
+      try {
+        const start = alignedStart(currentIndex);
+        const end = Math.min(total, start + WINDOW_SIZE);
+        for (let index = start; index < end; index += 1) loaded.delete(index);
+        await loadWindow(start, sourceOwner, true, signal, "high");
+        if (
+          sourceOwner !== sourceGeneration ||
+          generation !== requestGeneration ||
+          currentPhoto()?.id !== photoId
+        )
+          return;
+        const refreshed = await showPreview(generation, signal);
+        const persisted = refreshed && (await persistPosition());
+        if (
+          refreshed &&
+          persisted &&
+          sourceOwner === sourceGeneration &&
+          generation === requestGeneration
+        ) {
+          setConnected(true);
+          status.textContent = "Connected. Current state refreshed.";
+        }
+      } finally {
+        if (
+          sourceOwner === sourceGeneration &&
+          generation === requestGeneration
+        ) {
+          busy = false;
+          updateControls();
+        }
       }
-      busy = false;
-      updateControls();
     })();
   });
   previous.addEventListener("click", () => void moveTo(currentIndex - 1));

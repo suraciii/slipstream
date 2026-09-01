@@ -1282,8 +1282,8 @@ test("hydrated Grid thumbnails render without thumbnail API requests", async ({
   await thumbnail.click();
   const preview = page.locator("[data-stage] img");
   await expect(preview).toBeVisible();
-  await expect(preview).not.toHaveAttribute("fetchpriority", "low");
-  await expect(preview).not.toHaveAttribute("decoding", "async");
+  await expect(preview).toHaveAttribute("fetchpriority", "high");
+  await expect(preview).toHaveAttribute("decoding", "async");
 });
 
 test("source switching reaches Ready while Grid derivatives remain held", async ({
@@ -1324,9 +1324,17 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
     await scrolledDerivative;
     expect(derivativeRequests).toBeGreaterThan(requestsBeforeScroll);
 
+    const pendingGridImage = await page
+      .locator(".photo-cell img")
+      .first()
+      .elementHandle();
+    expect(pendingGridImage).not.toBeNull();
     await page.getByRole("button", { name: "Refresh" }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
     await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+    expect(
+      await pendingGridImage!.evaluate((image) => image.hasAttribute("src")),
+    ).toBe(false);
 
     await page
       .getByRole("button", { name: /^Held Derivatives 70 Photos/ })
@@ -1342,7 +1350,126 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
   }
 });
 
-test("a stale source response cannot replace a newer source", async ({
+test("leaving Photo View cancels a pending review image transfer", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "photo.jpg"), await jpeg());
+  const running = await server(base, root);
+  const [photoId] = await browseIds(running.url);
+  const previewResponse = await fetch(
+    `${running.url}/api/photos/${photoId}/preview`,
+  );
+  expect(previewResponse.ok).toBe(true);
+  const preview = (await previewResponse.json()) as { url?: string };
+  expect(preview.url).toContain("/review/");
+
+  let release!: () => void;
+  const reviewHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/derivatives/**/review/**", (route) =>
+    reviewHeld.then(() => route.continue()).catch(() => undefined),
+  );
+  try {
+    await page.goto(running.url);
+    const reviewRequest = page.waitForRequest((request) =>
+      new URL(request.url()).pathname.includes("/review/"),
+    );
+    await page.locator('[data-photo-index="0"]').click();
+    await reviewRequest;
+    const pendingReviewImage = await page
+      .locator("[data-stage] img")
+      .elementHandle();
+    expect(pendingReviewImage).not.toBeNull();
+
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.getByText(/^Ready · 1 Photos$/)).toBeVisible();
+    expect(
+      await pendingReviewImage!.evaluate((image) => image.hasAttribute("src")),
+    ).toBe(false);
+  } finally {
+    release();
+    await page.unroute("**/api/derivatives/**/review/**");
+  }
+});
+
+test("source switching aborts a pending current-Photo Preview request", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  await createSet(running.url, "Preview Abort Target");
+
+  let release!: () => void;
+  const previewHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let heldUrl: string | undefined;
+  await page.route("**/api/photos/*/preview", (route) => {
+    heldUrl = route.request().url();
+    return previewHeld.then(() => route.continue()).catch(() => undefined);
+  });
+  try {
+    await page.goto(running.url);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect.poll(() => heldUrl).toBeTruthy();
+    const canceledUrl = heldUrl!;
+    const previewCanceled = page.waitForEvent(
+      "requestfailed",
+      (request) => request.url() === canceledUrl,
+    );
+
+    await page
+      .getByRole("button", { name: /^Preview Abort Target 8 Photos/ })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Preview Abort Target",
+    );
+    await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+    await previewCanceled;
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/preview");
+  }
+});
+
+test("opening Photo View aborts Grid fallback thumbnail requests", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+
+  let release!: () => void;
+  const thumbnailHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let heldUrl: string | undefined;
+  await page.route("**/api/photos/*/thumbnail", (route) => {
+    heldUrl = route.request().url();
+    return thumbnailHeld.then(() => route.continue()).catch(() => undefined);
+  });
+  try {
+    await page.goto(running.url);
+    await expect.poll(() => heldUrl).toBeTruthy();
+    const canceledUrl = heldUrl!;
+    const thumbnailCanceled = page.waitForEvent(
+      "requestfailed",
+      (request) => request.url() === canceledUrl,
+    );
+
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.getByText("1 / 8")).toBeVisible();
+    await thumbnailCanceled;
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/thumbnail");
+  }
+});
+
+test("a superseded source open is aborted before the newer source renders", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -1371,23 +1498,31 @@ test("a stale source response cannot replace a newer source", async ({
       staleHeld = true;
       await staleGate;
     }
-    await route.continue();
+    try {
+      await route.continue();
+    } catch {
+      /* a newer source may abort the intercepted request */
+    }
   });
   try {
     await page.getByRole("button", { name: /^First Source 8 Photos/ }).click();
     await expect.poll(() => staleHeld).toBe(true);
+    const staleCanceled = page.waitForEvent("requestfailed", (request) => {
+      if (
+        request.method() !== "POST" ||
+        new URL(request.url()).pathname !== "/api/browse"
+      )
+        return false;
+      return (
+        (request.postDataJSON() as { photoSetId?: string }).photoSetId ===
+        firstSetId
+      );
+    });
     await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
     await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
 
-    const staleResponse = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/browse" &&
-        response.status() === 200,
-    );
-    release();
-    await staleResponse;
+    await staleCanceled;
     await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
     await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
   } finally {
@@ -1655,8 +1790,150 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await page.goto(running.url);
   const image = page.locator(".photo-cell img").first();
   await image.scrollIntoViewIfNeeded();
-  await expect(image).toHaveAttribute("alt", "Thumbnail unavailable");
+  await expect(image).toHaveAttribute(
+    "alt",
+    "Photo 1 of 1 — Thumbnail unavailable",
+  );
   expect(thumbnailRequests).toHaveLength(0);
+});
+
+test("detached Grid image errors cannot poison the replacement cell", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "photo.jpg"), await jpeg());
+  const running = await server(base, root);
+  const [photoId] = await browseIds(running.url);
+  const response = await fetch(
+    `${running.url}/api/photos/${photoId}/thumbnail`,
+  );
+  expect(response.ok).toBe(true);
+
+  await page.goto(running.url);
+  const currentImage = page.locator(".photo-cell img").first();
+  await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
+  const detachedImage = await currentImage.elementHandle();
+  expect(detachedImage).not.toBeNull();
+
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  expect(await detachedImage!.evaluate((image) => image.isConnected)).toBe(
+    false,
+  );
+  await detachedImage!.evaluate((image) =>
+    image.dispatchEvent(new Event("error")),
+  );
+
+  await expect(currentImage).toHaveAttribute("alt", "Photo 1 of 1");
+  await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
+});
+
+test("a completed mutation cannot reopen or advance a superseding source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const { setId } = await createSet(running.url, "Mutation Target");
+  await page.goto(running.url);
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  let release!: () => void;
+  const stateHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  await page.route("**/api/photos/*/state", async (route) => {
+    held = true;
+    await stateHeld;
+    try {
+      await route.continue();
+    } catch {
+      /* the page may close only during failed test cleanup */
+    }
+  });
+  try {
+    await page.getByRole("button", { name: "Select" }).click();
+    await expect.poll(() => held).toBe(true);
+    const mutationCompleted = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/state") &&
+        response.status() === 200,
+    );
+
+    await page
+      .getByRole("button", { name: /^Mutation Target 2 Photos/ })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Mutation Target",
+    );
+    await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+    release();
+    await mutationCompleted;
+
+    await expect(page.locator("[data-review]")).toBeHidden();
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Mutation Target",
+    );
+    await expect
+      .poll(
+        async () =>
+          (await state(running.url, setId)).members[0]!.selectionState,
+      )
+      .toBe("selected");
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/state");
+  }
+});
+
+test("an Undo Preview continuation cannot label or persist a newer Photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const [firstPhotoId] = await browseIds(running.url);
+  await page.goto(running.url);
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+
+  let release!: () => void;
+  const previewHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  await page.route(`**/api/photos/${firstPhotoId}/preview`, async (route) => {
+    held = true;
+    await previewHeld;
+    try {
+      await route.continue();
+    } catch {
+      /* navigating to the newer Photo aborts the Undo Preview */
+    }
+  });
+  try {
+    await page.getByRole("button", { name: /^Undo/ }).click();
+    await expect.poll(() => held).toBe(true);
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText("2 / 2")).toBeVisible();
+    release();
+    await expect(page.getByText("Last change undone.")).toHaveCount(0);
+  } finally {
+    release();
+    await page.unroute(`**/api/photos/${firstPhotoId}/preview`);
+  }
 });
 
 test("opening a Photo from the Grid persists the Photo Set position", async ({
@@ -1784,6 +2061,7 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
   const { base, root } = await fixture();
   await writePhotos(root, 130);
   const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
   await openGrid(page, running.url, "All Photos");
 
   let expired = false;
@@ -1829,7 +2107,7 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
   try {
     const viewport = page.locator("[data-grid-viewport]");
     await viewport.evaluate((element) => {
-      element.scrollTop = element.scrollHeight;
+      element.scrollTop = 30 * 178;
       element.dispatchEvent(new Event("scroll"));
     });
     await expect.poll(() => reopenAttempts).toBe(1);
@@ -1918,6 +2196,81 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
   ).toBeVisible();
 });
 
+test("navigation promotes an aborted adjacent window to current priority", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 1100 });
+  await openGrid(page, running.url, "All Photos");
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    Object.defineProperty(viewport, "clientWidth", {
+      configurable: true,
+      value: 900,
+    });
+    Object.defineProperty(viewport, "clientHeight", {
+      configurable: true,
+      value: 900,
+    });
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    viewport.scrollTop = 3 * 178;
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.locator('[data-photo-index="59"]')).toHaveCount(1);
+  await expect(page.locator('[data-photo-index="60"]')).toHaveCount(0);
+
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let boundaryRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      boundaryRequests += 1;
+      if (boundaryRequests === 1) {
+        await firstGate;
+        try {
+          await route.continue();
+        } catch {
+          /* current navigation aborts the adjacent request */
+        }
+        return;
+      }
+      await route.continue();
+    },
+  );
+  try {
+    await page.locator('[data-photo-index="59"]').evaluate((cell) => {
+      (cell as HTMLButtonElement).click();
+    });
+    await expect(page.getByText("60 / 70")).toBeVisible();
+    await expect.poll(() => boundaryRequests).toBe(1);
+
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect.poll(() => boundaryRequests).toBe(2);
+    await expect(page.getByText("61 / 70")).toBeVisible();
+  } finally {
+    releaseFirst();
+  }
+});
+
 test("a throttled boundary window cannot wedge Photo View or Back to Grid", async ({
   page,
 }) => {
@@ -1941,7 +2294,11 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
     async (route) => {
       boundaryRequests += 1;
       await boundaryGate;
-      await route.continue();
+      try {
+        await route.continue();
+      } catch {
+        /* Back to Grid aborts the Photo-owned boundary request */
+      }
     },
   );
   const viewport = page.locator("[data-grid-viewport]");
@@ -1951,7 +2308,9 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   await page.locator('[data-photo-index="59"]').click();
   await expect(page.getByText("60 / 70")).toBeVisible();
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByText("61 / 70")).toBeVisible();
+  // The boundary Photo waits for its shared facts; Back to Grid must remain
+  // available instead of claiming the unavailable Photo is already open.
+  await expect(page.getByText("60 / 70")).toBeVisible();
   // The boundary window is still loading; Back to Grid must stay available.
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),

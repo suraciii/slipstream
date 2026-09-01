@@ -174,9 +174,9 @@ Duplicate requests for one cache identity share one in-flight job. Leaving Photo
 
 The browser treats source control and current-Photo requests as foreground work. Grid thumbnail transfer, bounded look-ahead, adjacent Preview preparation, and scan progress are background work. Background work must not occupy browser network or rendering capacity in a way that delays a new source request or an already available control.
 
-Each source opening owns one client request generation. Starting a newer generation cancels fetch-based work from the prior generation, detaches its Grid cells, and rejects any late response or failure from changing current state. A stale Browse Snapshot opened after supersession is explicitly closed.
+Each source opening and current Photo owns a client request generation. Starting a newer generation aborts fetch-based work from the prior generation and rejects any late response or failure from changing current state. Before a superseded Grid or Photo View is detached or hidden, the browser explicitly removes every pending image source so an already-started transfer cannot continue owning an HTTP connection. A stale Browse Snapshot opened after supersession is explicitly closed.
 
-Grid thumbnail transfer uses lower browser priority than source and window requests, and thumbnail decoding does not synchronously gate interaction. Scroll events may request the next bounded window immediately, but Grid DOM reconstruction is coalesced to at most one render per animation frame. Photo View's current Preview retains foreground priority.
+Grid thumbnail transfer and adjacent Preview preparation use lower browser priority than source, window, and current-Photo requests. Grid and Photo View image decoding is asynchronous, while Photo View's current Preview retains foreground network priority. Scroll events may request the next bounded window immediately, but Grid DOM reconstruction is coalesced to at most one render per animation frame.
 
 ### Loading Feedback
 
