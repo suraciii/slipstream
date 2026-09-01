@@ -2492,6 +2492,43 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
 }
 
 #[tokio::test]
+async fn browse_windows_hydrate_only_current_thumbnail_manifests() {
+    let (base, config) = prepare_fixture();
+    let original = config.library_root.join("photo.jpg");
+    jpeg_fixture(&original, 90, 45, [192, 64, 32]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let before_generation = published_photo_summary(&application, &photo_id).await;
+    assert_eq!(before_generation.preview.thumbnail_url, None);
+
+    let thumbnail = application.thumbnail(&photo_id).await.unwrap();
+    let thumbnail_url = thumbnail.url.unwrap();
+    assert!(thumbnail_url.starts_with("/api/derivatives/"));
+    assert!(thumbnail_url.contains("/thumbnail/"));
+    let hydrated = published_photo_summary(&application, &photo_id).await;
+    assert_eq!(
+        hydrated.preview.thumbnail_url.as_deref(),
+        Some(thumbnail_url.as_str())
+    );
+
+    // A source revision invalidates the old manifest for Browse Window
+    // hydration even though the old derivative remains on disk.
+    jpeg_fixture(&original, 91, 46, [32, 192, 64]);
+    application.rescan().await.unwrap();
+    let after_revision = published_photo_summary(&application, &photo_id).await;
+    assert_eq!(after_revision.preview.thumbnail_url, None);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let (base, config) = prepare_fixture();
     let original = config.library_root.join("photo.jpg");

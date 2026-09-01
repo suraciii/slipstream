@@ -91,6 +91,8 @@ pub struct PreviewWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<&'static str>,
 }
 
@@ -99,6 +101,7 @@ pub(crate) fn photo_summary_indexed_with_url(
     originals: &[slipstream_core::OriginalRecord],
     originals_by_id: &std::collections::HashMap<String, usize>,
     preview_url: Option<String>,
+    thumbnail_url: Option<String>,
 ) -> PhotoSummary {
     let original = |id: &Option<String>, kind: &'static str| {
         id.as_ref().and_then(|id| {
@@ -137,6 +140,7 @@ pub(crate) fn photo_summary_indexed_with_url(
                 .zip(photo.preview_height)
                 .map(|(width, height)| width.max(height) < 2560),
             url: preview_url,
+            thumbnail_url,
             message: (!photo.available).then_some("Original File is unavailable"),
         },
     }

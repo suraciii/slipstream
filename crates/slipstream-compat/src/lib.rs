@@ -491,6 +491,16 @@ mod tests {
             "browse photo summaries document the hydrated current preview URL"
         );
         assert!(
+            values.iter().any(|v| {
+                v["photos"][0]["preview"]["thumbnailUrl"]
+                    .as_str()
+                    .is_some_and(|url| {
+                        url.starts_with("/api/derivatives/") && url.contains("/thumbnail/")
+                    })
+            }),
+            "browse photo summaries document the hydrated current thumbnail URL"
+        );
+        assert!(
             values
                 .iter()
                 .any(|v| v["state"] == "ready" && v["stale"] == true)
