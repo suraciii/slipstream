@@ -146,7 +146,7 @@ The response also makes Preview Source, actual dimensions, and Preview Capabilit
 
 A native extraction failure is bounded to the affected Photo and candidate. The worker releases native memory and records an actionable internal error without exposing absolute paths or native stack data to the browser.
 
-If all candidates fail, Preview state becomes `unavailable`. The scheduler must not retry continuously. A source change, explicit rescan, or explicit retry may make it eligible again.
+If all candidates fail, Preview state becomes `unavailable`. Only terminal no-usable-source outcomes (`Malformed`, `Unsupported`, and `NoUsablePreview`) seed this durable state. Hard native failures such as `ResourceLimit`, `Io`, and `Internal` remain transient service errors and must not seed durable `unavailable`, so later requests can retry them. The scheduler must not retry continuously. A source change, explicit rescan, or explicit retry may make it eligible again.
 
 If the server stops during generation, a temporary file is not considered a valid Derivative. Startup or later cache maintenance may remove abandoned temporary files.
 

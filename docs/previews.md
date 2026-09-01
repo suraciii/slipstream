@@ -66,7 +66,7 @@ Slipstream must not automatically generate every Library Preview. Demand-driven 
 
 ## Failure Behavior
 
-If a matching JPEG is corrupt, Slipstream may try the RAW embedded JPEG. The interface must report the source it ultimately uses.
+If a matching JPEG is corrupt and a RAW Original exists, Slipstream must try the RAW Original's embedded JPEG candidates, largest first. If no embedded candidate is usable, Slipstream must mark the Photo Preview unavailable. The interface must report the source it ultimately uses.
 
 If extraction, decoding, orientation, or derivative generation fails for every allowed source, Slipstream must mark the Photo Preview unavailable. It must not substitute an unrelated file or generic RAW development without identifying a different contract.
 
