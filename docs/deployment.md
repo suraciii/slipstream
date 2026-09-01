@@ -74,7 +74,7 @@ unrelated move, multiple roots, or per-file relinking.
 
 1. Stop every Slipstream process using the state database. Preserve sidecars
    for recovery instead of deleting them.
-2. Create and record a verified canonical schema-v4 backup (see Backup).
+2. Create and record a verified canonical schema-v5 backup (see Backup).
 3. Change `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor. Keep
    the state directory and database basename unchanged. Ensure the proposed
    Folder is mounted read-only at the same absolute path inside the container.
@@ -85,7 +85,7 @@ unrelated move, multiple roots, or per-file relinking.
      run --rm --no-deps slipstream expand-library
    ```
 
-The offline command rejects a running database, sidecars, non-v4 state, an
+The offline command rejects a running database, sidecars, non-v5 state, an
 unrelated Folder, descriptor mismatch, invalid remembered Locations, and
 scan-limit failures. It commits the binding and Location changes in one
 admitted transaction, then completes a normal scan before reporting success.
@@ -104,12 +104,14 @@ prior Folder.
    docker compose --env-file /path/to/slipstream.env -f compose.yaml up -d
    ```
 
-3. Verify `GET /healthz`, the Library Overview, a Photo Set browse read, one
-   state mutation, undo, and a derivative read. Compare the SQLite schema and
+3. Verify `GET /healthz`, the Library Overview, one bounded File Location
+   read, an Album browse read, one state mutation, undo, and a derivative read.
+   Compare the SQLite schema and
    database binding with the pre-cutover record.
 4. Confirm Original File hashes are unchanged.
 
 Operators verify exact persisted state by comparing a bounded protocol
 traversal or an offline read-only state projection against the pre-cutover
-record; no HTTP route materializes the complete Library or complete Photo Set
-membership. Acceptance tooling is operator-provided.
+record; no HTTP route materializes the complete Library, complete Folder tree,
+complete recursive Folder membership, or complete Album membership. Acceptance
+tooling is operator-provided.

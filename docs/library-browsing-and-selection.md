@@ -1,20 +1,23 @@
 # Library Browsing and Selection
 
-A Photographer opens Slipstream to browse the Photo Library, find Photos, and record decisions. Browsing must become useful before a large Library has transferred every Photo fact or generated every Preview. Slipstream therefore uses one progressively loaded Library Browser for `All Photos` and Photo Sets.
+A Photographer opens Slipstream to browse the Photo Library, find Photos, and record decisions. Browsing must become useful before a large Library has transferred every Photo fact, every Album member, or every Original Folder. Slipstream therefore uses one progressively loaded Library Browser for `All Photos`, File Locations, and Albums.
 
 ## Library Browser
 
-The Library Browser is Slipstream's primary screen. It must open directly to the `All Photos` Grid rather than a Photo Set landing page. Source navigation must show:
+The Library Browser is Slipstream's primary screen. It must open directly to the `All Photos` Grid rather than an Album landing page. Source navigation must show:
 
 - the Photo Library as the `All Photos` source;
-- each Photo Set as another source;
-- the Photo count for each source;
+- the read-only Library Folder root and its Original Folders under a `File Locations` section;
+- each Album under a separate `Albums` section;
+- the Photo count for each displayed source;
 - current Library loading or scan status; and
-- whether a Photo Set has a saved position.
+- whether an Album has a saved position.
 
-A wide viewport may keep source navigation beside the Grid. A narrow viewport may present the same sources through a compact control or drawer. Changing source must not require entering a separate workflow.
+A wide viewport may keep source navigation beside the Grid. A narrow viewport may present the same sources through a compact control or drawer. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
-Opening Slipstream must not require the browser to download every Photo fact or every Photo Set member. The source list and counts must become available from a bounded summary response.
+Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. File Locations must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
+
+All Folder windows retained together must come from the same Published Library. If a rescan replaces that publication while File Locations are loading, Slipstream must refresh File Locations rather than append children from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
 
 The first product uses two views:
 
@@ -23,16 +26,17 @@ The first product uses two views:
 
 The Photographer opens Photo View by activating a Grid cell. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source.
 
-Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder management, keywording, publishing, or RAW adjustment controls.
+Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or RAW adjustment controls.
 
 ## Source Order
 
 Each source owns one order:
 
 - `All Photos` uses deterministic Capture Time order.
-- A Photo Set uses explicit membership position.
+- An Original Folder filters that same order to one recursive Folder subtree.
+- An Album uses explicit membership position.
 
-When the Photographer opens or changes a source, Slipstream fixes that source's ordered Photo IDs for the open view. A rescan may refresh availability, Selection State, Rating, and Preview facts, but it must not insert, remove, or reorder Photos in that open view. Reopening or refreshing the source may use a newly published order.
+When the Photographer opens or changes a source, Slipstream fixes that source's ordered Photo IDs for the open view. A rescan may refresh availability, Selection State, Rating, Preview facts, and File Location navigation, but it must not insert, remove, or reorder Photos in that open view. Reopening or refreshing the source may use a newly published order or Folder subtree.
 
 `All Photos` must use this deterministic order:
 
@@ -43,7 +47,9 @@ When the Photographer opens or changes a source, Slipstream fixes that source's 
 
 The Photo's ordering Location is its RAW Original Location when the Photo contains RAW. Otherwise it is its JPEG Original Location.
 
-Photo Set order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, and rescans must not reorder a Photo Set.
+Original Folder order must use the `All Photos` order filtered by component-aware Folder ancestry. A Folder named `a` must not include a sibling named `ab`. Folder filtering must count a RAW/JPEG pair once by the parent of its ordering Original Location.
+
+Album order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, Original Folder changes, and rescans must not reorder an Album.
 
 ## Progressive Grid Loading
 
@@ -65,7 +71,7 @@ A Grid cell must show, when available:
 - unavailable state; and
 - Preview failure without removing the Photo from its position.
 
-Thumbnail completion must not change source order, Selection State, Rating, or saved Photo Set position.
+Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
 
 Thumbnail, Preview, scan, and bounded look-ahead loading must run in the background. Rebuildable or superseded loading must not delay source changes, navigation, already available controls, or returning between Grid View and Photo View. Changing source or view must cancel pending image transfers and requests owned only by the previous source, Photo, or view; hiding obsolete loading is not sufficient when it would continue consuming capacity. Slipstream may wait only when the requested action depends on confirmed facts or persistence, such as opening a source's first bounded window or safely completing a Selection State change before advancing.
 
@@ -107,13 +113,27 @@ On a new state store with no published Library, the browser may show initializat
 
 ## Saved Position
 
-Slipstream must remember the last Photo shown in Photo View for each Photo Set. Grid scrolling alone does not change durable saved position. Opening that Photo Set must return to the saved Photo when it is still a member and available.
+Slipstream must remember the last Photo shown in Photo View for each Album. Grid scrolling alone does not change durable saved position. Opening that Album must return to the saved Photo when it is still a member and available.
 
 If the saved Photo is unavailable, Slipstream must move to the next available member by membership position and wrap once to the first available member. If no member is available, Slipstream must keep the saved member current.
 
-Removing the saved Photo from the Photo Set clears that Set's saved position. The next opening starts at its first available member, or its first member when none are available.
+Removing the saved Photo from the Album clears that Album's saved position. The next opening starts at its first available member, or its first member when none are available.
 
-The first product does not persist an `All Photos` position across browser reloads. Grid scroll position and the current `All Photos` Photo are browser-local.
+The first product does not persist an `All Photos` or Original Folder position across browser reloads. Grid scroll position and the current Photo in those sources are browser-local.
+
+## Album Management
+
+The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique case-insensitively within the flat Album list. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
+
+The Photographer must be able to rename an Album and delete an Album after a confirmation that Photos and Original Files remain unchanged. Deleting the open Album must return to `All Photos` or another valid source without leaving an unusable current source.
+
+Photo View must let the Photographer add the current Photo to one or more Albums. Adding a Photo that already belongs to an Album must not create a duplicate membership. When the current source is an Album, Photo View must let the Photographer remove the current Photo from that Album.
+
+A confirmed membership addition appends the Photo after existing members. Removing a Photo must compact later membership positions without changing their relative order. Removing the saved or current Photo must apply the saved-position rules before the Album is next opened.
+
+Album mutations must persist before Slipstream presents them as complete. Changing source or Photo must not cancel an admitted persistence operation, but a late response from an obsolete UI generation must not overwrite the current source, current Photo, or current error state.
+
+The first Album-management interface does not require Grid multi-select, drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums.
 
 ## Selection State
 
@@ -186,9 +206,13 @@ Keyboard actions must follow the same persistence and undo rules as visible cont
 
 ## Failure Behavior
 
+If a File Location window fails to load, Slipstream must retain already loaded Folder nodes, identify the failed range, and offer retry without collapsing unrelated navigation. If its publication expired, Slipstream must replace the retained File Locations with one coherent current publication and identify that scan results changed them.
+
 If a Grid or Photo window fails to load, Slipstream must retain already loaded content, identify the failed range, and offer retry without returning to an empty application screen.
 
 If the current Preview cannot load, Slipstream must keep the Photo in source order, identify the failure, and allow navigation without forcing a selection decision.
+
+If an Album creation, rename, delete, or membership change cannot persist, Slipstream must identify the affected Album and action. It must retain a recoverable current source and must not present the failed change as complete.
 
 If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
 
@@ -200,7 +224,9 @@ If an ephemeral server-side browse snapshot expires or is lost after server rest
 
 A Library contains 36,997 Photos. Slipstream displays the Library count and first Grid window without transferring all 36,997 Photo facts. Scrolling loads later windows while the source order remains stable.
 
-The Photographer opens `26春节`, activates its fourth Grid cell, and later returns to the source list. Reopening `26春节` returns to that saved Photo when it remains available.
+The Photographer opens the Album `26春节`, activates its fourth Grid cell, and later returns to the source list. Reopening that Album returns to the saved Photo when it remains available.
+
+The filesystem also contains the Original Folder `RAW/26春节`. Opening it shows Photos from that Folder and its descendants in Capture Time order. Its matching name does not connect it to the Album or change Album membership.
 
 A rescan discovers 100 new Photos while the Photographer is viewing the Library. The open Grid does not insert them or move existing cells. A completion notice offers refresh; reopening `All Photos` includes the new Photos in Capture Time order.
 
@@ -210,4 +236,4 @@ The Photographer drags a Photo to the right. A selected indicator grows with the
 
 A Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. Grid and Photo navigation show `Z`, then `A`, even though the filenames sort in the opposite order.
 
-A Photo Set explicitly contains `shoot/A.JPG` at position 0 and `shoot/Z.JPG` at position 1, while `Z` has the earlier Capture Time. That Photo Set shows `A`, then `Z`. `All Photos` shows `Z`, then `A`.
+An Album explicitly contains `shoot/A.JPG` at position 0 and `shoot/Z.JPG` at position 1, while `Z` has the earlier Capture Time. That Album shows `A`, then `Z`. `All Photos` and the `shoot` Original Folder show `Z`, then `A`.

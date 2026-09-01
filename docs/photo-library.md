@@ -1,4 +1,4 @@
-# Photo Library and Photo Sets
+# Photo Library and Albums
 
 A Photographer already owns files and directory organization. Slipstream must add selection and grouping without requiring an import copy or proprietary file layout.
 
@@ -8,7 +8,9 @@ The server operator configures one Library Folder. Slipstream must index support
 
 The Library Folder defines discovery and read-only containment. Its filesystem location must not define the identity of an existing Original File or Photo.
 
-Indexing must not move, rename, rewrite, or delete an Original File. Selecting an arbitrary server filesystem directory from the browser is not required.
+An Original Folder is the Library Folder itself or a real descendant directory represented by one or more known Original Locations. Slipstream must present Original Folders as read-only File Locations. The Library Folder remains the root File Location even when the Library is empty. Slipstream must not present any other empty directory or directory containing no known supported Original as a product object.
+
+Indexing must not move, rename, rewrite, or delete an Original File or Original Folder. Selecting an arbitrary server filesystem directory from the browser is not required.
 
 If the configured Library Folder does not exist, is not a directory, or cannot be read, Slipstream must identify the failure and must not present a partially indexed Folder as current.
 
@@ -32,7 +34,7 @@ The JPEG Original is not a disposable derivative. It remains an Original File an
 
 An Original File and Photo must keep their persisted identities after first discovery. Their current Original Locations must not be their identities.
 
-Slipstream must retain Photo Set membership, Selection State, and Rating across an ordinary rescan when an Original File remains at the same Location with the same file size and modification time.
+Slipstream must retain Album membership, Selection State, and Rating across an ordinary rescan when an Original File remains at the same Location with the same file size and modification time.
 
 Moving or renaming Original Files outside Slipstream may create a new Photo and leave the prior Photo unavailable. Ordinary rescan must not guess a move or silently transfer state by filename, Capture Time, camera metadata, inode, content similarity, or another heuristic.
 
@@ -47,13 +49,13 @@ Before changing state, Slipstream must prove that the current Library Folder is 
 A successful expansion must:
 
 - preserve every existing Original File and Photo identity;
-- preserve Selection State, Rating, Photo Set membership and order, and saved Photo Set positions;
+- preserve Selection State, Rating, Album membership and order, and saved Album positions;
 - preserve remembered unavailable Photos;
 - discover supported files outside the former Folder as new Photos;
-- leave Photo Set membership unchanged unless the Photographer changes it; and
+- leave Album membership unchanged unless the Photographer changes it; and
 - leave every Original File unchanged.
 
-Slipstream may invalidate and rebuild Capture Time inspection facts, Preview facts, and cached derivatives when their revisions include an old Location. These are derived state and must not replace or reset Selection State, Rating, Photo Sets, membership order, or saved Photo Set positions.
+Slipstream may invalidate and rebuild Capture Time inspection facts, Preview facts, cached derivatives, and derived Original Folder navigation when their inputs include an old Location. These are derived state and must not replace or reset Selection State, Rating, Albums, membership order, or saved Album positions.
 
 Expansion requires a stopped Library and a verified backup. If Slipstream cannot prove the ancestor relationship or preserve every remembered Original Location without conflict, it must reject the expansion without changing the current Library.
 
@@ -63,7 +65,7 @@ For example, expanding `/photos/26-spring` to `/photos` keeps `26-spring/a.ARW` 
 
 ## Capture Time
 
-Capture Time is optional camera metadata. Slipstream uses it to order `All Photos` in the Library Browser. Capture Time must not determine pairing or change a Photo Set's membership order.
+Capture Time is optional camera metadata. Slipstream uses it to order `All Photos` and Original Folder sources in the Library Browser. Capture Time must not determine pairing or change an Album's membership order.
 
 Slipstream must inspect each available Original independently. It must use the first valid base field in this order:
 
@@ -84,17 +86,25 @@ Missing, invalid, or failed capture metadata must not make an otherwise readable
 
 When an Original becomes unavailable, Slipstream must retain its last successfully inspected Capture Time for ordering. When that Original returns with changed file revision facts, Slipstream must replace the retained fact with the result of inspecting the current bytes.
 
-## Photo Sets
+## Physical and Virtual Organization
 
-The Photographer may create, rename, and delete a Photo Set.
+Original Folders and Albums are separate organization axes.
 
-A Photo Set contains explicitly ordered references to Photos. Its membership positions are authoritative whenever the Photographer browses that Photo Set. Capture metadata and rescans must not silently change those positions.
+An Original Folder answers where Original Files are known to exist. Its membership is derived from Original Locations and changes only when a completed scan publishes added, removed, or changed Locations. Remembered unavailable Originals remain projected at their last known Locations. An Original Folder does not own Photos, Selection State, Rating, or saved position.
 
-One Photo may belong to multiple Photo Sets. New members append in the order supplied by the add operation. Only an explicit reorder operation may change the order of existing members. Deleting a Photo Set must not delete or modify a Photo or Original File.
+For Folder browsing, a Photo belongs to the parent directory of its ordering Original Location. The ordering Original Location is the RAW Original Location when the Photo contains RAW. Otherwise it is the JPEG Original Location. A RAW/JPEG pair therefore appears once rather than once per Original File.
 
-The Photographer may add or remove Photos from a Photo Set. A Photo's Selection State and Rating belong to the Photo, not to one membership. The same decision therefore appears in every Photo Set that contains the Photo.
+Selecting an Original Folder must include Photos in that Folder and every descendant Folder. It must include remembered unavailable Photos at their last known Original Locations. The interface must identify this recursive behavior instead of implying that only direct children are shown.
 
-Directory structure and Photo Sets are separate. Indexing a directory must not automatically create a permanent Photo Set for every directory.
+An Album answers how the Photographer wants to use or organize Photos. The Photographer may create, rename, and delete an Album. An Album may be empty and must remain openable and manageable while empty.
+
+An Album contains explicitly ordered references to Photos. Its membership positions are authoritative whenever the Photographer browses that Album. Capture metadata, Original Folder changes, and rescans must not silently change those positions.
+
+One Photo may belong to multiple Albums. New members append in the order supplied by the add operation. Only an explicit reorder operation may change the order of existing members. Deleting an Album must not delete or modify a Photo, Original Location, Original Folder, or Original File.
+
+The Photographer may add or remove Photos from an Album. A Photo's Selection State and Rating belong to the Photo, not to one Album membership. The same decision therefore appears in every Album that contains the Photo.
+
+Indexing a directory must not automatically create an Album. A Folder and an Album may have the same display name, but the interface must keep File Locations and Albums visibly separate. The first product does not provide Album Groups, Smart Albums, synchronized Folder-backed Albums, folder mutation, or automatic move detection.
 
 ## Rescanning
 
@@ -109,8 +119,9 @@ A rescan must:
 - reuse persisted Capture Time facts for unchanged Originals;
 - retain the last successfully inspected Capture Time for a remembered unavailable Original;
 - publish one completed Library snapshot without exposing partial reordering while the rescan runs;
-- leave explicit Photo Set membership positions unchanged;
-- preserve unaffected Photo Sets and decisions;
+- refresh derived File Locations only from that completed publication;
+- leave explicit Album membership positions unchanged;
+- preserve unaffected Albums and decisions;
 - never remove a decision only because a file is temporarily unavailable.
 
 Continuous filesystem watching is not required initially.
@@ -137,4 +148,6 @@ shoot/DSCF0002.RAF
 
 `DSCF0001.RAF` and `DSCF0001.JPG` form one Photo. `DSCF0002.RAF` forms another Photo.
 
-Deleting a Photo Set named `Portfolio candidates` removes the group only. It does not delete its Photos or files.
+The filesystem contains `RAW/26春节`, and the Photographer also creates an Album named `26春节`. The File Location changes when a completed rescan observes changed Original Locations. The Album changes only through explicit membership operations.
+
+Deleting an Album named `Portfolio candidates` removes the virtual group only. It does not delete its Photos, Original Locations, Original Folders, or files.

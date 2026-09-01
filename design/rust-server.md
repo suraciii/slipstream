@@ -7,7 +7,7 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 ## Design Drivers
 
 - Original Files are irreplaceable and require descriptor-confined access.
-- Existing SQLite Library, Photo Set, Selection State, Rating, and saved-position behavior must remain stable.
+- Existing SQLite Library, Album, Selection State, Rating, and saved-position behavior must remain stable through the required v4-to-v5 terminology migration.
 - LibRaw and image processing are blocking native work and must remain bounded.
 - One Photographer and one Photo Library do not justify distributed services, an ORM, or an actor framework.
 - The service must support operator-controlled restart and rollback without modifying Original Files.
@@ -62,7 +62,7 @@ Actix Web `4.15.0` was considered. It supports the required HTTP surface, but it
 
 ### SQLite: rusqlite with bundled SQLite
 
-rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v4 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
+rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v5 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
 
 sqlx `0.9.0` was considered. Its pool, async facade, macro/offline metadata, and generic migration layer do not replace Slipstream's exact schema-shape validation and sidecar admission. It is rejected until concurrent connections or cross-database support become measured requirements.
 
@@ -106,10 +106,10 @@ The service preserves:
 
 - the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
-- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
-- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 as a preserved migration input and v4 as the required writable identity fence;
+- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
+- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 and v4 as preserved migration inputs and v5 as required writable state;
 - exact preservation of existing Original File and Photo IDs as opaque values across migration and Library expansion, without recomputing them from the current Original Location;
-- Location-independent, state-store-unique allocation for every new Original File and Photo ID under v4;
+- Location-independent, state-store-unique allocation for every new Original File and Photo ID under current writable state;
 - source revision text and cache/manifest identity serialization, including Unicode and fractional modification times;
 - matching JPEG before largest usable embedded RAW JPEG;
 - descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
@@ -121,4 +121,4 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3 and v4 schema shapes, legacy-ID preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, and v5 schema shapes, legacy-ID and Album-state preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.

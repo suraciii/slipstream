@@ -16,7 +16,7 @@ Slipstream needs the smallest server-owned application boundary that lets one Ph
 Three kinds of state have separate owners:
 
 1. The filesystem owns Original Files.
-2. SQLite owns Photo identity, Photo Sets, Selection State, Rating, saved Photo Set position, and derivative metadata.
+2. SQLite owns Photo identity, Albums, Selection State, Rating, saved Album position, and derivative metadata.
 3. The browser owns transient gesture, zoom, navigation, and one-level undo state.
 
 No layer may become the only owner of another layer's state.
@@ -49,7 +49,8 @@ One Photo Library Scope owns:
 - current Original Locations;
 - deterministic RAW/JPEG pairing;
 - Photo records and availability;
-- Photo Set membership;
+- Album membership;
+- derived read-only Original Folder navigation;
 - Preview requests.
 
 Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation.
@@ -58,11 +59,11 @@ The Library Folder is a location and discovery boundary, not Photo Library ident
 
 ### Library Browser Scope
 
-The Library Browser is the primary interface. It opens `All Photos` or one Photo Set in a progressively loaded Grid View and opens one current Photo in Photo View.
+The Library Browser is the primary interface. It opens `All Photos`, one read-only Original Folder, or one Album in a progressively loaded Grid View and opens one current Photo in Photo View.
 
-The implementation creates a hidden ephemeral Browse Snapshot when a source opens. Library Snapshots own Capture Time order, while Photo Set Snapshots own explicit membership order. A Snapshot retains only ordered Photo IDs; bounded windows query current Photo facts. [`capture-time-ordering.md`](capture-time-ordering.md) defines metadata authority, rescan behavior, and deterministic ties, while [`library-browsing.md`](library-browsing.md) defines scalable loading and cache behavior.
+The implementation creates a hidden ephemeral Browse Snapshot when a source opens. Library and Original Folder Snapshots own Capture Time order, while Album Snapshots own explicit membership order. A Snapshot retains only ordered Photo IDs; bounded windows query current Photo facts. [`photo-organization.md`](photo-organization.md) defines physical and virtual organization, [`capture-time-ordering.md`](capture-time-ordering.md) defines metadata authority, rescan behavior, and deterministic ties, and [`library-browsing.md`](library-browsing.md) defines scalable loading and cache behavior.
 
-Durable saved position records only the last Photo shown in Photo View for a Photo Set. Grid scroll position, current `All Photos` position, drag position, active animation, zoom, pan, and undo are browser-local.
+Durable saved position records only the last Photo shown in Photo View for an Album. Grid scroll position, current `All Photos` or Original Folder position, drag position, active animation, zoom, pan, and undo are browser-local.
 
 The server is authoritative for Selection State and Rating. The browser must reconcile failed mutations instead of assuming an animation committed them.
 
@@ -94,13 +95,13 @@ At minimum, SQLite stores:
 - Original Location, kind, size, modification time, availability, and derived Capture Time inspection facts;
 - Photo identity and RAW/JPEG references;
 - Preview source, dimensions, cache revision, and failure state;
-- Photo Set identity, name, order, and membership;
+- Album identity, name, order, and membership;
 - Photo Selection State and Rating;
 - per-Photo-Set saved position.
 
 Original bytes, matching JPEG bytes, and embedded RAW JPEG bytes do not belong in SQLite.
 
-Selection State and Rating update in one database transaction per Photo mutation. A mutation may update that Photo Set's saved position in the same transaction. The browser holds one undo description containing the affected Photo, field, prior value, and expected current value; undo uses a compare-and-set transaction so it cannot overwrite a newer change. Photo Set deletion removes membership and saved position, not Photo state or filesystem content.
+Selection State and Rating update in one database transaction per Photo mutation. A mutation may update that Album's saved position in the same transaction. The browser holds one undo description containing the affected Photo, field, prior value, and expected current value; undo uses a compare-and-set transaction so it cannot overwrite a newer change. Album deletion removes membership and saved position, not Photo state or filesystem content.
 
 The first architecture does not write XMP sidecars. Export or synchronization requires a later design because it introduces a second writable source of metadata.
 
@@ -111,9 +112,10 @@ The browser is a client of the server. It receives browser-displayable derivativ
 The server exposes the smallest required surfaces:
 
 - a bounded Library Overview and scan status;
-- creation and bounded traversal of hidden Browse Snapshots for `All Photos` and Photo Sets;
+- bounded direct-child File Location navigation;
+- creation and bounded traversal of hidden Browse Snapshots for `All Photos`, Original Folders, and Albums;
 - current Photo state and Preview metadata;
-- mutations for Photo Set membership, Selection State, Rating, and saved Photo Set position;
+- mutations for Album membership, Selection State, Rating, and saved Album position;
 - a rescan command;
 - derivative responses for thumbnails and review Previews; and
 - transient scan and Preview-ready notifications when useful.
@@ -130,8 +132,9 @@ The initial codebase has these logical modules:
 - **Library** owns root containment, discovery, pairing, and Photo availability.
 - **Preview** owns source selection, embedded JPEG extraction, normalization, cache invalidation, and delivery.
 - **Browsing** owns Library Overview, hidden Browse Snapshots, bounded windows, and source navigation.
-- **Selection** owns Selection State, Rating, and saved Photo Set position.
-- **Photo Set** owns group identity, ordering, and membership.
+- **Selection** owns Selection State, Rating, and saved Album position.
+- **Album** owns virtual group identity, ordering, and membership.
+- **File Locations** derives read-only Original Folder navigation from Published Library Locations.
 - **Protocol** owns browser-server schemas.
 - **Web** owns presentation, gestures, Detail Review, and one-level undo.
 
@@ -156,13 +159,13 @@ The first implementation proves this complete path:
 1. Start the server with one Photo Library directory.
 2. Open the Library Browser.
 3. Index a directory containing one RAW-only Photo and one RAW/JPEG Photo.
-4. Create one Photo Set and add both Photos.
+4. Create one Album and add both Photos.
 5. Display both Photos in a progressively loaded Grid without a complete-Library response.
 6. Display the matching JPEG for the paired Photo in Photo View.
 7. Extract and display the largest usable embedded JPEG for the RAW-only Photo.
 8. Right-swipe one Photo to `selected` and left-swipe the other to `rejected`.
 9. Set one Rating and undo one decision.
-10. Restart the server and restore cached Previews, the Photo Set, decisions, Rating, and saved position.
+10. Restart the server and restore cached Previews, the Album, decisions, Rating, and saved position.
 11. Prove that Original File bytes and metadata are unchanged.
 
 Everything else is deferred until this slice works.
