@@ -148,6 +148,10 @@ pub enum ServerError {
     BrowseLimit,
     Join(String),
     NotPublished,
+    FileLocationsExpired,
+    FolderInvalid,
+    FolderNotFound,
+    FileLocationWindow,
 }
 
 impl fmt::Display for ServerError {
@@ -169,6 +173,14 @@ impl fmt::Display for ServerError {
             Self::NotPublished => formatter.write_str(
                 "Library is initializing; the first completed scan has not published a Library yet",
             ),
+            Self::FileLocationsExpired => {
+                formatter.write_str("File Locations changed with a newer Library publication")
+            }
+            Self::FolderInvalid => formatter.write_str("Original Folder location is invalid"),
+            Self::FolderNotFound => {
+                formatter.write_str("Original Folder is not part of this publication")
+            }
+            Self::FileLocationWindow => formatter.write_str("File Location window is invalid"),
         }
     }
 }

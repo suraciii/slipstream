@@ -253,5 +253,166 @@
         "error": "Cross-origin mutation rejected"
       }
     }
+  },
+  {
+    "name": "file-locations-first-window-binds-publication",
+    "request": {
+      "method": "GET",
+      "path": "/api/file-locations?start=0&limit=60"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "publication": "$publication",
+        "parent": "",
+        "start": 0,
+        "limit": 60,
+        "total": 0,
+        "children": []
+      }
+    },
+    "capture": "publication"
+  },
+  {
+    "name": "file-locations-retained-window-uses-publication",
+    "request": {
+      "method": "GET",
+      "path": "/api/file-locations?publication=$publication&parent=&start=0&limit=60"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "publication": "$publication",
+        "parent": "",
+        "start": 0,
+        "limit": 60,
+        "total": 0,
+        "children": []
+      }
+    }
+  },
+  {
+    "name": "file-locations-window-limit-zero",
+    "request": {
+      "method": "GET",
+      "path": "/api/file-locations?start=0&limit=0"
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "File Location window is invalid"
+      }
+    }
+  },
+  {
+    "name": "file-locations-malformed-parent",
+    "request": {
+      "method": "GET",
+      "path": "/api/file-locations?publication=$publication&parent=%2Fabs&start=0&limit=60"
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Original Folder"
+      }
+    }
+  },
+  {
+    "name": "file-locations-unknown-parent",
+    "request": {
+      "method": "GET",
+      "path": "/api/file-locations?publication=$publication&parent=missing&start=0&limit=60"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Unknown Original Folder"
+      }
+    }
+  },
+  {
+    "name": "folder-source-open-root-empty",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "folder",
+        "folderPath": "",
+        "publication": "$publication"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 0,
+        "position": 0
+      }
+    }
+  },
+  {
+    "name": "folder-source-missing-publication",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "folder",
+        "folderPath": ""
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Folder source"
+      }
+    }
+  },
+  {
+    "name": "folder-source-malformed-path",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "folder",
+        "folderPath": "/abs",
+        "publication": "$publication"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Folder source"
+      }
+    }
+  },
+  {
+    "name": "folder-source-unknown-folder",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "folder",
+        "folderPath": "missing",
+        "publication": "$publication"
+      }
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Unknown Original Folder"
+      }
+    }
   }
 ]

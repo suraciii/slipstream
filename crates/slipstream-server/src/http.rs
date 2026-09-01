@@ -1,4 +1,5 @@
 use super::*;
+use crate::folders::valid_folder_location;
 #[derive(Clone)]
 pub(crate) struct WebRoot {
     path: PathBuf,
@@ -131,6 +132,7 @@ pub(crate) fn create_router_with_web_root(
         .route(HEALTH_PATH, get(healthz))
         .route("/api/overview", get(overview))
         .route("/api/status", get(status))
+        .route("/api/file-locations", get(get_file_locations))
         .route("/api/browse", post(open_browse))
         .route(
             "/api/browse/{token}",
@@ -234,6 +236,10 @@ pub(crate) struct BrowseOpenBody {
     #[serde(default)]
     album_id: Option<String>,
     #[serde(default)]
+    folder_path: Option<String>,
+    #[serde(default)]
+    publication: Option<String>,
+    #[serde(default)]
     photo_id: Option<String>,
 }
 
@@ -257,10 +263,23 @@ pub(crate) async fn open_browse(
         None => None,
     };
     let source = match body.source.as_str() {
-        "library" if body.album_id.is_none() => BrowseSourceRequest::Library,
-        "album" => match body.album_id.filter(|id| valid_id(id)) {
+        "library" if body.album_id.is_none() && body.folder_path.is_none() => {
+            BrowseSourceRequest::Library
+        }
+        "album" if body.folder_path.is_none() => match body.album_id.filter(|id| valid_id(id)) {
             Some(id) => BrowseSourceRequest::Album(id),
             None => return api_error(StatusCode::BAD_REQUEST, "Invalid Album source"),
+        },
+        "folder" if body.album_id.is_none() => match (body.folder_path, body.publication) {
+            (Some(location), Some(publication))
+                if !publication.is_empty() && valid_folder_location(&location) =>
+            {
+                BrowseSourceRequest::Folder {
+                    location,
+                    publication,
+                }
+            }
+            _ => return api_error(StatusCode::BAD_REQUEST, "Invalid Folder source"),
         },
         _ => return api_error(StatusCode::BAD_REQUEST, "Invalid browse source"),
     };
@@ -288,6 +307,27 @@ pub(crate) async fn get_browse_window(
     }
 }
 
+pub(crate) async fn get_file_locations(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some((publication, parent, start, limit)) = file_locations_query(request.uri().query())
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "File Location window is invalid");
+    };
+    let Some(parent) = percent_decode(&parent) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Original Folder");
+    };
+    match state
+        .application
+        .file_locations(publication.as_deref(), &parent, start, limit)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn close_browse(
     State(state): State<HttpState>,
     axum::extract::Path(token): axum::extract::Path<String>,
@@ -301,6 +341,57 @@ pub(crate) async fn close_browse(
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
         .expect("valid response")
+}
+
+pub(crate) fn file_locations_query(
+    query: Option<&str>,
+) -> Option<(Option<String>, String, usize, usize)> {
+    let mut publication = None;
+    let mut parent = String::new();
+    let mut start = None;
+    let mut limit = None;
+    for part in query?.split('&') {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "publication" if !value.is_empty() => publication = Some(value.to_owned()),
+            "parent" if !value.is_empty() => parent = value.to_owned(),
+            "start" => start = value.parse().ok(),
+            "limit" => limit = value.parse().ok(),
+            _ => {}
+        }
+    }
+    Some((publication, parent, start?, limit?))
+}
+
+/// Decodes one query value as UTF-8 using `application/x-www-form-urlencoded`
+/// semantics: `+` means space and `%HH` escapes decode to bytes.
+pub(crate) fn percent_decode(value: &str) -> Option<String> {
+    let bytes: Vec<u8> = value
+        .bytes()
+        .map(|byte| if byte == b'+' { b' ' } else { byte })
+        .collect();
+    let bytes = bytes.as_slice();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 > bytes.len() {
+                    return None;
+                }
+                let hex = bytes.get(index + 1..index + 3)?;
+                let high = (hex[0] as char).to_digit(16)?;
+                let low = (hex[1] as char).to_digit(16)?;
+                decoded.push((high * 16 + low) as u8);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 pub(crate) fn browse_query(query: Option<&str>) -> Option<(usize, usize)> {
@@ -888,6 +979,22 @@ impl From<ServerError> for ApiError {
             ServerError::BrowseLimit => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "Browse window is invalid",
+            },
+            ServerError::FileLocationsExpired => Self {
+                status: StatusCode::CONFLICT,
+                message: "File Locations expired",
+            },
+            ServerError::FolderInvalid => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Invalid Original Folder",
+            },
+            ServerError::FolderNotFound => Self {
+                status: StatusCode::NOT_FOUND,
+                message: "Unknown Original Folder",
+            },
+            ServerError::FileLocationWindow => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "File Location window is invalid",
             },
             ServerError::NotPublished => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,
