@@ -781,6 +781,7 @@ impl DerivativeScheduler {
         identity.validate()?;
         let key = derivative_cache_key(&identity)?;
         let manifest_key = manifest_identity(&identity)?;
+        let mut detached = Vec::new();
         let cell;
         {
             let mut state = self.inner.state.lock().expect("scheduler state poisoned");
@@ -813,13 +814,8 @@ impl DerivativeScheduler {
                 return Err(CacheError::Saturated);
             }
             if let Some(existing) = state.in_flight.get(&key) {
-                let existing_generation =
-                    (existing.manifest_key == manifest_key).then_some(existing.generation);
                 let existing_meta = Arc::clone(&existing.meta);
                 let existing_cell = existing.cell.clone();
-                if let Some(generation) = existing_generation {
-                    state.authoritative.insert(manifest_key.clone(), generation);
-                }
                 let mut existing_priority = existing_meta
                     .priority
                     .lock()
@@ -850,7 +846,22 @@ impl DerivativeScheduler {
                     .in_flight
                     .values()
                     .any(|existing| existing.manifest_key == manifest_key);
-                if !manifest_in_flight {
+                if manifest_in_flight {
+                    state.authoritative.insert(manifest_key.clone(), generation);
+                    let mut detached_keys = Vec::new();
+                    state.queue.retain(|job| {
+                        if job.manifest_key == manifest_key && job.key != key {
+                            detached.push(job.cell.clone());
+                            detached_keys.push(job.key.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for detached_key in detached_keys {
+                        state.in_flight.remove(&detached_key);
+                    }
+                } else {
                     state.authoritative.insert(manifest_key.clone(), generation);
                 }
                 state.in_flight.insert(
@@ -874,6 +885,9 @@ impl DerivativeScheduler {
                 self.inner.signal.notify_one();
             }
             state.waiter_count += 1;
+        }
+        for cell in detached {
+            cell.complete(Err(CacheError::Invalidated));
         }
         let result = cell.wait();
         let mut state = self.inner.state.lock().expect("scheduler state poisoned");
@@ -1031,6 +1045,14 @@ fn worker_loop(inner: Arc<SchedulerInner>) {
         {
             state.in_flight.remove(&job.key);
         }
+        // All result paths, including cache hits and failures, must honor takeover
+        // before a waiter can observe their result.
+        let result = if state.authoritative.get(&job.manifest_key).copied() == Some(job.generation)
+        {
+            result
+        } else {
+            Err(CacheError::Invalidated)
+        };
         job.cell.complete(result);
         if state.closed && state.queue.is_empty() && state.active == 0 && state.in_flight.is_empty()
         {
@@ -1041,12 +1063,32 @@ fn worker_loop(inner: Arc<SchedulerInner>) {
     }
 }
 
+fn job_is_authoritative(inner: &SchedulerInner, job: &QueuedJob) -> bool {
+    let state = inner.state.lock().expect("scheduler state poisoned");
+    state.authoritative.get(&job.manifest_key).copied() == Some(job.generation)
+}
+
+fn authoritative_result(
+    inner: &SchedulerInner,
+    job: &QueuedJob,
+    result: Result<DerivativeResult, CacheError>,
+) -> Result<DerivativeResult, CacheError> {
+    if job_is_authoritative(inner, job) {
+        result
+    } else {
+        Err(CacheError::Invalidated)
+    }
+}
+
 fn generate_one(inner: &SchedulerInner, job: &QueuedJob) -> Result<DerivativeResult, CacheError> {
     let final_path = inner.cache.derivative_path(&job.key);
     if let Some(failure) =
         read_failure(&inner.cache.failure_path(&job.key), &job.identity, &job.key)
     {
         let mut state = inner.state.lock().expect("scheduler state poisoned");
+        if state.authoritative.get(&job.manifest_key).copied() != Some(job.generation) {
+            return Err(CacheError::Invalidated);
+        }
         state.failed.insert(
             job.key.clone(),
             DerivativeFailure {
@@ -1058,19 +1100,23 @@ fn generate_one(inner: &SchedulerInner, job: &QueuedJob) -> Result<DerivativeRes
             },
         );
         drop(state);
-        return stale_or_failure(inner, &job.identity, failure);
+        return authoritative_result(inner, job, stale_or_failure(inner, &job.identity, failure));
     }
     if let Ok(manifest) = read_manifest(&inner.cache.manifest_path(&job.identity)?)
         && manifest_matches_identity(&manifest, &job.identity)
         && manifest.key == job.key
         && let Some(facts) = inspect_cached(&final_path, job.identity.target, &manifest)
     {
-        return Ok(DerivativeResult::Ready(cached_from_manifest(
-            &inner.cache,
-            &manifest,
-            facts,
-            false,
-        )));
+        return authoritative_result(
+            inner,
+            job,
+            Ok(DerivativeResult::Ready(cached_from_manifest(
+                &inner.cache,
+                &manifest,
+                facts,
+                false,
+            ))),
+        );
     }
     let prior = read_manifest(&inner.cache.manifest_path(&job.identity)?)
         .ok()
@@ -1152,35 +1198,30 @@ fn persist_or_stale(
     error: DerivativeError,
 ) -> Result<DerivativeResult, CacheError> {
     let classified = failure_for_error(error);
-    let authoritative = {
-        let state = inner.state.lock().expect("scheduler state poisoned");
-        state.authoritative.get(&job.manifest_key).copied() == Some(job.generation)
-    };
-    if authoritative
-        && matches!(
-            classified.kind,
-            DerivativeFailureKind::Unsupported
-                | DerivativeFailureKind::Malformed
-                | DerivativeFailureKind::ResourceLimit
-        )
-    {
+    let mut state = inner.state.lock().expect("scheduler state poisoned");
+    if state.authoritative.get(&job.manifest_key).copied() != Some(job.generation) {
+        return Err(CacheError::Invalidated);
+    }
+    if matches!(
+        classified.kind,
+        DerivativeFailureKind::Unsupported
+            | DerivativeFailureKind::Malformed
+            | DerivativeFailureKind::ResourceLimit
+    ) {
         let _ = persist_failure(
             &inner.cache.failure_path(&job.key),
             failure_record(&job.identity, &job.key, classified.kind),
         );
-        let mut state = inner.state.lock().expect("scheduler state poisoned");
-        if state.authoritative.get(&job.manifest_key).copied() == Some(job.generation) {
-            state.failed.insert(job.key.clone(), classified.clone());
-        }
+        state.failed.insert(job.key.clone(), classified.clone());
     }
-    if let Some(manifest) = prior
+    drop(state);
+    let result = if let Some(manifest) = prior
         && let Some(facts) = inspect_cached(
             &inner.cache.derivative_path(&manifest.key),
             job.identity.target,
             &manifest,
-        )
-    {
-        return Ok(DerivativeResult::Ready(CachedDerivative {
+        ) {
+        Ok(DerivativeResult::Ready(CachedDerivative {
             cache_path: inner.cache.derivative_path(&manifest.key),
             cache_key: manifest.key,
             source: manifest.source,
@@ -1193,11 +1234,13 @@ fn persist_or_stale(
             profile: manifest.color_profile.into(),
             generated: false,
             stale: true,
-        }));
-    }
-    Ok(DerivativeResult::Failed(DerivativeFailure {
-        kind: classified.kind,
-    }))
+        }))
+    } else {
+        Ok(DerivativeResult::Failed(DerivativeFailure {
+            kind: classified.kind,
+        }))
+    };
+    authoritative_result(inner, job, result)
 }
 
 fn stale_or_failure(
@@ -1822,7 +1865,7 @@ mod tests {
     use std::{
         fs,
         sync::{
-            Arc, Condvar, Mutex,
+            Arc, Barrier, Condvar, Mutex,
             atomic::{AtomicU64, Ordering},
         },
         time::Duration,
@@ -1862,12 +1905,19 @@ mod tests {
     }
 
     fn scheduler(process: Option<Arc<DerivativeProcess>>) -> (DerivativeScheduler, PathBuf) {
+        scheduler_with_workers(process, 1)
+    }
+
+    fn scheduler_with_workers(
+        process: Option<Arc<DerivativeProcess>>,
+        workers: usize,
+    ) -> (DerivativeScheduler, PathBuf) {
         let (cache_path, original_path) = directories();
         let cache = CacheDirectory::open(&cache_path, &original_path).unwrap();
         let scheduler = DerivativeScheduler::with_options(
             cache,
             DerivativeSchedulerOptions {
-                workers: 1,
+                workers,
                 queue_capacity: 64,
                 waiter_capacity: 64,
                 process,
@@ -1875,6 +1925,28 @@ mod tests {
         )
         .unwrap();
         (scheduler, cache_path)
+    }
+
+    fn wait_for_waiter_count(scheduler: &DerivativeScheduler, minimum: usize) {
+        loop {
+            let state = scheduler.inner.state.lock().unwrap();
+            if state.waiter_count >= minimum {
+                return;
+            }
+            drop(state);
+            thread::yield_now();
+        }
+    }
+
+    fn wait_for_queued_key(scheduler: &DerivativeScheduler, key: &str) {
+        loop {
+            let state = scheduler.inner.state.lock().unwrap();
+            if state.queue.iter().any(|job| job.key == key) {
+                return;
+            }
+            drop(state);
+            thread::yield_now();
+        }
     }
 
     #[test]
@@ -2063,7 +2135,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_requests_coalesce_and_priority_is_strict_fifo() {
+    fn duplicate_requests_coalesce_before_newer_identity_supersedes_old_work() {
         let started = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let started_for_job = Arc::clone(&started);
@@ -2102,39 +2174,303 @@ mod tests {
                 scheduler.generate(identity(1.0), vec![1], DerivativePriority::Current)
             })
         };
+        wait_for_waiter_count(&scheduler, 2);
+        let adjacent_identity = identity(2.0);
+        let adjacent_key = derivative_cache_key(&adjacent_identity).unwrap();
         let adjacent = {
             let scheduler = scheduler.clone();
             std::thread::spawn(move || {
-                scheduler.generate(identity(2.0), vec![2], DerivativePriority::Adjacent)
+                scheduler.generate(adjacent_identity, vec![2], DerivativePriority::Adjacent)
             })
         };
+        wait_for_queued_key(&scheduler, &adjacent_key);
         let background = {
             let scheduler = scheduler.clone();
             std::thread::spawn(move || {
                 scheduler.generate(identity(3.0), vec![3], DerivativePriority::Background)
             })
         };
-        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(adjacent.join().unwrap(), Err(CacheError::Invalidated));
+        assert_eq!(
+            *started.0.lock().unwrap(),
+            vec![1],
+            "queued superseded work must not be processed"
+        );
         *release.0.lock().unwrap() = true;
         release.1.notify_all();
-        let active_result = active.join().unwrap();
-        let duplicate_result = duplicate.join().unwrap();
-        let ready = [active_result, duplicate_result]
-            .into_iter()
-            .find_map(|result| match result {
-                Ok(DerivativeResult::Ready(ready)) => Some(ready),
-                Err(CacheError::Invalidated) => None,
-                other => panic!("unexpected duplicate result: {other:?}"),
-            })
-            .expect("one coalesced waiter must receive the generated derivative");
+        assert_eq!(active.join().unwrap(), Err(CacheError::Invalidated));
+        assert_eq!(duplicate.join().unwrap(), Err(CacheError::Invalidated));
+        let background_result = background.join().unwrap().unwrap();
+        let DerivativeResult::Ready(ready) = background_result else {
+            panic!("newer identity should publish the current derivative")
+        };
         assert!(ready.generated && !ready.stale);
-        for result in [adjacent.join().unwrap(), background.join().unwrap()] {
-            assert!(matches!(
-                result,
-                Ok(DerivativeResult::Ready(_)) | Err(CacheError::Invalidated)
-            ));
-        }
-        assert_eq!(*started.0.lock().unwrap(), vec![1, 2, 3]);
+        assert_eq!(*started.0.lock().unwrap(), vec![1, 3]);
+        scheduler.shutdown().unwrap();
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn newer_manifest_identity_supersedes_in_flight_generation() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let entered_for_process = Arc::clone(&entered);
+        let release_for_process = Arc::clone(&release);
+        let processed_for_process = Arc::clone(&processed);
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+            processed_for_process
+                .lock()
+                .unwrap()
+                .push(bytes.first().copied().unwrap_or_default());
+            if bytes.first() == Some(&1) {
+                entered_for_process.wait();
+                release_for_process.wait();
+            }
+            let (width, height) = if bytes.first() == Some(&2) {
+                (16, 8)
+            } else {
+                (8, 8)
+            };
+            Ok(Derivative {
+                width,
+                height,
+                profile: DerivativeProfile::Srgb,
+                jpeg: jpeg(width, height),
+            })
+        });
+        let (scheduler, cache_path) = scheduler_with_workers(Some(process), 2);
+        let old_identity = identity(11.0);
+        let new_identity = identity(12.0);
+        let old_key = derivative_cache_key(&old_identity).unwrap();
+        let new_key = derivative_cache_key(&new_identity).unwrap();
+        let old_scheduler = scheduler.clone();
+        let old_value = old_identity.clone();
+        let old = thread::spawn(move || {
+            old_scheduler.generate(old_value, vec![1], DerivativePriority::Current)
+        });
+        entered.wait();
+
+        let new_scheduler = scheduler.clone();
+        let new_value = new_identity.clone();
+        let new = thread::spawn(move || {
+            new_scheduler.generate(new_value, vec![2], DerivativePriority::Current)
+        });
+        let new_result = new.join().unwrap().unwrap();
+        let DerivativeResult::Ready(new_ready) = new_result else {
+            panic!("new identity should publish a current derivative")
+        };
+        assert!(new_ready.generated && !new_ready.stale);
+        assert_eq!(new_ready.cache_key, new_key);
+        assert!(scheduler.cache().derivative_path(&new_key).exists());
+        assert!(!scheduler.cache().derivative_path(&old_key).exists());
+        let manifest_path = scheduler.cache().manifest_path(&new_identity).unwrap();
+        assert_eq!(read_manifest(&manifest_path).unwrap().key, new_key);
+
+        let duplicate_scheduler = scheduler.clone();
+        let duplicate_value = old_identity.clone();
+        let duplicate = thread::spawn(move || {
+            duplicate_scheduler.generate(duplicate_value, vec![1], DerivativePriority::Current)
+        });
+        wait_for_waiter_count(&scheduler, 2);
+
+        release.wait();
+        assert_eq!(old.join().unwrap(), Err(CacheError::Invalidated));
+        assert_eq!(duplicate.join().unwrap(), Err(CacheError::Invalidated));
+        assert!(!scheduler.cache().derivative_path(&old_key).exists());
+        assert_eq!(read_manifest(&manifest_path).unwrap().key, new_key);
+        assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
+        scheduler.shutdown().unwrap();
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn superseded_in_flight_failure_returns_invalidated() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let entered_for_process = Arc::clone(&entered);
+        let release_for_process = Arc::clone(&release);
+        let processed_for_process = Arc::clone(&processed);
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+            processed_for_process
+                .lock()
+                .unwrap()
+                .push(bytes.first().copied().unwrap_or_default());
+            if bytes.first() == Some(&1) {
+                entered_for_process.wait();
+                release_for_process.wait();
+                return Err(DerivativeError::Malformed);
+            }
+            Ok(Derivative {
+                width: 16,
+                height: 8,
+                profile: DerivativeProfile::Srgb,
+                jpeg: jpeg(16, 8),
+            })
+        });
+        let (scheduler, cache_path) = scheduler_with_workers(Some(process), 2);
+        let old_identity = identity(16.0);
+        let new_identity = identity(17.0);
+        let old_key = derivative_cache_key(&old_identity).unwrap();
+        let new_key = derivative_cache_key(&new_identity).unwrap();
+        let old_scheduler = scheduler.clone();
+        let old = thread::spawn(move || {
+            old_scheduler.generate(old_identity, vec![1], DerivativePriority::Current)
+        });
+        entered.wait();
+
+        let new_scheduler = scheduler.clone();
+        let new_value = new_identity.clone();
+        let new = thread::spawn(move || {
+            new_scheduler.generate(new_value, vec![2], DerivativePriority::Current)
+        });
+        let new_result = new.join().unwrap().unwrap();
+        let DerivativeResult::Ready(new_ready) = new_result else {
+            panic!("new identity should publish a current derivative")
+        };
+        assert!(new_ready.generated && !new_ready.stale);
+        assert_eq!(new_ready.cache_key, new_key);
+        assert!(scheduler.cache().derivative_path(&new_key).exists());
+
+        release.wait();
+        assert_eq!(old.join().unwrap(), Err(CacheError::Invalidated));
+        assert!(!scheduler.cache().derivative_path(&old_key).exists());
+        assert_eq!(
+            read_manifest(&scheduler.cache().manifest_path(&new_identity).unwrap())
+                .unwrap()
+                .key,
+            new_key
+        );
+        assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
+        scheduler.shutdown().unwrap();
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn newer_manifest_identity_detaches_queued_older_generation() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let entered_for_process = Arc::clone(&entered);
+        let release_for_process = Arc::clone(&release);
+        let processed_for_process = Arc::clone(&processed);
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+            processed_for_process
+                .lock()
+                .unwrap()
+                .push(bytes.first().copied().unwrap_or_default());
+            if bytes.first() == Some(&1) {
+                entered_for_process.wait();
+                release_for_process.wait();
+            }
+            Ok(Derivative {
+                width: 8,
+                height: 8,
+                profile: DerivativeProfile::Srgb,
+                jpeg: jpeg(8, 8),
+            })
+        });
+        let (scheduler, cache_path) = scheduler_with_workers(Some(process), 1);
+        let active_identity = identity(21.0);
+        let queued_identity = identity(22.0);
+        let new_identity = identity(23.0);
+        let queued_key = derivative_cache_key(&queued_identity).unwrap();
+        let new_key = derivative_cache_key(&new_identity).unwrap();
+        let active_scheduler = scheduler.clone();
+        let active = thread::spawn(move || {
+            active_scheduler.generate(active_identity, vec![1], DerivativePriority::Current)
+        });
+        entered.wait();
+
+        let queued_scheduler = scheduler.clone();
+        let queued = thread::spawn(move || {
+            queued_scheduler.generate(queued_identity, vec![2], DerivativePriority::Current)
+        });
+        wait_for_queued_key(&scheduler, &queued_key);
+
+        let new_scheduler = scheduler.clone();
+        let new_value = new_identity.clone();
+        let new = thread::spawn(move || {
+            new_scheduler.generate(new_value, vec![3], DerivativePriority::Current)
+        });
+        assert_eq!(queued.join().unwrap(), Err(CacheError::Invalidated));
+        assert_eq!(*processed.lock().unwrap(), vec![1]);
+
+        release.wait();
+        assert_eq!(active.join().unwrap(), Err(CacheError::Invalidated));
+        let new_result = new.join().unwrap().unwrap();
+        let DerivativeResult::Ready(new_ready) = new_result else {
+            panic!("new identity should publish a current derivative")
+        };
+        assert!(new_ready.generated && !new_ready.stale);
+        assert_eq!(new_ready.cache_key, new_key);
+        assert_eq!(*processed.lock().unwrap(), vec![1, 3]);
+        assert!(!scheduler.cache().derivative_path(&queued_key).exists());
+        assert!(scheduler.cache().derivative_path(&new_key).exists());
+        assert_eq!(
+            read_manifest(&scheduler.cache().manifest_path(&new_identity).unwrap())
+                .unwrap()
+                .key,
+            new_key
+        );
+        scheduler.shutdown().unwrap();
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn same_key_concurrent_requests_coalesce_without_duplicate_processing() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let runs = Arc::new(AtomicU64::new(0));
+        let entered_for_process = Arc::clone(&entered);
+        let release_for_process = Arc::clone(&release);
+        let runs_for_process = Arc::clone(&runs);
+        let process: Arc<DerivativeProcess> = Arc::new(move |_, _| {
+            let run = runs_for_process.fetch_add(1, Ordering::AcqRel);
+            if run == 0 {
+                entered_for_process.wait();
+                release_for_process.wait();
+            }
+            Ok(Derivative {
+                width: 8,
+                height: 8,
+                profile: DerivativeProfile::Srgb,
+                jpeg: jpeg(8, 8),
+            })
+        });
+        let (scheduler, cache_path) = scheduler_with_workers(Some(process), 2);
+        let value = identity(31.0);
+        let first_scheduler = scheduler.clone();
+        let first_value = value.clone();
+        let first = thread::spawn(move || {
+            first_scheduler.generate(first_value, vec![1], DerivativePriority::Background)
+        });
+        entered.wait();
+
+        let duplicate_scheduler = scheduler.clone();
+        let duplicate_value = value.clone();
+        let duplicate = thread::spawn(move || {
+            duplicate_scheduler.generate(duplicate_value, vec![1], DerivativePriority::Current)
+        });
+        wait_for_waiter_count(&scheduler, 2);
+        release.wait();
+
+        let first_result = first.join().unwrap().unwrap();
+        let duplicate_result = duplicate.join().unwrap().unwrap();
+        assert!(matches!(first_result, DerivativeResult::Ready(_)));
+        assert!(matches!(duplicate_result, DerivativeResult::Ready(_)));
+        assert_eq!(runs.load(Ordering::Acquire), 1);
+        assert_eq!(
+            first_result, duplicate_result,
+            "coalesced waiters should observe the same derivative result"
+        );
+        assert!(
+            scheduler
+                .cache()
+                .derivative_path(&derivative_cache_key(&value).unwrap())
+                .exists()
+        );
         scheduler.shutdown().unwrap();
         let _ = fs::remove_dir_all(cache_path.parent().unwrap());
     }
