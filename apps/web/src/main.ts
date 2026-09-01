@@ -33,7 +33,7 @@ export function renderApp(
     <main class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
       <section class="browser" data-browser aria-labelledby="browser-title">
-        <aside class="source-panel" data-set-screen aria-label="Library sources">
+        <aside class="source-panel" data-library-screen aria-label="Library sources">
           <h2 id="browser-title">Library</h2>
           <p data-summary-status role="status">Loading Library…</p>
           <div class="source-list" data-source-list></div>
@@ -53,6 +53,7 @@ export function renderApp(
           <dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview Source</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl>
           <p class="status" data-status role="status" aria-live="polite"></p>
           <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
+          <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
           <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
           <div class="photo-controls"><button type="button" data-previous>Previous</button><button type="button" data-detail aria-pressed="false">Detail Review</button><button type="button" data-undo disabled>Undo</button><button type="button" data-next>Next</button></div>
         </section>
@@ -60,7 +61,18 @@ export function renderApp(
     </main>`;
 
   const connection = required<HTMLElement>(root, "[data-connection]");
-  const summaryStatus = required<HTMLElement>(root, "[data-summary-status]");
+  const summaryStatusElement = required<HTMLElement>(
+    root,
+    "[data-summary-status]",
+  );
+  const summaryStatus = {
+    get textContent() {
+      return summaryStatusElement.textContent;
+    },
+    set textContent(value: string) {
+      summaryStatusElement.textContent = value;
+    },
+  };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
@@ -79,12 +91,30 @@ export function renderApp(
   const rating = required<HTMLElement>(root, "[data-rating]");
   const source = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
-  const status = required<HTMLElement>(root, "[data-status]");
+  const statusElement = required<HTMLElement>(root, "[data-status]");
+  // Photo-status writes are epoch-sequenced so a late Album settlement can
+  // never overwrite a newer Photo status from any writer.
+  let photoStatusEpoch = 0;
+  const status = {
+    get textContent() {
+      return statusElement.textContent;
+    },
+    set textContent(value: string) {
+      photoStatusEpoch += 1;
+      statusElement.textContent = value;
+    },
+  };
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
   const previous = required<HTMLButtonElement>(root, "[data-previous]");
   const next = required<HTMLButtonElement>(root, "[data-next]");
   const select = required<HTMLButtonElement>(root, "[data-select]");
+  const albumSelect = required<HTMLSelectElement>(root, "[data-album-select]");
+  const addToAlbum = required<HTMLButtonElement>(root, "[data-add-to-album]");
+  const removeFromAlbum = required<HTMLButtonElement>(
+    root,
+    "[data-remove-from-album]",
+  );
   const reject = required<HTMLButtonElement>(root, "[data-reject]");
   const clear = required<HTMLButtonElement>(root, "[data-clear]");
   const undoButton = required<HTMLButtonElement>(root, "[data-undo]");
@@ -122,6 +152,53 @@ export function renderApp(
     { page: number; children: FolderChild[]; total: number }
   >();
   const expandedFolders = new Set<string>();
+  // In-progress Album management form: create, rename, or a two-step delete
+  // confirmation. Only one form exists at a time and it lives in the Albums
+  // section of the source list. The current model object is the operation's
+  // identity: an asynchronous continuation only clears or updates the form it
+  // still owns, so a newer form is never clobbered by an older settle.
+  type AlbumFormModel =
+    | {
+        kind: "create";
+        formId: string;
+        name: string;
+        pending?: boolean;
+        message?: string;
+      }
+    | {
+        kind: "rename";
+        formId: string;
+        id: string;
+        name: string;
+        pending?: boolean;
+        message?: string;
+      }
+    | {
+        kind: "delete";
+        formId: string;
+        id: string;
+        name: string;
+        pending?: boolean;
+      };
+  let albumFormCounter = 0;
+  const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
+  let albumForm: AlbumFormModel | undefined;
+
+  // Album mutations report on the surface that initiated them. Every write to
+  // a status surface bumps that surface's epoch, so a late Album settlement
+  // can never overwrite a newer status from any writer — Album action, Photo
+  // decision, or scan label alike.
+  let albumActionSequence = 0;
+  let summaryNoticeAction = 0;
+  const ALBUM_NAME_MAXIMUM = 120;
+  const albumNameError = (name: string): string | undefined => {
+    const trimmed = name.trim();
+    if (!trimmed) return "Enter an Album name.";
+    if (Array.from(trimmed).length > ALBUM_NAME_MAXIMUM)
+      return `Album names are at most ${ALBUM_NAME_MAXIMUM} characters.`;
+    return undefined;
+  };
+
   // The most recently attempted source, retained for truthful reconnection
   // instead of silently falling back to All Photos.
   let lastSource:
@@ -254,6 +331,7 @@ export function renderApp(
     folderFailure = undefined;
     folderRequestSequence.clear();
     rootBindOwner = 0;
+    releaseRootBindingWaiters();
     // Re-render at once: retained Folder cards must not stay clickable with
     // an unbound publication, and a cleared failure must remove its Retry
     // control before any handler can dereference it.
@@ -263,10 +341,112 @@ export function renderApp(
   /// Awaits a bound File Location publication. Folder-source requests must
   /// never be sent publicationless: retry and reconnect paths wait for (or
   /// re-establish) the root binding first and report failure truthfully.
+  let rootBindingWaiters: Array<() => void> = [];
+  const releaseRootBindingWaiters = () => {
+    const waiters = rootBindingWaiters;
+    rootBindingWaiters = [];
+    for (const waiter of waiters) waiter();
+  };
   const awaitRootBinding = async () => {
     if (fileLocationPublication) return true;
+    if (rootBindOwner !== 0) {
+      // A root bind is already in flight: await its settlement instead of
+      // reporting no publication while one is on the way.
+      await new Promise<void>((resolve) => {
+        rootBindingWaiters.push(resolve);
+      });
+      return fileLocationPublication !== undefined;
+    }
     await loadFolderWindow("", 0, false);
     return fileLocationPublication !== undefined;
+  };
+
+  /// Sends one admitted Album mutation and reports truthful outcomes.
+  /// Admitted persistence is never aborted by a source or Photo change; the
+  /// response always refreshes the bounded Album list, while notices stay
+  /// owned by the initiating action, surface, generation, and epoch.
+  const mutateAlbum = (
+    path: string,
+    body: unknown,
+    failure: (httpStatus: number) => string,
+    surface: "photo" | "summary",
+    photoGeneration = requestGeneration,
+  ): Promise<{ ok: boolean; announce: (text: string) => void }> => {
+    const action = ++albumActionSequence;
+    const photoEpoch = photoStatusEpoch;
+    const stillNewest = () => action === albumActionSequence;
+    // The photo surface only accepts the newest action's notice, for the
+    // Photo generation that initiated it, while Photo View is open and no
+    // newer status of any kind has been written since initiation.
+    const ownsPhotoSurface = () =>
+      stillNewest() &&
+      surface === "photo" &&
+      photoGeneration === requestGeneration &&
+      currentPhotoMode &&
+      photoEpoch === photoStatusEpoch;
+    const reportToSummary = (text: string) => {
+      // A failure that no longer owns the Photo surface still matters:
+      // surface it in the Library summary unless a newer Album notice
+      // already owns that channel.
+      if (action > summaryNoticeAction) {
+        summaryNoticeAction = action;
+        summaryStatus.textContent = text;
+      }
+    };
+    const report = (text: string) => {
+      if (ownsPhotoSurface()) status.textContent = text;
+      else reportToSummary(text);
+    };
+    return (async () => {
+      try {
+        const response = await fetcher(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          report(failure(response.status));
+          // Only transport-class failures change global connectivity: a
+          // duplicate name (409) or unknown Album (404) is a normal,
+          // answered request, not a disconnection — and a superseded
+          // action's failure must not disconnect a newer success.
+          if (response.status >= 500 && stillNewest()) setConnected(false);
+          return { ok: false, announce: () => {} };
+        }
+        // A stale settlement refreshes the bounded data but leaves the
+        // current connection state to whichever action owns the UI now.
+        try {
+          await refreshOverviewState({
+            connectivity: stillNewest(),
+            action,
+          });
+        } catch {
+          // The mutation itself persisted; the summary refresh failing must
+          // not silently hide that success. A superseded action must not
+          // disconnect the UI a newer action already restored.
+          if (!stillNewest()) return { ok: true, announce: () => {} };
+          setConnected(false);
+          if (action > summaryNoticeAction) {
+            summaryNoticeAction = action;
+            summaryStatus.textContent =
+              "The Album was saved but the Library summary could not be refreshed.";
+          }
+        }
+        return {
+          ok: true,
+          announce: (text: string) => {
+            if (ownsPhotoSurface()) status.textContent = text;
+          },
+        };
+      } catch {
+        // A transport failure of the newest action is a real connectivity
+        // loss; a superseded action's failure still surfaces as a notice
+        // but must not disconnect UI a newer action already restored.
+        report(failure(0));
+        if (stillNewest()) setConnected(false);
+        return { ok: false, announce: () => {} };
+      }
+    })();
   };
 
   const describeRange = (parent: string, page: number) =>
@@ -302,9 +482,13 @@ export function renderApp(
         await loadFolderWindow("", 0);
         // Only claim a coherent reload when the new root actually bound; a
         // failed rebind keeps its own failure message and retry control.
-        if (fileLocationPublication)
+        if (fileLocationPublication) {
+          // Deliberate retake: this recovery message outranks a standing
+          // Album notice because it asks the user to act now.
+          summaryNoticeAction = 0;
           summaryStatus.textContent =
             "Scan results changed File Locations. Reloaded the current Folders.";
+        }
         return;
       }
       if (!response.ok) throw new Error("file locations failed");
@@ -337,9 +521,12 @@ export function renderApp(
           // Only the failed range's own success clears its retry state; an
           // unrelated range loading must not hide a still-failed range.
           folderFailure = undefined;
-          summaryStatus.textContent = overview
-            ? scanLabel(overview.scan)
-            : "Library ready";
+          // Follow the Library summary's notice rule: a standing Album
+          // notice is not erased by this background status write.
+          if (summaryNoticeAction === 0)
+            summaryStatus.textContent = overview
+              ? scanLabel(overview.scan)
+              : "Library ready";
         }
         // Any successful load restores the connection a failed range marked
         // offline; the global connection banner must not stay stuck.
@@ -355,6 +542,8 @@ export function renderApp(
       // dropped: repeated failed exploration cannot grow retained state.
       folderRequestSequence.delete(parent);
       folderFailure = { parent, page };
+      // Deliberate retake: the failed range's retry control must surface.
+      summaryNoticeAction = 0;
       summaryStatus.textContent = `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`;
       setConnected(false);
       renderSources();
@@ -362,7 +551,10 @@ export function renderApp(
       // Clear ownership only when this request still owns it: a reset that
       // invalidated the bind must not let a discarded request clear a newer
       // owner's flag.
-      if (unboundRoot && rootBindOwner === sequence) rootBindOwner = 0;
+      if (unboundRoot && rootBindOwner === sequence) {
+        rootBindOwner = 0;
+        releaseRootBindingWaiters();
+      }
     }
   };
 
@@ -475,6 +667,17 @@ export function renderApp(
   };
 
   const renderSources = () => {
+    // Background refreshes rebuild the source list; an Album form input that
+    // held focus keeps its focus and caret through the rebuild.
+    const focused = document.activeElement;
+    const focusedFormId =
+      focused instanceof HTMLInputElement
+        ? focused.dataset.albumFormId
+        : undefined;
+    const focusedSelection =
+      focused instanceof HTMLInputElement
+        ? [focused.selectionStart, focused.selectionEnd]
+        : undefined;
     sourceList.replaceChildren();
     const libraryButton = sourceButton(
       "All Photos",
@@ -540,9 +743,29 @@ export function renderApp(
     rootRow.append(rootExpand, rootCard);
     sourceList.append(rootRow, folderChildrenFragment(""));
 
+    const albumHeadingRow = document.createElement("div");
+    albumHeadingRow.className = "album-heading";
     const albumHeading = document.createElement("h3");
     albumHeading.textContent = "Albums";
-    sourceList.append(albumHeading);
+    const newAlbum = document.createElement("button");
+    newAlbum.type = "button";
+    newAlbum.className = "album-new";
+    newAlbum.textContent = "New Album";
+    newAlbum.addEventListener("click", () => {
+      albumForm = { kind: "create", formId: nextAlbumFormId(), name: "" };
+      renderSources();
+    });
+    albumHeadingRow.append(albumHeading, newAlbum);
+    sourceList.append(albumHeadingRow);
+
+    if (albumForm?.kind === "create") {
+      sourceList.append(
+        albumCreateForm(() => {
+          albumForm = undefined;
+          renderSources();
+        }),
+      );
+    }
     for (const set of sets) {
       const button = sourceButton(
         set.name,
@@ -552,8 +775,255 @@ export function renderApp(
         false,
       );
       button.addEventListener("click", () => void openSource("album", set));
-      sourceList.append(button);
+      const row = document.createElement("div");
+      row.className = "album-row";
+      row.append(button, albumTools(set));
+      sourceList.append(row);
     }
+    if (focusedFormId) {
+      const restored = sourceList.querySelector<HTMLInputElement>(
+        `input[data-album-form-id="${focusedFormId}"]`,
+      );
+      if (restored) {
+        const end = restored.value.length;
+        const start = Math.min(focusedSelection?.[0] ?? end, end);
+        const finish = Math.min(focusedSelection?.[1] ?? end, end);
+        restored.focus();
+        restored.setSelectionRange(start, finish);
+      }
+    }
+  };
+
+  const albumNameInput = (
+    model: Extract<AlbumFormModel, { kind: "create" | "rename" }>,
+    initial: string,
+  ) => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = "name";
+    input.dataset.albumFormId = model.formId;
+    input.setAttribute("aria-label", "Album name");
+    // Keep the model's draft current so a re-render during editing preserves
+    // exactly what the user typed, and validate by Unicode code points like
+    // the server instead of native UTF-16 code-unit maxlength.
+    const draft = model;
+    input.addEventListener("input", () => {
+      if (albumForm === draft) {
+        draft.name = input.value;
+        if (draft.message) delete draft.message;
+      }
+    });
+    input.value = initial;
+    return input;
+  };
+
+  const albumFormMessage = () => {
+    const message = document.createElement("p");
+    message.className = "album-form-message";
+    message.setAttribute("role", "alert");
+    return message;
+  };
+
+  const albumCreateForm = (cancel: () => void) => {
+    const model: AlbumFormModel = albumForm as {
+      kind: "create";
+      formId: string;
+      name: string;
+      pending?: boolean;
+    };
+    const form = document.createElement("form");
+    form.className = "album-form";
+    form.setAttribute("aria-label", "Create Album");
+    const input = albumNameInput(model, model.name);
+    const message = albumFormMessage();
+    message.textContent = model.message ?? "";
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.textContent = "Create Album";
+    save.disabled = Boolean(model.pending);
+    const abort = document.createElement("button");
+    abort.type = "button";
+    abort.textContent = "Cancel";
+    abort.addEventListener("click", cancel);
+    form.append(input, save, abort, message);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = input.value.trim();
+      const invalid = albumNameError(name);
+      if (invalid) {
+        // Stored in the model so a background re-render cannot erase it.
+        model.message = invalid;
+        message.textContent = invalid;
+        return;
+      }
+      delete model.message;
+      message.textContent = "";
+      model.name = name;
+      model.pending = true;
+      renderSources();
+      void (async () => {
+        const { ok: created } = await mutateAlbum(
+          "/api/albums",
+          { name },
+          (httpStatus) =>
+            httpStatus === 409
+              ? "An Album with this name already exists."
+              : "The Album could not be created.",
+          "summary",
+        );
+        // Ownership check: a newer form opened meanwhile keeps its own state.
+        if (albumForm === model) {
+          if (created) albumForm = undefined;
+          else model.pending = false;
+        }
+        renderSources();
+      })();
+    });
+    return form;
+  };
+
+  const albumTools = (set: AlbumSummary) => {
+    const tools = document.createElement("div");
+    tools.className = "album-tools";
+    if (albumForm?.kind === "rename" && albumForm.id === set.id) {
+      const model: AlbumFormModel = albumForm as {
+        kind: "rename";
+        formId: string;
+        id: string;
+        name: string;
+        pending?: boolean;
+      };
+      const form = document.createElement("form");
+      form.className = "album-form";
+      form.setAttribute("aria-label", "Rename Album");
+      const input = albumNameInput(model, model.name);
+      const message = albumFormMessage();
+      message.textContent = model.message ?? "";
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.textContent = "Save Name";
+      save.disabled = Boolean(model.pending);
+      const abort = document.createElement("button");
+      abort.type = "button";
+      abort.textContent = "Cancel";
+      abort.addEventListener("click", () => {
+        albumForm = undefined;
+        renderSources();
+      });
+      form.append(input, save, abort, message);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = input.value.trim();
+        if (!name || name === set.name) {
+          albumForm = undefined;
+          renderSources();
+          return;
+        }
+        const invalid = albumNameError(name);
+        if (invalid) {
+          // Stored in the model so a background re-render cannot erase it.
+          model.message = invalid;
+          message.textContent = invalid;
+          return;
+        }
+        delete model.message;
+        message.textContent = "";
+        model.name = name;
+        model.pending = true;
+        renderSources();
+        void (async () => {
+          const { ok: renamed } = await mutateAlbum(
+            `/api/albums/${set.id}/rename`,
+            { name },
+            (httpStatus) =>
+              httpStatus === 409
+                ? "An Album with this name already exists."
+                : "The Album could not be renamed.",
+            "summary",
+          );
+          // Ownership check: a newer form opened meanwhile keeps its own state.
+          if (albumForm === model) {
+            if (renamed) albumForm = undefined;
+            else model.pending = false;
+          }
+          renderSources();
+        })();
+      });
+      tools.append(form);
+      return tools;
+    }
+    if (albumForm?.kind === "delete" && albumForm.id === set.id) {
+      const model: AlbumFormModel = albumForm;
+      const confirmBox = document.createElement("div");
+      confirmBox.className = "album-confirm";
+      confirmBox.setAttribute("role", "alert");
+      const text = document.createElement("p");
+      text.textContent = "Photos and Original Files remain unchanged.";
+      const confirmButton = document.createElement("button");
+      confirmButton.type = "button";
+      confirmButton.textContent = "Delete Album";
+      confirmButton.disabled = Boolean(model.pending);
+      const abort = document.createElement("button");
+      abort.type = "button";
+      abort.textContent = "Cancel";
+      abort.addEventListener("click", () => {
+        albumForm = undefined;
+        renderSources();
+      });
+      confirmButton.addEventListener("click", () => {
+        void (async () => {
+          confirmButton.disabled = true;
+          model.pending = true;
+          const { ok: deleted } = await mutateAlbum(
+            `/api/albums/${set.id}/delete`,
+            {},
+            () => "The Album could not be deleted.",
+            "summary",
+          );
+          // Ownership check: a newer form opened while the deletion was
+          // pending keeps its own state and draft.
+          if (albumForm === model) albumForm = undefined;
+          renderSources();
+          if (deleted && sourceKind === "album" && sourceSetId === set.id) {
+            // The open source object is gone; return to the system source.
+            await openSource("library");
+          }
+        })();
+      });
+      confirmBox.append(text, confirmButton, abort);
+      tools.append(confirmBox);
+      return tools;
+    }
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.className = "album-tool";
+    rename.textContent = "Rename";
+    rename.setAttribute("aria-label", `Rename ${set.name}`);
+    rename.addEventListener("click", () => {
+      albumForm = {
+        kind: "rename",
+        formId: nextAlbumFormId(),
+        id: set.id,
+        name: set.name,
+      };
+      renderSources();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "album-tool";
+    remove.textContent = "Delete";
+    remove.setAttribute("aria-label", `Delete ${set.name}`);
+    remove.addEventListener("click", () => {
+      albumForm = {
+        kind: "delete",
+        formId: nextAlbumFormId(),
+        id: set.id,
+        name: set.name,
+      };
+      renderSources();
+    });
+    tools.append(rename, remove);
+    return tools;
   };
   const sourceButton = (
     name: string,
@@ -606,24 +1076,78 @@ export function renderApp(
         const response = await fetcher("/api/status");
         if (!response.ok) continue;
         const scan = (await response.json()) as LibraryOverviewResponse["scan"];
-        summaryStatus.textContent = scanLabel(scan);
+        // Publication polling is background status: it must not erase a
+        // standing Album notice from the Library summary.
+        if (summaryNoticeAction === 0)
+          summaryStatus.textContent = scanLabel(scan);
         if (scan.state === "idle") await loadOverview();
       } catch {
         /* keep polling; the connection status reflects hard failures */
       }
     }
   };
-  const refreshOverviewState = async () => {
+  let overviewRequestSequence = 0;
+  let overviewCommitted = 0;
+  const refreshOverviewState = async (options?: {
+    connectivity?: boolean;
+    action?: number;
+  }) => {
+    // Overview responses commit shared state in commit order: a response may
+    // land only if it is newer than the last COMMITTED overview, so a late
+    // older response cannot revert Albums, counts, titles, or retry state,
+    // while a newer request that FAILS never discards an older success.
+    const request = ++overviewRequestSequence;
     const response = await fetcher("/api/overview");
     if (!response.ok) throw new Error("overview failed");
-    overview = (await response.json()) as LibraryOverviewResponse;
+    const body = (await response.json()) as LibraryOverviewResponse;
+    // Re-check after the body resolves: a slow parse must not let an
+    // obsolete overview revert newer committed state either.
+    if (request <= overviewCommitted) return;
+    overviewCommitted = request;
+    overview = body;
     sets = overview.albums;
-    summaryStatus.textContent = scanLabel(overview.scan);
-    setConnected(true);
+    // The Library summary keeps a standing Album notice until a newer
+    // Album action settles or the user deliberately reloads: background
+    // refreshes (folder recovery, scan polling) must not erase it.
+    const owner = options?.action;
+    const mayTakeSummary =
+      owner !== undefined
+        ? owner >= summaryNoticeAction
+        : summaryNoticeAction === 0;
+    if (mayTakeSummary) {
+      summaryStatus.textContent = scanLabel(overview.scan);
+      // A successfully settled action supersedes any prior notice: clear
+      // the marker so background refreshes may take the summary again.
+      // (A failing action keeps its marker until a newer action settles.)
+      if (owner !== undefined) summaryNoticeAction = 0;
+    }
+    if (options?.connectivity !== false) setConnected(true);
+    // A refreshed Album list must not leave stale presentation behind: the
+    // open Album keeps its (possibly renamed) name on every heading, the
+    // remembered retry source follows the rename, and the current-Photo
+    // membership controls follow the refreshed Album list.
+    if (sourceKind === "album" && sourceSetId) {
+      const open = sets.find((candidate) => candidate.id === sourceSetId);
+      if (open) {
+        sourceSetName = open.name;
+        gridTitle.textContent = sourceSetName;
+        photoTitle.textContent = sourceSetName;
+        if (lastSource?.kind === "album" && lastSource.set?.id === open.id) {
+          lastSource = { ...lastSource, set: open };
+        }
+      }
+    }
+    renderMembershipControls();
     renderSources();
   };
 
+  let overviewLoadSequence = 0;
   const loadOverview = async () => {
+    // A deliberate reload or retry retakes the Library summary channel.
+    // Sequence loads so an older failed load cannot mark a newer successful
+    // load disconnected: only the newest load owns the failure surface.
+    const load = ++overviewLoadSequence;
+    summaryNoticeAction = 0;
     summaryStatus.textContent = "Loading Library summary…";
     try {
       await refreshOverviewState();
@@ -654,6 +1178,7 @@ export function renderApp(
         }
       } else if (!current.published) void pollUntilPublished();
     } catch {
+      if (load !== overviewLoadSequence) return;
       summaryStatus.textContent =
         "Could not reach Slipstream. Check the server and retry.";
       setConnected(false);
@@ -707,6 +1232,8 @@ export function renderApp(
     sourceKind = kind;
     sourceSetId = set?.id;
     sourceFolder = folder;
+    // A new open snapshot ends the previous source's removal memory.
+    removedFromCurrentAlbum.clear();
     sourceSetName =
       set?.name ?? (folder ? `${folder.name} · Folder` : "All Photos");
     gridTitle.textContent = sourceSetName;
@@ -757,9 +1284,12 @@ export function renderApp(
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
         if (generation !== sourceGeneration) return;
-        if (fileLocationPublication)
+        if (fileLocationPublication) {
+          // Deliberate retake: actionable recovery outranks a standing notice.
+          summaryNoticeAction = 0;
           summaryStatus.textContent =
             "Scan results changed File Locations. Reopen the current Folder.";
+        }
         throw new Error("file locations expired");
       }
       if (!response.ok) throw new Error("browse open failed");
@@ -899,6 +1429,8 @@ export function renderApp(
           await refreshOverviewState().catch(() => {});
           await loadFolderWindow("", 0);
           if (generation === sourceGeneration && fileLocationPublication) {
+            // Deliberate retake: actionable recovery outranks a standing notice.
+            summaryNoticeAction = 0;
             summaryStatus.textContent =
               "Scan results changed File Locations. Reopen the current Folder.";
           }
@@ -1264,6 +1796,9 @@ export function renderApp(
     updateControls();
     const previewRequest = showPreview(generation, signal);
     if (!hasKnownPreview) await previewRequest;
+    // A superseded open must not persist or touch controls afterwards: the
+    // newer navigation persists its own position.
+    if (generation !== requestGeneration) return;
     await persistPosition();
     updateControls();
   };
@@ -1293,9 +1828,140 @@ export function renderApp(
     );
     stage.replaceChildren(image);
   };
+  // Membership state that must survive re-renders: in-flight operations are
+  // keyed by action, Album, and Photo (an Add to one Album never blocks a
+  // Remove from another), and Photos already removed from the open Album
+  // stay non-removable in the retained open snapshot.
+  const membershipInFlight = new Set<string>();
+  const membershipKey = (
+    verb: "add" | "remove",
+    albumId: string,
+    photoId: string,
+  ) => `${verb}:${albumId}:${photoId}`;
+  const removedFromCurrentAlbum = new Set<string>();
+
+  /// Populates the current-Photo Album membership controls.
+  const renderMembershipControls = () => {
+    albumSelect.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = sets.length ? "Choose Album…" : "No Albums yet";
+    placeholder.disabled = true;
+    placeholder.selected = true;
+    albumSelect.append(placeholder);
+    for (const set of sets) {
+      const option = document.createElement("option");
+      option.value = set.id;
+      option.textContent = set.name;
+      albumSelect.append(option);
+    }
+    const photo = currentPhoto();
+    const adding = Boolean(
+      photo &&
+        sets.some((set) =>
+          membershipInFlight.has(membershipKey("add", set.id, photo.id)),
+        ),
+    );
+    const removing =
+      Boolean(photo && sourceSetId) &&
+      membershipInFlight.has(membershipKey("remove", sourceSetId!, photo!.id));
+    const inOpenAlbum =
+      sourceKind === "album" &&
+      Boolean(sourceSetId) &&
+      Boolean(photo) &&
+      !removedFromCurrentAlbum.has(photo!.id);
+    albumSelect.disabled = !sets.length || adding;
+    addToAlbum.disabled = !sets.length || !photo || adding;
+    removeFromAlbum.hidden = !inOpenAlbum;
+    removeFromAlbum.disabled = !inOpenAlbum || removing;
+  };
+
+  addToAlbum.addEventListener("click", () => {
+    const photo = currentPhoto();
+    const albumId = albumSelect.value;
+    if (!photo || !albumId) return;
+    const photoId = photo.id;
+    const key = membershipKey("add", albumId, photoId);
+    if (membershipInFlight.has(key)) return;
+    const generation = requestGeneration;
+    membershipInFlight.add(key);
+    void (async () => {
+      addToAlbum.disabled = true;
+      const { ok: added, announce } = await mutateAlbum(
+        `/api/albums/${albumId}/members`,
+        { photoIds: [photoId] },
+        () => "The Photo could not be added to the Album.",
+        "photo",
+        generation,
+      );
+      membershipInFlight.delete(key);
+      // Re-adding to the open Album clears the retained snapshot's removal
+      // mark: the Photo is a member again and may be removed once more.
+      if (added && albumId === sourceSetId) {
+        removedFromCurrentAlbum.delete(photoId);
+      }
+      // Admitted persistence is never aborted by a source change; the
+      // continuation only touches this Photo's controls while it is still
+      // the current Photo of the initiating generation.
+      if (generation === requestGeneration && currentPhoto()?.id === photoId) {
+        renderMembershipControls();
+        if (added) announce("Added to the Album.");
+      } else {
+        renderMembershipControls();
+      }
+    })();
+  });
+
+  removeFromAlbum.addEventListener("click", () => {
+    const photo = currentPhoto();
+    if (
+      !photo ||
+      sourceKind !== "album" ||
+      !sourceSetId ||
+      removedFromCurrentAlbum.has(photo.id)
+    )
+      return;
+    const albumId = sourceSetId;
+    const photoId = photo.id;
+    const key = membershipKey("remove", albumId, photoId);
+    if (membershipInFlight.has(key)) return;
+    const generation = requestGeneration;
+    const snapshotGeneration = sourceGeneration;
+    membershipInFlight.add(key);
+    void (async () => {
+      removeFromAlbum.disabled = true;
+      const { ok: removed, announce } = await mutateAlbum(
+        `/api/albums/${albumId}/members/remove`,
+        { photoId },
+        () => "The Photo could not be removed from the Album.",
+        "photo",
+        generation,
+      );
+      membershipInFlight.delete(key);
+      if (removed && snapshotGeneration === sourceGeneration) {
+        // The member is gone from the Album; within this open snapshot it
+        // must not be removable again. A removal settling after the source
+        // changed must not mark the Photo in a different Album's snapshot.
+        removedFromCurrentAlbum.add(photoId);
+      }
+      // Recomputing the controls re-enables removal after a failure so the
+      // failed action stays retryable.
+      if (generation === requestGeneration && currentPhoto()?.id === photoId) {
+        renderMembershipControls();
+        if (removed)
+          announce(
+            "Removed from the Album. It stays in this open view until reopened.",
+          );
+      } else {
+        renderMembershipControls();
+      }
+    })();
+  });
+
   const renderPhotoShell = (generation = requestGeneration): boolean => {
     const photo = currentPhoto();
     photoTitle.textContent = sourceSetName;
+    renderMembershipControls();
     renderPhotoFacts();
     source.textContent = photo?.preview.source
       ? sourceLabel(photo.preview.source)
@@ -1427,24 +2093,29 @@ export function renderApp(
   const persistPosition = (): Promise<boolean> => {
     if (sourceKind !== "album" || !sourceSetId || !currentPhoto())
       return Promise.resolve(true);
-    const setId = sourceSetId;
+    const albumId = sourceSetId;
     const photoId = currentPhoto()!.id;
     const generation = sourceGeneration;
     const task = progressQueue.then(async () => {
       try {
-        const response = await fetcher(`/api/albums/${setId}/progress`, {
+        const response = await fetcher(`/api/albums/${albumId}/progress`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ photoId }),
         });
+        if (response.status === 404 || response.status === 409) {
+          // The saved-position member is gone or contested: an answered,
+          // expected stale write — not a connectivity loss.
+          return false;
+        }
         if (!response.ok) throw new Error("position rejected");
         sets = sets.map((set) =>
-          set.id === setId ? { ...set, hasSavedPosition: true } : set,
+          set.id === albumId ? { ...set, hasSavedPosition: true } : set,
         );
         renderSources();
         return true;
       } catch {
-        if (generation === sourceGeneration && sourceSetId === setId)
+        if (generation === sourceGeneration && sourceSetId === albumId)
           setConnected(
             false,
             "Album position could not be saved. Retry before making more decisions.",
@@ -1468,7 +2139,7 @@ export function renderApp(
     if (!photo || !connected || busy) return;
     const generation = sourceGeneration;
     const photoIndex = currentIndex;
-    const setId = sourceSetId;
+    const albumId = sourceSetId;
     const prior = undo;
     undo = undefined;
     busy = true;
@@ -1481,7 +2152,7 @@ export function renderApp(
         body: JSON.stringify({
           field,
           value,
-          ...(setId ? { albumId: setId } : {}),
+          ...(albumId ? { albumId } : {}),
         }),
       });
       if (!response.ok) {
@@ -1531,7 +2202,7 @@ export function renderApp(
     const action = undo;
     if (!action || !connected || busy) return;
     const generation = sourceGeneration;
-    const setId = sourceSetId;
+    const albumId = sourceSetId;
     const affectedIndex = Array.from(loaded.entries()).find(
       ([, photo]) => photo.id === action.photoId,
     )?.[0];
@@ -1553,7 +2224,7 @@ export function renderApp(
           field: action.field,
           value: action.priorValue,
           expectedCurrent: action.expectedCurrent,
-          ...(setId ? { albumId: setId } : {}),
+          ...(albumId ? { albumId } : {}),
         }),
       });
       if (!response.ok) {
@@ -1757,18 +2428,28 @@ export function renderApp(
   };
   window.addEventListener("resize", onResize);
   back.addEventListener("click", showGrid);
-  refresh.addEventListener(
-    "click",
-    () =>
-      void openSource(
+  refresh.addEventListener("click", () => {
+    void (async () => {
+      // A Folder reopen needs the File Location binding: never send a
+      // publicationless browse (it can only fail as expired/invalid).
+      if (sourceKind === "folder" && !fileLocationPublication) {
+        await awaitRootBinding();
+        if (!fileLocationPublication) {
+          gridStatus.textContent =
+            "Could not load this source. Retry to continue.";
+          return;
+        }
+      }
+      await openSource(
         sourceKind,
         sourceKind === "album"
           ? sets.find((set) => set.id === sourceSetId)
           : undefined,
         undefined,
         sourceKind === "folder" ? sourceFolder : undefined,
-      ),
-  );
+      );
+    })();
+  });
   retry.addEventListener("click", () => void loadOverview());
   retryPhoto.addEventListener("click", () => {
     void (async () => {
