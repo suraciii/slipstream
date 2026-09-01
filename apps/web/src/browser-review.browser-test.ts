@@ -60,6 +60,11 @@ async function fixture() {
   await mkdir(root);
   return { base, root };
 }
+async function writePhotos(root: string, count: number) {
+  const data = await jpeg();
+  for (let index = 0; index < count; index += 1)
+    await writeFile(join(root, `${String(index).padStart(3, "0")}.jpg`), data);
+}
 async function server(base: string, root: string) {
   const running = await startBrowserServer({ base, root });
   servers.push(running);
@@ -1219,6 +1224,17 @@ test("Grid thumbnails survive virtual re-renders without refetching", async ({
     );
   await expect.poll(loadedThumbnails).toBe(8);
   expect(thumbnailRequests).toHaveLength(8);
+  expect(
+    await page
+      .locator(".photo-cell img")
+      .evaluateAll((images) =>
+        images.every(
+          (image) =>
+            image.getAttribute("fetchpriority") === "low" &&
+            image.getAttribute("decoding") === "async",
+        ),
+      ),
+  ).toBe(true);
   const viewport = page.locator("[data-grid-viewport]");
   for (let _ = 0; _ < 4; _ += 1) {
     await viewport.evaluate((element) =>
@@ -1256,10 +1272,358 @@ test("hydrated Grid thumbnails render without thumbnail API requests", async ({
   const renderedThumbnails = () => page.locator(".photo-cell img").count();
   await expect.poll(renderedThumbnails).toBe(8);
   expect(thumbnailRequests).toHaveLength(0);
-  await expect(page.locator(".photo-cell img").first()).toHaveAttribute(
+  const thumbnail = page.locator(".photo-cell img").first();
+  await expect(thumbnail).toHaveAttribute(
     "src",
     /\/api\/derivatives\/[^/]+\/thumbnail\/[^/]+\.jpg$/,
   );
+  await expect(thumbnail).toHaveAttribute("fetchpriority", "low");
+  await expect(thumbnail).toHaveAttribute("decoding", "async");
+  await thumbnail.click();
+  const preview = page.locator("[data-stage] img");
+  await expect(preview).toBeVisible();
+  await expect(preview).not.toHaveAttribute("fetchpriority", "low");
+  await expect(preview).not.toHaveAttribute("decoding", "async");
+});
+
+test("source switching reaches Ready while Grid derivatives remain held", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await createSet(running.url, "Held Derivatives");
+
+  let release!: () => void;
+  const derivativesHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let derivativeRequests = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.includes("/api/derivatives/"))
+      derivativeRequests += 1;
+  });
+  await page.route("**/api/derivatives/**", (route) =>
+    derivativesHeld.then(() => route.continue()).catch(() => undefined),
+  );
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+    await expect.poll(() => derivativeRequests).toBeGreaterThan(0);
+
+    const viewport = page.locator("[data-grid-viewport]");
+    const requestsBeforeScroll = derivativeRequests;
+    const scrolledDerivative = page.waitForRequest((request) =>
+      new URL(request.url()).pathname.includes("/api/derivatives/"),
+    );
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await scrolledDerivative;
+    expect(derivativeRequests).toBeGreaterThan(requestsBeforeScroll);
+
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+    await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+
+    await page
+      .getByRole("button", { name: /^Held Derivatives 70 Photos/ })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Held Derivatives",
+    );
+    await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+    expect(derivativeRequests).toBeGreaterThan(1);
+  } finally {
+    release();
+    await page.unroute("**/api/derivatives/**");
+  }
+});
+
+test("a stale source response cannot replace a newer source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  const { setId: firstSetId } = await createSet(running.url, "First Source");
+  await createSet(running.url, "Second Source");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+
+  let release!: () => void;
+  const staleGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let staleHeld = false;
+  await page.route("**/api/browse", async (route) => {
+    const request = route.request();
+    if (
+      request.method() === "POST" &&
+      (request.postDataJSON() as { photoSetId?: string }).photoSetId ===
+        firstSetId &&
+      !staleHeld
+    ) {
+      staleHeld = true;
+      await staleGate;
+    }
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: /^First Source 8 Photos/ }).click();
+    await expect.poll(() => staleHeld).toBe(true);
+    await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
+    await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+
+    const staleResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/browse" &&
+        response.status() === 200,
+    );
+    release();
+    await staleResponse;
+    await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
+    await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  } finally {
+    release();
+    await page.unroute("**/api/browse");
+  }
+});
+
+test("source changes invalidate queued Grid renders", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  await createSet(running.url, "Boundary Source");
+
+  const openedResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/browse",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  const opened = (await (await openedResponse).json()) as { token: string };
+  const oldToken = opened.token;
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+
+  let staleWindowRequests = 0;
+  await page.route("**/api/browse/**", async (route) => {
+    const request = route.request();
+    if (
+      request.method() === "GET" &&
+      request.url().includes(`/api/browse/${oldToken}?`)
+    )
+      staleWindowRequests += 1;
+    await route.continue();
+  });
+  try {
+    await page.evaluate(() => {
+      document.querySelector<HTMLButtonElement>("[data-back]")!.click();
+      document
+        .querySelector<HTMLElement>("[data-grid-viewport]")!
+        .dispatchEvent(new Event("scroll"));
+      const source = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(".source-card"),
+      ).find((button) => button.textContent?.startsWith("Boundary Source"));
+      if (!source) throw new Error("Boundary source is missing");
+      source.click();
+      document
+        .querySelector<HTMLElement>("[data-grid-viewport]")!
+        .dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Boundary Source",
+    );
+    await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    expect(staleWindowRequests).toBe(0);
+  } finally {
+    await page.unroute("**/api/browse/**");
+  }
+});
+
+test("source switching cancels the previous pending window", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  await createSet(running.url, "Abort Target");
+
+  const openedResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/browse",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  const openedBody = (await (await openedResponse).json()) as {
+    token: string;
+  };
+  const oldBrowseToken = openedBody.token;
+  await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+
+  let release!: () => void;
+  const windowHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let oldWindowUrl: string | undefined;
+  await page.route("**/api/browse/**", (route) => {
+    const request = route.request();
+    if (
+      request.method() === "GET" &&
+      request.url().includes(`/api/browse/${oldBrowseToken}?`)
+    ) {
+      oldWindowUrl = request.url();
+      return windowHeld.then(() => route.continue()).catch(() => undefined);
+    }
+    return route.continue();
+  });
+  try {
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      element.scrollTop = 30 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => oldWindowUrl).toBeTruthy();
+    const oldWindowCanceled = page.waitForEvent(
+      "requestfailed",
+      (request) => request.url() === oldWindowUrl,
+    );
+
+    await page
+      .getByRole("button", { name: /^Abort Target 120 Photos/ })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("Abort Target");
+    await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+    await oldWindowCanceled;
+  } finally {
+    release();
+    await page.unroute("**/api/browse/**");
+  }
+});
+
+test("source switching aborts fallback thumbnail requests", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await createSet(running.url, "Fallback Abort");
+
+  let release!: () => void;
+  const thumbnailGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let thumbnailRequests = 0;
+  await page.route("**/api/photos/*/thumbnail", (route) => {
+    thumbnailRequests += 1;
+    return thumbnailGate.then(() => route.continue()).catch(() => undefined);
+  });
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+    await expect.poll(() => thumbnailRequests).toBeGreaterThan(0);
+    const thumbnailCanceled = page.waitForEvent("requestfailed", (request) =>
+      new URL(request.url()).pathname.endsWith("/thumbnail"),
+    );
+
+    await page
+      .getByRole("button", { name: /^Fallback Abort 70 Photos/ })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText(
+      "Fallback Abort",
+    );
+    await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+    await thumbnailCanceled;
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/thumbnail");
+  }
+});
+
+test("scroll events coalesce Grid rendering to one animation frame", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  await expect(page.locator(".photo-cell img")).toHaveCount(8);
+
+  const renderCount = await page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        const layer = document.querySelector<HTMLElement>("[data-grid-layer]");
+        const viewport = document.querySelector<HTMLElement>(
+          "[data-grid-viewport]",
+        );
+        if (!layer || !viewport) throw new Error("Grid elements are missing");
+        const replaceChildren = layer.replaceChildren.bind(layer);
+        let count = 0;
+        layer.replaceChildren = (...nodes: Node[]) => {
+          count += 1;
+          replaceChildren(...nodes);
+        };
+        for (let index = 0; index < 8; index += 1)
+          viewport.dispatchEvent(new Event("scroll"));
+        requestAnimationFrame(() => resolve(count));
+      }),
+  );
+  expect(renderCount).toBe(1);
+});
+
+test("Back to Grid restoration supersedes a queued scroll render", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+
+  const currentCell = page.locator('[data-photo-index="6"]');
+  await currentCell.scrollIntoViewIfNeeded();
+  await currentCell.click();
+  await expect(page.getByText("7 / 8")).toBeVisible();
+
+  const restoredScrollTop = await page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        const viewport = document.querySelector<HTMLElement>(
+          "[data-grid-viewport]",
+        );
+        const back = document.querySelector<HTMLButtonElement>(
+          "[data-review] [data-back]",
+        );
+        if (!viewport || !back) throw new Error("Grid controls are missing");
+        viewport.scrollTop = 0;
+        viewport.dispatchEvent(new Event("scroll"));
+        back.click();
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => resolve(viewport.scrollTop)),
+        );
+      }),
+  );
+
+  expect(restoredScrollTop).toBeGreaterThan(0);
+  await expect(currentCell).toBeVisible();
 });
 
 test("hydrated Grid thumbnail delivery failures stay attached to the Photo", async ({
@@ -1412,6 +1776,86 @@ test("Undo clears when the affected Photo leaves the loaded window", async ({
   expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
     "selected",
   );
+});
+
+test("failed Browse recovery leaves the boundary range retryable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+
+  let expired = false;
+  let boundaryRequests = 0;
+  let reopenAttempts = 0;
+  let releaseRetry!: () => void;
+  const retryGate = new Promise<void>((resolve) => {
+    releaseRetry = resolve;
+  });
+  await page.route(/\/api\/browse/, async (route) => {
+    const request = route.request();
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).searchParams.get("start") === "60"
+    ) {
+      boundaryRequests += 1;
+      if (boundaryRequests === 1) {
+        expired = true;
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: '{"error":"Browse source expired or not found"}',
+        });
+        return;
+      }
+      await retryGate;
+      try {
+        await route.continue();
+      } catch {
+        /* the browser may cancel duplicate viewport requests */
+      }
+      return;
+    }
+    if (request.method() === "POST" && expired) {
+      reopenAttempts += 1;
+      if (reopenAttempts === 1) {
+        await route.fulfill({ status: 503, body: '{"error":"reopen failed"}' });
+        return;
+      }
+    }
+    await route.continue();
+  });
+  try {
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => reopenAttempts).toBe(1);
+    await expect(page.locator("[data-status]")).toHaveText(
+      "This source expired and could not be reopened. Retry the connection.",
+    );
+
+    const retriedWindow = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "GET" &&
+        url.pathname.includes("/api/browse/") &&
+        url.searchParams.get("start") === "60" &&
+        response.status() === 200
+      );
+    });
+    await viewport.evaluate((element) => {
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => boundaryRequests).toBeGreaterThan(1);
+    releaseRetry();
+    await retriedWindow;
+  } finally {
+    releaseRetry();
+    await page.unroute(/\/api\/browse/);
+  }
 });
 
 test("an expired Browse snapshot reopens around the current Photo", async ({
