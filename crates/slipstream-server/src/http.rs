@@ -139,32 +139,29 @@ pub(crate) fn create_router_with_web_root(
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
         // The complete-membership list is retired; the path only creates sets.
+        .route("/api/albums", get(retired_album_list).post(create_album))
         .route(
-            "/api/photo-sets",
-            get(retired_photo_set_list).post(create_photo_set),
+            "/api/albums/{id}/rename",
+            get(method_not_allowed).post(rename_album),
         )
         .route(
-            "/api/photo-sets/{id}/rename",
-            get(method_not_allowed).post(rename_photo_set),
+            "/api/albums/{id}/delete",
+            get(method_not_allowed).post(delete_album),
         )
         .route(
-            "/api/photo-sets/{id}/delete",
-            get(method_not_allowed).post(delete_photo_set),
+            "/api/albums/{id}/members",
+            get(method_not_allowed).post(add_album_members),
         )
         .route(
-            "/api/photo-sets/{id}/members",
-            get(method_not_allowed).post(add_photo_set_members),
+            "/api/albums/{id}/members/remove",
+            get(method_not_allowed).post(remove_album_member),
         )
         .route(
-            "/api/photo-sets/{id}/members/remove",
-            get(method_not_allowed).post(remove_photo_set_member),
+            "/api/albums/{id}/order",
+            get(method_not_allowed).post(reorder_album),
         )
         .route(
-            "/api/photo-sets/{id}/order",
-            get(method_not_allowed).post(reorder_photo_set),
-        )
-        .route(
-            "/api/photo-sets/{id}/progress",
+            "/api/albums/{id}/progress",
             get(method_not_allowed).post(set_progress),
         )
         .route(
@@ -235,7 +232,7 @@ pub(crate) async fn status(State(state): State<HttpState>) -> Json<ScanStatusWir
 pub(crate) struct BrowseOpenBody {
     source: String,
     #[serde(default)]
-    photo_set_id: Option<String>,
+    album_id: Option<String>,
     #[serde(default)]
     photo_id: Option<String>,
 }
@@ -260,10 +257,10 @@ pub(crate) async fn open_browse(
         None => None,
     };
     let source = match body.source.as_str() {
-        "library" if body.photo_set_id.is_none() => BrowseSourceRequest::Library,
-        "photo-set" => match body.photo_set_id.filter(|id| valid_id(id)) {
-            Some(id) => BrowseSourceRequest::PhotoSet(id),
-            None => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo Set source"),
+        "library" if body.album_id.is_none() => BrowseSourceRequest::Library,
+        "album" => match body.album_id.filter(|id| valid_id(id)) {
+            Some(id) => BrowseSourceRequest::Album(id),
+            None => return api_error(StatusCode::BAD_REQUEST, "Invalid Album source"),
         },
         _ => return api_error(StatusCode::BAD_REQUEST, "Invalid browse source"),
     };
@@ -320,7 +317,7 @@ pub(crate) fn browse_query(query: Option<&str>) -> Option<(usize, usize)> {
     Some((start?, limit?))
 }
 
-pub(crate) async fn retired_photo_set_list() -> Response<Body> {
+pub(crate) async fn retired_album_list() -> Response<Body> {
     api_error(StatusCode::NOT_FOUND, "Not found")
 }
 
@@ -338,38 +335,38 @@ pub(crate) async fn scan(State(state): State<HttpState>, request: Request<Body>)
     }
 }
 
-pub(crate) async fn create_photo_set(
+pub(crate) async fn create_album(
     State(state): State<HttpState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, |body| {
+    mutate_album_route(&state, request, |body| {
         valid_name(body.get("name"))
-            .map(|name| slipstream_core::PhotoSetMutation::Create { name })
-            .ok_or("Invalid Photo Set name")
+            .map(|name| slipstream_core::AlbumMutation::Create { name })
+            .ok_or("Invalid Album name")
     })
     .await
 }
 
-pub(crate) async fn rename_photo_set(
+pub(crate) async fn rename_album(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, move |body| {
+    mutate_album_route(&state, request, move |body| {
         if !valid_id(&id) {
-            return Err("Invalid Photo Set mutation");
+            return Err("Invalid Album mutation");
         }
         valid_name(body.get("name"))
-            .map(|name| slipstream_core::PhotoSetMutation::Rename {
-                photo_set_id: id.clone(),
+            .map(|name| slipstream_core::AlbumMutation::Rename {
+                album_id: id.clone(),
                 name,
             })
-            .ok_or("Invalid Photo Set mutation")
+            .ok_or("Invalid Album mutation")
     })
     .await
 }
 
-pub(crate) async fn delete_photo_set(
+pub(crate) async fn delete_album(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
@@ -378,11 +375,11 @@ pub(crate) async fn delete_photo_set(
         return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
     }
     if !valid_id(&id) {
-        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo Set");
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Album");
     }
     match state
         .application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::Delete { photo_set_id: id })
+        .mutate_album(slipstream_core::AlbumMutation::Delete { album_id: id })
         .await
     {
         Ok(result) => json_response(StatusCode::OK, &result),
@@ -390,18 +387,18 @@ pub(crate) async fn delete_photo_set(
     }
 }
 
-pub(crate) async fn add_photo_set_members(
+pub(crate) async fn add_album_members(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, move |body| {
+    mutate_album_route(&state, request, move |body| {
         if !valid_id(&id) {
             return Err("Invalid membership batch");
         }
         valid_ids(body.get("photoIds"))
-            .map(|photo_ids| slipstream_core::PhotoSetMutation::AddMembers {
-                photo_set_id: id.clone(),
+            .map(|photo_ids| slipstream_core::AlbumMutation::AddMembers {
+                album_id: id.clone(),
                 photo_ids,
             })
             .ok_or("Invalid membership batch")
@@ -409,39 +406,39 @@ pub(crate) async fn add_photo_set_members(
     .await
 }
 
-pub(crate) async fn remove_photo_set_member(
+pub(crate) async fn remove_album_member(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, move |body| {
+    mutate_album_route(&state, request, move |body| {
         let photo_id = body.get("photoId").and_then(Value::as_str);
         if !valid_id(&id) || photo_id.is_none_or(|value| !valid_id(value)) {
-            return Err("Invalid Photo Set member");
+            return Err("Invalid Album member");
         }
-        Ok(slipstream_core::PhotoSetMutation::RemoveMember {
-            photo_set_id: id.clone(),
+        Ok(slipstream_core::AlbumMutation::RemoveMember {
+            album_id: id.clone(),
             photo_id: photo_id.unwrap().to_owned(),
         })
     })
     .await
 }
 
-pub(crate) async fn reorder_photo_set(
+pub(crate) async fn reorder_album(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, move |body| {
+    mutate_album_route(&state, request, move |body| {
         if !valid_id(&id) {
-            return Err("Invalid Photo Set order");
+            return Err("Invalid Album order");
         }
         valid_ids(body.get("photoIds"))
-            .map(|photo_ids| slipstream_core::PhotoSetMutation::Reorder {
-                photo_set_id: id.clone(),
+            .map(|photo_ids| slipstream_core::AlbumMutation::Reorder {
+                album_id: id.clone(),
                 photo_ids,
             })
-            .ok_or("Invalid Photo Set order")
+            .ok_or("Invalid Album order")
     })
     .await
 }
@@ -451,13 +448,13 @@ pub(crate) async fn set_progress(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_photo_set_route(&state, request, move |body| {
+    mutate_album_route(&state, request, move |body| {
         let photo_id = body.get("photoId").and_then(Value::as_str);
         if !valid_id(&id) || photo_id.is_none_or(|value| !valid_id(value)) {
             return Err("Invalid review progress");
         }
-        Ok(slipstream_core::PhotoSetMutation::SetProgress {
-            photo_set_id: id.clone(),
+        Ok(slipstream_core::AlbumMutation::SetProgress {
+            album_id: id.clone(),
             photo_id: photo_id.unwrap().to_owned(),
         })
     })
@@ -508,7 +505,7 @@ pub(crate) async fn mutate_photo_state(
     let Ok(expected_current) = expected_current else {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state mutation");
     };
-    let photo_set_id = match body.get("photoSetId") {
+    let album_id = match body.get("albumId") {
         None => Ok(None),
         Some(value) => value
             .as_str()
@@ -517,7 +514,7 @@ pub(crate) async fn mutate_photo_state(
             .map(Some)
             .ok_or(()),
     };
-    let Ok(photo_set_id) = photo_set_id else {
+    let Ok(album_id) = album_id else {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state mutation");
     };
     let field = if matches!(field, Some("selectionState")) {
@@ -532,7 +529,7 @@ pub(crate) async fn mutate_photo_state(
             field,
             value,
             expected_current,
-            photo_set_id,
+            album_id,
         })
         .await;
     match result {
@@ -677,12 +674,12 @@ pub(crate) async fn get_derivative(
         .expect("valid derivative response")
 }
 
-pub(crate) async fn mutate_photo_set_route(
+pub(crate) async fn mutate_album_route(
     state: &HttpState,
     request: Request<Body>,
     build: impl FnOnce(
         &serde_json::Map<String, Value>,
-    ) -> Result<slipstream_core::PhotoSetMutation, &'static str>,
+    ) -> Result<slipstream_core::AlbumMutation, &'static str>,
 ) -> Response<Body> {
     if !mutation_allowed(&request) {
         return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
@@ -698,7 +695,7 @@ pub(crate) async fn mutate_photo_set_route(
         Ok(mutation) => mutation,
         Err(message) => return api_error(StatusCode::BAD_REQUEST, message),
     };
-    match state.application.mutate_photo_set(mutation).await {
+    match state.application.mutate_album(mutation).await {
         Ok(result) => json_response(StatusCode::OK, &result),
         Err(error) => ApiError::from(error).into_response(),
     }

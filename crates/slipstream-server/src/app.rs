@@ -330,18 +330,18 @@ impl Application {
     }
 
     pub async fn overview(&self) -> Result<LibraryOverviewResponse, ServerError> {
-        let photo_sets = self
+        let albums = self
             .library
-            .list_photo_sets()
+            .list_album_summaries()
             .await?
             .into_iter()
-            .map(photo_set_summary)
+            .map(album_summary)
             .collect();
         Ok(LibraryOverviewResponse {
             published: self.shared.published.load(Ordering::Relaxed),
             photo_count: self.published_photo_count(),
             scan: self.scan_status(),
-            photo_sets,
+            albums,
         })
     }
 
@@ -371,40 +371,41 @@ impl Application {
                     .unwrap_or(0);
                 (photo_ids, position)
             }
-            BrowseSourceRequest::PhotoSet(id) => {
-                let set = self
+            BrowseSourceRequest::Album(id) => {
+                let target = self
                     .library
-                    .list_photo_sets()
+                    .album_browse_target(&id)
                     .await?
-                    .into_iter()
-                    .find(|set| set.id == id)
                     .ok_or(ServerError::BrowseNotFound)?;
                 let preferred = preferred_photo_id.and_then(|preferred| {
-                    set.members
+                    target
+                        .members
                         .iter()
                         .position(|member| member.photo_id == preferred)
                 });
-                let saved = set.last_reviewed_photo_id.and_then(|saved| {
-                    set.members
+                let saved = target.saved_photo_id.as_deref().and_then(|saved| {
+                    target
+                        .members
                         .iter()
                         .position(|member| member.photo_id == saved)
                 });
                 let position = preferred.unwrap_or_else(|| {
                     saved
-                        .filter(|saved| set.members[*saved].available)
+                        .filter(|saved| target.members[*saved].available)
                         .or_else(|| {
                             saved.and_then(|saved| {
-                                (1..=set.members.len())
-                                    .map(|offset| (saved + offset) % set.members.len())
-                                    .find(|index| set.members[*index].available)
+                                (1..=target.members.len())
+                                    .map(|offset| (saved + offset) % target.members.len())
+                                    .find(|index| target.members[*index].available)
                             })
                         })
-                        .or_else(|| set.members.iter().position(|member| member.available))
+                        .or_else(|| target.members.iter().position(|member| member.available))
                         .or(saved)
                         .unwrap_or(0)
                 });
                 (
-                    set.members
+                    target
+                        .members
                         .into_iter()
                         .map(|member| member.photo_id)
                         .collect(),
@@ -571,14 +572,14 @@ impl Application {
             .remove(token);
     }
 
-    pub async fn photo_sets(&self) -> Result<PhotoSetSummaryListResponse, ServerError> {
-        Ok(PhotoSetSummaryListResponse {
-            photo_sets: self
+    pub async fn albums(&self) -> Result<AlbumSummaryListResponse, ServerError> {
+        Ok(AlbumSummaryListResponse {
+            albums: self
                 .library
-                .list_photo_sets()
+                .list_album_summaries()
                 .await?
                 .into_iter()
-                .map(photo_set_summary)
+                .map(album_summary)
                 .collect(),
         })
     }
@@ -588,12 +589,12 @@ impl Application {
         Ok(self.scan_status())
     }
 
-    pub async fn mutate_photo_set(
+    pub async fn mutate_album(
         &self,
-        mutation: slipstream_core::PhotoSetMutation,
-    ) -> Result<PhotoSetSummaryListResponse, ServerError> {
-        self.library.mutate_photo_set(mutation).await?;
-        self.photo_sets().await
+        mutation: slipstream_core::AlbumMutation,
+    ) -> Result<AlbumSummaryListResponse, ServerError> {
+        self.library.mutate_album(mutation).await?;
+        self.albums().await
     }
 
     pub async fn mutate_photo_state(

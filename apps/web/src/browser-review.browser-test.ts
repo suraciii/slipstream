@@ -130,14 +130,12 @@ async function browseIds(url: string): Promise<string[]> {
 
 async function createSet(url: string, name = "Review") {
   const photos = await browseIds(url);
-  const created = (await (
-    await post(url, "/api/photo-sets", { name })
-  ).json()) as {
-    photoSets: Array<{ id: string; name: string }>;
+  const created = (await (await post(url, "/api/albums", { name })).json()) as {
+    albums: Array<{ id: string; name: string }>;
   };
-  const set = created.photoSets.find((item) => item.name === name)!;
+  const set = created.albums.find((item) => item.name === name)!;
   for (let offset = 0; offset < photos.length; offset += 100)
-    await post(url, `/api/photo-sets/${set.id}/members`, {
+    await post(url, `/api/albums/${set.id}/members`, {
       photoIds: photos.slice(offset, offset + 100),
     });
   return { setId: set.id };
@@ -145,7 +143,7 @@ async function createSet(url: string, name = "Review") {
 function progressResponse(page: Page, setId: string, status = 200) {
   return page.waitForResponse(
     (response) =>
-      response.url().includes(`/api/photo-sets/${setId}/progress`) &&
+      response.url().includes(`/api/albums/${setId}/progress`) &&
       response.request().method() === "POST" &&
       response.status() === status,
   );
@@ -207,11 +205,11 @@ async function startReview(
   );
 }
 // Membership order and per-member facts are observable only through a
-// fresh Photo Set Browse Snapshot. The resolved open position exposes the
-// saved Photo Set position under the unavailable-member fallback rules.
+// fresh Album Browse Snapshot. The resolved open position exposes the
+// saved Album position under the unavailable-member fallback rules.
 async function state(url: string, setId: string): Promise<SetState> {
   const opened = (await (
-    await post(url, "/api/browse", { source: "photo-set", photoSetId: setId })
+    await post(url, "/api/browse", { source: "album", albumId: setId })
   ).json()) as { token: string; total: number; position: number };
   const members: SetMember[] = [];
   let start = 0;
@@ -263,7 +261,7 @@ async function swipe(page: Page, from: number, to: number, y = 320) {
   });
 }
 
-test("starts from a Photo Set, shows facts, accessible controls, and resumes persisted progress after restart", async ({
+test("starts from a Album, shows facts, accessible controls, and resumes persisted progress after restart", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -294,7 +292,7 @@ test("starts from a Photo Set, shows facts, accessible controls, and resumes per
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  // The advanced Photo is the saved Photo Set position.
+  // The advanced Photo is the saved Album position.
   await expect
     .poll(async () => (await state(running.url, setId)).position)
     .toBe(1);
@@ -536,7 +534,7 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   const running = await server(base, root);
   const { setId } = await createSet(running.url);
   const initial = await state(running.url, setId);
-  await post(running.url, `/api/photo-sets/${setId}/progress`, {
+  await post(running.url, `/api/albums/${setId}/progress`, {
     photoId: initial.members[0]!.photoId,
   });
   await rm(missing);
@@ -564,7 +562,7 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   });
 });
 
-test("shows empty/no-set start states and only uses GET plus same-service POST mutations", async ({
+test("shows empty and no-album start states and only uses same-service requests", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -574,17 +572,23 @@ test("shows empty/no-set start states and only uses GET plus same-service POST m
   page.on("request", (request) => methods.push(request.method()));
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await post(running.url, "/api/photo-sets", { name: "Empty" });
+  await post(running.url, "/api/albums", { name: "Empty" });
   await page.reload();
   const empty = page.getByRole("button", { name: /Empty/ });
   await expect(empty).toBeVisible();
-  await expect(empty).toBeDisabled();
+  // Empty Albums stay openable: they are valid sources, not disabled cards.
+  await expect(empty).toBeEnabled();
+  await empty.click();
+  await expect(empty).toHaveClass(/active/);
   await createSet(running.url, "Ready");
   await page.reload();
   await expect(page.getByRole("button", { name: /Ready/ })).toBeEnabled();
-  expect(methods.every((method) => method === "GET" || method === "POST")).toBe(
-    true,
-  );
+  expect(
+    methods.every(
+      (method) => method === "GET" || method === "POST" || method === "DELETE",
+    ),
+    methods.join(","),
+  ).toBe(true);
 });
 
 test("persists manual navigation and advanced current Photo across leave, reload, and restart", async ({
@@ -886,20 +890,20 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
     field: "selectionState",
     value: "selected",
   });
-  expect(stateBodies[0]).not.toHaveProperty("photoSetId");
+  expect(stateBodies[0]).not.toHaveProperty("albumId");
   const overview = (await (
     await fetch(`${running.url}/api/overview`)
   ).json()) as {
-    photoSets: unknown[];
+    albums: unknown[];
   };
-  expect(overview.photoSets).toEqual([]);
+  expect(overview.albums).toEqual([]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
 
   const { setId } = await createSet(running.url, "Explicit order");
-  await post(running.url, `/api/photo-sets/${setId}/order`, {
+  await post(running.url, `/api/albums/${setId}/order`, {
     photoIds: [aId, zId],
   });
   await page.reload();
@@ -962,7 +966,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
     .toBe(true);
 });
 
-test("Photo Set Review snapshots explicit members across rescan and reconnect", async ({
+test("Album Review snapshots explicit members across rescan and reconnect", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -980,7 +984,7 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
   const aId = initialIds[1]!;
   const zId = initialIds[0]!;
   const { setId } = await createSet(running.url, "Snapshot");
-  await post(running.url, `/api/photo-sets/${setId}/order`, {
+  await post(running.url, `/api/albums/${setId}/order`, {
     photoIds: [aId, zId],
   });
   await startReview(page, running.url, "Snapshot", setId);
@@ -994,7 +998,7 @@ test("Photo Set Review snapshots explicit members across rescan and reconnect", 
   const rescannedIds = await browseIds(running.url);
   const bId = rescannedIds.find((id) => !initialIds.includes(id));
   expect(bId).toBeDefined();
-  await post(running.url, `/api/photo-sets/${setId}/members`, {
+  await post(running.url, `/api/albums/${setId}/members`, {
     photoIds: [bId!],
   });
   await page.route("**/api/photos/*/preview", (route) => route.abort());
@@ -1050,7 +1054,7 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
     releaseFailure = resolve;
   });
   let failed = false;
-  await page.route("**/api/photo-sets/*/progress", async (route) => {
+  await page.route("**/api/albums/*/progress", async (route) => {
     if (!failed) {
       failed = true;
       await failureReleased;
@@ -1070,12 +1074,12 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   await progressAfterFailure;
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  await page.unroute("**/api/photo-sets/*/progress");
+  await page.unroute("**/api/albums/*/progress");
   let releaseSuccess!: () => void;
   const successReleased = new Promise<void>((resolve) => {
     releaseSuccess = resolve;
   });
-  await page.route("**/api/photo-sets/*/progress", async (route) => {
+  await page.route("**/api/albums/*/progress", async (route) => {
     await successReleased;
     await route.continue();
   });
@@ -1086,13 +1090,13 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   await progressRecovered;
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
-  await page.unroute("**/api/photo-sets/*/progress");
+  await page.unroute("**/api/albums/*/progress");
   await expect
     .poll(async () => (await state(running.url, setId)).position)
     .toBe(2);
 });
 
-test("Photo Set resume wraps past an unavailable saved member and retains it when all are unavailable", async ({
+test("Album resume wraps past an unavailable saved member and retains it when all are unavailable", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -1105,7 +1109,7 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   expect(
     initial.members.findIndex((member) => member.photoId === savedId),
   ).toBe(2);
-  await post(running.url, `/api/photo-sets/${setId}/progress`, {
+  await post(running.url, `/api/albums/${setId}/progress`, {
     photoId: savedId,
   });
   await rm(join(root, "c.jpg"));
@@ -1118,7 +1122,7 @@ test("Photo Set resume wraps past an unavailable saved member and retains it whe
   // pending write and leave the saved member unchanged.
   const progressConfirmed = page.waitForResponse(
     (response) =>
-      response.url().includes(`/api/photo-sets/${setId}/progress`) &&
+      response.url().includes(`/api/albums/${setId}/progress`) &&
       response.request().method() === "POST" &&
       response.status() === 200,
   );
@@ -1491,8 +1495,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
     const request = route.request();
     if (
       request.method() === "POST" &&
-      (request.postDataJSON() as { photoSetId?: string }).photoSetId ===
-        firstSetId &&
+      (request.postDataJSON() as { albumId?: string }).albumId === firstSetId &&
       !staleHeld
     ) {
       staleHeld = true;
@@ -1514,8 +1517,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
       )
         return false;
       return (
-        (request.postDataJSON() as { photoSetId?: string }).photoSetId ===
-        firstSetId
+        (request.postDataJSON() as { albumId?: string }).albumId === firstSetId
       );
     });
     await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
@@ -1936,7 +1938,7 @@ test("an Undo Preview continuation cannot label or persist a newer Photo", async
   }
 });
 
-test("opening a Photo from the Grid persists the Photo Set position", async ({
+test("opening a Photo from the Grid persists the Album position", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -2185,8 +2187,8 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
     .poll(() =>
       reopenBodies.some(
         (body) =>
-          body.source === "photo-set" &&
-          body.photoSetId === setId &&
+          body.source === "album" &&
+          body.albumId === setId &&
           body.photoId === firstId,
       ),
     )

@@ -16,9 +16,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slipstream_core::{
-    CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoSetRecord,
-    PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewFacts, PreviewService, PreviewState,
-    ScanLimits, ScanPhase, SelectionState, source_revision,
+    CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoStateField,
+    PhotoStateValue, PreviewCandidate, PreviewFacts, PreviewService, PreviewState, ScanLimits,
+    ScanPhase, SelectionState, source_revision,
 };
 use std::{
     env,
@@ -57,11 +57,11 @@ pub(crate) use config::{
 pub(crate) use http::{HttpState, healthz, open_web_root, static_web};
 pub use http::{RunningServer, create_router, expand_library, start_server};
 pub use wire::{
-    BrowseOpenResponse, BrowseSourceRequest, BrowseWindowResponse, DerivativeDelivery,
-    LibraryOverviewResponse, OriginalWire, PhotoSetSummaryListResponse, PhotoSetSummaryWire,
-    PhotoSummary, PreviewResponse, ScanStatusWire,
+    AlbumSummaryListResponse, AlbumSummaryWire, BrowseOpenResponse, BrowseSourceRequest,
+    BrowseWindowResponse, DerivativeDelivery, LibraryOverviewResponse, OriginalWire, PhotoSummary,
+    PreviewResponse, ScanStatusWire,
 };
-pub(crate) use wire::{photo_set_summary, photo_summary_indexed_with_url, selection_state};
+pub(crate) use wire::{album_summary, photo_summary_indexed_with_url, selection_state};
 
 #[cfg(test)]
 mod tests;

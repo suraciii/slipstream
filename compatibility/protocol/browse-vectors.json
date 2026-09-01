@@ -1,14 +1,21 @@
 [
   {
     "name": "overview-empty-library",
-    "request": { "method": "GET", "path": "/api/overview" },
+    "request": {
+      "method": "GET",
+      "path": "/api/overview"
+    },
     "expected": {
       "status": 200,
       "body": {
         "published": true,
         "photoCount": 0,
-        "scan": { "state": "idle", "completed": 0, "total": 0 },
-        "photoSets": []
+        "scan": {
+          "state": "idle",
+          "completed": 0,
+          "total": 0
+        },
+        "albums": []
       }
     }
   },
@@ -17,12 +24,20 @@
     "request": {
       "method": "POST",
       "path": "/api/browse",
-      "headers": { "content-type": "application/json" },
-      "body": { "source": "library" }
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "library"
+      }
     },
     "expected": {
       "status": 200,
-      "body": { "token": "$token", "total": 0, "position": 0 }
+      "body": {
+        "token": "$token",
+        "total": 0,
+        "position": 0
+      }
     }
   },
   {
@@ -33,7 +48,11 @@
     },
     "expected": {
       "status": 200,
-      "body": { "start": 0, "total": 0, "photos": [] }
+      "body": {
+        "start": 0,
+        "total": 0,
+        "photos": []
+      }
     }
   },
   {
@@ -44,7 +63,9 @@
     },
     "expected": {
       "status": 400,
-      "body": { "error": "Browse window is invalid" }
+      "body": {
+        "error": "Browse window is invalid"
+      }
     }
   },
   {
@@ -55,29 +76,46 @@
     },
     "expected": {
       "status": 400,
-      "body": { "error": "Browse window is invalid" }
+      "body": {
+        "error": "Browse window is invalid"
+      }
     }
   },
   {
     "name": "browse-window-missing-limit",
-    "request": { "method": "GET", "path": "/api/browse/$token?start=0" },
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token?start=0"
+    },
     "expected": {
       "status": 400,
-      "body": { "error": "Browse window is invalid" }
+      "body": {
+        "error": "Browse window is invalid"
+      }
     }
   },
   {
     "name": "browse-window-missing-start",
-    "request": { "method": "GET", "path": "/api/browse/$token?limit=1" },
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token?limit=1"
+    },
     "expected": {
       "status": 400,
-      "body": { "error": "Browse window is invalid" }
+      "body": {
+        "error": "Browse window is invalid"
+      }
     }
   },
   {
     "name": "browse-close",
-    "request": { "method": "DELETE", "path": "/api/browse/$token" },
-    "expected": { "status": 204 }
+    "request": {
+      "method": "DELETE",
+      "path": "/api/browse/$token"
+    },
+    "expected": {
+      "status": 204
+    }
   },
   {
     "name": "browse-window-after-close-not-found",
@@ -87,41 +125,58 @@
     },
     "expected": {
       "status": 404,
-      "body": { "error": "Browse source expired or not found" }
+      "body": {
+        "error": "Browse source expired or not found"
+      }
     }
   },
   {
     "name": "browse-close-idempotent",
-    "request": { "method": "DELETE", "path": "/api/browse/$token" },
-    "expected": { "status": 204 }
-  },
-  {
-    "name": "browse-open-missing-photo-set-id",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
-      "headers": { "content-type": "application/json" },
-      "body": { "source": "photo-set" }
+      "method": "DELETE",
+      "path": "/api/browse/$token"
     },
     "expected": {
-      "status": 400,
-      "body": { "error": "Invalid Photo Set source" }
+      "status": 204
     }
   },
   {
-    "name": "browse-open-unknown-photo-set",
+    "name": "browse-open-missing-album-id",
     "request": {
       "method": "POST",
       "path": "/api/browse",
-      "headers": { "content-type": "application/json" },
+      "headers": {
+        "content-type": "application/json"
+      },
       "body": {
-        "source": "photo-set",
-        "photoSetId": "0000000000000000000000000000000000000000000000000000000000000000"
+        "source": "album"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Album source"
+      }
+    }
+  },
+  {
+    "name": "browse-open-unknown-album",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "album",
+        "albumId": "0000000000000000000000000000000000000000000000000000000000000000"
       }
     },
     "expected": {
       "status": 404,
-      "body": { "error": "Browse source expired or not found" }
+      "body": {
+        "error": "Browse source expired or not found"
+      }
     }
   },
   {
@@ -129,12 +184,19 @@
     "request": {
       "method": "POST",
       "path": "/api/browse",
-      "headers": { "content-type": "application/json" },
-      "body": { "source": "library", "photoId": "short" }
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "library",
+        "photoId": "short"
+      }
     },
     "expected": {
       "status": 400,
-      "body": { "error": "Invalid preferred Photo" }
+      "body": {
+        "error": "Invalid preferred Photo"
+      }
     }
   },
   {
@@ -142,10 +204,19 @@
     "request": {
       "method": "POST",
       "path": "/api/browse",
-      "headers": { "content-type": "application/json" },
-      "body": { "source": "album" }
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "source": "photo-set"
+      }
     },
-    "expected": { "status": 400, "body": { "error": "Invalid browse source" } }
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid browse source"
+      }
+    }
   },
   {
     "name": "browse-open-cross-origin",
@@ -156,11 +227,15 @@
         "content-type": "application/json",
         "origin": "https://foreign.example"
       },
-      "body": { "source": "library" }
+      "body": {
+        "source": "library"
+      }
     },
     "expected": {
       "status": 403,
-      "body": { "error": "Cross-origin mutation rejected" }
+      "body": {
+        "error": "Cross-origin mutation rejected"
+      }
     }
   },
   {
@@ -168,11 +243,15 @@
     "request": {
       "method": "DELETE",
       "path": "/api/browse/$token",
-      "headers": { "origin": "https://foreign.example" }
+      "headers": {
+        "origin": "https://foreign.example"
+      }
     },
     "expected": {
       "status": 403,
-      "body": { "error": "Cross-origin mutation rejected" }
+      "body": {
+        "error": "Cross-origin mutation rejected"
+      }
     }
   }
 ]

@@ -445,7 +445,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         if let Some(expected) = vector["expected"]["body"].as_object() {
             let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
             if captured_set_id.is_empty()
-                && let Some(id) = actual["photoSets"][0]["id"].as_str()
+                && let Some(id) = actual["albums"][0]["id"].as_str()
             {
                 captured_set_id = id.to_owned();
             }
@@ -881,7 +881,7 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
 }
 
 #[tokio::test]
-async fn photo_set_browse_open_resolves_saved_position_without_members_response() {
+async fn album_browse_open_resolves_saved_position_without_members_response() {
     let (base, config) = prepare_fixture();
     for name in ["a.jpg", "b.jpg", "c.jpg"] {
         jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
@@ -891,40 +891,94 @@ async fn photo_set_browse_open_resolves_saved_position_without_members_response(
     application.rescan().await.unwrap();
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::Create {
+        .mutate_album(slipstream_core::AlbumMutation::Create {
             name: "Picks".to_owned(),
         })
         .await
         .unwrap();
     let set_id = application
-        .photo_sets()
+        .albums()
         .await
         .unwrap()
-        .photo_sets
+        .albums
         .into_iter()
         .find(|set| set.name == "Picks")
         .unwrap()
         .id;
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::AddMembers {
-            photo_set_id: set_id.clone(),
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: set_id.clone(),
             photo_ids: ids.clone(),
         })
         .await
         .unwrap();
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::SetProgress {
-            photo_set_id: set_id.clone(),
+        .mutate_album(slipstream_core::AlbumMutation::SetProgress {
+            album_id: set_id.clone(),
             photo_id: ids[1].clone(),
         })
         .await
         .unwrap();
     let opened = application
-        .browse_open(BrowseSourceRequest::PhotoSet(set_id), None)
+        .browse_open(BrowseSourceRequest::Album(set_id), None)
         .await
         .unwrap();
     assert_eq!(opened.total, 3);
     assert_eq!(opened.position, 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn empty_album_opens_lists_and_accepts_first_member() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Empty".to_owned(),
+        })
+        .await
+        .unwrap();
+    let album_id = application
+        .albums()
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Empty")
+        .unwrap()
+        .id;
+    let summaries = application.albums().await.unwrap().albums;
+    let summary = summaries.iter().find(|album| album.id == album_id).unwrap();
+    assert_eq!(summary.photo_count, 0);
+    assert!(!summary.has_saved_position);
+    let opened = application
+        .browse_open(BrowseSourceRequest::Album(album_id.clone()), None)
+        .await
+        .unwrap();
+    assert_eq!(opened.total, 0);
+    assert_eq!(opened.position, 0);
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id,
+            photo_ids: ids.clone(),
+        })
+        .await
+        .unwrap();
+    let summaries = application.albums().await.unwrap().albums;
+    let summary = summaries
+        .iter()
+        .find(|album| album.name == "Empty")
+        .unwrap();
+    assert_eq!(summary.photo_count, ids.len());
+    let opened = application
+        .browse_open(BrowseSourceRequest::Album(summary.id.clone()), None)
+        .await
+        .unwrap();
+    assert_eq!(opened.total, ids.len());
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1064,36 +1118,36 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
         .unwrap();
     assert_eq!(fallback.position, 0);
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::Create {
+        .mutate_album(slipstream_core::AlbumMutation::Create {
             name: "Picks".to_owned(),
         })
         .await
         .unwrap();
     let set_id = application
-        .photo_sets()
+        .albums()
         .await
         .unwrap()
-        .photo_sets
+        .albums
         .into_iter()
         .find(|set| set.name == "Picks")
         .unwrap()
         .id;
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::AddMembers {
-            photo_set_id: set_id.clone(),
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: set_id.clone(),
             photo_ids: ids.clone(),
         })
         .await
         .unwrap();
     application
-        .mutate_photo_set(slipstream_core::PhotoSetMutation::SetProgress {
-            photo_set_id: set_id.clone(),
+        .mutate_album(slipstream_core::AlbumMutation::SetProgress {
+            album_id: set_id.clone(),
             photo_id: ids[0].clone(),
         })
         .await
         .unwrap();
     let preferred = application
-        .browse_open(BrowseSourceRequest::PhotoSet(set_id), Some(&ids[2]))
+        .browse_open(BrowseSourceRequest::Album(set_id), Some(&ids[2]))
         .await
         .unwrap();
     assert_eq!(preferred.position, 2);
@@ -1251,7 +1305,7 @@ async fn publication_keeps_scan_owned_invalidation_availability_and_user_state()
                 field: slipstream_core::PhotoStateField::SelectionState,
                 value: slipstream_core::PhotoStateValue::Selection(SelectionState::Selected),
                 expected_current: None,
-                photo_set_id: None,
+                album_id: None,
             })
             .await
             .unwrap()
@@ -1739,7 +1793,7 @@ fn capture_metadata_fixture(path: &Path, capture_time: &str) {
 }
 
 #[tokio::test]
-async fn photo_set_and_state_protocol_persists_across_reopen() {
+async fn album_and_state_protocol_persists_across_reopen() {
     let (base, mut config) = prepare_fixture();
     jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [192, 64, 32]);
     jpeg_fixture(&config.library_root.join("b.jpg"), 8, 4, [32, 192, 64]);
@@ -1754,28 +1808,26 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     let created = response_json(
         post_json(
             &router,
-            "/api/photo-sets",
+            "/api/albums",
             serde_json::json!({"name": " Picks "}),
             Some("http://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(created["photoSets"][0]["name"], "Picks");
+    assert_eq!(created["albums"][0]["name"], "Picks");
     // Mutation responses expose bounded summaries only, never members.
-    assert_eq!(created["photoSets"][0]["photoCount"], 0);
-    assert_eq!(created["photoSets"][0]["hasSavedPosition"], false);
-    assert!(created["photoSets"][0]["members"].is_null());
-    assert!(created["photoSets"][0]["lastReviewedPhotoId"].is_null());
-    let set_a = created["photoSets"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["albums"][0]["photoCount"], 0);
+    assert_eq!(created["albums"][0]["hasSavedPosition"], false);
+    assert!(created["albums"][0]["members"].is_null());
+    assert!(created["albums"][0]["lastReviewedPhotoId"].is_null());
+    let set_a = created["albums"][0]["id"].as_str().unwrap().to_owned();
     assert_eq!(
         send(
             &router,
             Request::builder()
                 .method("POST")
-                .uri(format!(
-                    "http://camera.local/api/photo-sets/{set_a}/members"
-                ))
+                .uri(format!("http://camera.local/api/albums/{set_a}/members"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ORIGIN, "http://camera.local")
                 .body(Body::from(serde_json::json!({"photoIds": ids}).to_string()))
@@ -1788,7 +1840,7 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photo-sets/{set_a}/order"),
+            &format!("http://camera.local/api/albums/{set_a}/order"),
             serde_json::json!({"photoIds": [&ids[2], &ids[0], &ids[1]]}),
             Some("http://camera.local"),
         )
@@ -1799,7 +1851,7 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photo-sets/{set_a}/progress"),
+            &format!("http://camera.local/api/albums/{set_a}/progress"),
             serde_json::json!({"photoId": ids[0]}),
             Some("http://camera.local"),
         )
@@ -1810,14 +1862,14 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     let created_b = response_json(
         post_json(
             &router,
-            "http://camera.local/api/photo-sets",
+            "http://camera.local/api/albums",
             serde_json::json!({"name": "Other"}),
             Some("http://camera.local"),
         )
         .await,
     )
     .await;
-    let set_b = created_b["photoSets"]
+    let set_b = created_b["albums"]
         .as_array()
         .unwrap()
         .iter()
@@ -1829,7 +1881,7 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photo-sets/{set_b}/members"),
+            &format!("http://camera.local/api/albums/{set_b}/members"),
             serde_json::json!({"photoIds": [&ids[0]]}),
             Some("http://camera.local"),
         )
@@ -1839,15 +1891,15 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     );
 
     let selected = response_json(
-            post_json(
-                &router,
-                &format!("http://camera.local/api/photos/{}/state", ids[0]),
-                serde_json::json!({"field": "selectionState", "value": "selected", "photoSetId": set_a}),
-                Some("http://camera.local"),
-            )
-            .await,
+        post_json(
+            &router,
+            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            serde_json::json!({"field": "selectionState", "value": "selected", "albumId": set_a}),
+            Some("http://camera.local"),
         )
-        .await;
+        .await,
+    )
+    .await;
     let undo = selected["undo"].clone();
     assert_eq!(selected["kind"], "applied");
     assert_eq!(
@@ -1861,16 +1913,15 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
         .status(),
         StatusCode::OK
     );
-    // Membership order is observable only through a fresh Photo Set
+    // Membership order is observable only through a fresh Album
     // Browse Snapshot; the mutation responses stay summary-only.
-    let ordered =
-        browse_photo_ids(&application, BrowseSourceRequest::PhotoSet(set_a.clone())).await;
+    let ordered = browse_photo_ids(&application, BrowseSourceRequest::Album(set_a.clone())).await;
     assert_eq!(
         ordered,
         vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
     );
     let set_b_photos =
-        browse_summaries(&application, BrowseSourceRequest::PhotoSet(set_b.clone())).await;
+        browse_summaries(&application, BrowseSourceRequest::Album(set_b.clone())).await;
     let shared = set_b_photos
         .iter()
         .find(|photo| photo.id == ids[0])
@@ -1921,7 +1972,7 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photo-sets/{set_a}/members/remove"),
+            &format!("http://camera.local/api/albums/{set_a}/members/remove"),
             serde_json::json!({"photoId": ids[0]}),
             None,
         )
@@ -1932,10 +1983,10 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     // Removing the saved-position Photo clears the persisted progress;
     // the summary-only mutation response proves the cleared flag.
     let set_a_summary = application
-        .photo_sets()
+        .albums()
         .await
         .unwrap()
-        .photo_sets
+        .albums
         .into_iter()
         .find(|set| set.id == set_a)
         .unwrap();
@@ -1944,7 +1995,7 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photo-sets/{set_a}/delete"),
+            &format!("http://camera.local/api/albums/{set_a}/delete"),
             serde_json::json!({}),
             None,
         )
@@ -1971,10 +2022,10 @@ async fn photo_set_and_state_protocol_persists_across_reopen() {
     assert_eq!(persisted.rating, 4);
     assert!(
         reopened
-            .photo_sets()
+            .albums()
             .await
             .unwrap()
-            .photo_sets
+            .albums
             .iter()
             .all(|set| set.id != set_a)
     );
@@ -1991,7 +2042,7 @@ async fn unbounded_library_routes_are_retired() {
     let router = create_router(Arc::clone(&application), config.web_root());
     for uri in [
         "http://camera.local/api/photos",
-        "http://camera.local/api/photo-sets",
+        "http://camera.local/api/albums",
     ] {
         let response = send(
             &router,
@@ -2031,7 +2082,7 @@ async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
     let foreign = response_json(
         post_json(
             &router,
-            "http://camera.local/api/photo-sets/not-an-id/delete",
+            "http://camera.local/api/albums/not-an-id/delete",
             serde_json::json!("not-an-object"),
             Some("https://foreign.example"),
         )
@@ -2045,7 +2096,7 @@ async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
     let malformed = response_json(
         post_json(
             &router,
-            "/api/photo-sets",
+            "/api/albums",
             serde_json::json!({"name": "x"}),
             Some("not an origin"),
         )
@@ -2066,14 +2117,14 @@ async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
         response_json(
             post_json(
                 &router,
-                "/api/photo-sets",
+                "/api/albums",
                 serde_json::json!({"name": ""}),
                 None,
             )
             .await,
         )
         .await,
-        serde_json::json!({"error": "Invalid Photo Set name"})
+        serde_json::json!({"error": "Invalid Album name"})
     );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -2088,7 +2139,7 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
     let request = |body: Body, length: Option<&str>| {
         let mut builder = Request::builder()
             .method("POST")
-            .uri("http://camera.local/api/photo-sets")
+            .uri("http://camera.local/api/albums")
             .header(header::ORIGIN, "http://camera.local")
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(length) = length {
@@ -2150,7 +2201,7 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
         scan,
         serde_json::json!({"state": "idle", "completed": 0, "total": 0})
     );
-    assert_eq!(application.photo_sets().await.unwrap().photo_sets.len(), 0);
+    assert_eq!(application.albums().await.unwrap().albums.len(), 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

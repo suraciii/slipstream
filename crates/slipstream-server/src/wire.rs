@@ -5,7 +5,7 @@ pub struct LibraryOverviewResponse {
     pub published: bool,
     pub photo_count: usize,
     pub scan: ScanStatusWire,
-    pub photo_sets: Vec<PhotoSetSummaryWire>,
+    pub albums: Vec<AlbumSummaryWire>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -20,7 +20,7 @@ pub struct ScanStatusWire {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PhotoSetSummaryWire {
+pub struct AlbumSummaryWire {
     pub id: String,
     pub name: String,
     pub photo_count: usize,
@@ -46,15 +46,15 @@ pub struct BrowseWindowResponse {
 #[derive(Clone, Debug)]
 pub enum BrowseSourceRequest {
     Library,
-    PhotoSet(String),
+    Album(String),
 }
 
-/// Bounded Photo Set mutation response: the same summaries the Library
+/// Bounded Album mutation response: the same summaries the Library
 /// Overview exposes, never member lists.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PhotoSetSummaryListResponse {
-    pub photo_sets: Vec<PhotoSetSummaryWire>,
+pub struct AlbumSummaryListResponse {
+    pub albums: Vec<AlbumSummaryWire>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,12 +146,12 @@ pub(crate) fn photo_summary_indexed_with_url(
     }
 }
 
-pub(crate) fn photo_set_summary(record: PhotoSetRecord) -> PhotoSetSummaryWire {
-    PhotoSetSummaryWire {
-        id: record.id,
-        name: record.name,
-        photo_count: record.members.len(),
-        has_saved_position: record.last_reviewed_photo_id.is_some(),
+pub(crate) fn album_summary(summary: slipstream_core::AlbumSummary) -> AlbumSummaryWire {
+    AlbumSummaryWire {
+        id: summary.id,
+        name: summary.name,
+        photo_count: summary.photo_count,
+        has_saved_position: summary.has_saved_position,
     }
 }
 

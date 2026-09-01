@@ -1,7 +1,7 @@
 use crate::{
-    CaptureFact, LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoSetMutation,
-    PhotoSetMutationResult, PhotoSetRecord, PhotoStateMutation, PhotoStateMutationResult,
-    PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
+    AlbumBrowseTarget, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact,
+    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoStateMutation,
+    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
@@ -375,10 +375,10 @@ impl Library {
         self.root.original(path).map_err(Into::into)
     }
 
-    pub async fn list_photo_sets(&self) -> Result<Vec<PhotoSetRecord>, LibraryError> {
+    pub async fn list_albums(&self) -> Result<Vec<AlbumRecord>, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
-            self.persistence.list_photo_sets_receiver()
+            self.persistence.list_albums_receiver()
         }?;
         receive
             .await
@@ -386,13 +386,38 @@ impl Library {
             .map_err(Into::into)
     }
 
-    pub async fn mutate_photo_set(
-        &self,
-        mutation: PhotoSetMutation,
-    ) -> Result<PhotoSetMutationResult, LibraryError> {
+    pub async fn list_album_summaries(&self) -> Result<Vec<AlbumSummary>, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
-            self.persistence.mutate_photo_set_receiver(mutation)
+            self.persistence.list_album_summaries_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn album_browse_target(
+        &self,
+        album_id: &str,
+    ) -> Result<Option<AlbumBrowseTarget>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.album_browse_target_receiver(album_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    pub async fn mutate_album(
+        &self,
+        mutation: AlbumMutation,
+    ) -> Result<AlbumMutationResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.mutate_album_receiver(mutation)
         }
         .map_err(LibraryError::from)?;
         receive
@@ -944,7 +969,7 @@ mod tests {
         let database = state.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v4.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v5.sql"))
             .unwrap();
         connection
             .execute(
@@ -1016,23 +1041,20 @@ mod tests {
             params![missing_photo_id,missing_id],
         ).unwrap();
         connection
-            .execute("INSERT INTO photo_sets VALUES('set','Keep',1)", [])
+            .execute("INSERT INTO albums VALUES('set','Keep',1)", [])
+            .unwrap();
+        connection
+            .execute("INSERT INTO album_members VALUES('set',?,0)", [&pair_id])
             .unwrap();
         connection
             .execute(
-                "INSERT INTO photo_set_members VALUES('set',?,0)",
-                [&pair_id],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO photo_set_members VALUES('set',?,1)",
+                "INSERT INTO album_members VALUES('set',?,1)",
                 [missing_photo_id],
             )
             .unwrap();
         connection
             .execute(
-                "INSERT INTO review_progress VALUES('set',?)",
+                "INSERT INTO album_progress VALUES('set',?)",
                 [missing_photo_id],
             )
             .unwrap();
@@ -1064,7 +1086,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             connection
@@ -1097,7 +1119,7 @@ mod tests {
             "pending"
         );
         let photo: (String, String, i64, String, i64) = connection.query_row(
-            "SELECT sort_path,preview_state,rating,selection_state,(SELECT position FROM photo_set_members WHERE photo_set_id='set' AND photo_id=photos.id) FROM photos WHERE id=?",
+            "SELECT sort_path,preview_state,rating,selection_state,(SELECT position FROM album_members WHERE album_id='set' AND photo_id=photos.id) FROM photos WHERE id=?",
             [&legacy_photo], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
         ).unwrap();
         assert_eq!(
@@ -1113,7 +1135,7 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT photo_id FROM review_progress WHERE photo_set_id='set'",
+                    "SELECT photo_id FROM album_progress WHERE album_id='set'",
                     [],
                     |row| row.get::<_, String>(0)
                 )
@@ -1146,7 +1168,7 @@ mod tests {
             .unwrap();
         assert_ne!(sibling_photo.id, legacy_photo);
         assert_eq!(sibling_photo.id.len(), 36);
-        let sets = library.list_photo_sets().await.unwrap();
+        let sets = library.list_albums().await.unwrap();
         assert_eq!(
             sets[0]
                 .members
