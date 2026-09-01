@@ -1230,6 +1230,71 @@ test("Grid thumbnails survive virtual re-renders without refetching", async ({
   await expect.poll(loadedThumbnails).toBe(8);
 });
 
+test("hydrated Grid thumbnails render without thumbnail API requests", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 8; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(2, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  for (const id of ids) {
+    const response = await fetch(`${running.url}/api/photos/${id}/thumbnail`);
+    expect(response.ok).toBe(true);
+  }
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const thumbnailRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/thumbnail"))
+      thumbnailRequests.push(request.url());
+  });
+  await page.goto(running.url);
+  const renderedThumbnails = () => page.locator(".photo-cell img").count();
+  await expect.poll(renderedThumbnails).toBe(8);
+  expect(thumbnailRequests).toHaveLength(0);
+  await expect(page.locator(".photo-cell img").first()).toHaveAttribute(
+    "src",
+    /\/api\/derivatives\/[^/]+\/thumbnail\/[^/]+\.jpg$/,
+  );
+});
+
+test("hydrated Grid thumbnail delivery failures stay attached to the Photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "photo.jpg"), await jpeg());
+  const running = await server(base, root);
+  const [photoId] = await browseIds(running.url);
+  const response = await fetch(
+    `${running.url}/api/photos/${photoId}/thumbnail`,
+  );
+  expect(response.ok).toBe(true);
+
+  await page.route("**/*", (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (
+      pathname.includes("/api/derivatives/") &&
+      pathname.includes("/thumbnail/")
+    )
+      return route.fulfill({ status: 404, body: "missing derivative" });
+    return route.continue();
+  });
+  const thumbnailRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/thumbnail"))
+      thumbnailRequests.push(request.url());
+  });
+  await page.goto(running.url);
+  const image = page.locator(".photo-cell img").first();
+  await image.scrollIntoViewIfNeeded();
+  await expect(image).toHaveAttribute("alt", "Thumbnail unavailable");
+  expect(thumbnailRequests).toHaveLength(0);
+});
+
 test("opening a Photo from the Grid persists the Photo Set position", async ({
   page,
 }) => {

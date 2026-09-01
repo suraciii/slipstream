@@ -552,7 +552,13 @@ export function renderApp(
     caption.className = "cell-caption";
     caption.textContent = `${index + 1} · ${photo.rating ? `${photo.rating}★` : ""}`;
     cell.append(caption);
-    void loadThumbnail(photo.id, image);
+    if (photo.preview.state === "unavailable") {
+      markThumbnailUnavailable(photo.id, image);
+    } else if (photo.preview.thumbnailUrl) {
+      attachThumbnail(photo.id, image, photo.preview.thumbnailUrl, true);
+    } else {
+      void loadThumbnail(photo.id, image);
+    }
   };
   const rememberThumbnail = (photoId: string, url: string) => {
     thumbnailUrls.delete(photoId);
@@ -563,22 +569,41 @@ export function renderApp(
       thumbnailUrls.delete(oldest);
     }
   };
+  const markThumbnailUnavailable = (
+    photoId: string,
+    image: HTMLImageElement,
+  ) => {
+    thumbnailFailures.add(photoId);
+    image.removeAttribute("src");
+    image.alt = "Thumbnail unavailable";
+  };
+  const attachThumbnail = (
+    photoId: string,
+    image: HTMLImageElement,
+    url?: string,
+    attachDisconnected = false,
+  ) => {
+    if (!url) return;
+    if (thumbnailFailures.has(photoId)) {
+      image.alt = "Thumbnail unavailable";
+      return;
+    }
+    image.onerror = () => markThumbnailUnavailable(photoId, image);
+    if (attachDisconnected || image.isConnected) image.src = url;
+  };
   const loadThumbnail = (photoId: string, image: HTMLImageElement) => {
     const cached = thumbnailUrls.get(photoId);
     if (cached) {
-      image.src = cached;
+      attachThumbnail(photoId, image, cached, true);
       return;
     }
     if (thumbnailFailures.has(photoId)) {
       image.alt = "Thumbnail unavailable";
       return;
     }
-    const attach = (url?: string) => {
-      if (url && image.isConnected) image.src = url;
-    };
     const pending = thumbnailRequests.get(photoId);
     if (pending) {
-      void pending.then(attach);
+      void pending.then((url) => attachThumbnail(photoId, image, url));
       return;
     }
     const request = (async () => {
@@ -597,11 +622,10 @@ export function renderApp(
       if (url) {
         rememberThumbnail(photoId, url);
         thumbnailFailures.delete(photoId);
+        attachThumbnail(photoId, image, url);
       } else {
-        thumbnailFailures.add(photoId);
-        if (image.isConnected) image.alt = "Thumbnail unavailable";
+        markThumbnailUnavailable(photoId, image);
       }
-      attach(url);
     });
   };
 

@@ -47,6 +47,7 @@ export type PhotoSummary = Readonly<{
     height?: number;
     limitedDetail?: boolean;
     url?: string;
+    thumbnailUrl?: string;
     message?: string;
   }>;
 }>;

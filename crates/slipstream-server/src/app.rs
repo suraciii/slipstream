@@ -528,6 +528,21 @@ impl Application {
             } else {
                 None
             };
+            let thumbnail_url = if facts.photo.preview_state != PreviewState::Unavailable {
+                self.preview
+                    .lookup_current_key(&facts, DerivativeTarget::Thumbnail512)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|cache_key| {
+                        format!(
+                            "/api/derivatives/{}/thumbnail/{}.jpg",
+                            facts.photo.id, cache_key
+                        )
+                    })
+            } else {
+                None
+            };
             let originals_by_id = facts
                 .originals
                 .iter()
@@ -539,6 +554,7 @@ impl Application {
                 &facts.originals,
                 &originals_by_id,
                 preview_url,
+                thumbnail_url,
             ));
         }
         Ok(BrowseWindowResponse {
@@ -669,11 +685,15 @@ impl Application {
         let response = match result {
             Ok(slipstream_core::PreviewRequestResult::Current(ready)) => {
                 if target == DerivativeTarget::Review2560 {
+                    let source_revision = published_facts
+                        .as_ref()
+                        .and_then(|facts| preview_source_revision(facts, ready.source));
                     if let Some(facts) = published_facts.as_ref() {
                         self.shared
                             .patch_photo_if_source_matches(facts, |photo| {
                                 photo.preview_state = PreviewState::Ready;
                                 photo.preview_source = Some(ready.source);
+                                photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
                                 photo.cache_revision = Some(ready.cache_key.clone());
@@ -684,6 +704,7 @@ impl Application {
                             .patch_photo(photo_id, |photo| {
                                 photo.preview_state = PreviewState::Ready;
                                 photo.preview_source = Some(ready.source);
+                                photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
                                 photo.cache_revision = Some(ready.cache_key.clone());
@@ -874,4 +895,20 @@ impl Application {
             .await
             .map_err(|error| ServerError::Join(error.to_string()))?
     }
+}
+
+fn preview_source_revision(facts: &PreviewFacts, source: PreviewCandidate) -> Option<String> {
+    let original_id = match source {
+        PreviewCandidate::MatchingJpeg => facts.photo.jpeg_original_id.as_ref(),
+        PreviewCandidate::EmbeddedRawJpeg => facts.photo.raw_original_id.as_ref(),
+    }?;
+    let original = facts.originals.iter().find(|original| {
+        &original.id == original_id && original.available && original.error_category.is_none()
+    })?;
+    source_revision(
+        original.relative_path.as_str(),
+        original.facts.size,
+        original.facts.mtime_ms,
+    )
+    .ok()
 }

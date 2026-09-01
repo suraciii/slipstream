@@ -18,7 +18,7 @@ use serde_json::Value;
 use slipstream_core::{
     CacheDirectory, DerivativeTarget, Library, LibraryConfig, LibraryError, PhotoSetRecord,
     PhotoStateField, PhotoStateValue, PreviewCandidate, PreviewFacts, PreviewService, PreviewState,
-    ScanLimits, ScanPhase, SelectionState,
+    ScanLimits, ScanPhase, SelectionState, source_revision,
 };
 use std::{
     env,

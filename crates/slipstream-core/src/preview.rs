@@ -20,6 +20,7 @@ use std::{
 };
 
 const CACHE_LOOKUP_CAPACITY: usize = 2;
+const CACHE_HYDRATION_CAPACITY: usize = 1;
 
 pub const DEFAULT_PREVIEW_WORKERS: usize = 2;
 pub const DEFAULT_PREVIEW_QUEUE_CAPACITY: usize = 64;
@@ -331,6 +332,7 @@ struct ServiceInner {
     queue_capacity: usize,
     waiter_capacity: usize,
     cache_lookup: Arc<tokio::sync::Semaphore>,
+    cache_hydration: Arc<tokio::sync::Semaphore>,
     shutdown_lock: Mutex<()>,
     public_handles: std::sync::atomic::AtomicUsize,
 }
@@ -432,6 +434,7 @@ impl PreviewService {
             queue_capacity: options.queue_capacity,
             waiter_capacity: options.waiter_capacity,
             cache_lookup: Arc::new(tokio::sync::Semaphore::new(CACHE_LOOKUP_CAPACITY)),
+            cache_hydration: Arc::new(tokio::sync::Semaphore::new(CACHE_HYDRATION_CAPACITY)),
             shutdown_lock: Mutex::new(()),
             public_handles: std::sync::atomic::AtomicUsize::new(1),
         });
@@ -521,7 +524,24 @@ impl PreviewService {
 
     /// Returns a bounded, metadata-only current cache key for Browse Window
     /// URL hydration. The eventual Preview/derivative request validates bytes.
+    /// Hydration has one lower-priority lane so current Preview lookups retain
+    /// one of the shared capacity-two cache admissions.
     pub async fn lookup_current_key(
+        &self,
+        facts: &PreviewFacts,
+        target: DerivativeTarget,
+    ) -> Result<Option<String>, PreviewServiceError> {
+        let _hydration_permit = self
+            .inner
+            .cache_hydration
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PreviewServiceError::Closed)?;
+        self.lookup_current_key_admitted(facts, target).await
+    }
+
+    async fn lookup_current_key_admitted(
         &self,
         facts: &PreviewFacts,
         target: DerivativeTarget,

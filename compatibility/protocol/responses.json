@@ -31,7 +31,8 @@
           "width": 2560,
           "height": 1707,
           "limitedDetail": false,
-          "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/review/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg"
+          "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/review/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg",
+          "thumbnailUrl": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/thumbnail/96f23e5c1e3f2bc98b3e87f07d8dce2bb32f95f37cd4bd9a322f2e3f0e2474f2.jpg"
         }
       }
     ]

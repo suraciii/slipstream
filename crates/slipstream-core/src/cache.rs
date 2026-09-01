@@ -6,6 +6,7 @@
 use crate::{
     OriginalKind, OriginalRecord, PhotoRecord, PreviewCandidate,
     derivative::{Derivative, DerivativeError, DerivativeProfile, DerivativeTarget, process_jpeg},
+    source_revision,
 };
 use image::{ImageDecoder, codecs::jpeg::JpegDecoder};
 use lcms2::Profile;
@@ -292,27 +293,55 @@ impl CacheDirectory {
         originals: &[OriginalRecord],
         target: DerivativeTarget,
     ) -> Result<Option<Manifest>, CacheError> {
-        let selected = selected_original(photo, originals);
-        let Some((candidate, original)) = selected else {
-            return Ok(None);
-        };
         let path = self.manifest_path_for_photo_target(&photo.id, target)?;
         let Ok(manifest) = read_manifest(&path) else {
             return Ok(None);
         };
+        let find = |id: &Option<String>, kind: OriginalKind| {
+            id.as_ref().and_then(|id| {
+                originals.iter().find(|original| {
+                    &original.id == id
+                        && original.kind == kind
+                        && original.available
+                        && original.error_category.is_none()
+                })
+            })
+        };
+        let selected = selected_original(photo, originals);
+        let persisted = photo.preview_source.and_then(|source| match source {
+            PreviewCandidate::MatchingJpeg => find(&photo.jpeg_original_id, OriginalKind::Jpeg)
+                .map(|original| (PreviewCandidate::MatchingJpeg, original)),
+            PreviewCandidate::EmbeddedRawJpeg => find(&photo.raw_original_id, OriginalKind::Raw)
+                .map(|original| (PreviewCandidate::EmbeddedRawJpeg, original)),
+        });
+        let Some((candidate, original)) = persisted.or(selected) else {
+            return Ok(None);
+        };
+
+        let manifest_source = match candidate {
+            PreviewCandidate::MatchingJpeg => DerivativeSource::MatchingJpeg,
+            PreviewCandidate::EmbeddedRawJpeg => DerivativeSource::EmbeddedRawJpeg,
+        };
         if !manifest_key_is_valid(&manifest)
             || manifest.photo_identity != photo.id
             || manifest.target_long_edge != target.long_edge()
-            || manifest.source
-                != match candidate {
-                    PreviewCandidate::MatchingJpeg => DerivativeSource::MatchingJpeg,
-                    PreviewCandidate::EmbeddedRawJpeg => DerivativeSource::EmbeddedRawJpeg,
-                }
+            || manifest.source != manifest_source
             || manifest.source_relative_path != original.relative_path.as_str()
             || manifest.source_size != original.facts.size
             || manifest.source_mtime_ms != original.facts.mtime_ms
             || (candidate == PreviewCandidate::MatchingJpeg
                 && manifest.embedded_candidate_identity.is_some())
+            || photo.preview_source.is_some_and(|source| {
+                source != candidate
+                    || photo.preview_source_revision.as_deref()
+                        != source_revision(
+                            original.relative_path.as_str(),
+                            original.facts.size,
+                            original.facts.mtime_ms,
+                        )
+                        .ok()
+                        .as_deref()
+            })
         {
             return Ok(None);
         }
@@ -2129,6 +2158,75 @@ mod tests {
                         .to_string_lossy()
                         .ends_with(".tmp")
                 })
+        );
+        scheduler.shutdown().unwrap();
+        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
+    }
+
+    #[test]
+    fn current_manifest_accepts_the_persisted_raw_fallback_source() {
+        let (scheduler, cache_path) = scheduler(None);
+        let raw_revision = 1.0;
+        let raw_identity = DerivativeIdentity {
+            photo_identity: "photo-1".to_owned(),
+            source: DerivativeSource::EmbeddedRawJpeg,
+            source_relative_path: "one.ARW".to_owned(),
+            source_size: 12,
+            source_mtime_ms: raw_revision,
+            embedded_candidate_identity: Some("0".to_owned()),
+            target: DerivativeTarget::Thumbnail512,
+        };
+        let result = scheduler
+            .generate(raw_identity, jpeg(2, 2), DerivativePriority::Current)
+            .unwrap();
+        let DerivativeResult::Ready(ready) = result else {
+            panic!("expected a ready derivative")
+        };
+        let original = |id: &str, path: &str, kind: OriginalKind, size: u64| OriginalRecord {
+            id: id.to_owned(),
+            relative_path: crate::RelativeOriginalPath::parse(path).unwrap(),
+            kind,
+            facts: crate::OriginalFacts {
+                size,
+                mtime_ms: raw_revision,
+                device: 0,
+                inode: 0,
+            },
+            available: true,
+            error_category: None,
+            error_message: None,
+            capture: crate::CaptureFact::pending(),
+        };
+        let originals = vec![
+            original("raw-id", "one.ARW", OriginalKind::Raw, 12),
+            original("jpeg-id", "one.JPG", OriginalKind::Jpeg, 9),
+        ];
+        let cache_key = ready.cache_key.clone();
+        let photo = PhotoRecord {
+            id: "photo-1".to_owned(),
+            raw_original_id: Some("raw-id".to_owned()),
+            jpeg_original_id: Some("jpeg-id".to_owned()),
+            ambiguous: false,
+            available: true,
+            preview_state: crate::PreviewState::Ready,
+            preview_candidate: Some(PreviewCandidate::MatchingJpeg),
+            preview_source: Some(PreviewCandidate::EmbeddedRawJpeg),
+            preview_source_revision: Some(source_revision("one.ARW", 12, raw_revision).unwrap()),
+            preview_width: Some(2),
+            preview_height: Some(2),
+            cache_revision: Some(cache_key.clone()),
+            sort_path: "one.ARW".to_owned(),
+            selection_state: crate::SelectionState::Undecided,
+            rating: 0,
+        };
+
+        assert_eq!(
+            scheduler.cache().lookup_current_key(
+                &photo,
+                &originals,
+                DerivativeTarget::Thumbnail512,
+            ),
+            Ok(Some(cache_key))
         );
         scheduler.shutdown().unwrap();
         let _ = fs::remove_dir_all(cache_path.parent().unwrap());
