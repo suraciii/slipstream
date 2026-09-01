@@ -561,22 +561,29 @@ mod tests {
     }
 
     #[test]
-    fn canonical_schema_v4_snapshot_executes_with_bundled_sqlite() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(&fs::read_to_string(contract_path("sqlite/schema-v4.sql")).unwrap())
-            .unwrap();
-        let expected: Value =
-            serde_json::from_slice(&fs::read(contract_path("sqlite/schema-v4.json")).unwrap())
-                .unwrap();
-        assert_eq!(schema_manifest(&connection), expected);
-        assert_eq!(
+    fn canonical_schema_snapshots_execute_with_bundled_sqlite() {
+        for version in ["v4", "v5"] {
+            let connection = Connection::open_in_memory().unwrap();
             connection
-                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1))
-                .optional()
-                .unwrap(),
-            None
-        );
+                .execute_batch(
+                    &fs::read_to_string(contract_path(&format!("sqlite/schema-{version}.sql")))
+                        .unwrap(),
+                )
+                .unwrap();
+            let expected: Value = serde_json::from_slice(
+                &fs::read(contract_path(&format!("sqlite/schema-{version}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(schema_manifest(&connection), expected, "{version}");
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA foreign_key_check", [], |_| Ok(1))
+                    .optional()
+                    .unwrap(),
+                None,
+                "{version}"
+            );
+        }
         assert!(!rusqlite::version().is_empty());
     }
 

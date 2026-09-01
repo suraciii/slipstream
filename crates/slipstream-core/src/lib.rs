@@ -31,11 +31,12 @@ pub use derivative::{
     Derivative, DerivativeError, DerivativeProfile, DerivativeTarget, process_jpeg,
 };
 pub use domain::{
-    DiscoveredOriginal, OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoRecord, PhotoSetMember, PhotoSetMutation, PhotoSetMutationResult,
-    PhotoSetRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
-    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState,
-    RelativeOriginalPath, ScanResult, ScanSnapshot, SelectionState,
+    AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
+    AlbumRecord, AlbumSummary, DiscoveredOriginal, OriginalErrorCategory, OriginalFacts,
+    OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
+    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
+    ScanResult, ScanSnapshot, SelectionState,
 };
 pub use identity::{
     InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,

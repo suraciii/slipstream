@@ -143,7 +143,7 @@ pub struct ScanSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PhotoSetMember {
+pub struct AlbumMember {
     pub photo_id: String,
     pub position: u32,
     pub available: bool,
@@ -152,46 +152,68 @@ pub struct PhotoSetMember {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PhotoSetRecord {
+pub struct AlbumRecord {
     pub id: String,
     pub name: String,
     pub last_reviewed_photo_id: Option<String>,
-    pub members: Vec<PhotoSetMember>,
+    pub members: Vec<AlbumMember>,
+}
+
+/// Bounded Album summary: per-Album facts without member materialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlbumSummary {
+    pub id: String,
+    pub name: String,
+    pub photo_count: usize,
+    pub has_saved_position: bool,
+}
+
+/// Ordered Album membership identity for Browse Snapshot construction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlbumBrowseMember {
+    pub photo_id: String,
+    pub available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PhotoSetMutation {
+pub struct AlbumBrowseTarget {
+    pub members: Vec<AlbumBrowseMember>,
+    pub saved_photo_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AlbumMutation {
     Create {
         name: String,
     },
     Rename {
-        photo_set_id: String,
+        album_id: String,
         name: String,
     },
     Delete {
-        photo_set_id: String,
+        album_id: String,
     },
     AddMembers {
-        photo_set_id: String,
+        album_id: String,
         photo_ids: Vec<String>,
     },
     RemoveMember {
-        photo_set_id: String,
+        album_id: String,
         photo_id: String,
     },
     Reorder {
-        photo_set_id: String,
+        album_id: String,
         photo_ids: Vec<String>,
     },
     SetProgress {
-        photo_set_id: String,
+        album_id: String,
         photo_id: String,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PhotoSetMutationResult {
-    pub photo_set_id: String,
+pub struct AlbumMutationResult {
+    pub album_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,7 +234,7 @@ pub struct PhotoStateMutation {
     pub field: PhotoStateField,
     pub value: PhotoStateValue,
     pub expected_current: Option<PhotoStateValue>,
-    pub photo_set_id: Option<String>,
+    pub album_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -2,7 +2,7 @@ import type {
   BrowseOpenResponse,
   BrowseWindowResponse,
   LibraryOverviewResponse,
-  PhotoSetSummary,
+  AlbumSummary,
   PhotoSummary,
   PreviewResponse,
   PreviewSource,
@@ -104,11 +104,11 @@ export function renderApp(
   }
 
   let overview: LibraryOverviewResponse | undefined;
-  let sets: ReadonlyArray<PhotoSetSummary> = [];
+  let sets: ReadonlyArray<AlbumSummary> = [];
   let token = "";
   let total = 0;
   let currentIndex = 0;
-  let sourceKind: "library" | "photo-set" = "library";
+  let sourceKind: "library" | "album" = "library";
   let sourceSetId: string | undefined;
   let sourceSetName = "All Photos";
   let loaded = new Map<number, PhotoSummary>();
@@ -212,10 +212,11 @@ export function renderApp(
       const button = sourceButton(
         set.name,
         set.photoCount,
-        sourceKind === "photo-set" && sourceSetId === set.id,
+        sourceKind === "album" && sourceSetId === set.id,
         set.hasSavedPosition,
+        false,
       );
-      button.addEventListener("click", () => void openSource("photo-set", set));
+      button.addEventListener("click", () => void openSource("album", set));
       sourceList.append(button);
     }
   };
@@ -224,11 +225,12 @@ export function renderApp(
     count: number,
     active: boolean,
     saved = false,
+    disableWhenEmpty = true,
   ) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `source-card${active ? " active" : ""}`;
-    button.disabled = count === 0;
+    button.disabled = disableWhenEmpty && count === 0;
     button.innerHTML = "<strong></strong><span></span>";
     button.querySelector("strong")!.textContent = name;
     button.querySelector("span")!.textContent =
@@ -282,7 +284,7 @@ export function renderApp(
       const response = await fetcher("/api/overview");
       if (!response.ok) throw new Error("overview failed");
       overview = (await response.json()) as LibraryOverviewResponse;
-      sets = overview.photoSets;
+      sets = overview.albums;
       summaryStatus.textContent = scanLabel(overview.scan);
       setConnected(true);
       renderSources();
@@ -314,8 +316,8 @@ export function renderApp(
   };
 
   const openSource = async (
-    kind: "library" | "photo-set",
-    set?: PhotoSetSummary,
+    kind: "library" | "album",
+    set?: AlbumSummary,
     preferredPhotoId?: string,
   ) => {
     busy = true;
@@ -362,8 +364,8 @@ export function renderApp(
                 ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
               }
             : {
-                source: "photo-set",
-                photoSetId: set!.id,
+                source: "album",
+                albumId: set!.id,
                 ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
               },
         ),
@@ -464,8 +466,8 @@ export function renderApp(
           sourceKind === "library"
             ? { source: "library", ...(anchorId ? { photoId: anchorId } : {}) }
             : {
-                source: "photo-set",
-                photoSetId: sourceSetId,
+                source: "album",
+                albumId: sourceSetId,
                 ...(anchorId ? { photoId: anchorId } : {}),
               },
         ),
@@ -993,14 +995,14 @@ export function renderApp(
     updateControls();
   };
   const persistPosition = (): Promise<boolean> => {
-    if (sourceKind !== "photo-set" || !sourceSetId || !currentPhoto())
+    if (sourceKind !== "album" || !sourceSetId || !currentPhoto())
       return Promise.resolve(true);
     const setId = sourceSetId;
     const photoId = currentPhoto()!.id;
     const generation = sourceGeneration;
     const task = progressQueue.then(async () => {
       try {
-        const response = await fetcher(`/api/photo-sets/${setId}/progress`, {
+        const response = await fetcher(`/api/albums/${setId}/progress`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ photoId }),
@@ -1015,7 +1017,7 @@ export function renderApp(
         if (generation === sourceGeneration && sourceSetId === setId)
           setConnected(
             false,
-            "Photo Set position could not be saved. Retry before making more decisions.",
+            "Album position could not be saved. Retry before making more decisions.",
           );
         return false;
       }
@@ -1049,7 +1051,7 @@ export function renderApp(
         body: JSON.stringify({
           field,
           value,
-          ...(setId ? { photoSetId: setId } : {}),
+          ...(setId ? { albumId: setId } : {}),
         }),
       });
       if (!response.ok) {
@@ -1121,7 +1123,7 @@ export function renderApp(
           field: action.field,
           value: action.priorValue,
           expectedCurrent: action.expectedCurrent,
-          ...(setId ? { photoSetId: setId } : {}),
+          ...(setId ? { albumId: setId } : {}),
         }),
       });
       if (!response.ok) {
@@ -1330,7 +1332,7 @@ export function renderApp(
     () =>
       void openSource(
         sourceKind,
-        sourceKind === "photo-set"
+        sourceKind === "album"
           ? sets.find((set) => set.id === sourceSetId)
           : undefined,
       ),

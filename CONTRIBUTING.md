@@ -83,13 +83,13 @@ cargo run --locked -p slipstream-server
 
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST` to whatever address you deploy on. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
 
-To expand a stopped schema-v4 Library to an ancestor Folder, first create and record a verified consistent backup with the service stopped (see [`docs/deployment.md`](docs/deployment.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
+To expand a stopped schema-v5 Library to an ancestor Folder, first create and record a verified consistent backup with the service stopped (see [`docs/deployment.md`](docs/deployment.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
 
 ```sh
 cargo run --locked -p slipstream-server -- expand-library
 ```
 
-The offline command rejects a running database, sidecars, non-v4 state, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes once, then completes a normal scan before reporting success.
+The offline command rejects a running database, sidecars, non-v5 state, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes once, then completes a normal scan before reporting success.
 
 ## Container verification
 

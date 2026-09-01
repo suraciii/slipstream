@@ -7,7 +7,7 @@ export type UndoDescription = Readonly<{
   expectedCurrent: SelectionState | number;
 }>;
 
-export type PhotoSetSummary = Readonly<{
+export type AlbumSummary = Readonly<{
   id: string;
   name: string;
   photoCount: number;
@@ -22,7 +22,7 @@ export type LibraryOverviewResponse = Readonly<{
     completed?: number;
     total?: number;
   }>;
-  photoSets: ReadonlyArray<PhotoSetSummary>;
+  albums: ReadonlyArray<AlbumSummary>;
 }>;
 
 export type BrowseOpenResponse = Readonly<{

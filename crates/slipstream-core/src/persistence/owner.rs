@@ -3,12 +3,13 @@ use super::{
     admission::StateDatabaseLock, validate_canonical_schema,
 };
 use crate::{
-    CaptureFact, CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, LibraryRoot,
-    OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
-    PhotoRecord, PhotoSetMember, PhotoSetMutation, PhotoSetMutationResult, PhotoSetRecord,
-    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
-    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
-    ScanLimits, ScanSnapshot, SelectionState,
+    AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
+    AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
+    DiscoveredOriginal, LibraryRoot, OriginalErrorCategory, OriginalFacts, OriginalKind,
+    OriginalRecord, OriginalScanError, PhotoRecord, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
+    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanLimits, ScanSnapshot,
+    SelectionState,
     identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -121,9 +122,7 @@ fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
     }
 }
 
-fn normalize_photo_set_mutation(
-    mutation: PhotoSetMutation,
-) -> Result<PhotoSetMutation, MutationError> {
+fn normalize_album_mutation(mutation: AlbumMutation) -> Result<AlbumMutation, MutationError> {
     let trim_name = |name: String| {
         let name = name.trim().to_owned();
         if name.is_empty() || name.chars().count() > 120 {
@@ -133,15 +132,15 @@ fn normalize_photo_set_mutation(
         }
     };
     match mutation {
-        PhotoSetMutation::Create { name } => Ok(PhotoSetMutation::Create {
+        AlbumMutation::Create { name } => Ok(AlbumMutation::Create {
             name: trim_name(name)?,
         }),
-        PhotoSetMutation::Rename { photo_set_id, name } => Ok(PhotoSetMutation::Rename {
-            photo_set_id,
+        AlbumMutation::Rename { album_id, name } => Ok(AlbumMutation::Rename {
+            album_id,
             name: trim_name(name)?,
         }),
-        PhotoSetMutation::AddMembers {
-            photo_set_id,
+        AlbumMutation::AddMembers {
+            album_id,
             photo_ids,
         } => {
             if photo_ids.len() > 100
@@ -153,15 +152,15 @@ fn normalize_photo_set_mutation(
             {
                 return Err(MutationError::Conflict);
             }
-            Ok(PhotoSetMutation::AddMembers {
-                photo_set_id,
+            Ok(AlbumMutation::AddMembers {
+                album_id,
                 photo_ids,
             })
         }
-        PhotoSetMutation::Delete { .. }
-        | PhotoSetMutation::RemoveMember { .. }
-        | PhotoSetMutation::Reorder { .. }
-        | PhotoSetMutation::SetProgress { .. } => Ok(mutation),
+        AlbumMutation::Delete { .. }
+        | AlbumMutation::RemoveMember { .. }
+        | AlbumMutation::Reorder { .. }
+        | AlbumMutation::SetProgress { .. } => Ok(mutation),
     }
 }
 
@@ -190,10 +189,15 @@ enum Command {
         reply: Reply<ScanSnapshot>,
     },
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
-    ListPhotoSets(Reply<Vec<PhotoSetRecord>>),
-    MutatePhotoSet(
-        PhotoSetMutation,
-        oneshot::Sender<Result<PhotoSetMutationResult, MutationError>>,
+    ListAlbums(Reply<Vec<AlbumRecord>>),
+    ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
+    AlbumBrowseTarget {
+        album_id: String,
+        reply: Reply<Option<AlbumBrowseTarget>>,
+    },
+    MutateAlbum(
+        AlbumMutation,
+        oneshot::Sender<Result<AlbumMutationResult, MutationError>>,
     ),
     MutatePhotoState(
         PhotoStateMutation,
@@ -411,36 +415,62 @@ impl Persistence {
             .unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
-    pub async fn list_photo_sets(&self) -> Result<Vec<PhotoSetRecord>, PersistenceError> {
-        let receive = self.list_photo_sets_receiver()?;
+    pub async fn list_albums(&self) -> Result<Vec<AlbumRecord>, PersistenceError> {
+        let receive = self.list_albums_receiver()?;
         receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
-    pub(crate) fn list_photo_sets_receiver(
+    pub(crate) fn list_albums_receiver(
         &self,
-    ) -> Result<oneshot::Receiver<Result<Vec<PhotoSetRecord>, PersistenceError>>, PersistenceError>
+    ) -> Result<oneshot::Receiver<Result<Vec<AlbumRecord>, PersistenceError>>, PersistenceError>
     {
         let (send, receive) = oneshot::channel();
-        self.submit(Command::ListPhotoSets(send))?;
+        self.submit(Command::ListAlbums(send))?;
         Ok(receive)
     }
 
-    pub async fn mutate_photo_set(
+    /// Bounded summaries for browser routes: counts and saved-position
+    /// existence stay in SQL; no member rows are materialized.
+    pub(crate) fn list_album_summaries_receiver(
         &self,
-        mutation: PhotoSetMutation,
-    ) -> Result<PhotoSetMutationResult, MutationError> {
-        let receive = self.mutate_photo_set_receiver(mutation)?;
+    ) -> Result<oneshot::Receiver<Result<Vec<AlbumSummary>, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ListAlbumSummaries(send))?;
+        Ok(receive)
+    }
+
+    /// Ordered membership identity for one Album's Browse Snapshot.
+    pub(crate) fn album_browse_target_receiver(
+        &self,
+        album_id: &str,
+    ) -> Result<
+        oneshot::Receiver<Result<Option<AlbumBrowseTarget>, PersistenceError>>,
+        PersistenceError,
+    > {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::AlbumBrowseTarget {
+            album_id: album_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub async fn mutate_album(
+        &self,
+        mutation: AlbumMutation,
+    ) -> Result<AlbumMutationResult, MutationError> {
+        let receive = self.mutate_album_receiver(mutation)?;
         receive.await.unwrap_or(Err(MutationError::Persistence))
     }
 
-    pub(crate) fn mutate_photo_set_receiver(
+    pub(crate) fn mutate_album_receiver(
         &self,
-        mutation: PhotoSetMutation,
-    ) -> Result<oneshot::Receiver<Result<PhotoSetMutationResult, MutationError>>, MutationError>
-    {
-        let mutation = normalize_photo_set_mutation(mutation)?;
+        mutation: AlbumMutation,
+    ) -> Result<oneshot::Receiver<Result<AlbumMutationResult, MutationError>>, MutationError> {
+        let mutation = normalize_album_mutation(mutation)?;
         let (send, receive) = oneshot::channel();
-        self.submit(Command::MutatePhotoSet(mutation, send))
+        self.submit(Command::MutateAlbum(mutation, send))
             .map_err(mutation_error_from_persistence)?;
         Ok(receive)
     }
@@ -573,11 +603,17 @@ fn owner_main(
                 let result = seed_preview(&state, &database_name, &mut connection, preview);
                 let _ = reply.send(result);
             }
-            Command::ListPhotoSets(reply) => {
-                let _ = reply.send(list_photo_sets(&connection));
+            Command::ListAlbums(reply) => {
+                let _ = reply.send(list_albums(&connection));
             }
-            Command::MutatePhotoSet(mutation, reply) => {
-                let result = mutate_photo_set(&state, &database_name, &mut connection, mutation);
+            Command::ListAlbumSummaries(reply) => {
+                let _ = reply.send(list_album_summaries(&connection));
+            }
+            Command::AlbumBrowseTarget { album_id, reply } => {
+                let _ = reply.send(album_browse_target(&connection, &album_id));
+            }
+            Command::MutateAlbum(mutation, reply) => {
+                let result = mutate_album(&state, &database_name, &mut connection, mutation);
                 let _ = reply.send(result);
             }
             Command::MutatePhotoState(mutation, reply) => {
@@ -650,7 +686,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 4)
+    preflight_schema_for_max_version(connection, canonical_root, 5)
 }
 
 fn preflight_schema_for_max_version(
@@ -675,6 +711,8 @@ fn preflight_schema_for_max_version(
         3 => validate_canonical_schema(connection, SchemaVersion::V3)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         4 => validate_canonical_schema(connection, SchemaVersion::V4)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        5 => validate_canonical_schema(connection, SchemaVersion::V5)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -712,7 +750,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 4 {
+    if version > 5 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -725,6 +763,7 @@ fn startup_schema(
             migrate_v0(&transaction)?;
             migrate_v2(&transaction)?;
             migrate_v3(&transaction)?;
+            migrate_v4(&transaction)?;
         }
         1 => {
             validate_canonical_schema(&transaction, SchemaVersion::V1)
@@ -732,19 +771,27 @@ fn startup_schema(
             migrate_v1(&transaction)?;
             migrate_v2(&transaction)?;
             migrate_v3(&transaction)?;
+            migrate_v4(&transaction)?;
         }
         2 => {
             validate_canonical_schema(&transaction, SchemaVersion::V2)
                 .map_err(|_| PersistenceError::UnsupportedSchema)?;
             migrate_v2(&transaction)?;
             migrate_v3(&transaction)?;
+            migrate_v4(&transaction)?;
         }
         3 => {
             validate_canonical_schema(&transaction, SchemaVersion::V3)
                 .map_err(|_| PersistenceError::UnsupportedSchema)?;
             migrate_v3(&transaction)?;
+            migrate_v4(&transaction)?;
         }
-        4 => validate_canonical_schema(&transaction, SchemaVersion::V4)
+        4 => {
+            validate_canonical_schema(&transaction, SchemaVersion::V4)
+                .map_err(|_| PersistenceError::UnsupportedSchema)?;
+            migrate_v4(&transaction)?;
+        }
+        5 => validate_canonical_schema(&transaction, SchemaVersion::V5)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
@@ -765,7 +812,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V4)
+    validate_canonical_schema(&transaction, SchemaVersion::V5)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -813,6 +860,8 @@ fn migrate_v0(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
 }
 
 fn migrate_v1(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    // Creates schema v2 state: the legacy photo-set table names are part of
+    // the immutable v2-v4 contracts and are renamed to albums by migrate_v4.
     transaction
         .execute_batch(
             "ALTER TABLE photos ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'undecided'
@@ -864,6 +913,44 @@ fn migrate_v2(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
 fn migrate_v3(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     transaction
         .execute_batch("PRAGMA user_version = 4;")
+        .map_err(|_| PersistenceError::Storage)
+}
+
+fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    // Issue #95: rename the active photo-set storage to canonical albums in
+    // one transaction. The new tables use DDL text identical to
+    // compatibility/sqlite/schema-v5.sql so the migrated database satisfies
+    // the exact schema-v5 manifest. Every album id, name, creation order,
+    // membership position, and saved position is copied unchanged.
+    transaction
+        .execute_batch(
+            "CREATE TABLE albums(
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
+               created_at INTEGER NOT NULL);
+             CREATE TABLE album_members(
+               album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+               position INTEGER NOT NULL CHECK(position >= 0),
+               PRIMARY KEY(album_id, photo_id),
+               UNIQUE(album_id, position));
+             CREATE TABLE album_progress(
+               album_id TEXT PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
+               photo_id TEXT NOT NULL,
+               FOREIGN KEY(album_id, photo_id)
+                 REFERENCES album_members(album_id, photo_id) ON DELETE CASCADE);
+             CREATE INDEX album_members_photo ON album_members(photo_id);
+             INSERT INTO albums(id,name,created_at)
+               SELECT id,name,created_at FROM photo_sets;
+             INSERT INTO album_members(album_id,photo_id,position)
+               SELECT photo_set_id,photo_id,position FROM photo_set_members;
+             INSERT INTO album_progress(album_id,photo_id)
+               SELECT photo_set_id,photo_id FROM review_progress;
+             DROP TABLE review_progress;
+             DROP TABLE photo_set_members;
+             DROP TABLE photo_sets;
+             PRAGMA user_version = 5;",
+        )
         .map_err(|_| PersistenceError::Storage)
 }
 
@@ -972,7 +1059,7 @@ type PreservedPhoto = (
 struct ExpansionProjection {
     originals: Vec<PreservedOriginal>,
     photos: Vec<PreservedPhoto>,
-    photo_sets: Vec<(String, String, i64)>,
+    albums: Vec<(String, String, i64)>,
     members: Vec<(String, String, i64)>,
     progress: Vec<(String, String)>,
 }
@@ -998,7 +1085,7 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&readonly, SchemaVersion::V4)
+    validate_canonical_schema(&readonly, SchemaVersion::V5)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     let stored_root = required_root_binding(&readonly)?;
     drop(readonly);
@@ -1049,7 +1136,7 @@ pub(crate) fn expand_library_binding(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&connection, SchemaVersion::V4)
+    validate_canonical_schema(&connection, SchemaVersion::V5)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
@@ -1062,7 +1149,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V4)
+    validate_canonical_schema(&transaction, SchemaVersion::V5)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -1112,7 +1199,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V4)
+    validate_canonical_schema(&transaction, SchemaVersion::V5)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -1254,16 +1341,15 @@ fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, 
                 row.get(6)?
             ))
         ),
-        photo_sets: rows!(
-            "SELECT id,name,created_at FROM photo_sets ORDER BY id",
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        ),
+        albums: rows!("SELECT id,name,created_at FROM albums ORDER BY id", |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        }),
         members: rows!(
-            "SELECT photo_set_id,photo_id,position FROM photo_set_members ORDER BY photo_set_id,photo_id",
+            "SELECT album_id,photo_id,position FROM album_members ORDER BY album_id,photo_id",
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         ),
         progress: rows!(
-            "SELECT photo_set_id,photo_id FROM review_progress ORDER BY photo_set_id",
+            "SELECT album_id,photo_id FROM album_progress ORDER BY album_id",
             |row| Ok((row.get(0)?, row.get(1)?))
         ),
     })
@@ -1893,9 +1979,9 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
-fn list_photo_sets(connection: &Connection) -> Result<Vec<PhotoSetRecord>, PersistenceError> {
+fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceError> {
     let sets = connection
-        .prepare("SELECT id,name FROM photo_sets ORDER BY created_at,id")
+        .prepare("SELECT id,name FROM albums ORDER BY created_at,id")
         .map_err(|_| PersistenceError::Storage)?
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1908,12 +1994,12 @@ fn list_photo_sets(connection: &Connection) -> Result<Vec<PhotoSetRecord>, Persi
         let members = connection
             .prepare(
                 "SELECT m.photo_id,m.position,p.available,p.selection_state,p.rating
-                 FROM photo_set_members m JOIN photos p ON p.id=m.photo_id
-                 WHERE m.photo_set_id=? ORDER BY m.position",
+                 FROM album_members m JOIN photos p ON p.id=m.photo_id
+                 WHERE m.album_id=? ORDER BY m.position",
             )
             .map_err(|_| PersistenceError::Storage)?
             .query_map([id.as_str()], |row| {
-                Ok(PhotoSetMember {
+                Ok(AlbumMember {
                     photo_id: row.get(0)?,
                     position: row
                         .get::<_, i64>(1)?
@@ -1932,13 +2018,13 @@ fn list_photo_sets(connection: &Connection) -> Result<Vec<PhotoSetRecord>, Persi
             .map_err(|_| PersistenceError::Storage)?;
         let last_reviewed_photo_id = connection
             .query_row(
-                "SELECT photo_id FROM review_progress WHERE photo_set_id=?",
+                "SELECT photo_id FROM album_progress WHERE album_id=?",
                 [id.as_str()],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|_| PersistenceError::Storage)?;
-        result.push(PhotoSetRecord {
+        result.push(AlbumRecord {
             id,
             name,
             last_reviewed_photo_id,
@@ -1946,6 +2032,72 @@ fn list_photo_sets(connection: &Connection) -> Result<Vec<PhotoSetRecord>, Persi
         });
     }
     Ok(result)
+}
+
+fn list_album_summaries(connection: &Connection) -> Result<Vec<AlbumSummary>, PersistenceError> {
+    connection
+        .prepare(
+            "SELECT a.id, a.name,
+                    (SELECT count(*) FROM album_members m WHERE m.album_id = a.id),
+                    EXISTS(SELECT 1 FROM album_progress p WHERE p.album_id = a.id)
+             FROM albums a ORDER BY a.created_at, a.id",
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok(AlbumSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                photo_count: row
+                    .get::<_, i64>(2)?
+                    .try_into()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                has_saved_position: row.get::<_, i64>(3)? != 0,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)
+}
+
+fn album_browse_target(
+    connection: &Connection,
+    album_id: &str,
+) -> Result<Option<AlbumBrowseTarget>, PersistenceError> {
+    let exists = connection
+        .query_row("SELECT 1 FROM albums WHERE id=?", [album_id], |_| Ok(()))
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    let members = connection
+        .prepare(
+            "SELECT m.photo_id, p.available
+             FROM album_members m JOIN photos p ON p.id=m.photo_id
+             WHERE m.album_id=? ORDER BY m.position",
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([album_id], |row| {
+            Ok(AlbumBrowseMember {
+                photo_id: row.get(0)?,
+                available: row.get::<_, i64>(1)? != 0,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    let saved_photo_id = connection
+        .query_row(
+            "SELECT photo_id FROM album_progress WHERE album_id=?",
+            [album_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(Some(AlbumBrowseTarget {
+        members,
+        saved_photo_id,
+    }))
 }
 
 fn mutation_error_from_sqlite(error: rusqlite::Error) -> MutationError {
@@ -1979,61 +2131,54 @@ fn mutation_transaction<T>(
     Ok(result)
 }
 
-fn require_photo_set(
-    transaction: &Transaction<'_>,
-    photo_set_id: &str,
-) -> Result<(), MutationError> {
+fn require_album(transaction: &Transaction<'_>, album_id: &str) -> Result<(), MutationError> {
     transaction
-        .query_row(
-            "SELECT 1 FROM photo_sets WHERE id=?",
-            [photo_set_id],
-            |_| Ok(()),
-        )
+        .query_row("SELECT 1 FROM albums WHERE id=?", [album_id], |_| Ok(()))
         .optional()
         .map_err(mutation_error_from_sqlite)?
         .ok_or(MutationError::NotFound)
 }
 
-fn mutate_photo_set(
+fn mutate_album(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
-    mutation: PhotoSetMutation,
-) -> Result<PhotoSetMutationResult, MutationError> {
+    mutation: AlbumMutation,
+) -> Result<AlbumMutationResult, MutationError> {
     mutation_transaction(state, database_name, connection, |transaction| {
-        let photo_set_id = match mutation {
-            PhotoSetMutation::Create { name } => {
+        let album_id = match mutation {
+            AlbumMutation::Create { name } => {
                 let id = uuid_v4()?;
                 transaction
                     .execute(
-                        "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                        "INSERT INTO albums(id,name,created_at) VALUES(?,?,?)",
                         params![id, name, unix_millis()],
                     )
                     .map_err(mutation_error_from_sqlite)?;
                 id
             }
-            PhotoSetMutation::Rename { photo_set_id, name } => {
-                require_photo_set(transaction, &photo_set_id)?;
+            AlbumMutation::Rename { album_id, name } => {
+                require_album(transaction, &album_id)?;
                 transaction
                     .execute(
-                        "UPDATE photo_sets SET name=? WHERE id=?",
-                        params![name, photo_set_id],
+                        "UPDATE albums SET name=? WHERE id=?",
+                        params![name, album_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
-                photo_set_id
+                album_id
             }
-            PhotoSetMutation::Delete { photo_set_id } => {
-                require_photo_set(transaction, &photo_set_id)?;
+            AlbumMutation::Delete { album_id } => {
+                require_album(transaction, &album_id)?;
                 transaction
-                    .execute("DELETE FROM photo_sets WHERE id=?", [&photo_set_id])
+                    .execute("DELETE FROM albums WHERE id=?", [&album_id])
                     .map_err(mutation_error_from_sqlite)?;
-                photo_set_id
+                album_id
             }
-            PhotoSetMutation::AddMembers {
-                photo_set_id,
+            AlbumMutation::AddMembers {
+                album_id,
                 photo_ids,
             } => {
-                require_photo_set(transaction, &photo_set_id)?;
+                require_album(transaction, &album_id)?;
                 for photo_id in &photo_ids {
                     transaction
                         .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
@@ -2043,30 +2188,40 @@ fn mutate_photo_set(
                 }
                 let mut position: i64 = transaction
                     .query_row(
-                        "SELECT COALESCE(MAX(position)+1,0) FROM photo_set_members WHERE photo_set_id=?",
-                        [&photo_set_id],
+                        "SELECT COALESCE(MAX(position)+1,0) FROM album_members WHERE album_id=?",
+                        [&album_id],
                         |row| row.get(0),
                     )
                     .map_err(mutation_error_from_sqlite)?;
                 for photo_id in photo_ids {
+                    let already_member = transaction
+                        .query_row(
+                            "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
+                            params![album_id, photo_id],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .map_err(mutation_error_from_sqlite)?;
+                    if already_member.is_some() {
+                        // Adding an existing member is idempotent: the
+                        // persisted position is kept and no row is added.
+                        continue;
+                    }
                     transaction
                         .execute(
-                            "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
-                            params![photo_set_id, photo_id, position],
+                            "INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)",
+                            params![album_id, photo_id, position],
                         )
                         .map_err(mutation_error_from_sqlite)?;
                     position = position.checked_add(1).ok_or(MutationError::Conflict)?;
                 }
-                photo_set_id
+                album_id
             }
-            PhotoSetMutation::RemoveMember {
-                photo_set_id,
-                photo_id,
-            } => {
+            AlbumMutation::RemoveMember { album_id, photo_id } => {
                 let position: i64 = transaction
                     .query_row(
-                        "SELECT position FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
-                        params![photo_set_id, photo_id],
+                        "SELECT position FROM album_members WHERE album_id=? AND photo_id=?",
+                        params![album_id, photo_id],
                         |row| row.get(0),
                     )
                     .optional()
@@ -2074,29 +2229,29 @@ fn mutate_photo_set(
                     .ok_or(MutationError::NotFound)?;
                 transaction
                     .execute(
-                        "DELETE FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
-                        params![photo_set_id, photo_id],
+                        "DELETE FROM album_members WHERE album_id=? AND photo_id=?",
+                        params![album_id, photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
                 transaction
                     .execute(
-                        "UPDATE photo_set_members SET position=position-1 WHERE photo_set_id=? AND position>?",
-                        params![photo_set_id, position],
+                        "UPDATE album_members SET position=position-1 WHERE album_id=? AND position>?",
+                        params![album_id, position],
                     )
                     .map_err(mutation_error_from_sqlite)?;
-                photo_set_id
+                album_id
             }
-            PhotoSetMutation::Reorder {
-                photo_set_id,
+            AlbumMutation::Reorder {
+                album_id,
                 photo_ids,
             } => {
-                require_photo_set(transaction, &photo_set_id)?;
+                require_album(transaction, &album_id)?;
                 let current = transaction
                     .prepare(
-                        "SELECT photo_id,position FROM photo_set_members WHERE photo_set_id=? ORDER BY position",
+                        "SELECT photo_id,position FROM album_members WHERE album_id=? ORDER BY position",
                     )
                     .map_err(mutation_error_from_sqlite)?
-                    .query_map([&photo_set_id], |row| {
+                    .query_map([&album_id], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
                     })
                     .map_err(mutation_error_from_sqlite)?
@@ -2129,28 +2284,25 @@ fn mutate_photo_set(
                 }
                 transaction
                     .execute(
-                        "UPDATE photo_set_members SET position=position+? WHERE photo_set_id=?",
-                        params![temporary_offset, photo_set_id],
+                        "UPDATE album_members SET position=position+? WHERE album_id=?",
+                        params![temporary_offset, album_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
                 for (position, photo_id) in photo_ids.iter().enumerate() {
                     transaction
                         .execute(
-                            "UPDATE photo_set_members SET position=? WHERE photo_set_id=? AND photo_id=?",
-                            params![position as i64, photo_set_id, photo_id],
+                            "UPDATE album_members SET position=? WHERE album_id=? AND photo_id=?",
+                            params![position as i64, album_id, photo_id],
                         )
                         .map_err(mutation_error_from_sqlite)?;
                 }
-                photo_set_id
+                album_id
             }
-            PhotoSetMutation::SetProgress {
-                photo_set_id,
-                photo_id,
-            } => {
+            AlbumMutation::SetProgress { album_id, photo_id } => {
                 transaction
                     .query_row(
-                        "SELECT 1 FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
-                        params![photo_set_id, photo_id],
+                        "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
+                        params![album_id, photo_id],
                         |_| Ok(()),
                     )
                     .optional()
@@ -2158,15 +2310,15 @@ fn mutate_photo_set(
                     .ok_or(MutationError::NotFound)?;
                 transaction
                     .execute(
-                        "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)
-                         ON CONFLICT(photo_set_id) DO UPDATE SET photo_id=excluded.photo_id",
-                        params![photo_set_id, photo_id],
+                        "INSERT INTO album_progress(album_id,photo_id) VALUES(?,?)
+                         ON CONFLICT(album_id) DO UPDATE SET photo_id=excluded.photo_id",
+                        params![album_id, photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
-                photo_set_id
+                album_id
             }
         };
-        Ok(PhotoSetMutationResult { photo_set_id })
+        Ok(AlbumMutationResult { album_id })
     })
 }
 
@@ -2209,11 +2361,11 @@ fn mutate_photo_state(
         {
             return Err(MutationError::Conflict);
         }
-        if let Some(photo_set_id) = mutation.photo_set_id.as_deref() {
+        if let Some(album_id) = mutation.album_id.as_deref() {
             transaction
                 .query_row(
-                    "SELECT 1 FROM photo_set_members WHERE photo_set_id=? AND photo_id=?",
-                    params![photo_set_id, mutation.photo_id],
+                    "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
+                    params![album_id, mutation.photo_id],
                     |_| Ok(()),
                 )
                 .optional()
@@ -2245,12 +2397,12 @@ fn mutate_photo_state(
                     .map_err(mutation_error_from_sqlite)?;
             }
         }
-        if let Some(photo_set_id) = mutation.photo_set_id.as_deref() {
+        if let Some(album_id) = mutation.album_id.as_deref() {
             transaction
                 .execute(
-                    "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)
-                     ON CONFLICT(photo_set_id) DO UPDATE SET photo_id=excluded.photo_id",
-                    params![photo_set_id, mutation.photo_id],
+                    "INSERT INTO album_progress(album_id,photo_id) VALUES(?,?)
+                     ON CONFLICT(album_id) DO UPDATE SET photo_id=excluded.photo_id",
+                    params![album_id, mutation.photo_id],
                 )
                 .map_err(mutation_error_from_sqlite)?;
         }
@@ -2390,7 +2542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initializes_exact_v4_and_runs_fifo_writes() {
+    async fn initializes_exact_v5_and_runs_fifo_writes() {
         let (_base, library, state, name, path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -2411,7 +2563,138 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+    }
+
+    #[tokio::test]
+    async fn v4_migration_to_v5_preserves_album_state_in_one_step() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
+        );
+        let first = "00000000-0000-4000-8000-000000000031";
+        let second = "00000000-0000-4000-8000-000000000032";
+        let photo_one = "photo-one";
+        let photo_two = "photo-two";
+        let connection = Connection::open(&path).unwrap();
+        for (id, path_text, sort_path) in [
+            ("original-one", "one.JPG", "one.JPG"),
+            ("original-two", "two.JPG", "two.JPG"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state) VALUES(?,?, 'jpeg',9,1.0,1,'pending')",
+                    params![id, path_text],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,0,1,'inspection-pending',?,'undecided',0)",
+                    params![sort_path.replace(".JPG", ""), id, sort_path],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE photos SET id=? WHERE jpeg_original_id='original-one'",
+                [photo_one],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE photos SET id=? WHERE jpeg_original_id='original-two'",
+                [photo_two],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![first, "Shoot", 7_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
+                params![second, "Client", 9_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,1)",
+                params![first, photo_two],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,0)",
+                params![first, photo_one],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
+                params![first, photo_two],
+            )
+            .unwrap();
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let albums = persistence.list_albums().await.unwrap();
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].id, first);
+        assert_eq!(albums[0].name, "Shoot");
+        assert_eq!(albums[1].id, second);
+        assert_eq!(albums[1].name, "Client");
+        assert_eq!(albums[1].members.len(), 0);
+        assert_eq!(albums[1].last_reviewed_photo_id, None);
+        let members = &albums[0].members;
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].photo_id, photo_one);
+        assert_eq!(members[0].position, 0);
+        assert_eq!(members[1].photo_id, photo_two);
+        assert_eq!(members[1].position, 1);
+        assert_eq!(albums[0].last_reviewed_photo_id.as_deref(), Some(photo_two));
+        persistence.shutdown().unwrap();
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            5
+        );
+        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+        // The legacy photo-set tables are gone rather than left as aliases.
+        for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
+            assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
+        }
+    }
+
+    #[test]
+    fn newer_v6_database_is_rejected_without_changes() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 6)
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            Persistence::open(
+                state,
+                name,
+                library.canonical_path().to_str().unwrap().to_owned(),
+            ),
+            Err(PersistenceError::NewerSchema)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -2433,7 +2716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_shared_v0_and_v1_to_v4_and_rejects_malformed_v2() {
+    async fn migrates_shared_v0_and_v1_to_v5_and_rejects_malformed_v2() {
         for sql in [
             include_str!("../../../../compatibility/sqlite/v0.sql"),
             include_str!("../../../../compatibility/sqlite/v1.sql"),
@@ -2448,7 +2731,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -2616,7 +2899,7 @@ mod tests {
                 source_revision: Some("capture-revision".to_owned()),
             }
         );
-        let set = persistence.list_photo_sets().await.unwrap().remove(0);
+        let set = persistence.list_albums().await.unwrap().remove(0);
         assert_eq!(set.id, set_id);
         assert_eq!(set.name, "Preserved");
         assert_eq!(set.members.len(), 1);
@@ -2628,7 +2911,7 @@ mod tests {
         assert_eq!(set.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V4).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
     }
 
     #[tokio::test]
@@ -2668,7 +2951,7 @@ mod tests {
             let before = fs::read(&path).unwrap();
             assert_eq!(
                 persistence
-                    .mutate_photo_set(PhotoSetMutation::Create {
+                    .mutate_album(AlbumMutation::Create {
                         name: format!("Blocked {suffix}"),
                     })
                     .await,
@@ -3199,7 +3482,7 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT photo_id FROM review_progress WHERE photo_set_id=?",
+                    "SELECT photo_id FROM album_progress WHERE album_id=?",
                     ["00000000-0000-4000-8000-000000000021"],
                     |row| row.get::<_, String>(0),
                 )
@@ -3209,7 +3492,7 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT count(*) FROM photo_set_members WHERE photo_set_id=?",
+                    "SELECT count(*) FROM album_members WHERE album_id=?",
                     ["00000000-0000-4000-8000-000000000021"],
                     |row| row.get::<_, i64>(0),
                 )
@@ -3468,7 +3751,166 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn photo_set_crud_normalizes_names_and_preserves_rows_across_restart() {
+    async fn album_summaries_and_browse_target_avoid_member_materialization() {
+        let (_base, library, state, name, path) = fixture();
+        let originals = vec![
+            discovered("one.ARW", OriginalKind::Raw, 3, 1000.0),
+            discovered("two.ARW", OriginalKind::Raw, 4, 1000.0),
+        ];
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.apply_scan(originals, Vec::new()).await.unwrap();
+        let photo_one = snapshot.photos[0].id.clone();
+        let photo_two = snapshot.photos[1].id.clone();
+        let created = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Bounded".to_owned(),
+            })
+            .await
+            .unwrap();
+        let album_id = created.album_id;
+        // Empty summary before any member exists.
+        let summaries = persistence
+            .list_album_summaries_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, album_id);
+        assert_eq!(summaries[0].photo_count, 0);
+        assert!(!summaries[0].has_saved_position);
+        // Browse target for the empty album exists with no members.
+        let target = persistence
+            .album_browse_target_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.as_ref().unwrap().members.len(), 0);
+        assert_eq!(target.as_ref().unwrap().saved_photo_id, None);
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_one.clone(), photo_two.clone()],
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: photo_two.clone(),
+            })
+            .await
+            .unwrap();
+        let summaries = persistence
+            .list_album_summaries_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summaries[0].photo_count, 2);
+        assert!(summaries[0].has_saved_position);
+        let target = persistence
+            .album_browse_target_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.members.len(), 2);
+        assert_eq!(target.members[0].photo_id, photo_one);
+        assert!(target.members[0].available);
+        assert_eq!(target.members[1].photo_id, photo_two);
+        assert_eq!(target.saved_photo_id.as_deref(), Some(photo_two.as_str()));
+        // Unknown albums report no browse target.
+        assert!(
+            persistence
+                .album_browse_target_receiver("00000000-0000-4000-8000-00000000dead")
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn adding_an_existing_album_member_is_idempotent() {
+        let (_base, library, state, name, path) = fixture();
+        let originals = vec![
+            discovered("one.ARW", OriginalKind::Raw, 3, 1000.0),
+            discovered("two.ARW", OriginalKind::Raw, 4, 1000.0),
+            discovered("three.ARW", OriginalKind::Raw, 5, 1000.0),
+        ];
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.apply_scan(originals, Vec::new()).await.unwrap();
+        let photo_one = snapshot.photos[0].id.clone();
+        let photo_two = snapshot.photos[1].id.clone();
+        let photo_three = snapshot.photos[2].id.clone();
+        let created = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Idempotent".to_owned(),
+            })
+            .await
+            .unwrap();
+        let album_id = created.album_id;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_one.clone(), photo_two.clone()],
+            })
+            .await
+            .unwrap();
+        // Re-adding a persisted member succeeds and keeps its position.
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_two.clone()],
+            })
+            .await
+            .unwrap();
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(album.members.len(), 2);
+        assert_eq!(album.members[0].photo_id, photo_one);
+        assert_eq!(album.members[0].position, 0);
+        assert_eq!(album.members[1].photo_id, photo_two);
+        assert_eq!(album.members[1].position, 1);
+        // A mixed request appends only the new member after existing ones.
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_two, photo_three.clone()],
+            })
+            .await
+            .unwrap();
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(album.members.len(), 3);
+        assert_eq!(album.members[2].photo_id, photo_three);
+        assert_eq!(album.members[2].position, 2);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn album_crud_normalizes_names_and_preserves_rows_across_restart() {
         let (_base, library, state, name, path) = fixture();
         let original_path = library.canonical_path().join("one.JPG");
         fs::write(&original_path, b"original bytes").unwrap();
@@ -3486,35 +3928,35 @@ mod tests {
             .unwrap();
         let photo_id = snapshot.photos[0].id.clone();
         let created = persistence
-            .mutate_photo_set(PhotoSetMutation::Create {
+            .mutate_album(AlbumMutation::Create {
                 name: "  Picks  ".to_owned(),
             })
             .await
             .unwrap();
-        let set_id = created.photo_set_id;
+        let set_id = created.album_id;
         persistence
-            .mutate_photo_set(PhotoSetMutation::AddMembers {
-                photo_set_id: set_id.clone(),
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: set_id.clone(),
                 photo_ids: vec![photo_id.clone()],
             })
             .await
             .unwrap();
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::Create {
+                .mutate_album(AlbumMutation::Create {
                     name: "pIcKs".to_owned(),
                 })
                 .await,
             Err(MutationError::Conflict)
         );
         persistence
-            .mutate_photo_set(PhotoSetMutation::Rename {
-                photo_set_id: set_id.clone(),
+            .mutate_album(AlbumMutation::Rename {
+                album_id: set_id.clone(),
                 name: " Renamed ".to_owned(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         assert_eq!(sets[0].name, "Renamed");
         persistence.shutdown().unwrap();
 
@@ -3525,16 +3967,14 @@ mod tests {
             library.canonical_path().to_string_lossy().into_owned(),
         )
         .unwrap();
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         assert_eq!(sets[0].id, set_id);
         assert_eq!(sets[0].members[0].photo_id, photo_id);
         persistence
-            .mutate_photo_set(PhotoSetMutation::Delete {
-                photo_set_id: set_id,
-            })
+            .mutate_album(AlbumMutation::Delete { album_id: set_id })
             .await
             .unwrap();
-        assert!(persistence.list_photo_sets().await.unwrap().is_empty());
+        assert!(persistence.list_albums().await.unwrap().is_empty());
         let connection = Connection::open(path).unwrap();
         assert_eq!(
             connection
@@ -3569,71 +4009,61 @@ mod tests {
             .unwrap();
         let ids = photo_ids(&snapshot);
         let set_id = persistence
-            .mutate_photo_set(PhotoSetMutation::Create {
+            .mutate_album(AlbumMutation::Create {
                 name: "Order".to_owned(),
             })
             .await
             .unwrap()
-            .photo_set_id;
+            .album_id;
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::AddMembers {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::AddMembers {
+                    album_id: set_id.clone(),
                     photo_ids: vec![ids[0].clone(), ids[0].clone()],
                 })
                 .await,
             Err(MutationError::Conflict)
         );
-        assert_eq!(
-            persistence.list_photo_sets().await.unwrap()[0]
-                .members
-                .len(),
-            0
-        );
+        assert_eq!(persistence.list_albums().await.unwrap()[0].members.len(), 0);
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::AddMembers {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::AddMembers {
+                    album_id: set_id.clone(),
                     photo_ids: vec![ids[0].clone(), "unknown".to_owned()],
                 })
                 .await,
             Err(MutationError::NotFound)
         );
-        assert_eq!(
-            persistence.list_photo_sets().await.unwrap()[0]
-                .members
-                .len(),
-            0
-        );
+        assert_eq!(persistence.list_albums().await.unwrap()[0].members.len(), 0);
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::AddMembers {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::AddMembers {
+                    album_id: set_id.clone(),
                     photo_ids: (0..=100).map(|index| format!("unknown-{index}")).collect(),
                 })
                 .await,
             Err(MutationError::Conflict)
         );
         persistence
-            .mutate_photo_set(PhotoSetMutation::AddMembers {
-                photo_set_id: set_id.clone(),
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: set_id.clone(),
                 photo_ids: ids.clone(),
             })
             .await
             .unwrap();
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::Reorder {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::Reorder {
+                    album_id: set_id.clone(),
                     photo_ids: vec![ids[2].clone(), ids[0].clone(), ids[1].clone()],
                 })
                 .await
                 .unwrap()
-                .photo_set_id,
+                .album_id,
             set_id
         );
         assert_eq!(
-            persistence.list_photo_sets().await.unwrap()[0]
+            persistence.list_albums().await.unwrap()[0]
                 .members
                 .iter()
                 .map(|member| member.photo_id.clone())
@@ -3642,21 +4072,21 @@ mod tests {
         );
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::Reorder {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::Reorder {
+                    album_id: set_id.clone(),
                     photo_ids: vec![ids[0].clone(), ids[0].clone(), ids[1].clone()],
                 })
                 .await,
             Err(MutationError::Conflict)
         );
         persistence
-            .mutate_photo_set(PhotoSetMutation::RemoveMember {
-                photo_set_id: set_id.clone(),
+            .mutate_album(AlbumMutation::RemoveMember {
+                album_id: set_id.clone(),
                 photo_id: ids[0].clone(),
             })
             .await
             .unwrap();
-        let members = &persistence.list_photo_sets().await.unwrap()[0].members;
+        let members = &persistence.list_albums().await.unwrap()[0].members;
         assert_eq!(
             members
                 .iter()
@@ -3669,7 +4099,7 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
-                "UPDATE photo_set_members SET position=9 WHERE photo_set_id=? AND photo_id=?",
+                "UPDATE album_members SET position=9 WHERE album_id=? AND photo_id=?",
                 params![set_id, ids[1]],
             )
             .unwrap();
@@ -3683,8 +4113,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::Reorder {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::Reorder {
+                    album_id: set_id.clone(),
                     photo_ids: vec![ids[1].clone(), ids[2].clone()],
                 })
                 .await,
@@ -3714,36 +4144,36 @@ mod tests {
             .unwrap();
         let ids = photo_ids(&snapshot);
         let set_a = persistence
-            .mutate_photo_set(PhotoSetMutation::Create {
+            .mutate_album(AlbumMutation::Create {
                 name: "A".to_owned(),
             })
             .await
             .unwrap()
-            .photo_set_id;
+            .album_id;
         let set_b = persistence
-            .mutate_photo_set(PhotoSetMutation::Create {
+            .mutate_album(AlbumMutation::Create {
                 name: "B".to_owned(),
             })
             .await
             .unwrap()
-            .photo_set_id;
+            .album_id;
         for set_id in [&set_a, &set_b] {
             persistence
-                .mutate_photo_set(PhotoSetMutation::AddMembers {
-                    photo_set_id: set_id.clone(),
+                .mutate_album(AlbumMutation::AddMembers {
+                    album_id: set_id.clone(),
                     photo_ids: ids.clone(),
                 })
                 .await
                 .unwrap();
         }
         persistence
-            .mutate_photo_set(PhotoSetMutation::SetProgress {
-                photo_set_id: set_a.clone(),
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: set_a.clone(),
                 photo_id: ids[0].clone(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         assert_eq!(
             sets.iter()
                 .find(|set| set.id == set_a)
@@ -3758,7 +4188,7 @@ mod tests {
                 field: PhotoStateField::SelectionState,
                 value: PhotoStateValue::Selection(SelectionState::Selected),
                 expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
-                photo_set_id: Some(set_b.clone()),
+                album_id: Some(set_b.clone()),
             })
             .await
             .unwrap();
@@ -3766,7 +4196,7 @@ mod tests {
             result.undo.prior_value,
             PhotoStateValue::Selection(SelectionState::Undecided)
         );
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
         let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
         assert_eq!(
@@ -3788,7 +4218,7 @@ mod tests {
                     field: PhotoStateField::SelectionState,
                     value: result.undo.prior_value,
                     expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
-                    photo_set_id: None,
+                    album_id: None,
                 })
                 .await,
             Err(MutationError::Conflict)
@@ -3799,7 +4229,7 @@ mod tests {
                 field: PhotoStateField::SelectionState,
                 value: result.undo.prior_value,
                 expected_current: Some(result.undo.expected_current),
-                photo_set_id: None,
+                album_id: None,
             })
             .await
             .unwrap();
@@ -3809,11 +4239,11 @@ mod tests {
                 field: PhotoStateField::Rating,
                 value: PhotoStateValue::Rating(5),
                 expected_current: Some(PhotoStateValue::Rating(0)),
-                photo_set_id: Some(set_a.clone()),
+                album_id: Some(set_a.clone()),
             })
             .await
             .unwrap();
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
         let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
         assert_eq!(current_a.members[1].rating, 5);
@@ -3823,13 +4253,13 @@ mod tests {
             Some(ids[1].as_str())
         );
         persistence
-            .mutate_photo_set(PhotoSetMutation::RemoveMember {
-                photo_set_id: set_a.clone(),
+            .mutate_album(AlbumMutation::RemoveMember {
+                album_id: set_a.clone(),
                 photo_id: ids[1].clone(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_photo_sets().await.unwrap();
+        let sets = persistence.list_albums().await.unwrap();
         assert_eq!(
             sets.iter()
                 .find(|set| set.id == set_a)
@@ -3863,20 +4293,20 @@ mod tests {
                 field: PhotoStateField::Rating,
                 value: PhotoStateValue::Rating(4),
                 expected_current: None,
-                photo_set_id: None,
+                album_id: None,
             })
             .await
             .unwrap();
         let set_id = persistence
-            .mutate_photo_set(PhotoSetMutation::Create {
+            .mutate_album(AlbumMutation::Create {
                 name: "Keep".to_owned(),
             })
             .await
             .unwrap()
-            .photo_set_id;
+            .album_id;
         persistence
-            .mutate_photo_set(PhotoSetMutation::AddMembers {
-                photo_set_id: set_id.clone(),
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: set_id.clone(),
                 photo_ids: vec![photo_id.clone()],
             })
             .await
@@ -3885,7 +4315,7 @@ mod tests {
             .apply_scan(Vec::new(), Vec::new())
             .await
             .unwrap();
-        let member = &persistence.list_photo_sets().await.unwrap()[0].members[0];
+        let member = &persistence.list_albums().await.unwrap()[0].members[0];
         assert!(!member.available);
         assert_eq!(member.rating, 4);
         let sidecar = path.with_file_name("library.sqlite-journal");
@@ -3894,7 +4324,7 @@ mod tests {
         let before = fs::read(&path).unwrap();
         assert_eq!(
             persistence
-                .mutate_photo_set(PhotoSetMutation::Create {
+                .mutate_album(AlbumMutation::Create {
                     name: "Blocked".to_owned()
                 })
                 .await,
@@ -3917,12 +4347,12 @@ mod tests {
         .unwrap();
         library.shutdown().unwrap();
         assert!(matches!(
-            library.list_photo_sets().await,
+            library.list_albums().await,
             Err(crate::LibraryError::Closed)
         ));
         assert!(matches!(
             library
-                .mutate_photo_set(PhotoSetMutation::Create {
+                .mutate_album(AlbumMutation::Create {
                     name: "Nope".to_owned()
                 })
                 .await,

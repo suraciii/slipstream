@@ -1,42 +1,87 @@
 [
   {
     "name": "retired-photo-list",
-    "request": { "method": "GET", "path": "/api/photos" },
-    "expected": { "status": 404, "body": { "error": "Not found" } }
+    "request": {
+      "method": "GET",
+      "path": "/api/photos"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Not found"
+      }
+    }
   },
   {
-    "name": "retired-photo-set-membership-list",
-    "request": { "method": "GET", "path": "/api/photo-sets" },
-    "expected": { "status": 404, "body": { "error": "Not found" } }
+    "name": "retired-album-membership-list",
+    "request": {
+      "method": "GET",
+      "path": "/api/albums"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Not found"
+      }
+    }
+  },
+  {
+    "name": "retired-photo-set-create",
+    "request": {
+      "method": "POST",
+      "path": "/api/photo-sets"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Not found"
+      }
+    }
   },
   {
     "name": "unsupported-method-on-retired-photo-list",
-    "request": { "method": "DELETE", "path": "/api/photos" },
+    "request": {
+      "method": "DELETE",
+      "path": "/api/photos"
+    },
     "expected": {
       "status": 405,
-      "body": { "error": "Method not allowed" }
+      "body": {
+        "error": "Method not allowed"
+      }
     }
   },
   {
     "name": "scan-reports-status-without-photo-facts",
-    "request": { "method": "POST", "path": "/api/scan" },
-    "expected": {
-      "status": 200,
-      "body": { "state": "idle", "completed": 0, "total": 0 }
-    }
-  },
-  {
-    "name": "photo-set-create-returns-bounded-summaries",
     "request": {
       "method": "POST",
-      "path": "/api/photo-sets",
-      "headers": { "content-type": "application/json" },
-      "body": { "name": "Compat Set" }
+      "path": "/api/scan"
     },
     "expected": {
       "status": 200,
       "body": {
-        "photoSets": [
+        "state": "idle",
+        "completed": 0,
+        "total": 0
+      }
+    }
+  },
+  {
+    "name": "album-create-returns-bounded-summaries",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "name": "Compat Set"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
           {
             "id": "$setId",
             "name": "Compat Set",
@@ -48,35 +93,59 @@
     }
   },
   {
-    "name": "invalid-photo-set",
+    "name": "invalid-album",
     "request": {
       "method": "POST",
-      "path": "/api/photo-sets",
-      "headers": { "content-type": "application/json" },
-      "body": { "name": "" }
+      "path": "/api/albums",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": {
+        "name": ""
+      }
     },
-    "expected": { "status": 400, "body": { "error": "Invalid Photo Set name" } }
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Album name"
+      }
+    }
   },
   {
     "name": "cross-origin-mutation",
     "request": {
       "method": "POST",
       "path": "/api/scan",
-      "headers": { "origin": "https://foreign.example" }
+      "headers": {
+        "origin": "https://foreign.example"
+      }
     },
     "expected": {
       "status": 403,
-      "body": { "error": "Cross-origin mutation rejected" }
+      "body": {
+        "error": "Cross-origin mutation rejected"
+      }
     }
   },
   {
     "name": "api-no-spa-fallback",
-    "request": { "method": "GET", "path": "/api/unknown" },
-    "expected": { "status": 404, "body": { "error": "Not found" } }
+    "request": {
+      "method": "GET",
+      "path": "/api/unknown"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Not found"
+      }
+    }
   },
   {
     "name": "index-revalidation",
-    "request": { "method": "GET", "path": "/" },
+    "request": {
+      "method": "GET",
+      "path": "/"
+    },
     "expected": {
       "status": 200,
       "headers": {
@@ -89,10 +158,15 @@
   },
   {
     "name": "spa-fallback-revalidation",
-    "request": { "method": "GET", "path": "/review/session" },
+    "request": {
+      "method": "GET",
+      "path": "/review/session"
+    },
     "expected": {
       "status": 200,
-      "headers": { "cache-control": "no-cache" },
+      "headers": {
+        "cache-control": "no-cache"
+      },
       "bodyText": "<main>compatibility web</main>"
     }
   }
