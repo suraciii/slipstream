@@ -1,12 +1,12 @@
 # Scalable Library Browsing
 
-Slipstream's Web application must browse a Photo Library whose size exceeds what a mobile browser should download, parse, retain, or render as one response. The Photographer opens `All Photos` or a Photo Set, browses its Grid, and opens individual Photos in the same Library Browser. The implementation needs a hidden stable-order boundary so a background rescan cannot move Photos underneath the user.
+Slipstream's Web application must browse a Photo Library whose size exceeds what a mobile browser should download, parse, retain, or render as one response. The Photographer opens `All Photos`, one Original Folder, or one Album, browses its Grid, and opens individual Photos in the same Library Browser. The implementation needs a hidden stable-order boundary so a background rescan cannot move Photos underneath the user.
 
 ## Design Drivers
 
 - The Library may contain tens of thousands of Photos and continue growing.
-- The first useful screen must not depend on every Photo fact or Photo Set member.
-- Grid and Photo navigation must preserve deterministic Library order or explicit Photo Set order.
+- The first useful screen must not depend on every Photo fact, Album member, or Original Folder.
+- Grid and Photo navigation must preserve deterministic Library and Folder order or explicit Album order.
 - A rescan may refresh Photo facts but must not reorder an already open source.
 - Grid thumbnails and review Previews are rebuildable, persistent derivatives.
 - The current Photo must not compete equally with speculative background work.
@@ -21,11 +21,19 @@ Slipstream's Web application must browse a Photo Library whose size exceeds what
 The Library Overview is a bounded summary of the current published Library. It contains:
 
 - total Photo count;
-- Photo Set identifiers, names, counts, and saved-position availability;
+- Album identifiers, names, counts, and saved-position availability;
 - current scan state and progress summary; and
 - whether a published Library is available.
 
-It contains no complete Photo list and no complete Photo Set membership list. Its response size is therefore independent of Library Photo count except for encoded counts and the number of Photo Sets.
+It contains no complete Photo list, complete Album membership list, or Original Folder tree. Its response size is therefore independent of Library Photo count except for encoded counts and the number of Albums.
+
+### File Location Window
+
+A File Location Window is one bounded range of direct child Original Folders beneath a requested parent. Each Folder summary contains its relative Location, display name, recursive Photo count, and whether known descendant Folders exist.
+
+The server derives Folder summaries from one Published Library according to [Physical File Locations and Virtual Albums](photo-organization.md). A request provides one validated relative parent Location, start position, bounded limit, and the opaque publication value from the first retained Folder window. The first request may omit that value and binds to the current publication. The server returns the publication, parent, requested start, total direct-child count, and only that range.
+
+A newer publication expires the old value. The browser restarts File Location navigation instead of combining windows from different publications. No route returns the complete Folder tree or complete recursive Folder membership. The Library Overview therefore remains small even when directory count grows with the Library.
 
 ### Browse Snapshot
 
@@ -34,15 +42,15 @@ A Browse Snapshot is an internal, ephemeral server object. It is not a product o
 It contains:
 
 - one opaque token;
-- source identity: `All Photos` or one Photo Set;
+- source identity: `All Photos`, one Original Folder, or one Album;
 - an immutable ordered array of Photo IDs;
 - total count;
-- the Photo Set's initial saved position when applicable; and
+- the Album's initial saved position when applicable; and
 - last-access time for bounded cleanup.
 
 Creating a Snapshot copies only ordered Photo IDs. It does not copy Photo facts, thumbnails, or Preview bytes. Current Photo facts are queried from the Library owner when a window is requested.
 
-One process may retain only a bounded number of Snapshots. Explicit close, idle expiration, server restart, and bounded oldest-idle eviction may remove one. Losing a Snapshot never loses Selection State, Rating, Photo Set membership, or saved position because those remain in SQLite.
+One process may retain only a bounded number of Snapshots. Explicit close, idle expiration, server restart, and bounded oldest-idle eviction may remove one. Losing a Snapshot never loses Selection State, Rating, Album membership, or saved position because those remain in SQLite.
 
 ### Browse Window
 
@@ -96,6 +104,7 @@ Conceptual protocol surfaces are:
 ```text literal
 GET    /api/overview
 GET    /api/status
+GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}&limit={count}
 POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
 DELETE /api/browse/{token}
@@ -110,20 +119,26 @@ DELETE /api/browse/{token}
 or:
 
 ```json
-{ "source": "photo-set", "photoSetId": "opaque-id" }
+{ "source": "folder", "folderPath": "RAW/26-spring", "publication": "opaque" }
+```
+
+or:
+
+```json
+{ "source": "album", "albumId": "opaque-id" }
 ```
 
 It returns the opaque token, total count, initial position, and optionally one bounded first window. The exact JSON belongs to the protocol compatibility fixtures; database rows and absolute Original Locations do not cross this boundary.
 
-The protocol has no route that materializes every Photo fact or every Photo Set member. The legacy unbounded complete-Photo list and complete-membership list are retired: requests to them receive `404 Not found`. Photo Set mutations return bounded Photo Set summaries in the same shape as the Library Overview's Photo Set list, never member lists. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
+The protocol has no route that materializes every Photo fact, every Album member, every Original Folder, or complete recursive Folder membership. The legacy unbounded complete-Photo and complete-membership routes remain retired. Album mutations return bounded Album summaries in the same shape as the Library Overview's Album list, never member lists. Legacy Photo Set routes and source values are retired rather than aliased. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
 
 ### Order Ownership
 
-An `All Photos` Browse Snapshot copies Photo IDs from the current Published Library's deterministic Capture Time order. A Photo Set Browse Snapshot copies IDs by persisted membership position.
+An `All Photos` Browse Snapshot copies Photo IDs from the current Published Library's deterministic Capture Time order. An Original Folder Browse Snapshot filters that order by the recursive component-aware Folder rule. An Album Browse Snapshot copies IDs by persisted membership position.
 
 After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library.
 
-The server resolves Photo Set saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local.
+The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local.
 
 ### Grid Loading
 
@@ -183,6 +198,7 @@ Grid thumbnail transfer and adjacent Preview preparation use lower browser prior
 The Web application owns presentation of asynchronous phases. It must remain responsive while requests run.
 
 - Overview loading shows connection and summary phases.
+- File Location loading reports the real requested direct-child range and total.
 - Browse creation shows source-order preparation without a fake percentage.
 - Grid loading reports the real requested range and total.
 - Thumbnail loading uses stable cell placeholders and real completed/visible counts when useful.
@@ -197,11 +213,13 @@ Already loaded facts and derivative bytes remain visible after disconnection. Mu
 
 If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use.
 
-The first product does not promise durable `All Photos` position across browser reload. Photo Set saved position remains durable SQLite state.
+The first product does not promise durable `All Photos` or Original Folder position across browser reload. Album saved position remains durable SQLite state.
 
 ## Failure Behavior
 
-A failed window request does not clear successfully loaded windows. The browser identifies the failed range and retries that range.
+A failed File Location request does not clear successfully loaded Folder nodes. The browser identifies and retries only the failed direct-child range. An expired publication clears and reloads File Location navigation from the current Published Library rather than appending incompatible children.
+
+A failed Browse Window request does not clear successfully loaded windows. The browser identifies the failed range and retries that range.
 
 A per-Photo thumbnail or Preview failure remains attached to that Photo and does not block sibling cells, navigation, Selection State, or Rating.
 
@@ -215,7 +233,7 @@ Cache write failure may serve a valid stale derivative under the existing stale-
 
 ### Selected: Bounded Server-Owned Browse Snapshot and Windows
 
-This preserves a stable open-source order while keeping browser transfer, memory, and DOM bounded. It also lets the server resolve Photo Set resume behavior without sending all members.
+This preserves a stable open-source order while keeping browser transfer, memory, and DOM bounded. It also lets the server resolve Album resume behavior without sending all members.
 
 ### Rejected: Add Progress to the Existing Complete Response
 
@@ -231,7 +249,7 @@ Streaming could show early rows sooner, but total transfer and browser memory wo
 
 ### Rejected: Send Every Ordered ID to the Browser
 
-Sending only IDs is smaller than sending every fact, but it still makes startup transfer and browser memory proportional to the whole Library and leaves Snapshot lifecycle and Photo Set resume rules in the client.
+Sending only IDs is smaller than sending every fact, but it still makes startup transfer and browser memory proportional to the whole Library and leaves Snapshot lifecycle and Album resume rules in the client.
 
 ### Selected: Persistent Demand Cache with Adjacent Prefetch
 
@@ -265,15 +283,17 @@ These add reconnection protocols, deployment units, and coordination state witho
 
 Verification must include a generated Library projection with at least 40,000 Photos and prove:
 
-- Library Overview size does not grow with Photo count except encoded counts and Photo Set summaries;
+- Library Overview size does not grow with Photo count except encoded counts and Album summaries;
+- every File Location Window respects an enforced maximum, retained windows share one publication, expiration reloads rather than mixes generations, and no route returns the complete Folder tree or complete recursive membership;
+- File Location counts deduplicate RAW/JPEG pairs and include remembered unavailable Photos at their last known Locations;
 - the first Grid becomes interactive without a complete Photo transfer;
 - every Browse Window respects the enforced maximum;
-- browser-retained facts and rendered cells remain bounded while scrolling from the first to a late position;
-- `All Photos` order matches Capture Time rules and Photo Set order matches membership position;
-- a rescan refreshes facts but cannot reorder or insert into an open Browse Snapshot;
-- reopening the source after rescan uses the new complete order;
-- Photo Set saved-position and unavailable-member fallback work without complete membership transfer;
-- Selection State, Rating, undo, and saved Photo Set position mutations refresh only affected facts and survive restart;
+- browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
+- `All Photos` and Original Folder order match Capture Time rules, while Album order matches membership position;
+- a rescan refreshes facts and File Location navigation but cannot reorder or insert into an open Browse Snapshot;
+- reopening the source after rescan uses the new complete order and current Folder subtree;
+- Album saved-position and unavailable-member fallback work without complete membership transfer;
+- Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;

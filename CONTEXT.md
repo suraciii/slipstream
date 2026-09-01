@@ -3,7 +3,7 @@
 ## Library
 
 **Photo Library**:
-The Original Files known to Slipstream together with their Photos, Photo Sets, and selection state. One state store owns one Photo Library.
+The Original Files known to Slipstream together with their Photos, Albums, and selection state. One state store owns one Photo Library.
 
 **Library Folder**:
 The configured filesystem directory whose supported descendant files belong to the Photo Library. The Folder defines discovery and read-only containment, not Photo or Original identity.
@@ -13,7 +13,7 @@ _Avoid_: Library Root, source root
 One photograph presented for browsing and selection. A Photo may contain a RAW Original and its matching JPEG Original, and remains the same Photo when a supported Library expansion changes their Locations.
 
 **Capture Time**:
-The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time does not come from filesystem modification time and does not determine Photo Set membership order.
+The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time does not come from filesystem modification time and does not determine Album membership order.
 
 **Original File**:
 A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not modify it, and a supported Library expansion must not create a new identity for it.
@@ -22,20 +22,25 @@ A RAW or JPEG file owned by the Photographer and known to Slipstream under one s
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
 _Avoid_: Original path, file identity
 
+**Original Folder**:
+The Library Folder or one of its descendant filesystem directories, used to physically organize Original Files by their Original Locations. Slipstream presents it read-only. An Original Folder is not an Album and does not own Photo state.
+_Avoid_: Album folder, virtual folder
+
 **Library Expansion**:
 A controlled replacement of the current Library Folder with an ancestor directory while preserving existing Original File and Photo identities.
 _Avoid_: Rebase, relink, root migration
 
-**Photo Set**:
-A Photographer-defined group of Photos. One Photo may belong to multiple Photo Sets.
+**Album**:
+A Photographer-defined, explicitly ordered virtual group of Photos. One Photo may belong to multiple Albums. Album membership does not change an Original File or Original Location.
+_Avoid_: Photo Set, Collection, Favorites
 
 ## Browsing and Selection
 
 **Library Browser**:
-The primary interface for viewing Photos from the Photo Library or one Photo Set. It provides a progressively loaded Grid View and a focused Photo View.
+The primary interface for viewing Photos from `All Photos`, one Original Folder, or one Album. It provides a progressively loaded Grid View and a focused Photo View.
 
 **Grid View**:
-The progressively loaded thumbnail view of the current Photo Library or Photo Set source.
+The progressively loaded thumbnail view of the current `All Photos`, Original Folder, or Album source.
 
 **Photo View**:
 The focused view of one Photo with Preview, navigation, Selection State, Rating, and Detail Review controls.

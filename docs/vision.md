@@ -1,6 +1,6 @@
 # Product Vision
 
-Slipstream is a browser-based photo selection workspace. It lets a Photographer browse a Photo Library quickly from a phone, tablet, or desktop browser, group Photos into Photo Sets, and record keep and reject decisions without modifying Original Files.
+Slipstream is a browser-based photo selection workspace. It lets a Photographer browse a Photo Library quickly from a phone, tablet, or desktop browser, navigate read-only File Locations, group Photos into Albums, and record keep and reject decisions without modifying Original Files.
 
 ## Goal
 
@@ -17,11 +17,11 @@ The first product must support this complete path:
 1. The Photographer opens Slipstream in a browser and immediately sees a progressively loaded Photo Library.
 2. Slipstream indexes the configured Library Folder without moving or changing Original Files.
 3. Slipstream pairs a RAW Original and matching JPEG Original as one Photo when they have the same base name in the same directory.
-4. The Photographer browses `All Photos` or opens a Photo Set in Grid View.
+4. The Photographer browses `All Photos`, one Original Folder, or one Album in Grid View.
 5. The Photographer opens one Photo in Photo View from the Grid.
 6. A right swipe selects the Photo and a left swipe rejects it.
 7. The Photographer may assign a zero-to-five-star Rating, inspect available Preview detail, and undo a recent decision.
-8. Slipstream retains generated Previews, the Photo Set, saved Photo Set position, Selection State, and Rating.
+8. Slipstream retains generated Previews, the Album, saved Album position, Selection State, and Rating.
 
 ## Preview Trust
 
@@ -38,8 +38,9 @@ Slipstream must identify the Preview Source. It must not describe an unavailable
 - **Original ownership**: Original Files remain in place and unchanged.
 - **Touch-native browsing**: Core selection works through direct gestures and also remains accessible through visible controls and keyboard input.
 - **Progressive use**: The Library Browser becomes useful without downloading every Photo fact or generating every Preview.
-- **Fast continuation**: The Photographer can reopen a Photo Set at its saved Photo without reconstructing the prior browsing position.
-- **Focused core**: Slipstream proves Photo Sets, trustworthy Previews, and selection before adding editing or automation.
+- **Fast continuation**: The Photographer can reopen an Album at its saved Photo without reconstructing the prior browsing position.
+- **Clear organization**: File Locations show where Original Files exist, while Albums show how the Photographer groups Photos without moving files.
+- **Focused core**: Slipstream proves Albums, trustworthy Previews, and selection before adding editing or automation.
 
 ## What Slipstream Is Not
 
