@@ -69,6 +69,7 @@ dl {
   display: grid;
   align-content: start;
   gap: 0.75rem;
+  min-width: 0;
 }
 .source-panel > h2 {
   font-size: 1.1rem;
@@ -94,6 +95,9 @@ dl {
 .source-card.active {
   border-color: #75b8ff;
   box-shadow: 0 0 0 1px #75b8ff inset;
+}
+.source-card {
+  overflow-wrap: anywhere;
 }
 .source-card span {
   color: #bbc1ca;
@@ -149,6 +153,114 @@ dl {
 .folder-page-label {
   color: #8b93a1;
   font-size: 0.75rem;
+}
+.album-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.album-heading h3 {
+  margin: 0.75rem 0 0.25rem;
+}
+.album-new {
+  margin-top: 0.75rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #171b23;
+  color: #bbc1ca;
+  cursor: pointer;
+}
+.album-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.album-tools {
+  display: flex;
+  gap: 0.5rem;
+  padding-left: 0.5rem;
+  min-width: 0;
+}
+.album-tool {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: transparent;
+  color: #8b93a1;
+  cursor: pointer;
+  font-size: 0.75rem;
+}
+.album-form {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  min-width: 0;
+}
+.album-form input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #12151b;
+  color: #e6e9ef;
+}
+.album-form-message {
+  flex-basis: 100%;
+  margin: 0;
+  color: #d8a0a0;
+  font-size: 0.75rem;
+}
+.album-form button,
+.album-confirm button {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #171b23;
+  color: #bbc1ca;
+  cursor: pointer;
+}
+.album-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #5a3a3a;
+  border-radius: 6px;
+}
+.album-confirm p {
+  margin: 0;
+  color: #d8a0a0;
+  font-size: 0.75rem;
+}
+.membership-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.membership-controls label {
+  color: #8b93a1;
+  font-size: 0.8rem;
+}
+.membership-controls select {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #12151b;
+  color: #e6e9ef;
+}
+.membership-controls button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #171b23;
+  color: #bbc1ca;
+  cursor: pointer;
 }
 .folder-more {
   display: block;
@@ -404,6 +516,16 @@ dt {
   .source-card {
     flex: 0 0 10.5rem;
     min-height: 4rem;
+  }
+  .album-heading {
+    flex: 0 0 auto;
+  }
+  .album-row {
+    flex: 0 0 10.5rem;
+  }
+  .album-row .source-card {
+    flex: 0 0 auto;
+    width: 100%;
   }
   .grid-view {
     height: calc(100dvh - 12rem);

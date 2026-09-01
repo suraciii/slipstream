@@ -94,8 +94,8 @@ type BrowsePhoto = {
   selectionState: string;
   rating: number;
 };
-type SetMember = BrowsePhoto & { photoId: string; position: number };
-type SetState = { id: string; position: number; members: SetMember[] };
+type AlbumMember = BrowsePhoto & { photoId: string; position: number };
+type AlbumState = { id: string; position: number; members: AlbumMember[] };
 
 async function browseWindow(
   url: string,
@@ -128,22 +128,22 @@ async function browseIds(url: string): Promise<string[]> {
   return ids;
 }
 
-async function createSet(url: string, name = "Review") {
+async function createAlbum(url: string, name = "Review") {
   const photos = await browseIds(url);
   const created = (await (await post(url, "/api/albums", { name })).json()) as {
     albums: Array<{ id: string; name: string }>;
   };
-  const set = created.albums.find((item) => item.name === name)!;
+  const album = created.albums.find((item) => item.name === name)!;
   for (let offset = 0; offset < photos.length; offset += 100)
-    await post(url, `/api/albums/${set.id}/members`, {
+    await post(url, `/api/albums/${album.id}/members`, {
       photoIds: photos.slice(offset, offset + 100),
     });
-  return { setId: set.id };
+  return { albumId: album.id };
 }
-function progressResponse(page: Page, setId: string, status = 200) {
+function progressResponse(page: Page, albumId: string, status = 200) {
   return page.waitForResponse(
     (response) =>
-      response.url().includes(`/api/albums/${setId}/progress`) &&
+      response.url().includes(`/api/albums/${albumId}/progress`) &&
       response.request().method() === "POST" &&
       response.status() === status,
   );
@@ -151,10 +151,10 @@ function progressResponse(page: Page, setId: string, status = 200) {
 
 async function actionWithProgress(
   page: Page,
-  setId: string,
+  albumId: string,
   action: () => Promise<unknown>,
 ) {
-  const confirmed = progressResponse(page, setId);
+  const confirmed = progressResponse(page, albumId);
   await action();
   await confirmed;
 }
@@ -169,10 +169,10 @@ async function waitForGridFrame(page: Page) {
 
 async function openPhotoAndWaitForProgress(
   page: Page,
-  setId: string,
+  albumId: string,
   photo: Locator,
 ) {
-  const confirmed = progressResponse(page, setId);
+  const confirmed = progressResponse(page, albumId);
   await photo.click();
   await expect(page.locator("[data-review]")).toBeVisible();
   await page.waitForFunction(
@@ -187,13 +187,13 @@ async function startReview(
   page: Page,
   url: string,
   name = "Review",
-  setId?: string,
+  albumId?: string,
 ) {
   await openGrid(page, url, name);
   const photo = page.locator('[data-photo-index="0"]');
   await expect(photo).toHaveAccessibleName(/Photo 1 of/);
-  if (setId) {
-    await openPhotoAndWaitForProgress(page, setId, photo);
+  if (albumId) {
+    await openPhotoAndWaitForProgress(page, albumId, photo);
     return;
   }
   await photo.click();
@@ -207,11 +207,11 @@ async function startReview(
 // Membership order and per-member facts are observable only through a
 // fresh Album Browse Snapshot. The resolved open position exposes the
 // saved Album position under the unavailable-member fallback rules.
-async function state(url: string, setId: string): Promise<SetState> {
+async function state(url: string, albumId: string): Promise<AlbumState> {
   const opened = (await (
-    await post(url, "/api/browse", { source: "album", albumId: setId })
+    await post(url, "/api/browse", { source: "album", albumId: albumId })
   ).json()) as { token: string; total: number; position: number };
-  const members: SetMember[] = [];
+  const members: AlbumMember[] = [];
   let start = 0;
   for (;;) {
     const window = await browseWindow(url, opened.token, start);
@@ -224,7 +224,7 @@ async function state(url: string, setId: string): Promise<SetState> {
     if (window.photos.length === 0 || start >= opened.total) break;
   }
   await fetch(`${url}/api/browse/${opened.token}`, { method: "DELETE" });
-  return { id: setId, position: opened.position, members };
+  return { id: albumId, position: opened.position, members };
 }
 async function openGrid(page: Page, url: string, name: string) {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -268,8 +268,8 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await writeFile(join(root, "a.jpg"), await jpeg());
   await writeFile(join(root, "b.jpg"), await jpeg());
   let running = await server(base, root);
-  const { setId } = await createSet(running.url, "Picks");
-  await startReview(page, running.url, "Picks", setId);
+  const { albumId } = await createAlbum(running.url, "Picks");
+  await startReview(page, running.url, "Picks", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
   await expect(page.getByText("0 stars", { exact: true })).toBeVisible();
@@ -288,13 +288,13 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     "Rate 5 stars",
   ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
   // The advanced Photo is the saved Album position.
   await expect
-    .poll(async () => (await state(running.url, setId)).position)
+    .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
 
   await page.goto("about:blank");
@@ -302,14 +302,14 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   servers.splice(servers.indexOf(running), 1);
   running = await server(base, root);
   await page.goto(running.url);
-  await page.getByRole("button", { name: /Picks/ }).click();
+  await page.getByRole("button", { name: /^Picks \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 2 of 2/ }),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await expect(page.getByText("Selected", { exact: true })).toBeVisible();
@@ -322,27 +322,29 @@ test("visible controls and keyboard share mutation, advance, rating independence
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
 
-  await actionWithProgress(page, setId, () => page.keyboard.press("p"));
+  await actionWithProgress(page, albumId, () => page.keyboard.press("p"));
   await expect(page.getByText("2 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "selected",
   );
   await page.keyboard.press("5");
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
-  expect((await state(running.url, setId)).members[1]).toMatchObject({
+  expect((await state(running.url, albumId)).members[1]).toMatchObject({
     selectionState: "undecided",
     rating: 5,
   });
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Reject" }).click(),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
-  await actionWithProgress(page, setId, () => page.keyboard.press("Control+z"));
+  await actionWithProgress(page, albumId, () =>
+    page.keyboard.press("Control+z"),
+  );
   await expect(page.getByText("2 / 3")).toBeVisible();
   await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
@@ -353,11 +355,13 @@ test("visible controls and keyboard share mutation, advance, rating independence
   await page.keyboard.press("u");
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await expect(page.getByText("2 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.keyboard.press("ArrowRight"),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () => page.keyboard.press("ArrowLeft"));
+  await actionWithProgress(page, albumId, () =>
+    page.keyboard.press("ArrowLeft"),
+  );
   await expect(page.getByText("2 / 3")).toBeVisible();
 });
 
@@ -368,8 +372,8 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
 
   const preview = page.locator("[data-preview]");
   await preview.dispatchEvent("pointerdown", {
@@ -387,7 +391,7 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
     pointerType: "touch",
   });
   await expect(page.locator("[data-select-feedback]")).toHaveClass(/pending/);
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "undecided",
   );
   await preview.dispatchEvent("pointerup", {
@@ -398,7 +402,7 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
     pointerType: "touch",
   });
   await expect(page.getByText("1 / 3")).toBeVisible();
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "undecided",
   );
 
@@ -410,25 +414,25 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
     await mutationReleased;
     await route.continue();
   });
-  const progressAfterMutation = progressResponse(page, setId);
+  const progressAfterMutation = progressResponse(page, albumId);
   await swipe(page, 100, 190);
   await expect(page.getByText("1 / 3")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeDisabled();
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "undecided",
   );
   releaseMutation();
   await progressAfterMutation;
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.unroute("**/api/photos/*/state");
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "selected",
   );
-  await actionWithProgress(page, setId, () => swipe(page, 250, 150));
+  await actionWithProgress(page, albumId, () => swipe(page, 250, 150));
   await expect(page.getByText("3 / 3")).toBeVisible();
-  expect((await state(running.url, setId)).members[1]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "rejected",
   );
 });
@@ -440,8 +444,8 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   for (const name of ["a.jpg", "b.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
 
   await page.route("**/api/photos/*/state", (route) =>
     route.fulfill({
@@ -453,7 +457,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await page.getByRole("button", { name: "Select" }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByText(/could not be saved/)).toBeVisible();
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "undecided",
   );
   await page.unroute("**/api/photos/*/state");
@@ -463,7 +467,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   await page.unroute("**/api/photos/*/state");
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
@@ -478,20 +482,20 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   for (const name of ["a.jpg", "b.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
 
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Undo" }).click(),
   );
   await expect(page.getByText("1 / 2")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
-  const firstId = (await state(running.url, setId)).members[0]!.photoId;
+  const firstId = (await state(running.url, albumId)).members[0]!.photoId;
   await post(running.url, `/api/photos/${firstId}/state`, {
     field: "selectionState",
     value: "rejected",
@@ -499,12 +503,12 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await page.getByRole("button", { name: "Undo" }).click();
   await expect(page.getByText(/no longer available/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await page.getByRole("button", { name: "Detail Review" }).click();
@@ -513,10 +517,10 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   ).toHaveAttribute("aria-pressed", "true");
   await swipe(page, 100, 220);
   await expect(page.getByText("1 / 2")).toBeVisible();
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "rejected",
   );
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Next" }).click(),
   );
   await expect(
@@ -532,34 +536,833 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await writeFile(missing, await jpeg());
   await writeFile(join(root, "b.jpg"), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  const initial = await state(running.url, setId);
-  await post(running.url, `/api/albums/${setId}/progress`, {
+  const { albumId } = await createAlbum(running.url);
+  const initial = await state(running.url, albumId);
+  await post(running.url, `/api/albums/${albumId}/progress`, {
     photoId: initial.members[0]!.photoId,
   });
   await rm(missing);
   await post(running.url, "/api/scan", {});
-  await startReview(page, running.url, "Review", setId);
+  await startReview(page, running.url, "Review", albumId);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await page.getByRole("button", { name: /Review/ }).click();
+  await page.getByRole("button", { name: /^Review \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 2 of 2/ }),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await expect(page.getByText(/Original File is unavailable/)).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  expect((await state(running.url, setId)).members[0]).toMatchObject({
+  expect((await state(running.url, albumId)).members[0]).toMatchObject({
     available: false,
     selectionState: "selected",
   });
+});
+
+test("album management creates, renames, and deletes Albums with confirmation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+  ).toBeVisible();
+
+  // Create through the inline form.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Trip");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByRole("button", { name: /Trip 0 Photos/ }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Rename Trip" })).toBeVisible();
+
+  // Rename keeps membership and identity semantics on the card.
+  await page.getByRole("button", { name: "Rename Trip" }).click();
+  await page.getByLabel("Album name").fill("Journey");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(
+    page.getByRole("button", { name: /Journey 0 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /Trip 0 Photos/ }),
+  ).toBeHidden();
+
+  // Deleting requires confirmation and states the safety contract.
+  await page.getByRole("button", { name: "Delete Journey" }).click();
+  await expect(
+    page.getByText("Photos and Original Files remain unchanged."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: /Journey 0 Photos/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Delete Journey" }).click();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  await expect(
+    page.getByRole("button", { name: /Journey 0 Photos/ }),
+  ).toBeHidden();
+  // Originals are untouched: All Photos keeps its count.
+  await expect(
+    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+  ).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
+test("deleting the open album returns to the All Photos source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Session" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /Session 0 Photos/ }).click();
+  await expect(page.getByRole("heading", { name: "Session" })).toBeVisible();
+  await page.getByRole("button", { name: "Delete Session" }).click();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
+test("the current photo joins and leaves albums from the photo view", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Picks" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
+
+  // Adding the current Photo to an Album updates the bounded counts.
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Picks" });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(
+    page.getByRole("button", { name: /Picks 1 Photos/ }),
+  ).toBeVisible();
+
+  // Adding an existing member is idempotent.
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Picks" });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(
+    page.getByRole("button", { name: /Picks 1 Photos/ }),
+  ).toBeVisible();
+
+  // Removing from the open Album source updates the count while the open
+  // snapshot keeps its copied order.
+  await page.getByRole("button", { name: /Picks 1 Photos/ }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("1 / 1")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(
+    page.getByRole("button", { name: /Picks 0 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+  ).toBeVisible();
+});
+
+test("album management failures are reported without claiming completion", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Keep" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  await page.route("**/api/albums/*/rename", (route) => route.abort());
+  await page.getByRole("button", { name: "Rename Keep" }).click();
+  await page.getByLabel("Album name").fill("Lost");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(page.getByText("The Album could not be renamed.")).toBeVisible();
+  await page.unroute("**/api/albums/*/rename");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(
+    page.getByRole("button", { name: /Lost 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("album creation reports duplicates and validates name boundaries by code points", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Trip" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // Duplicate names fail truthfully with 409 and keep the drafted name.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Trip");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeVisible();
+  await expect(page.getByLabel("Album name")).toHaveValue("Trip");
+
+  // Blank names never reach the server.
+  await page.getByLabel("Album name").fill("   ");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(page.getByText("Enter an Album name.")).toBeVisible();
+
+  // 120 Unicode characters — including astral pairs that native maxlength
+  // would count as 122 UTF-16 units — are accepted exactly like the server's
+  // code-point rule.
+  const boundary = "a".repeat(118) + "🎉".repeat(2);
+  await page.getByLabel("Album name").fill(boundary);
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByRole("button", {
+      name: new RegExp(`^${boundary} 0 Photos`),
+    }),
+  ).toBeVisible();
+
+  // 121 code points are rejected before any request.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("a".repeat(119) + "🎉".repeat(2));
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText("Album names are at most 120 characters."),
+  ).toBeVisible();
+});
+
+test("creating an album from the photo view immediately enables adding the current photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.getByLabel("Album", { exact: true })).toBeDisabled();
+
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Fresh");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  // The picker refreshes in place: no Photo View reopen needed.
+  await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Fresh" });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Fresh 1 Photos/ }),
+  ).toBeVisible();
+});
+
+test("a failed removal stays retryable from the photo view", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Retry");
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Retry 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  await page.route("**/api/albums/*/members/remove", (route) => route.abort());
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText("The Photo could not be removed from the Album."),
+  ).toBeVisible();
+  // The failed control is re-enabled, not wedged.
+  await expect(
+    page.getByRole("button", { name: "Remove from this Album" }),
+  ).toBeEnabled();
+  await page.unroute("**/api/albums/*/members/remove");
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Retry 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("renaming the open album updates every heading in place", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Before");
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Before 1 Photos/ }).click();
+  await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Rename Before" }).click();
+  await page.getByLabel("Album name").fill("After");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(
+    page.getByRole("button", { name: /^After 1 Photos/ }),
+  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
+});
+
+test("album form operations do not clobber a newer form", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const firstCreated = (await (
+    await post(running.url, "/api/albums", { name: "Alpha" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const firstId = firstCreated.albums.find((item) => item.name === "Alpha")!.id;
+  await post(running.url, "/api/albums", { name: "Beta" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // Hold Alpha's rename while a newer Beta rename form is being edited.
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/api/albums/${firstId}/rename`, async (route) => {
+    await released;
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Rename Alpha" }).click();
+  await page.getByLabel("Album name").fill("Alpha Two");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  // While Alpha's request is pending, open and edit Beta's rename form.
+  await page.getByRole("button", { name: "Rename Beta" }).click();
+  await page.getByLabel("Album name").fill("Beta Two");
+  release!();
+  // Alpha settles, but Beta's in-progress form and draft survive.
+  await expect(
+    page.getByRole("button", { name: /^Alpha Two 0 Photos/ }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Album name")).toHaveValue("Beta Two");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Beta Two 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("a late album success cannot overwrite a newer removal notice", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Hold");
+  await post(running.url, "/api/albums", { name: "Other" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Hold 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  // Hold the membership add while a removal settles first.
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/albums/*/members", async (route) => {
+    await released;
+    await route.continue();
+  });
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Other" });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  const removedNotice = page.getByText(
+    "Removed from the Album. It stays in this open view until reopened.",
+  );
+  await expect(removedNotice).toBeVisible();
+  release!();
+  // The admitted add still lands in the Album, but its late success cannot
+  // overwrite the newer removal notice.
+  await expect(
+    page.getByRole("button", { name: /^Other 1 Photos/ }),
+  ).toBeVisible();
+  await expect(removedNotice).toBeVisible();
+});
+
+test("a superseded album failure surfaces in the library summary", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Hold");
+  await post(running.url, "/api/albums", { name: "Other" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Hold 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  let fail = false;
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/albums/*/members", async (route) => {
+    await released;
+    if (fail) await route.abort();
+    else await route.continue();
+  });
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Other" });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  fail = true;
+  release!();
+  // The superseded failure is not dropped: it surfaces in the Library
+  // summary while the Photo status keeps the newer removal notice.
+  await expect(
+    page.getByText("The Photo could not be added to the Album."),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  // The superseded transport failure must not disconnect the UI the newer
+  // successful action already restored.
+  await expect(page.getByText("Disconnected")).toBeHidden();
+});
+
+test("a pending delete keeps a newer create form and its draft", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const doomed = (await (
+    await post(running.url, "/api/albums", { name: "Doomed" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const doomedId = doomed.albums.find((item) => item.name === "Doomed")!.id;
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/api/albums/${doomedId}/delete`, async (route) => {
+    await released;
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Delete Doomed" }).click();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  // While the deletion is pending, open a create form and draft a name.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Draft");
+  release!();
+  await expect(
+    page.getByRole("button", { name: /^Doomed 0 Photos/ }),
+  ).toBeHidden();
+  // The newer form and its draft survive the delete settlement.
+  await expect(page.getByLabel("Album name")).toHaveValue("Draft");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Draft 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("a renamed open album reconnects under its new name", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Before");
+  await post(running.url, "/api/albums", { name: "Sibling" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Before 1 Photos/ }).click();
+  await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Rename Before" }).click();
+  await page.getByLabel("Album name").fill("After");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
+
+  // Disconnect without re-opening the source (so the remembered retry
+  // source is still the one captured when the Album was opened), then
+  // reconnect: the retry must use the renamed Album, not the stale name.
+  await page.route("**/api/albums/*/rename", (route) => route.abort());
+  await page.getByRole("button", { name: "Rename Sibling" }).click();
+  await page.getByLabel("Album name").fill("Sibling Two");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  await page.unroute("**/api/albums/*/rename");
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^After 1 Photos/ }),
+  ).toBeVisible();
+});
+
+test("a stale overview response cannot revert newer album state", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "One" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // Capture the rename's (older) overview response immediately, then hold
+  // its delivery while a newer create's refresh commits first.
+  let captured = false;
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/overview", async (route) => {
+    if (!captured) {
+      captured = true;
+      const response = await route.fetch();
+      await released;
+      await route.fulfill({ response });
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Rename One" }).click();
+  await page.getByLabel("Album name").fill("Two");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  // The older response is captured (Albums: [Two]) but not yet delivered.
+  // Create a newer Album whose refresh commits with both Albums.
+  const createdConfirmed = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/albums") &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Newest");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await createdConfirmed;
+  await expect(
+    page.getByRole("button", { name: /^Newest 0 Photos/ }),
+  ).toBeVisible();
+  // Release the stale response: it must be discarded, not applied.
+  release!();
+  await expect(
+    page.getByRole("button", { name: /^Newest 0 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Two 0 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Newest 0 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Two 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("album form re-renders preserve caret position and validation messages", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // A validation message survives a background source-list re-render.
+  const foldersResponded = page.waitForResponse((response) =>
+    response.url().includes("/api/file-locations"),
+  );
+  await page.route("**/api/file-locations*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await route.continue();
+  });
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await page.getByRole("button", { name: "New Album" }).click();
+  const input = page.getByLabel("Album name");
+  await input.fill("a".repeat(121));
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText("Album names are at most 120 characters."),
+  ).toBeVisible();
+  // Edit down to valid, leaving the caret mid-string.
+  await input.fill("Naming");
+  await input.evaluate((element) => {
+    (element as HTMLInputElement).setSelectionRange(3, 3);
+  });
+  await foldersResponded;
+  await expect(input).toHaveValue("Naming");
+  await expect(input).toBeFocused();
+  const caret = await input.evaluate((element) =>
+    (element as HTMLInputElement).selectionStart ===
+    (element as HTMLInputElement).selectionEnd
+      ? (element as HTMLInputElement).selectionStart
+      : -1,
+  );
+  expect(caret).toBe(3);
+  // The message was cleared by editing; the re-render kept that state.
+  await expect(
+    page.getByText("Album names are at most 120 characters."),
+  ).toBeHidden();
+});
+
+test("in-flight membership and delete operations stay disabled across re-renders", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  await writeFile(join(root, "two.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Slow");
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Slow 2 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+
+  // Hold the removal while a background re-render lands: the control must
+  // stay disabled and a second removal must not fire.
+  let calls = 0;
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/albums/*/members/remove", async (route) => {
+    calls += 1;
+    await released;
+    await route.continue();
+  });
+  let folderDelivered!: () => void;
+  const folderDeliveredSettled = new Promise<void>((resolve) => {
+    folderDelivered = resolve;
+  });
+  await page.route("**/api/file-locations*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await route.continue();
+    folderDelivered();
+  });
+  const removeButton = page.getByRole("button", {
+    name: "Remove from this Album",
+  });
+  await removeButton.click();
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  // Deterministically wait until the delayed folder response has been
+  // delivered and its re-render landed, then verify the in-flight guard.
+  await folderDeliveredSettled;
+  await expect(removeButton).toBeDisabled();
+  release!();
+  await expect(
+    page
+      .getByText(
+        "Removed from the Album. It stays in this open view until reopened.",
+      )
+      .first(),
+  ).toBeVisible({ timeout: 15000 });
+  expect(calls).toBe(1);
+  // The removed member is no longer removable within the open snapshot.
+  await expect(removeButton).toBeHidden();
+});
+
+test("an answered stale saved-position write is not a disconnection", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  await writeFile(join(root, "two.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "Positions");
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  let progressWrites = 0;
+  await page.route("**/api/albums/*/progress", (route) => {
+    progressWrites += 1;
+    return route.fulfill({ status: 404 });
+  });
+  await page.getByRole("button", { name: /^Positions 2 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+  // The server answers 404 when the saved member no longer exists; that is
+  // an expected stale write, not a connectivity loss. Count writes so the
+  // assertion targets the ArrowRight navigation specifically.
+  // Let the photo-open write settle first so the baseline is stable.
+  await expect.poll(() => progressWrites, { timeout: 5000 }).toBeGreaterThan(0);
+  const writesBeforeNavigation = progressWrites;
+  await page.keyboard.press("ArrowRight");
+  await expect
+    .poll(() => progressWrites, { timeout: 5000 })
+    .toBe(writesBeforeNavigation + 1);
+  await expect(page.getByRole("heading", { name: "Positions" })).toBeVisible();
+  await expect(page.getByText("Disconnected")).toBeHidden();
+});
+
+test("duplicate album names answer without presenting a disconnection", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Twin" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Twin");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeVisible();
+  // A 409 conflict is a normal answered request, not a connectivity loss.
+  await expect(page.getByText("Disconnected")).toBeHidden();
+
+  // A newer successful action takes the summary back from the notice and
+  // releases the channel for later background status writes.
+  await page.getByLabel("Album name").fill("Fresh");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Fresh 0 Photos/ }),
+  ).toBeVisible();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeHidden();
+});
+
+test("album form inputs keep focus across background refreshes", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // A slow File Location response re-renders the source list after the
+  // create form is already being edited.
+  const foldersResponded = page.waitForResponse((response) =>
+    response.url().includes("/api/file-locations"),
+  );
+  await page.route("**/api/file-locations*", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await route.continue();
+  });
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await page.getByRole("button", { name: "New Album" }).click();
+  const input = page.getByLabel("Album name");
+  await input.fill("Focused");
+  await foldersResponded;
+  await expect(input).toHaveValue("Focused");
+  await expect(input).toBeFocused();
+});
+
+test("source panel album failures report beside the library summary, not the photo status", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Panel" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  await page.route("**/api/albums/*/rename", (route) => route.abort());
+  await page.getByRole("button", { name: "Rename Panel" }).click();
+  await page.getByLabel("Album name").fill("Nowhere");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  // The failure lands in the Library summary that owns the form.
+  await expect(page.getByText("The Album could not be renamed.")).toBeVisible();
+  // The Photo-view status is not overwritten by the panel's failure.
+  await expect(page.getByRole("status").first()).not.toContainText(
+    "could not be renamed",
+  );
+});
+
+test("an admitted album add completes after switching sources", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Picks" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Picks" });
+
+  // Hold the membership response while the source changes underneath.
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/albums/*/members", async (route) => {
+    const request = route.request();
+    if (
+      request.method() === "POST" &&
+      !request.url().includes("/remove") &&
+      !request.url().endsWith("/order") &&
+      !request.url().endsWith("/progress")
+    ) {
+      await released;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  release!();
+  // The admitted mutation still updates the bounded Album list.
+  await expect(
+    page.getByRole("button", { name: /Picks 1 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("The Photo could not be added to the Album."),
+  ).toBeHidden();
 });
 
 test("file locations show a bounded tree and open recursive folder sources", async ({
@@ -955,15 +1758,17 @@ test("shows empty and no-album start states and only uses same-service requests"
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await post(running.url, "/api/albums", { name: "Empty" });
   await page.reload();
-  const empty = page.getByRole("button", { name: /Empty/ });
+  const empty = page.getByRole("button", { name: /^Empty \d+ Photos/ });
   await expect(empty).toBeVisible();
   // Empty Albums stay openable: they are valid sources, not disabled cards.
   await expect(empty).toBeEnabled();
   await empty.click();
   await expect(empty).toHaveClass(/active/);
-  await createSet(running.url, "Ready");
+  await createAlbum(running.url, "Ready");
   await page.reload();
-  await expect(page.getByRole("button", { name: /Ready/ })).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: /^Ready \d+ Photos/ }),
+  ).toBeEnabled();
   expect(
     methods.every(
       (method) => method === "GET" || method === "POST" || method === "DELETE",
@@ -979,46 +1784,46 @@ test("persists manual navigation and advanced current Photo across leave, reload
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   let running = await server(base, root);
-  const { setId } = await createSet(running.url, "Progress");
-  await startReview(page, running.url, "Progress", setId);
-  await actionWithProgress(page, setId, () =>
+  const { albumId } = await createAlbum(running.url, "Progress");
+  await startReview(page, running.url, "Progress", albumId);
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Next" }).click(),
   );
   await expect
-    .poll(async () => (await state(running.url, setId)).position)
+    .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 2 of 3/ }),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 2 of 3/ }),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect
-    .poll(async () => (await state(running.url, setId)).position)
+    .poll(async () => (await state(running.url, albumId)).position)
     .toBe(2);
   await page.goto("about:blank");
   await running.close();
   servers.splice(servers.indexOf(running), 1);
   running = await server(base, root);
   await page.goto(running.url);
-  await page.getByRole("button", { name: /Progress/ }).click();
+  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 3 of 3/ }),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
@@ -1031,8 +1836,8 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
   const preview = page.locator("[data-preview]");
   const event = async (type: string, x: number, time: number, pointerId = 41) =>
     preview.evaluate(
@@ -1052,13 +1857,13 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
     );
 
   await event("pointerdown", 100, 0);
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.keyboard.press("ArrowRight"),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
   await event("pointerup", 200, 10);
   expect(
-    (await state(running.url, setId)).members
+    (await state(running.url, albumId)).members
       .slice(0, 2)
       .map((x) => x.selectionState),
   ).toEqual(["undecided", "undecided"]);
@@ -1066,26 +1871,26 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await event("pointerdown", 100, 0, 42);
   await event("pointermove", 171, 1000, 42);
   await event("pointerup", 171, 1000, 42);
-  expect((await state(running.url, setId)).members[1]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "undecided",
   );
-  await actionWithProgress(page, setId, async () => {
+  await actionWithProgress(page, albumId, async () => {
     await event("pointerdown", 100, 0, 43);
     await event("pointermove", 172, 1000, 43);
     await event("pointerup", 172, 1000, 43);
   });
   await expect(page.getByText("3 / 3")).toBeVisible();
 
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
-  await actionWithProgress(page, setId, async () => {
+  await actionWithProgress(page, albumId, async () => {
     await event("pointerdown", 100, 0, 44);
     await event("pointermove", 148, 50, 44);
     await event("pointerup", 148, 50, 44);
   });
   await expect(page.getByText("3 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await event("pointerdown", 100, 0, 45);
@@ -1103,14 +1908,14 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await event("pointermove", 200, 10, 47);
   await preview.dispatchEvent("lostpointercapture", { pointerId: 47 });
   await event("pointerup", 200, 10, 47);
-  expect((await state(running.url, setId)).members[1]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "selected",
   );
 
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.reload();
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
-  await actionWithProgress(page, setId, async () => {
+  await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: /Photo 1 of/ }).click();
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   });
@@ -1128,15 +1933,15 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
 
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Next" }).click(),
   );
-  await actionWithProgress(page, setId, () => page.keyboard.press("p"));
+  await actionWithProgress(page, albumId, () => page.keyboard.press("p"));
   await expect(page.getByText("3 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await page.keyboard.press("5");
@@ -1166,21 +1971,23 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
     clientY: 330,
     pointerType: "touch",
   });
-  expect((await state(running.url, setId)).members[1]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "selected",
   );
   await page.getByRole("button", { name: "Exit Detail" }).click();
-  await actionWithProgress(page, setId, () => page.keyboard.press("x"));
+  await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
-  await actionWithProgress(page, setId, () => page.keyboard.press("Control+z"));
+  await actionWithProgress(page, albumId, () =>
+    page.keyboard.press("Control+z"),
+  );
   await expect(page.getByText("2 / 3")).toBeVisible();
 
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await page.route("**/api/photos/*/state", async (route) => {
@@ -1191,7 +1998,7 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await page.unroute("**/api/photos/*/state");
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
@@ -1210,8 +2017,8 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await copyFile(cameraSample, raw);
   await writeFile(matching, await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
-  await startReview(page, running.url, "Review", setId);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
   await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
   await rm(matching);
   await post(running.url, "/api/scan", {});
@@ -1219,7 +2026,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 1 of/ }),
   );
   await expect(
@@ -1283,15 +2090,15 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
 
-  const { setId } = await createSet(running.url, "Explicit order");
-  await post(running.url, `/api/albums/${setId}/order`, {
+  const { albumId } = await createAlbum(running.url, "Explicit order");
+  await post(running.url, `/api/albums/${albumId}/order`, {
     photoIds: [aId, zId],
   });
   await page.reload();
   await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 1 of 2/ }),
   );
   await expect(page.getByText("1 / 2")).toBeVisible();
@@ -1364,11 +2171,11 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   const initialIds = await browseIds(running.url);
   const aId = initialIds[1]!;
   const zId = initialIds[0]!;
-  const { setId } = await createSet(running.url, "Snapshot");
-  await post(running.url, `/api/albums/${setId}/order`, {
+  const { albumId } = await createAlbum(running.url, "Snapshot");
+  await post(running.url, `/api/albums/${albumId}/order`, {
     photoIds: [aId, zId],
   });
-  await startReview(page, running.url, "Snapshot", setId);
+  await startReview(page, running.url, "Snapshot", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
 
   await writeFile(
@@ -1379,16 +2186,16 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   const rescannedIds = await browseIds(running.url);
   const bId = rescannedIds.find((id) => !initialIds.includes(id));
   expect(bId).toBeDefined();
-  await post(running.url, `/api/albums/${setId}/members`, {
+  await post(running.url, `/api/albums/${albumId}/members`, {
     photoIds: [bId!],
   });
   await page.route("**/api/photos/*/preview", (route) => route.abort());
-  await actionWithProgress(page, setId, async () => {
+  await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   });
   await page.unroute("**/api/photos/*/preview");
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
@@ -1396,7 +2203,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await page.getByRole("button", { name: /^Snapshot(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 2 of 3/ }),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
@@ -1409,23 +2216,23 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "Recovery");
-  await startReview(page, running.url, "Recovery", setId);
-  await actionWithProgress(page, setId, () =>
+  const { albumId } = await createAlbum(running.url, "Recovery");
+  await startReview(page, running.url, "Recovery", albumId);
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await page.route("**/api/photos/*/preview", (route) => route.abort());
-  await actionWithProgress(page, setId, async () => {
+  await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   });
   await page.unroute("**/api/photos/*/preview");
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Undo" }).click(),
   );
   await expect(page.getByText("1 / 3")).toBeVisible();
@@ -1444,8 +2251,8 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
     }
     await route.continue();
   });
-  const progressFailed = progressResponse(page, setId, 503);
-  const progressAfterFailure = progressResponse(page, setId);
+  const progressFailed = progressResponse(page, albumId, 503);
+  const progressAfterFailure = progressResponse(page, albumId);
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.getByRole("button", { name: "Next" }).click();
@@ -1464,7 +2271,7 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
     await successReleased;
     await route.continue();
   });
-  const progressRecovered = progressResponse(page, setId);
+  const progressRecovered = progressResponse(page, albumId);
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   releaseSuccess();
@@ -1473,7 +2280,7 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/albums/*/progress");
   await expect
-    .poll(async () => (await state(running.url, setId)).position)
+    .poll(async () => (await state(running.url, albumId)).position)
     .toBe(2);
 });
 
@@ -1484,13 +2291,13 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "Resume");
-  const initial = await state(running.url, setId);
+  const { albumId } = await createAlbum(running.url, "Resume");
+  const initial = await state(running.url, albumId);
   const savedId = initial.members[2]!.photoId;
   expect(
     initial.members.findIndex((member) => member.photoId === savedId),
   ).toBe(2);
-  await post(running.url, `/api/albums/${setId}/progress`, {
+  await post(running.url, `/api/albums/${albumId}/progress`, {
     photoId: savedId,
   });
   await rm(join(root, "c.jpg"));
@@ -1503,7 +2310,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   // pending write and leave the saved member unchanged.
   const progressConfirmed = page.waitForResponse(
     (response) =>
-      response.url().includes(`/api/albums/${setId}/progress`) &&
+      response.url().includes(`/api/albums/${albumId}/progress`) &&
       response.request().method() === "POST" &&
       response.status() === 200,
   );
@@ -1522,7 +2329,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   await page.reload();
   await expect
     .poll(async () => {
-      const retained = await state(running.url, setId);
+      const retained = await state(running.url, albumId);
       return {
         available: retained.members.map((member) => member.available),
         position: retained.position,
@@ -1532,7 +2339,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /Photo 3 of 3/ }),
   );
   await expect(page.getByText("3 / 3")).toBeVisible();
@@ -1677,7 +2484,7 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
   const { base, root } = await fixture();
   await writePhotos(root, 70);
   const running = await server(base, root);
-  await createSet(running.url, "Held Derivatives");
+  await createAlbum(running.url, "Held Derivatives");
 
   let release!: () => void;
   const derivativesHeld = new Promise<void>((resolve) => {
@@ -1785,7 +2592,7 @@ test("source switching aborts a pending current-Photo Preview request", async ({
   const { base, root } = await fixture();
   await writePhotos(root, 8);
   const running = await server(base, root);
-  await createSet(running.url, "Preview Abort Target");
+  await createAlbum(running.url, "Preview Abort Target");
 
   let release!: () => void;
   const previewHeld = new Promise<void>((resolve) => {
@@ -1860,8 +2667,11 @@ test("a superseded source open is aborted before the newer source renders", asyn
   const { base, root } = await fixture();
   await writePhotos(root, 8);
   const running = await server(base, root);
-  const { setId: firstSetId } = await createSet(running.url, "First Source");
-  await createSet(running.url, "Second Source");
+  const { albumId: firstAlbumId } = await createAlbum(
+    running.url,
+    "First Source",
+  );
+  await createAlbum(running.url, "Second Source");
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
@@ -1876,7 +2686,8 @@ test("a superseded source open is aborted before the newer source renders", asyn
     const request = route.request();
     if (
       request.method() === "POST" &&
-      (request.postDataJSON() as { albumId?: string }).albumId === firstSetId &&
+      (request.postDataJSON() as { albumId?: string }).albumId ===
+        firstAlbumId &&
       !staleHeld
     ) {
       staleHeld = true;
@@ -1898,7 +2709,8 @@ test("a superseded source open is aborted before the newer source renders", asyn
       )
         return false;
       return (
-        (request.postDataJSON() as { albumId?: string }).albumId === firstSetId
+        (request.postDataJSON() as { albumId?: string }).albumId ===
+        firstAlbumId
       );
     });
     await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
@@ -1918,7 +2730,7 @@ test("source changes invalidate queued Grid renders", async ({ page }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 8);
   const running = await server(base, root);
-  await createSet(running.url, "Boundary Source");
+  await createAlbum(running.url, "Boundary Source");
 
   const openedResponse = page.waitForResponse(
     (response) =>
@@ -1978,7 +2790,7 @@ test("source switching cancels the previous pending window", async ({
   const { base, root } = await fixture();
   await writePhotos(root, 120);
   const running = await server(base, root);
-  await createSet(running.url, "Abort Target");
+  await createAlbum(running.url, "Abort Target");
 
   const openedResponse = page.waitForResponse(
     (response) =>
@@ -2039,7 +2851,7 @@ test("source switching aborts fallback thumbnail requests", async ({
   const { base, root } = await fixture();
   await writePhotos(root, 70);
   const running = await server(base, root);
-  await createSet(running.url, "Fallback Abort");
+  await createAlbum(running.url, "Fallback Abort");
 
   let release!: () => void;
   const thumbnailGate = new Promise<void>((resolve) => {
@@ -2224,7 +3036,7 @@ test("a completed mutation cannot reopen or advance a superseding source", async
   const { base, root } = await fixture();
   await writePhotos(root, 2);
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "Mutation Target");
+  const { albumId } = await createAlbum(running.url, "Mutation Target");
   await page.goto(running.url);
   await page.locator('[data-photo-index="0"]').click();
   await expect(page.getByText("1 / 2")).toBeVisible();
@@ -2270,7 +3082,7 @@ test("a completed mutation cannot reopen or advance a superseding source", async
     await expect
       .poll(
         async () =>
-          (await state(running.url, setId)).members[0]!.selectionState,
+          (await state(running.url, albumId)).members[0]!.selectionState,
       )
       .toBe("selected");
   } finally {
@@ -2326,16 +3138,16 @@ test("opening a Photo from the Grid persists the Album position", async ({
   for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "GridPos");
+  const { albumId } = await createAlbum(running.url, "GridPos");
   await openGrid(page, running.url, "GridPos");
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /^Photo 3 of 4/ }),
   );
   await expect(page.getByText("3 / 4")).toBeVisible();
   await expect
-    .poll(async () => (await state(running.url, setId)).position)
+    .poll(async () => (await state(running.url, albumId)).position)
     .toBe(2);
 
   await page.reload();
@@ -2368,20 +3180,20 @@ test("Undo returns to the affected Photo and refreshes its Preview and facts", a
   for (const name of ["a.jpg", "b.jpg", "c.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
-  const { setId } = await createSet(running.url);
+  const { albumId } = await createAlbum(running.url);
   await openGrid(page, running.url, "Review");
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /^Photo 1 of/ }),
   );
   await expect(page.getByText("1 / 3")).toBeVisible();
   await expect(page.locator("[data-stage] img")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Undo" }).click(),
   );
   await expect(page.getByText("1 / 3")).toBeVisible();
@@ -2400,15 +3212,15 @@ test("Undo clears when the affected Photo leaves the loaded window", async ({
       await jpeg(),
     );
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "Wide");
+  const { albumId } = await createAlbum(running.url, "Wide");
   await openGrid(page, running.url, "Wide");
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /^Photo 1 of 200/ }),
   );
   await expect(page.getByText("1 / 200")).toBeVisible();
-  await actionWithProgress(page, setId, () =>
+  await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 200")).toBeVisible();
@@ -2430,10 +3242,11 @@ test("Undo clears when the affected Photo leaves the loaded window", async ({
   await page.keyboard.press("Control+z");
   await expect
     .poll(
-      async () => (await state(running.url, setId)).members[0]!.selectionState,
+      async () =>
+        (await state(running.url, albumId)).members[0]!.selectionState,
     )
     .toBe("selected");
-  expect((await state(running.url, setId)).members[0]!.selectionState).toBe(
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
     "selected",
   );
 });
@@ -2529,15 +3342,15 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
       await jpeg(),
     );
   const running = await server(base, root);
-  const { setId } = await createSet(running.url, "Expiry");
+  const { albumId } = await createAlbum(running.url, "Expiry");
   await openGrid(page, running.url, "Expiry");
   await openPhotoAndWaitForProgress(
     page,
-    setId,
+    albumId,
     page.getByRole("button", { name: /^Photo 1 of 130/ }),
   );
   await expect(page.getByText("1 / 130")).toBeVisible();
-  const firstId = (await state(running.url, setId)).members[0]!.photoId;
+  const firstId = (await state(running.url, albumId)).members[0]!.photoId;
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   const reopenBodies: Array<Record<string, unknown>> = [];
@@ -2569,7 +3382,7 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
       reopenBodies.some(
         (body) =>
           body.source === "album" &&
-          body.albumId === setId &&
+          body.albumId === albumId &&
           body.photoId === firstId,
       ),
     )
