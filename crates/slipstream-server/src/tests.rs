@@ -1,4 +1,5 @@
 use super::*;
+use crate::folders::MAXIMUM_FILE_LOCATION_WINDOW;
 use std::{
     collections::HashMap,
     fs,
@@ -490,24 +491,44 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
     )
     .unwrap();
     assert!(vectors.len() >= 12);
-    fn substitute(value: &serde_json::Value, token: &str) -> serde_json::Value {
+    fn replace_placeholder(
+        value: &serde_json::Value,
+        placeholder: &str,
+        replacement: &str,
+    ) -> serde_json::Value {
         match value {
             serde_json::Value::String(text) => {
-                serde_json::Value::String(text.replace("$token", token))
+                serde_json::Value::String(text.replace(placeholder, replacement))
             }
             serde_json::Value::Array(values) => serde_json::Value::Array(
-                values.iter().map(|item| substitute(item, token)).collect(),
+                values
+                    .iter()
+                    .map(|item| replace_placeholder(item, placeholder, replacement))
+                    .collect(),
             ),
             serde_json::Value::Object(entries) => serde_json::Value::Object(
                 entries
                     .iter()
-                    .map(|(name, item)| (name.clone(), substitute(item, token)))
+                    .map(|(name, item)| {
+                        (
+                            name.clone(),
+                            replace_placeholder(item, placeholder, replacement),
+                        )
+                    })
                     .collect(),
             ),
             other => other.clone(),
         }
     }
+    fn substitute(value: &serde_json::Value, token: &str, publication: &str) -> serde_json::Value {
+        replace_placeholder(
+            &replace_placeholder(value, "$publication", publication),
+            "$token",
+            token,
+        )
+    }
     let mut token = String::new();
+    let mut publication = String::new();
     for vector in vectors {
         let name = vector["name"].as_str().unwrap().to_owned();
         let request_definition = &vector["request"];
@@ -515,7 +536,8 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         let path = request_definition["path"]
             .as_str()
             .unwrap()
-            .replace("$token", &token);
+            .replace("$token", &token)
+            .replace("$publication", &publication);
         let mut builder = Request::builder().method(method).uri(&path);
         if let Some(headers) = request_definition["headers"].as_object() {
             for (header_name, value) in headers {
@@ -524,7 +546,10 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         }
         let body = request_definition
             .get("body")
-            .map(|body| Body::from(serde_json::to_vec(body).unwrap()))
+            .map(|body| {
+                let substituted = substitute(body, &token, &publication);
+                Body::from(serde_json::to_vec(&substituted).unwrap())
+            })
             .unwrap_or_else(Body::empty);
         let request = builder.body(body).unwrap();
         let response = tower::ServiceExt::oneshot(router.clone(), request)
@@ -551,19 +576,35 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
             token = new_token.to_owned();
             assert!(token.len() >= 36, "{name} token is not opaque");
         }
+        if vector["capture"].as_str() == Some("publication")
+            && let Some(captured) = actual
+                .as_ref()
+                .and_then(|value| value.get("publication"))
+                .and_then(|value| value.as_str())
+        {
+            publication = captured.to_owned();
+        }
         if let (Some(actual_value), Some(expected)) =
             (actual.as_ref(), vector["expected"]["body"].as_object())
         {
             assert_eq!(
                 actual_value.as_object().unwrap(),
-                substitute(&serde_json::Value::Object(expected.clone()), &token)
-                    .as_object()
-                    .unwrap(),
+                substitute(
+                    &serde_json::Value::Object(expected.clone()),
+                    &token,
+                    &publication
+                )
+                .as_object()
+                .unwrap(),
                 "{name}"
             );
         }
     }
     assert!(!token.is_empty(), "fixtures must exercise a captured token");
+    assert!(
+        !publication.is_empty(),
+        "fixtures must exercise a captured publication"
+    );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -925,6 +966,361 @@ async fn album_browse_open_resolves_saved_position_without_members_response() {
         .unwrap();
     assert_eq!(opened.total, 3);
     assert_eq!(opened.position, 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn file_location_windows_derive_bounded_folders_from_one_publication() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("b.JPG"), 8, 4, [32, 64, 192]);
+    fs::write(root.join("a.ARW"), b"raw-bytes-a").unwrap();
+    jpeg_fixture(&root.join("a.JPG"), 8, 4, [64, 32, 192]);
+    fs::create_dir_all(root.join("shoot/sub")).unwrap();
+    jpeg_fixture(&root.join("shoot/c.JPG"), 8, 4, [1, 2, 3]);
+    fs::write(root.join("shoot/d.ARW"), b"raw-bytes-d").unwrap();
+    jpeg_fixture(&root.join("shoot/d.JPG"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("shoot/sub/e.JPG"), 8, 4, [7, 8, 9]);
+    fs::create_dir_all(root.join("a")).unwrap();
+    jpeg_fixture(&root.join("a/f.JPG"), 8, 4, [9, 8, 7]);
+    fs::create_dir_all(root.join("ab")).unwrap();
+    jpeg_fixture(&root.join("ab/g.JPG"), 8, 4, [6, 5, 4]);
+    fs::create_dir_all(root.join("\u{76f8}\u{518c}")).unwrap();
+    jpeg_fixture(&root.join("\u{76f8}\u{518c}/h.JPG"), 8, 4, [3, 2, 1]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+
+    // The first window binds to the current publication without supplying one.
+    let first = application.file_locations(None, "", 0, 60).await.unwrap();
+    assert_eq!(first.parent, "");
+    assert_eq!(first.total, 4);
+    assert_eq!(first.children.len(), 4);
+    let names: Vec<&str> = first
+        .children
+        .iter()
+        .map(|child| child.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["a", "ab", "shoot", "\u{76f8}\u{518c}"]);
+    let by_location = |location: &str| {
+        first
+            .children
+            .iter()
+            .find(|child| child.location == location)
+            .unwrap()
+    };
+    // Paired RAW/JPEG Photos count once; counts are recursive.
+    assert_eq!(by_location("a").photo_count, 1);
+    assert!(!by_location("a").has_descendant_folders);
+    assert_eq!(by_location("ab").photo_count, 1);
+    assert_eq!(by_location("shoot").photo_count, 3);
+    assert!(by_location("shoot").has_descendant_folders);
+    assert_eq!(by_location("\u{76f8}\u{518c}").photo_count, 1);
+    let publication = first.publication.clone();
+    assert!(!publication.is_empty());
+
+    // A retained window with the same publication stays coherent.
+    let shoot = application
+        .file_locations(Some(&publication), "shoot", 0, 60)
+        .await
+        .unwrap();
+    assert_eq!(shoot.total, 1);
+    assert_eq!(shoot.children[0].location, "shoot/sub");
+    assert_eq!(shoot.children[0].photo_count, 1);
+
+    // Window bounds are enforced.
+    assert!(matches!(
+        application
+            .file_locations(Some(&publication), "", 0, 0)
+            .await,
+        Err(ServerError::FileLocationWindow)
+    ));
+    assert!(matches!(
+        application
+            .file_locations(Some(&publication), "", 0, MAXIMUM_FILE_LOCATION_WINDOW + 1)
+            .await,
+        Err(ServerError::FileLocationWindow)
+    ));
+    // Malformed and unknown parents are rejected without fallback.
+    for malformed in ["/abs", "a/../b", "a//b", "a/.", "\0"] {
+        assert!(matches!(
+            application
+                .file_locations(Some(&publication), malformed, 0, 60)
+                .await,
+            Err(ServerError::FolderInvalid)
+        ));
+    }
+    assert!(matches!(
+        application
+            .file_locations(Some(&publication), "missing", 0, 60)
+            .await,
+        Err(ServerError::FolderNotFound)
+    ));
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn file_location_counts_propagate_through_deep_ancestors() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("a/b/c")).unwrap();
+    jpeg_fixture(&root.join("a/b/c/deep.JPG"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("a/top.JPG"), 8, 4, [4, 5, 6]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let publication = application
+        .file_locations(None, "", 0, 60)
+        .await
+        .unwrap()
+        .publication;
+    let root_window = application
+        .file_locations(Some(&publication), "", 0, 60)
+        .await
+        .unwrap();
+    assert_eq!(root_window.children[0].photo_count, 2);
+    let a = application
+        .file_locations(Some(&publication), "a", 0, 60)
+        .await
+        .unwrap();
+    // Direct-child Folders only: files directly in `a` are not Folders.
+    assert_eq!(
+        a.children
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+    // The intermediate chain aggregates upward: a/b inherits c's Photo.
+    assert_eq!(a.children[0].photo_count, 1);
+    // The intermediate chain aggregates upward: a/b inherits c's Photo.
+    let ids = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: "a".to_owned(),
+            publication,
+        },
+    )
+    .await;
+    assert_eq!(ids.len(), 2);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn file_location_queries_decode_spaces_and_report_exact_expiry() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("My Photos")).unwrap();
+    jpeg_fixture(&root.join("My Photos/one.JPG"), 8, 4, [1, 2, 3]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let publication = application
+        .file_locations(None, "", 0, 60)
+        .await
+        .unwrap()
+        .publication;
+
+    // `+` decodes as space in query values, so the spaced Folder opens.
+    let response = tower::ServiceExt::oneshot(
+        router.clone(),
+        Request::builder()
+            .method("GET")
+            .uri(format!(
+                "http://camera.local/api/file-locations?publication={publication}&parent=My+Photos&start=0&limit=60"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["total"], 0);
+
+    // A superseded publication reports the exact expiry contract.
+    let response = tower::ServiceExt::oneshot(
+        router.clone(),
+        Request::builder()
+            .method("GET")
+            .uri("http://camera.local/api/file-locations?publication=0000000000000000&start=0&limit=60")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["error"], "File Locations expired");
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn folder_sources_filter_ancestry_and_expire_with_publication() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("b.JPG"), 8, 4, [32, 64, 192]);
+    fs::write(root.join("a.ARW"), b"raw-bytes-a").unwrap();
+    jpeg_fixture(&root.join("a.JPG"), 8, 4, [64, 32, 192]);
+    fs::create_dir_all(root.join("a")).unwrap();
+    jpeg_fixture(&root.join("a/f.JPG"), 8, 4, [9, 8, 7]);
+    fs::create_dir_all(root.join("ab")).unwrap();
+    jpeg_fixture(&root.join("ab/g.JPG"), 8, 4, [6, 5, 4]);
+    fs::create_dir_all(root.join("shoot/sub")).unwrap();
+    jpeg_fixture(&root.join("shoot/c.JPG"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("shoot/sub/e.JPG"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let publication = application
+        .file_locations(None, "", 0, 60)
+        .await
+        .unwrap()
+        .publication;
+
+    // Persisted Photo IDs are opaque allocations; read the Published snapshot
+    // through the in-crate boundary to build path expectations.
+    let ids_by_path = |application: &Application| {
+        let guard = application.shared.snapshot.read().unwrap();
+        let published = guard.as_ref().unwrap();
+        let mut map = std::collections::HashMap::new();
+        for photo in &published.snapshot.photos {
+            let ordering = photo
+                .raw_original_id
+                .as_deref()
+                .or(photo.jpeg_original_id.as_deref())
+                .unwrap();
+            let position = published.originals_by_id[ordering];
+            map.insert(
+                published.snapshot.originals[position]
+                    .relative_path
+                    .as_str()
+                    .to_owned(),
+                photo.id.clone(),
+            );
+        }
+        map
+    };
+    let ids = ids_by_path(&application);
+    let photo_a = ids["a.ARW"].clone();
+    let photo_f = ids["a/f.JPG"].clone();
+    let photo_c = ids["shoot/c.JPG"].clone();
+    let photo_e = ids["shoot/sub/e.JPG"].clone();
+
+    // Component-aware ancestry: folder "a" never includes sibling "ab".
+    let folder_a = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: "a".to_owned(),
+            publication: publication.clone(),
+        },
+    )
+    .await;
+    assert_eq!(folder_a, vec![photo_f.clone()]);
+    // Recursive subtree membership in Capture Time order.
+    let shoot = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: "shoot".to_owned(),
+            publication: publication.clone(),
+        },
+    )
+    .await;
+    assert_eq!(shoot.len(), 2);
+    assert!(shoot.contains(&photo_c));
+    assert!(shoot.contains(&photo_e));
+    // The root Folder location covers the whole Published Library.
+    let root_source = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: String::new(),
+            publication: publication.clone(),
+        },
+    )
+    .await;
+    assert_eq!(root_source.len(), 6);
+    assert!(root_source.contains(&photo_a));
+    assert!(root_source.contains(&ids["b.JPG"]));
+
+    // A rescan that removes one Original supersedes the publication: every
+    // retained File Location value and Folder-source open fails as expired.
+    fs::remove_file(root.join("shoot/sub/e.JPG")).unwrap();
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    assert!(matches!(
+        application
+            .file_locations(Some(&publication), "", 0, 60)
+            .await,
+        Err(ServerError::FileLocationsExpired)
+    ));
+    assert!(matches!(
+        application
+            .browse_open(
+                BrowseSourceRequest::Folder {
+                    location: "a".to_owned(),
+                    publication: publication.clone(),
+                },
+                None,
+            )
+            .await,
+        Err(ServerError::FileLocationsExpired)
+    ));
+    // A fresh window binds to the new publication and still projects the
+    // remembered unavailable Photo at its last known Location.
+    let fresh = application.file_locations(None, "", 0, 60).await.unwrap();
+    assert_ne!(fresh.publication, publication);
+    let shoot = application
+        .file_locations(Some(&fresh.publication), "shoot", 0, 60)
+        .await
+        .unwrap();
+    // The child window keeps projecting the remembered unavailable Photo.
+    assert_eq!(shoot.children[0].photo_count, 1);
+    let root_counts = application
+        .file_locations(Some(&fresh.publication), "", 0, 60)
+        .await
+        .unwrap();
+    let shoot_child = root_counts
+        .children
+        .iter()
+        .find(|child| child.location == "shoot")
+        .unwrap();
+    assert_eq!(shoot_child.photo_count, 2);
+    let reopened = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: "shoot".to_owned(),
+            publication: fresh.publication.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        reopened.len(),
+        2,
+        "remembered unavailable Photo is retained"
+    );
+    assert!(reopened.contains(&photo_c));
+    assert!(reopened.contains(&photo_e));
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

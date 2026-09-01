@@ -68,3 +68,19 @@ export type PreviewResponse = Readonly<{
   url?: string;
   message?: string;
 }>;
+
+export type FolderChild = Readonly<{
+  location: string;
+  name: string;
+  photoCount: number;
+  hasDescendantFolders: boolean;
+}>;
+
+export type FileLocationsResponse = Readonly<{
+  publication: string;
+  parent: string;
+  start: number;
+  limit: number;
+  total: number;
+  children: ReadonlyArray<FolderChild>;
+}>;

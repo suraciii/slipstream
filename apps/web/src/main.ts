@@ -1,8 +1,10 @@
 import type {
+  AlbumSummary,
   BrowseOpenResponse,
   BrowseWindowResponse,
+  FileLocationsResponse,
+  FolderChild,
   LibraryOverviewResponse,
-  AlbumSummary,
   PhotoSummary,
   PreviewResponse,
   PreviewSource,
@@ -108,9 +110,27 @@ export function renderApp(
   let token = "";
   let total = 0;
   let currentIndex = 0;
-  let sourceKind: "library" | "album" = "library";
+  let sourceKind: "library" | "album" | "folder" = "library";
   let sourceSetId: string | undefined;
   let sourceSetName = "All Photos";
+  let sourceFolder: { location: string; name: string } | undefined;
+  // File Location navigation retains bounded per-parent windows from one
+  // publication. A newer publication clears them and reloads coherently.
+  let fileLocationPublication: string | undefined;
+  const folderWindows = new Map<
+    string,
+    { page: number; children: FolderChild[]; total: number }
+  >();
+  const expandedFolders = new Set<string>();
+  // The most recently attempted source, retained for truthful reconnection
+  // instead of silently falling back to All Photos.
+  let lastSource:
+    | {
+        kind: "library" | "album" | "folder";
+        set: AlbumSummary | undefined;
+        folder: { location: string; name: string } | undefined;
+      }
+    | undefined;
   let loaded = new Map<number, PhotoSummary>();
   let windowRequests = new Map<
     number,
@@ -199,6 +219,261 @@ export function renderApp(
     preview.classList.toggle("detail", zoomed);
   };
 
+  // ---- File Location navigation -------------------------------------
+  // Retained Folder state is bounded by construction: each expanded parent
+  // retains exactly one current direct-child page, and the expanded set is
+  // capped with FIFO eviction. A navigation generation plus the retained
+  // publication guard against delayed responses from superseded generations.
+  const FOLDER_PAGE_SIZE = 60;
+  const MAXIMUM_EXPANDED_FOLDERS = 32;
+  type FolderPage = {
+    page: number;
+    children: FolderChild[];
+    total: number;
+  };
+  let fileLocationGeneration = 0;
+  let folderFailure: { parent: string; page: number } | undefined;
+  // Only one unbound root binder may own the bind at a time, identified by
+  // its globally unique request token. A reset invalidates the owner so a
+  // newer recovery can take over instead of deadlocking against a discarded
+  // in-flight bind.
+  let rootBindOwner = 0;
+  // Per-parent request tokens drawn from one globally monotonic counter:
+  // only the newest request for one parent may commit its window, delayed
+  // duplicates cannot regress the current page, and tokens are never reused,
+  // so collapse/eviction cleanup can never let a stale in-flight request
+  // impersonate a newer one.
+  const folderRequestSequence = new Map<string, number>();
+  let folderRequestCounter = 0;
+
+  const resetFileLocations = () => {
+    fileLocationGeneration += 1;
+    fileLocationPublication = undefined;
+    folderWindows.clear();
+    expandedFolders.clear();
+    folderFailure = undefined;
+    folderRequestSequence.clear();
+    rootBindOwner = 0;
+    // Re-render at once: retained Folder cards must not stay clickable with
+    // an unbound publication, and a cleared failure must remove its Retry
+    // control before any handler can dereference it.
+    renderSources();
+  };
+
+  /// Awaits a bound File Location publication. Folder-source requests must
+  /// never be sent publicationless: retry and reconnect paths wait for (or
+  /// re-establish) the root binding first and report failure truthfully.
+  const awaitRootBinding = async () => {
+    if (fileLocationPublication) return true;
+    await loadFolderWindow("", 0, false);
+    return fileLocationPublication !== undefined;
+  };
+
+  const describeRange = (parent: string, page: number) =>
+    `${parent || "Library Folder"} items ${(page * FOLDER_PAGE_SIZE + 1).toLocaleString()}–${((page + 1) * FOLDER_PAGE_SIZE).toLocaleString()}`;
+
+  const loadFolderWindow = async (
+    parent: string,
+    page: number,
+    expand = true,
+  ) => {
+    const unboundRoot = parent === "" && !fileLocationPublication;
+    if (unboundRoot && rootBindOwner !== 0) return;
+    const generation = fileLocationGeneration;
+    const sequence = (folderRequestCounter += 1);
+    folderRequestSequence.set(parent, sequence);
+    if (unboundRoot) rootBindOwner = sequence;
+    const parameters = new URLSearchParams({
+      start: String(page * FOLDER_PAGE_SIZE),
+      limit: String(FOLDER_PAGE_SIZE),
+    });
+    if (parent) parameters.set("parent", parent);
+    const boundPublication = fileLocationPublication;
+    if (boundPublication) parameters.set("publication", boundPublication);
+    try {
+      const response = await fetcher(`/api/file-locations?${parameters}`);
+      // A response from a superseded navigation generation or an outdated
+      // same-parent request is discarded, whatever its outcome.
+      if (generation !== fileLocationGeneration) return;
+      if (folderRequestSequence.get(parent) !== sequence) return;
+      if (response.status === 409) {
+        resetFileLocations();
+        await refreshOverviewState().catch(() => {});
+        await loadFolderWindow("", 0);
+        // Only claim a coherent reload when the new root actually bound; a
+        // failed rebind keeps its own failure message and retry control.
+        if (fileLocationPublication)
+          summaryStatus.textContent =
+            "Scan results changed File Locations. Reloaded the current Folders.";
+        return;
+      }
+      if (!response.ok) throw new Error("file locations failed");
+      const window = (await response.json()) as FileLocationsResponse;
+      if (generation !== fileLocationGeneration) return;
+      if (boundPublication && window.publication !== boundPublication) {
+        // A delayed response bound to a different publication: discard it,
+        // for the root exactly as for descendant windows.
+        return;
+      }
+      if (folderRequestSequence.get(parent) !== sequence) {
+        // A superseded request for this parent already committed a newer
+        // window; a delayed duplicate must not regress the current page.
+        return;
+      }
+      fileLocationPublication = window.publication;
+      folderWindows.set(parent, {
+        page,
+        children: [...window.children],
+        total: window.total,
+      });
+      // Startup binding publishes the window without visually expanding it;
+      // user navigation expands retained state instead of refetching.
+      if (expand) {
+        expandedFolders.add(parent);
+        enforceExpandedCap(parent);
+      }
+      if (folderFailure) {
+        if (folderFailure.parent === parent && folderFailure.page === page) {
+          // Only the failed range's own success clears its retry state; an
+          // unrelated range loading must not hide a still-failed range.
+          folderFailure = undefined;
+          summaryStatus.textContent = overview
+            ? scanLabel(overview.scan)
+            : "Library ready";
+        }
+        // Any successful load restores the connection a failed range marked
+        // offline; the global connection banner must not stay stuck.
+        setConnected(true);
+      }
+      renderSources();
+    } catch {
+      if (generation !== fileLocationGeneration) return;
+      // A superseded request's delayed failure must not overwrite the
+      // failure state or connection of a newer committed request.
+      if (folderRequestSequence.get(parent) !== sequence) return;
+      // No window committed for this parent, so its sequencing metadata is
+      // dropped: repeated failed exploration cannot grow retained state.
+      folderRequestSequence.delete(parent);
+      folderFailure = { parent, page };
+      summaryStatus.textContent = `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`;
+      setConnected(false);
+      renderSources();
+    } finally {
+      // Clear ownership only when this request still owns it: a reset that
+      // invalidated the bind must not let a discarded request clear a newer
+      // owner's flag.
+      if (unboundRoot && rootBindOwner === sequence) rootBindOwner = 0;
+    }
+  };
+
+  const enforceExpandedCap = (newest: string) => {
+    while (expandedFolders.size > MAXIMUM_EXPANDED_FOLDERS) {
+      const oldest = [...expandedFolders].find(
+        (location) => location !== newest && location !== "",
+      );
+      if (oldest === undefined) break;
+      expandedFolders.delete(oldest);
+      folderWindows.delete(oldest);
+      folderRequestSequence.delete(oldest);
+    }
+  };
+
+  const folderPager = (parent: string, retained: FolderPage) => {
+    const depth = parent ? parent.split("/").length : 0;
+    const pages = Math.max(1, Math.ceil(retained.total / FOLDER_PAGE_SIZE));
+    const controls = document.createElement("div");
+    controls.className = "folder-pager";
+    controls.style.marginLeft = `${Math.min(depth, 6) * 12}px`;
+    const previous = document.createElement("button");
+    previous.type = "button";
+    previous.className = "folder-page-button";
+    previous.textContent = "Previous Folders";
+    previous.disabled = retained.page === 0;
+    previous.addEventListener("click", () => {
+      const current = folderWindows.get(parent);
+      if (current && current.page > 0)
+        void loadFolderWindow(parent, current.page - 1);
+    });
+    const label = document.createElement("span");
+    label.className = "folder-page-label";
+    label.textContent = `${retained.page + 1} / ${pages}`;
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "folder-page-button";
+    next.textContent = "More Folders";
+    next.disabled = (retained.page + 1) * FOLDER_PAGE_SIZE >= retained.total;
+    next.addEventListener("click", () => {
+      // Read the current page at click time: the retained entry is replaced
+      // by each response, so a stale closure would replay the same page.
+      const current = folderWindows.get(parent);
+      if (current) void loadFolderWindow(parent, current.page + 1);
+    });
+    controls.append(previous, label, next);
+    return controls;
+  };
+
+  const folderCard = (child: FolderChild) => {
+    const depth = child.location.split("/").length;
+    const row = document.createElement("div");
+    row.className = "folder-row folder-child";
+    row.style.marginLeft = `${Math.min(depth - 1, 6) * 12}px`;
+    const expand = document.createElement("button");
+    expand.type = "button";
+    expand.className = "folder-expand";
+    expand.setAttribute(
+      "aria-expanded",
+      expandedFolders.has(child.location) ? "true" : "false",
+    );
+    expand.textContent = expandedFolders.has(child.location) ? "▾" : "▸";
+    expand.setAttribute("aria-label", `Toggle ${child.name} subfolders`);
+    expand.addEventListener("click", () => {
+      if (expandedFolders.has(child.location)) {
+        expandedFolders.delete(child.location);
+        folderWindows.delete(child.location);
+        folderRequestSequence.delete(child.location);
+        renderSources();
+      } else {
+        // Expanding revalidates against the current publication instead of
+        // trusting retained state from a possibly superseded generation.
+        void loadFolderWindow(child.location, 0);
+      }
+    });
+    const button = sourceButton(
+      `${child.name}${child.hasDescendantFolders ? " · Subfolders" : ""}`,
+      child.photoCount,
+      sourceKind === "folder" && sourceFolder?.location === child.location,
+      false,
+      false,
+    );
+    // Folder sources cannot open before a publication is bound.
+    button.disabled = !fileLocationPublication;
+    button.addEventListener(
+      "click",
+      () =>
+        void openSource("folder", undefined, undefined, {
+          location: child.location,
+          name: child.name,
+        }),
+    );
+    if (!child.hasDescendantFolders) expand.disabled = true;
+    row.append(expand, button);
+    if (!expandedFolders.has(child.location)) return row;
+    const fragment = document.createDocumentFragment();
+    fragment.append(row, folderChildrenFragment(child.location));
+    return fragment;
+  };
+
+  const folderChildrenFragment = (parent: string) => {
+    const retained = folderWindows.get(parent);
+    if (!retained || !expandedFolders.has(parent))
+      return document.createDocumentFragment();
+    const fragment = document.createDocumentFragment();
+    for (const child of retained.children) fragment.append(folderCard(child));
+    if (retained.total > FOLDER_PAGE_SIZE)
+      fragment.append(folderPager(parent, retained));
+    return fragment;
+  };
+
   const renderSources = () => {
     sourceList.replaceChildren();
     const libraryButton = sourceButton(
@@ -208,6 +483,66 @@ export function renderApp(
     );
     libraryButton.addEventListener("click", () => void openSource("library"));
     sourceList.append(libraryButton);
+
+    const fileHeading = document.createElement("h3");
+    fileHeading.textContent = "File Locations";
+    sourceList.append(fileHeading);
+    if (folderFailure) {
+      const retryFolders = document.createElement("button");
+      retryFolders.type = "button";
+      retryFolders.className = "folder-more";
+      retryFolders.textContent = `Retry File Locations (${describeRange(folderFailure.parent, folderFailure.page)})`;
+      retryFolders.addEventListener("click", () => {
+        // The control only renders while folderFailure is set, and reset
+        // removes it on the same render that clears the failure.
+        const failure = folderFailure;
+        if (failure) void loadFolderWindow(failure.parent, failure.page);
+      });
+      sourceList.append(retryFolders);
+    }
+    const rootCard = sourceButton(
+      "Library Folder",
+      overview?.photoCount ?? 0,
+      sourceKind === "folder" && sourceFolder?.location === "",
+      false,
+      false,
+    );
+    rootCard.addEventListener(
+      "click",
+      () =>
+        void openSource("folder", undefined, undefined, {
+          location: "",
+          name: "Library Folder",
+        }),
+    );
+    // The root source cannot open before a publication is bound.
+    rootCard.disabled = !fileLocationPublication;
+    const rootRow = document.createElement("div");
+    rootRow.className = "folder-row folder-root";
+    const rootExpand = document.createElement("button");
+    rootExpand.type = "button";
+    rootExpand.className = "folder-expand";
+    rootExpand.setAttribute(
+      "aria-expanded",
+      expandedFolders.has("") ? "true" : "false",
+    );
+    rootExpand.textContent = expandedFolders.has("") ? "▾" : "▸";
+    rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
+    rootExpand.addEventListener("click", () => {
+      if (expandedFolders.has("")) {
+        expandedFolders.delete("");
+        folderRequestSequence.delete("");
+        renderSources();
+      } else {
+        void loadFolderWindow("", 0);
+      }
+    });
+    rootRow.append(rootExpand, rootCard);
+    sourceList.append(rootRow, folderChildrenFragment(""));
+
+    const albumHeading = document.createElement("h3");
+    albumHeading.textContent = "Albums";
+    sourceList.append(albumHeading);
     for (const set of sets) {
       const button = sourceButton(
         set.name,
@@ -278,18 +613,46 @@ export function renderApp(
       }
     }
   };
+  const refreshOverviewState = async () => {
+    const response = await fetcher("/api/overview");
+    if (!response.ok) throw new Error("overview failed");
+    overview = (await response.json()) as LibraryOverviewResponse;
+    sets = overview.albums;
+    summaryStatus.textContent = scanLabel(overview.scan);
+    setConnected(true);
+    renderSources();
+  };
+
   const loadOverview = async () => {
     summaryStatus.textContent = "Loading Library summary…";
     try {
-      const response = await fetcher("/api/overview");
-      if (!response.ok) throw new Error("overview failed");
-      overview = (await response.json()) as LibraryOverviewResponse;
-      sets = overview.albums;
-      summaryStatus.textContent = scanLabel(overview.scan);
-      setConnected(true);
-      renderSources();
-      if (!token && overview.published) await openSource("library");
-      else if (!overview.published) void pollUntilPublished();
+      await refreshOverviewState();
+      const current = overview;
+      if (!current) throw new Error("overview missing");
+      if (!fileLocationPublication && current.published) {
+        // A remembered Folder source must reopen only after the publication
+        // is bound; otherwise the request would be rejected as invalid.
+        if (lastSource?.kind === "folder" && !token) {
+          await awaitRootBinding();
+        } else {
+          void loadFolderWindow("", 0, false);
+        }
+      }
+      if (!token && current.published) {
+        const source = lastSource ?? {
+          kind: "library" as const,
+          set: undefined,
+          folder: undefined,
+        };
+        const bindable =
+          source.kind !== "folder" || fileLocationPublication !== undefined;
+        if (bindable) {
+          await openSource(source.kind, source.set, undefined, source.folder);
+        } else {
+          gridStatus.textContent =
+            "Could not load this source. Retry to continue.";
+        }
+      } else if (!current.published) void pollUntilPublished();
     } catch {
       summaryStatus.textContent =
         "Could not reach Slipstream. Check the server and retry.";
@@ -316,9 +679,10 @@ export function renderApp(
   };
 
   const openSource = async (
-    kind: "library" | "album",
+    kind: "library" | "album" | "folder",
     set?: AlbumSummary,
     preferredPhotoId?: string,
+    folder?: { location: string; name: string },
   ) => {
     busy = true;
     cancelScheduledGridRender();
@@ -342,7 +706,9 @@ export function renderApp(
     photoView.hidden = true;
     sourceKind = kind;
     sourceSetId = set?.id;
-    sourceSetName = set?.name ?? "All Photos";
+    sourceFolder = folder;
+    sourceSetName =
+      set?.name ?? (folder ? `${folder.name} · Folder` : "All Photos");
     gridTitle.textContent = sourceSetName;
     gridStatus.textContent = "Preparing Library order…";
     undo = undefined;
@@ -353,6 +719,7 @@ export function renderApp(
     thumbnailFailures = new Set();
     lastCurrentPhotoId = preferredPhotoId;
     const priorToken = token;
+    lastSource = { kind, set, folder };
     try {
       const response = await fetcher("/api/browse", {
         method: "POST",
@@ -363,15 +730,38 @@ export function renderApp(
                 source: "library",
                 ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
               }
-            : {
-                source: "album",
-                albumId: set!.id,
-                ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
-              },
+            : kind === "folder"
+              ? {
+                  source: "folder",
+                  folderPath: folder!.location,
+                  ...(fileLocationPublication
+                    ? { publication: fileLocationPublication }
+                    : {}),
+                  ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
+                }
+              : {
+                  source: "album",
+                  albumId: set!.id,
+                  ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
+                },
         ),
         signal,
         priority: "high",
       });
+      if (response.status === 409 && kind === "folder") {
+        // Only the current source's handler may reset and reload File
+        // Locations: a superseded open doing the same would discard the
+        // newer recovery and leave the tree unbound.
+        if (generation !== sourceGeneration) return;
+        resetFileLocations();
+        await refreshOverviewState().catch(() => {});
+        await loadFolderWindow("", 0);
+        if (generation !== sourceGeneration) return;
+        if (fileLocationPublication)
+          summaryStatus.textContent =
+            "Scan results changed File Locations. Reopen the current Folder.";
+        throw new Error("file locations expired");
+      }
       if (!response.ok) throw new Error("browse open failed");
       const opened = (await response.json()) as BrowseOpenResponse;
       if (generation !== sourceGeneration) {
@@ -454,6 +844,24 @@ export function renderApp(
     const generation = ++sourceGeneration;
     cancelPendingImageLoads(gridLayer);
     const signal = sourceAbortController.signal;
+    let boundPublication = fileLocationPublication;
+    if (sourceKind === "folder" && !boundPublication) {
+      // A Folder source must never be reopened publicationless; wait for
+      // the root binding and fail truthfully if it cannot be established.
+      boundPublication = (await awaitRootBinding())
+        ? fileLocationPublication
+        : undefined;
+      if (generation !== sourceGeneration) return;
+      if (!boundPublication) {
+        // Fail truthfully instead of sending a publicationless request.
+        gridStatus.textContent =
+          "Could not load this source. Retry to continue.";
+        setConnected(false);
+        busy = false;
+        updateControls();
+        return;
+      }
+    }
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
     gridStatus.textContent = notice;
@@ -465,15 +873,37 @@ export function renderApp(
         body: JSON.stringify(
           sourceKind === "library"
             ? { source: "library", ...(anchorId ? { photoId: anchorId } : {}) }
-            : {
-                source: "album",
-                albumId: sourceSetId,
-                ...(anchorId ? { photoId: anchorId } : {}),
-              },
+            : sourceKind === "folder"
+              ? {
+                  source: "folder",
+                  folderPath: sourceFolder?.location ?? "",
+                  ...(boundPublication
+                    ? { publication: boundPublication }
+                    : {}),
+                  ...(anchorId ? { photoId: anchorId } : {}),
+                }
+              : {
+                  source: "album",
+                  albumId: sourceSetId,
+                  ...(anchorId ? { photoId: anchorId } : {}),
+                },
         ),
         signal,
         priority: "high",
       });
+      if (response.status === 409 && sourceKind === "folder") {
+        // Generation-gated exactly like openSource: only the current
+        // source's recovery may reset and rebind File Locations.
+        if (generation === sourceGeneration) {
+          resetFileLocations();
+          await refreshOverviewState().catch(() => {});
+          await loadFolderWindow("", 0);
+          if (generation === sourceGeneration && fileLocationPublication) {
+            summaryStatus.textContent =
+              "Scan results changed File Locations. Reopen the current Folder.";
+          }
+        }
+      }
       if (!response.ok) throw new Error("browse reopen failed");
       const opened = (await response.json()) as BrowseOpenResponse;
       if (generation !== sourceGeneration) {
@@ -1335,6 +1765,8 @@ export function renderApp(
         sourceKind === "album"
           ? sets.find((set) => set.id === sourceSetId)
           : undefined,
+        undefined,
+        sourceKind === "folder" ? sourceFolder : undefined,
       ),
   );
   retry.addEventListener("click", () => void loadOverview());

@@ -562,6 +562,387 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   });
 });
 
+test("file locations show a bounded tree and open recursive folder sources", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "Trip"));
+  await mkdir(join(root, "Trip/day2"));
+  await mkdir(join(root, "Trip-extra"));
+  await mkdir(join(root, "My Photos"));
+  const data = await jpeg();
+  for (const name of [
+    "root.jpg",
+    "Trip/one.jpg",
+    "Trip/day2/two.jpg",
+    "Trip-extra/three.jpg",
+    "My Photos/space.jpg",
+  ])
+    await writeFile(join(root, name), data);
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Trip" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  // File Locations and Albums remain separate sections; a same-name Folder
+  // and Album stay distinguishable by section.
+  await expect(
+    page.getByRole("heading", { name: "File Locations" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Albums" }).first(),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Library Folder/ }),
+  ).toBeVisible();
+
+  // Expanding the root loads one bounded direct-child window.
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /Trip · Subfolders/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Trip-extra 1 Photos" }),
+  ).toBeVisible();
+  // The same-name Album remains present in its own section.
+  await expect(
+    page.getByRole("button", { name: /Trip 0 Photos/ }),
+  ).toBeVisible();
+
+  // Expanding a child loads its own direct-child window.
+  await page.getByRole("button", { name: "Toggle Trip subfolders" }).click();
+  await expect(
+    page.getByRole("button", { name: /day2 1 Photos/ }),
+  ).toBeVisible();
+
+  // Opening the folder source shows the recursive subtree count.
+  await page.getByRole("button", { name: /Trip · Subfolders/ }).click();
+  await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Trip · Folder" }),
+  ).toBeVisible();
+
+  // The component-aware rule keeps the same-prefix sibling separate.
+  await page.getByRole("button", { name: /Trip-extra 1 Photos/ }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+
+  // A Folder name containing a space opens through decoded query values.
+  await page.getByRole("button", { name: /My Photos 1 Photos/ }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+
+  // The Library Folder root source covers the whole Published Library.
+  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
+});
+
+test("an empty Library still shows and opens the Library Folder root", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Library Folder 0 Photos/ }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(page.getByRole("button", { name: "More Folders" })).toBeHidden();
+  await page.getByRole("button", { name: /^Library Folder 0 Photos/ }).click();
+  await expect(page.getByText("No Photos in this source")).toBeVisible();
+});
+
+test("file location publication values stay unique across server restarts", async () => {
+  const { base, root } = await fixture();
+  const data = await jpeg();
+  await writeFile(join(root, "one.jpg"), data);
+  const first = await server(base, root);
+  const responseOne = await fetch(
+    `${first.url}/api/file-locations?start=0&limit=60`,
+  );
+  const windowOne = (await responseOne.json()) as { publication: string };
+  await first.close();
+  const second = await server(base, root);
+  const responseTwo = await fetch(
+    `${second.url}/api/file-locations?start=0&limit=60`,
+  );
+  const windowTwo = (await responseTwo.json()) as { publication: string };
+  expect(windowOne.publication).not.toBe(windowTwo.publication);
+});
+
+test("a failed folder source open reconnects to the same folder, not All Photos", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "shoot/one.jpg"), data);
+  await writeFile(join(root, "root.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photos/ }),
+  ).toBeVisible();
+
+  // The first folder-source open fails; the retry must reopen the same
+  // folder source instead of silently falling back to All Photos.
+  await page.route(
+    /\/api\/browse/,
+    async (route) => {
+      const request = route.request();
+      const body = request.postDataBuffer();
+      if (
+        request.method() === "POST" &&
+        body?.toString().includes("folderPath") &&
+        body.toString().includes("shoot")
+      )
+        await route.abort();
+      else await route.continue();
+    },
+    { times: 1 },
+  );
+  await page.getByRole("button", { name: /shoot 1 Photos/ }).click();
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "shoot · Folder" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
+test("a remembered folder source waits for the File Location binding before reopening", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"));
+  const data = await jpeg();
+  await writeFile(join(root, "shoot/one.jpg"), data);
+  await writeFile(join(root, "root.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photos/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /shoot 1 Photos/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "shoot · Folder" }),
+  ).toBeVisible();
+
+  // Both the Folder-source reopen and the File Location binding fail.
+  let folderOpens = 0;
+  await page.route(/\/api\/browse/, async (route) => {
+    const body = route.request().postDataBuffer()?.toString() ?? "";
+    if (route.request().method() === "POST" && body.includes("folderPath")) {
+      folderOpens += 1;
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.route(/\/api\/file-locations/, (route) => route.abort());
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  const opensAfterRefresh = folderOpens;
+
+  // The global Retry cannot bind File Locations, so it must NOT send a
+  // publicationless Folder open: the truthful failure stays visible.
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  expect(folderOpens).toBe(opensAfterRefresh);
+
+  // Once the binding and the source route recover, the same Retry reopens
+  // the remembered Folder.
+  await page.unroute(/\/api\/file-locations/);
+  await page.unroute(/\/api\/browse/);
+  // The Retry control hides as soon as the overview reconnects, so the
+  // click is dispatched before that stability transition can hide it.
+  await page.evaluate(() =>
+    document.querySelector<HTMLButtonElement>("[data-retry]")?.click(),
+  );
+  await expect(
+    page.getByRole("heading", { name: "shoot · Folder" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
+test("delayed File Location responses from a superseded publication are discarded", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "a/sub"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "a/sub/one.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /a · Subfolders/ }),
+  ).toBeVisible();
+
+  // Deliver one successful child window for `a` only after the publication
+  // has been superseded and the browser has reloaded the current root.
+  let release: (() => void) | undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(/\/api\/file-locations\?.*parent=a&/, async (route) => {
+    const response = await route.fetch();
+    await released;
+    await route.fulfill({ response });
+  });
+  await page.getByRole("button", { name: "Toggle a subfolders" }).click();
+  await writeFile(join(root, "a/sub/two.jpg"), data);
+  await post(running.url, "/api/scan", {});
+  await page.waitForFunction(async () => {
+    const response = await fetch("/api/overview");
+    const overview = (await response.json()) as { scan: { state: string } };
+    return overview.scan.state === "idle";
+  });
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await rootToggle.click();
+  await rootToggle.click();
+  await expect(
+    page.getByText(
+      "Scan results changed File Locations. Reloaded the current Folders.",
+    ),
+  ).toBeVisible();
+
+  // The delayed superseded window must not expand `a`: if it had been
+  // accepted, this click would collapse it instead of loading the fresh
+  // page, and the fresh recursive count would never appear.
+  release!();
+  await page.getByRole("button", { name: "Toggle a subfolders" }).click();
+  await expect(
+    page.getByRole("button", { name: /sub 2 Photos/ }),
+  ).toBeVisible();
+});
+
+test("failed File Location ranges keep siblings and retry only the failed range", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot/nested"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "shoot/one.jpg"), data);
+  await writeFile(join(root, "shoot/nested/two.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let failing = true;
+  await page.route(/\/api\/file-locations\?.*parent=shoot&/, async (route) => {
+    if (failing) await route.abort();
+    else await route.continue();
+  });
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot · Subfolders/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Toggle shoot subfolders" }).click();
+  await expect(
+    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Library Folder/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: /^Retry File Locations \(shoot items 1–60\)/,
+    }),
+  ).toBeVisible();
+  failing = false;
+  await page.getByRole("button", { name: /^Retry File Locations/ }).click();
+  // Retrying loads only the failed range: the sibling child appears while
+  // the already loaded root navigation stays intact.
+  await expect(
+    page.getByRole("button", { name: /nested 1 Photos/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /shoot · Subfolders/ }),
+  ).toBeVisible();
+  await expect(page.getByText(/Could not load File Locations/)).toBeHidden();
+});
+
+test("file locations reload coherently when a scan replaces the publication", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"));
+  const data = await jpeg();
+  await writeFile(join(root, "shoot/one.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photos/ }),
+  ).toBeVisible();
+
+  // A rescan that adds a Folder supersedes the retained publication.
+  await mkdir(join(root, "later"));
+  await writeFile(join(root, "later/two.jpg"), data);
+  await post(running.url, "/api/scan", {});
+  await page.waitForFunction(async () => {
+    const response = await fetch("/api/overview");
+    const overview = (await response.json()) as { scan: { state: string } };
+    return overview.scan.state === "idle";
+  });
+  // Collapsing and re-expanding sends the superseded publication value; the
+  // app reloads one coherent current publication instead of mixing windows.
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await rootToggle.click();
+  await rootToggle.click();
+  await expect(
+    page.getByText(
+      "Scan results changed File Locations. Reloaded the current Folders.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /later 1 Photos/ }),
+  ).toBeVisible();
+});
+
 test("shows empty and no-album start states and only uses same-service requests", async ({
   page,
 }) => {
@@ -2326,6 +2707,92 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   await expect(page.getByText("58 / 70")).toBeVisible();
   await expect(page.getByRole("button", { name: /^Select/ })).toBeEnabled();
   expect(boundaryRequests).toBeGreaterThanOrEqual(1);
+});
+
+test("file locations stay bounded on a 40,000-Photo Library with a large folder hierarchy", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const base = await mkdtemp(join(tmpdir(), "slipstream-browser-40k-folders-"));
+  temporary.push(base);
+  const root = join(base, "originals");
+  await mkdir(root);
+  await mkdir(join(base, "state"));
+  await mkdir(join(base, "cache"));
+  await chmod(join(base, "state"), 0o700);
+  // Canonical v5 state with 40,000 direct root Folders x 1 Photo each.
+  const generator = `
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(process.env.STATE_DB);
+    database.exec(await Bun.file(process.env.SCHEMA_PATH).text());
+    const insertOriginal = database.prepare(
+      "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available) VALUES(?1,?2,'jpeg',1,1.0,1)",
+    );
+    const insertPhoto = database.prepare(
+      "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path) VALUES(?1,?2,0,1,'inspection-pending',?3)",
+    );
+    const insertBinding = database.prepare(
+      "INSERT INTO library_metadata VALUES('canonical_root',?1)",
+    );
+    database.exec("BEGIN");
+    for (let index = 0; index < 40000; index += 1) {
+      const path = "f" + String(index).padStart(5, "0") + "/one.jpg";
+      const originalId = index.toString(16).padStart(8, "0").repeat(8);
+      const photoId = (0x100000 + index).toString(16).padStart(8, "0").repeat(8);
+      insertOriginal.run(originalId, path);
+      insertPhoto.run(photoId, originalId, path);
+    }
+    database.exec("COMMIT");
+    insertBinding.run(process.env.ROOT);
+    database.close();
+  `;
+  execFileSync("bun", ["-e", generator], {
+    env: {
+      ...process.env,
+      STATE_DB: join(base, "state", "library.sqlite"),
+      ROOT: root,
+      SCHEMA_PATH: join(process.cwd(), "compatibility/sqlite/schema-v5.sql"),
+    },
+    stdio: "inherit",
+  });
+
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+
+  // Expanding the root loads exactly one enforced direct-child page out of
+  // 40,000 with explicit pager controls.
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  const folderCards = page.locator(".source-panel .source-card");
+  await expect(folderCards).toHaveCount(62, { timeout: 10_000 });
+  await expect(page.getByText("1 / 667")).toBeVisible();
+  // Paging to a late position replaces the retained page: the DOM stays at
+  // one window no matter how deep the navigation reaches.
+  for (let page_index = 2; page_index <= 6; page_index += 1) {
+    await page.getByRole("button", { name: "More Folders" }).click();
+    await expect(page.getByText(`${page_index} / 667`)).toBeVisible();
+  }
+  expect(await page.locator(".folder-row .source-card").count()).toBe(61);
+  await page.getByRole("button", { name: "Previous Folders" }).click();
+  await expect(page.getByText("5 / 667")).toBeVisible();
+  expect(await page.locator(".folder-row .source-card").count()).toBe(61);
+
+  // Opening a Folder from the current page stays bounded end to end.
+  await page.locator(".folder-child .source-card").first().click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+
+  const metrics = await page.evaluate(() => ({
+    domCount: document.querySelectorAll("*").length,
+    cellCount: document.querySelectorAll(".photo-cell").length,
+    folderButtons: document.querySelectorAll(".folder-row").length,
+  }));
+  expect(metrics.cellCount).toBeLessThan(120);
+  expect(metrics.folderButtons).toBe(61);
+  expect(metrics.domCount).toBeLessThan(3_000);
 });
 
 test("a persisted 40,000-Photo Library is served from persisted state and stays browsable across the startup rescan", async ({

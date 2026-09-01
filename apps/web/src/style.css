@@ -99,6 +99,69 @@ dl {
   color: #bbc1ca;
   font-weight: 500;
 }
+.source-list h3 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b93a1;
+}
+.folder-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+.folder-row .source-card {
+  flex: 1;
+  min-height: 3.25rem;
+}
+.folder-expand {
+  flex: none;
+  width: 1.75rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #171b23;
+  color: #bbc1ca;
+  cursor: pointer;
+}
+.folder-expand:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.folder-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+.folder-page-button {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #2c3340;
+  border-radius: 6px;
+  background: #171b23;
+  color: #bbc1ca;
+  cursor: pointer;
+}
+.folder-page-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.folder-page-label {
+  color: #8b93a1;
+  font-size: 0.75rem;
+}
+.folder-more {
+  display: block;
+  width: calc(100% - 12px);
+  margin-top: 0.25rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px dashed #2c3340;
+  border-radius: 6px;
+  background: transparent;
+  color: #8b93a1;
+  cursor: pointer;
+  text-align: left;
+}
 .grid-view {
   min-width: 0;
   min-height: 0;

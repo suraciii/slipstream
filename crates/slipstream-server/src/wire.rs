@@ -47,6 +47,31 @@ pub struct BrowseWindowResponse {
 pub enum BrowseSourceRequest {
     Library,
     Album(String),
+    Folder {
+        location: String,
+        publication: String,
+    },
+}
+
+/// One bounded File Location window response.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileLocationsResponse {
+    pub publication: String,
+    pub parent: String,
+    pub start: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub children: Vec<FolderChildWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderChildWire {
+    pub location: String,
+    pub name: String,
+    pub photo_count: usize,
+    pub has_descendant_folders: bool,
 }
 
 /// Bounded Album mutation response: the same summaries the Library

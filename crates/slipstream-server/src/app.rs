@@ -9,6 +9,29 @@ pub(crate) struct Published {
     pub(crate) snapshot: slipstream_core::ScanSnapshot,
     pub(crate) photos_by_id: std::collections::HashMap<String, usize>,
     pub(crate) originals_by_id: std::collections::HashMap<String, usize>,
+    /// Opaque publication generation for File Location coherence.
+    pub(crate) publication: u64,
+    /// Folder index derived lazily from this immutable publication. Fact
+    /// patches never change Original Locations, so the cache stays valid for
+    /// the lifetime of this Published snapshot.
+    folder_index: std::sync::OnceLock<crate::folders::FolderIndex>,
+}
+
+/// Allocates process-unique, monotonically increasing publication
+/// generations. The process-unique base prevents a restarted server from
+/// reissuing a publication value a browser still retains.
+fn publication_generation() -> u64 {
+    static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base = *BASE.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos() as u64)
+            .unwrap_or(1);
+        let mixed = nanos ^ (u64::from(std::process::id()) << 32);
+        mixed | 1
+    });
+    base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 impl Published {
@@ -29,7 +52,24 @@ impl Published {
             snapshot,
             photos_by_id,
             originals_by_id,
+            publication: publication_generation(),
+            folder_index: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The derived Folder index for this publication, computed once.
+    pub(crate) fn folder_index(&self) -> &crate::folders::FolderIndex {
+        self.folder_index.get_or_init(|| {
+            crate::folders::FolderIndex::derive(
+                &self.snapshot.photos,
+                &self.originals_by_id,
+                &self.snapshot.originals,
+            )
+        })
+    }
+
+    pub(crate) fn publication_value(&self) -> String {
+        format!("{:016x}", self.publication)
     }
 }
 
@@ -329,6 +369,61 @@ impl Application {
             .map_or(0, |published| published.snapshot.photos.len())
     }
 
+    /// One bounded direct-child Folder window from the current publication.
+    ///
+    /// The first request may omit `publication` and binds to the current
+    /// Published Library. Later requests carrying a superseded value fail as
+    /// expired so the browser reloads one coherent publication instead of
+    /// combining windows from different generations.
+    pub async fn file_locations(
+        &self,
+        publication: Option<&str>,
+        parent: &str,
+        start: usize,
+        limit: usize,
+    ) -> Result<FileLocationsResponse, ServerError> {
+        if !crate::folders::valid_folder_location(parent) {
+            return Err(ServerError::FolderInvalid);
+        }
+        if limit == 0 || limit > crate::folders::MAXIMUM_FILE_LOCATION_WINDOW {
+            return Err(ServerError::FileLocationWindow);
+        }
+        let guard = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned");
+        let Some(published) = guard.as_ref() else {
+            return Err(ServerError::NotPublished);
+        };
+        let current = published.publication_value();
+        if publication.is_some_and(|requested| requested != current) {
+            return Err(ServerError::FileLocationsExpired);
+        }
+        let index = published.folder_index();
+        if !index.is_known(parent) {
+            return Err(ServerError::FolderNotFound);
+        }
+        let (children, total) = index.window(parent, start, limit);
+        drop(guard);
+        Ok(FileLocationsResponse {
+            publication: current,
+            parent: parent.to_owned(),
+            start,
+            limit,
+            total,
+            children: children
+                .into_iter()
+                .map(|child| FolderChildWire {
+                    location: child.location,
+                    name: child.name,
+                    photo_count: child.photo_count,
+                    has_descendant_folders: child.has_descendant_folders,
+                })
+                .collect(),
+        })
+    }
+
     pub async fn overview(&self) -> Result<LibraryOverviewResponse, ServerError> {
         let albums = self
             .library
@@ -366,6 +461,40 @@ impl Application {
                     .iter()
                     .map(|photo| photo.id.clone())
                     .collect::<Vec<_>>();
+                let position = preferred_photo_id
+                    .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
+                    .unwrap_or(0);
+                (photo_ids, position)
+            }
+            BrowseSourceRequest::Folder {
+                location,
+                publication,
+            } => {
+                if !crate::folders::valid_folder_location(&location) {
+                    return Err(ServerError::FolderInvalid);
+                }
+                let guard = self
+                    .shared
+                    .snapshot
+                    .read()
+                    .expect("published Library poisoned");
+                let Some(published) = guard.as_ref() else {
+                    return Err(ServerError::NotPublished);
+                };
+                if published.publication_value() != publication {
+                    return Err(ServerError::FileLocationsExpired);
+                }
+                let index = published.folder_index();
+                if !index.is_known(&location) {
+                    return Err(ServerError::FolderNotFound);
+                }
+                let photo_ids = index.filter_photo_ids(
+                    &published.snapshot.photos,
+                    &published.originals_by_id,
+                    &published.snapshot.originals,
+                    &location,
+                );
+                drop(guard);
                 let position = preferred_photo_id
                     .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
                     .unwrap_or(0);
