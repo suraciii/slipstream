@@ -1161,22 +1161,25 @@ impl PreviewContext {
                     | crate::NativePreviewError::NoUsablePreview,
                 )) => {
                     let revision = revision_of(jpeg)?;
-                    let checked = capability
-                        .read_whole(128 * 1024 * 1024)
-                        .map_err(map_confinement_error)?;
-                    if checked.facts.size != jpeg.facts.size
-                        || checked.facts.mtime_ms != jpeg.facts.mtime_ms
-                    {
-                        return Err(PreviewServiceError::Changed);
+                    if self.raw.is_none() {
+                        let checked = capability
+                            .read_whole(128 * 1024 * 1024)
+                            .map_err(map_confinement_error)?;
+                        if checked.facts.size != jpeg.facts.size
+                            || checked.facts.mtime_ms != jpeg.facts.mtime_ms
+                        {
+                            return Err(PreviewServiceError::Changed);
+                        }
+                        return Ok(Some(Inspection::InvalidSource(InvalidSource {
+                            expected_candidate: PreviewCandidate::MatchingJpeg,
+                            expected_revision: revision.clone(),
+                            actual_source: PreviewCandidate::MatchingJpeg,
+                            actual_revision: revision,
+                            actual: jpeg.clone(),
+                            jpeg: checked.bytes,
+                        })));
                     }
-                    return Ok(Some(Inspection::InvalidSource(InvalidSource {
-                        expected_candidate: PreviewCandidate::MatchingJpeg,
-                        expected_revision: revision.clone(),
-                        actual_source: PreviewCandidate::MatchingJpeg,
-                        actual_revision: revision,
-                        actual: jpeg.clone(),
-                        jpeg: checked.bytes,
-                    })));
+                    self.verify_current(jpeg, capability)?;
                 }
                 Err(error) => return Err(map_preview_error(error)),
             }
@@ -1849,6 +1852,138 @@ mod tests {
             runtime.block_on(fixture.service.review("photo", DerivativePriority::Current)),
             Err(PreviewServiceError::Closed)
         ));
+    }
+
+    #[test]
+    #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
+    fn corrupt_matching_jpeg_falls_back_to_raw_and_recovers_after_replacement() {
+        let Ok(sample) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
+            return;
+        };
+        let sample = Path::new(&sample);
+        let before = fs::read(sample).unwrap();
+        let raw_name = format!(
+            "one.{}",
+            sample
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("ARW")
+        );
+        let base = std::env::temp_dir().join(format!(
+            "slipstream-preview-fallback-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(base.join("originals")).unwrap();
+        fs::copy(sample, base.join("originals").join(&raw_name)).unwrap();
+        fs::write(base.join("originals/one.JPG"), b"not jpeg").unwrap();
+        let config = || LibraryConfig {
+            library_root: base.join("originals"),
+            state_directory: base.join("state"),
+            database_basename: "library.sqlite".to_owned(),
+            limits: ScanLimits::default(),
+            command_capacity: NonZeroUsize::new(64).unwrap(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let library = Arc::new(Library::open(config()).unwrap());
+        runtime.block_on(library.scan()).unwrap();
+        let service = PreviewService::new(library.clone(), base.join("cache")).unwrap();
+        let id = photo_id(&library);
+        let fallback = runtime
+            .block_on(service.review(id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(fallback) = fallback else {
+            panic!("expected a RAW fallback Preview")
+        };
+        assert_eq!(fallback.source, PreviewCandidate::EmbeddedRawJpeg);
+        let snapshot = runtime.block_on(library.snapshot()).unwrap();
+        let photo = snapshot.photos.iter().find(|photo| photo.id == id).unwrap();
+        assert_eq!(photo.preview_state, PreviewState::Ready);
+        assert_eq!(
+            photo.preview_candidate,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        assert_eq!(
+            photo.preview_source,
+            Some(PreviewCandidate::EmbeddedRawJpeg)
+        );
+        let raw = snapshot
+            .originals
+            .iter()
+            .find(|original| original.relative_path.as_str() == raw_name)
+            .unwrap();
+        assert_eq!(
+            photo.preview_source_revision.as_deref(),
+            Some(
+                source_revision(
+                    raw.relative_path.as_str(),
+                    raw.facts.size,
+                    raw.facts.mtime_ms,
+                )
+                .unwrap()
+                .as_str()
+            )
+        );
+
+        service.shutdown().unwrap();
+        library.shutdown().unwrap();
+        let reopened = Arc::new(Library::open(config()).unwrap());
+        let reopened_service = PreviewService::new(reopened.clone(), base.join("cache")).unwrap();
+        let reopened_result = runtime
+            .block_on(reopened_service.review(id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(reopened_ready) = reopened_result else {
+            panic!("expected the reopened RAW fallback Preview")
+        };
+        assert_eq!(reopened_ready.source, PreviewCandidate::EmbeddedRawJpeg);
+        assert!(!reopened_ready.generated);
+
+        runtime.block_on(reopened.scan()).unwrap();
+        let preserved = runtime
+            .block_on(reopened.snapshot())
+            .unwrap()
+            .photos
+            .into_iter()
+            .find(|photo| photo.id == id)
+            .unwrap();
+        assert_eq!(preserved.preview_state, PreviewState::Ready);
+        assert_eq!(
+            preserved.preview_candidate,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        assert_eq!(
+            preserved.preview_source,
+            Some(PreviewCandidate::EmbeddedRawJpeg)
+        );
+
+        fs::write(base.join("originals/one.JPG"), jpeg(64, 32)).unwrap();
+        runtime.block_on(reopened.scan()).unwrap();
+        let upgraded = runtime
+            .block_on(reopened_service.review(id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(upgraded) = upgraded else {
+            panic!("expected a matching JPEG Preview after replacement")
+        };
+        assert_eq!(upgraded.source, PreviewCandidate::MatchingJpeg);
+        let upgraded_photo = runtime
+            .block_on(reopened.snapshot())
+            .unwrap()
+            .photos
+            .into_iter()
+            .find(|photo| photo.id == id)
+            .unwrap();
+        assert_eq!(
+            upgraded_photo.preview_candidate,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        assert_eq!(
+            upgraded_photo.preview_source,
+            Some(PreviewCandidate::MatchingJpeg)
+        );
+        reopened_service.shutdown().unwrap();
+        reopened.shutdown().unwrap();
+        assert_eq!(fs::read(sample).unwrap(), before);
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
