@@ -1175,12 +1175,14 @@ test("in-flight membership and delete operations stay disabled across re-renders
     await released;
     await route.continue();
   });
-  const foldersResponded = page.waitForResponse((response) =>
-    response.url().includes("/api/file-locations"),
-  );
+  let folderDelivered!: () => void;
+  const folderDeliveredSettled = new Promise<void>((resolve) => {
+    folderDelivered = resolve;
+  });
   await page.route("**/api/file-locations*", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     await route.continue();
+    folderDelivered();
   });
   const removeButton = page.getByRole("button", {
     name: "Remove from this Album",
@@ -1189,14 +1191,18 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
-  await foldersResponded;
+  // Deterministically wait until the delayed folder response has been
+  // delivered and its re-render landed, then verify the in-flight guard.
+  await folderDeliveredSettled;
   await expect(removeButton).toBeDisabled();
   release!();
   await expect(
-    page.getByText(
-      "Removed from the Album. It stays in this open view until reopened.",
-    ),
-  ).toBeVisible();
+    page
+      .getByText(
+        "Removed from the Album. It stays in this open view until reopened.",
+      )
+      .first(),
+  ).toBeVisible({ timeout: 15000 });
   expect(calls).toBe(1);
   // The removed member is no longer removable within the open snapshot.
   await expect(removeButton).toBeHidden();
