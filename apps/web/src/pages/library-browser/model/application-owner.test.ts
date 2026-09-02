@@ -169,23 +169,18 @@ describe("ApplicationOwner", () => {
     expect(await owner.refreshOverview()).toBe(true);
     const staleRefresh = owner.refreshOverview();
     await Promise.resolve();
-    const mutation = owner.beginAlbumMutation({
-      noticeKey: "rename",
-      surface: "summary",
-      ownsSurface: () => true,
-    });
-    if (!mutation) throw new Error("expected admitted Album mutation");
-    const outcome = await owner.settleAlbumMutation(mutation, {
-      kind: "persisted",
-    });
+    expect(owner.advanceAlbumMutationFloor()).toBe(true);
+    let refreshFailure: unknown;
+    try {
+      await owner.refreshOverview();
+    } catch (error) {
+      refreshFailure = error;
+    }
+    expect(refreshFailure).toBeInstanceOf(Error);
+    expect((refreshFailure as Error).message).toBe("overview failed");
     older.resolve(response(overview("publication-1", "Stale Album")));
     expect(await staleRefresh).toBe(false);
 
-    expect(outcome).toMatchObject({
-      admitted: true,
-      ok: true,
-      disconnect: true,
-    });
     expect(owner.albums[0]?.name).toBe("Seed");
     expect(
       overviewEvents(events).map((event) => event.albums[0]?.name),
@@ -436,34 +431,18 @@ describe("ApplicationOwner", () => {
     }
   });
 
-  test("keeps the newest Album notice when an older failure settles late", async () => {
+  test("keeps the newest Album notice when an older failure settles late", () => {
     const { owner, events } = harness(() =>
       Promise.reject(new Error("unexpected request")),
     );
-    const older = owner.beginAlbumMutation({
-      noticeKey: "older",
-      surface: "summary",
-      ownsSurface: () => true,
-    });
-    const newer = owner.beginAlbumMutation({
-      noticeKey: "newer",
-      surface: "summary",
-      ownsSurface: () => true,
-    });
-    if (!older || !newer) throw new Error("expected admitted mutations");
-
-    await owner.settleAlbumMutation(newer, {
-      kind: "failed",
-      message: "Newer failure",
-      transportLost: false,
-    });
-    await owner.settleAlbumMutation(older, {
-      kind: "failed",
-      message: "Older failure",
-      transportLost: false,
-    });
+    const older = owner.claimAlbumSummary("older");
+    const newer = owner.claimAlbumSummary("newer");
+    owner.presentAlbumSummary(newer, "Newer failure");
+    owner.presentAlbumSummary(older, "Older failure");
 
     expect(latestSummary(events)?.text).toBe("Newer failure");
+    owner.releaseAlbumSummary(older);
+    owner.releaseAlbumSummary(newer);
     owner.dispose();
   });
 
@@ -537,7 +516,7 @@ describe("ApplicationOwner", () => {
     expect(scheduled.every((task) => !task.active)).toBe(true);
   });
 
-  test("dispose keeps an admitted Album write durable but its late refresh silent", async () => {
+  test("dispose silences a held post-Album Overview refresh", async () => {
     const held = deferred<Response>();
     let overviewRequests = 0;
     const { owner, events } = harness((input) => {
@@ -551,56 +530,13 @@ describe("ApplicationOwner", () => {
     });
     await owner.refreshOverview();
     events.splice(0);
-    const mutation = owner.beginAlbumMutation({
-      noticeKey: "rename",
-      surface: "summary",
-      ownsSurface: () => true,
-    });
-    if (!mutation) throw new Error("expected admitted mutation");
-    const pending = owner.settleAlbumMutation(mutation, { kind: "persisted" });
+    expect(owner.advanceAlbumMutationFloor()).toBe(true);
+    const pending = owner.refreshOverview();
     owner.dispose();
     held.resolve(response(overview("publication-1", "Late rename")));
 
-    expect(await pending).toMatchObject({
-      admitted: true,
-      ok: true,
-      presentOnSurface: false,
-      disconnect: false,
-    });
+    expect(await pending).toBe(false);
     expect(owner.albums[0]?.name).toBe("Seed");
-    expect(events).toHaveLength(0);
-  });
-
-  test("dispose suppresses recovery from a late failed Album refresh", async () => {
-    const held = deferred<Response>();
-    let overviewRequests = 0;
-    const { owner, events } = harness((input) => {
-      if (input === "/api/overview") {
-        overviewRequests += 1;
-        return overviewRequests === 1
-          ? Promise.resolve(response(overview("publication-1", "Seed")))
-          : held.promise;
-      }
-      return Promise.resolve(response(scan("idle", "publication-1")));
-    });
-    await owner.refreshOverview();
-    events.splice(0);
-    const mutation = owner.beginAlbumMutation({
-      noticeKey: "rename",
-      surface: "summary",
-      ownsSurface: () => true,
-    });
-    if (!mutation) throw new Error("expected admitted mutation");
-    const pending = owner.settleAlbumMutation(mutation, { kind: "persisted" });
-    owner.dispose();
-    held.reject(new Error("late offline refresh"));
-
-    expect(await pending).toMatchObject({
-      admitted: true,
-      ok: true,
-      presentOnSurface: false,
-      disconnect: false,
-    });
     expect(events).toHaveLength(0);
   });
 
@@ -618,15 +554,10 @@ describe("ApplicationOwner", () => {
     const presentation = owner.claimFileLocation("late", "Late failure");
     owner.presentFileLocation(presentation, "Still late");
     owner.releaseFileLocation(presentation);
-    expect(
-      owner.beginAlbumMutation({
-        noticeKey: "late",
-        admissionKey: "late",
-        surface: "summary",
-        ownsSurface: () => true,
-      }),
-    ).toBeUndefined();
-    expect(owner.isAlbumMutationAdmitted("late")).toBe(false);
+    const albumPresentation = owner.claimAlbumSummary("late");
+    owner.presentAlbumSummary(albumPresentation, "Late Album failure");
+    owner.resolveAlbumSummary(albumPresentation);
+    expect(owner.advanceAlbumMutationFloor()).toBe(false);
     owner.confirmSavedPosition("album-1");
     owner.notePublicationConflict();
 
