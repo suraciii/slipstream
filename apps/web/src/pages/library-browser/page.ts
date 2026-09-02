@@ -1,11 +1,7 @@
 import {
   RecoveryGate,
-  SettlementFamily,
-  SummaryNoticeChannel,
   TaskScope,
-  type NoticeHandle,
   type RecoveryClaim,
-  type NoticeUpdate,
   type RecoveryTransition,
 } from "./model/async-ownership.js";
 import type {
@@ -13,7 +9,6 @@ import type {
   BrowseOpenResponse,
   BrowseWindowResponse,
   FolderChild,
-  LibraryOverviewResponse,
   PhotoSummary,
   PreviewResponse,
   PreviewSource,
@@ -27,16 +22,20 @@ import {
   type FileLocationOutcome,
   type FileLocationWindow,
 } from "./model/file-location-owner.js";
+import {
+  createApplicationOwner,
+  type AlbumMutationSettlement,
+  type ApplicationCoordination,
+  type ApplicationEvent,
+  type ApplicationPresentation,
+  type ApplicationRecovery,
+  type FileLocationPresentation,
+} from "./model/application-owner.js";
 import "./ui/library-browser.css";
 
 type SessionUndo = UndoDescription &
   Readonly<{ advanced: boolean; snapshotIndex: number }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
-type SummaryMessage = Readonly<{
-  text: string;
-  action?: Readonly<{ label: string; run: () => void | Promise<void> }>;
-}>;
-
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
 const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
@@ -51,12 +50,7 @@ export function mountLibraryBrowser(
   fetcher: typeof fetch = fetch,
 ): () => void {
   let applicationAlive = true;
-  const applicationTasks = new TaskScope();
   const recoveryGate = new RecoveryGate();
-  const albumSettlements = new SettlementFamily();
-  const scanSettlements = new SettlementFamily();
-  const summaryNotices = new SummaryNoticeChannel<SummaryMessage>();
-  let overviewDataFloor = 0;
 
   root.innerHTML = `
     <main class="app-shell">
@@ -215,41 +209,125 @@ export function mountLibraryBrowser(
     ratings.append(button);
   }
 
-  let overview: LibraryOverviewResponse | undefined;
-  const summaryMessage = (
-    text: string,
-    action?: SummaryMessage["action"],
-  ): SummaryMessage => ({ text, ...(action ? { action } : {}) });
-  const applySummaryUpdate = (update: NoticeUpdate<SummaryMessage>): void => {
-    if (!applicationAlive || !("visible" in update)) return;
-    if (update.visible === null) {
-      const epoch = summaryNotices.backgroundEpoch();
-      applySummaryUpdate(
-        summaryNotices.presentBackground(
-          epoch,
-          summaryMessage(
-            overview ? scanLabel(overview.scan) : "Loading Library…",
-          ),
-        ),
+  const applicationRecoveries = new Map<ApplicationRecovery, RecoveryClaim>();
+
+  const presentApplication = (presentation: ApplicationPresentation): void => {
+    if (!applicationAlive) return;
+    if (presentation.kind === "summary") {
+      summaryStatusElement.replaceChildren(
+        document.createTextNode(presentation.summary.text),
       );
-      return;
-    }
-    if (update.visible === undefined) return;
-    summaryStatusElement.replaceChildren(
-      document.createTextNode(update.visible.text),
-    );
-    if (update.visible.action) {
+      if (!presentation.summary.action) return;
       const action = document.createElement("button");
       action.type = "button";
       action.className = "summary-action";
-      action.textContent = update.visible.action.label;
+      action.textContent =
+        presentation.summary.action.kind === "retry-library-check"
+          ? "Retry Library Check"
+          : "Refresh Current Source";
+      const owner = presentation.summary.action;
       action.addEventListener("click", () => {
-        void update.visible!.action!.run();
+        const intent = application.activateSummaryAction(owner);
+        if (intent?.kind === "refresh-current-source") refresh.click();
       });
       summaryStatusElement.append(" ", action);
+      return;
+    }
+    if (sourceKind === "album" && sourceSetId) {
+      const open = presentation.albums.find(
+        (candidate) => candidate.id === sourceSetId,
+      );
+      if (open) {
+        sourceSetName = open.name;
+        gridTitle.textContent = sourceSetName;
+        photoTitle.textContent = sourceSetName;
+        if (lastSource?.kind === "album" && lastSource.set?.id === open.id)
+          lastSource = { ...lastSource, set: open };
+      }
+    }
+    renderMembershipControls();
+    renderSources();
+  };
+
+  const coordinateApplication = async (
+    coordination: ApplicationCoordination,
+  ): Promise<void> => {
+    if (!applicationAlive) return;
+    if (coordination.kind === "mark-reachable") {
+      setConnected(true);
+      return;
+    }
+    if (coordination.kind === "fail-application-recovery") {
+      let claim = applicationRecoveries.get(coordination.recovery);
+      if (!claim) {
+        claim = recoveryGate.issue(
+          coordination.slot,
+          coordination.slot === "overview-reload" ? "overview" : "library",
+        );
+        applicationRecoveries.set(coordination.recovery, claim);
+      }
+      if (!recoveryGate.fail(claim, { transportLost: true }))
+        recoveryGate.discard(claim);
+      syncConnection();
+      return;
+    }
+    if (coordination.kind === "recover") {
+      const claim = applicationRecoveries.get(coordination.recovery);
+      if (claim) recoveryGate.recover(claim);
+      applicationRecoveries.delete(coordination.recovery);
+      syncConnection();
+      return;
+    }
+    if (coordination.kind === "reset-file-locations") {
+      resetFileLocations();
+      return;
+    }
+    if (coordination.kind === "load-file-location-root") {
+      await loadFolderWindow("", 0, false);
+      return;
+    }
+
+    if (!fileLocations.publication && coordination.overview.published) {
+      if (lastSource?.kind === "folder" && !token) {
+        await awaitRootBinding();
+        if (!coordination.isCurrent()) return;
+      } else {
+        void loadFolderWindow("", 0, false);
+      }
+    }
+    if (!coordination.isCurrent()) return;
+    if (!token && coordination.overview.published) {
+      const remembered = lastSource ?? {
+        kind: "library" as const,
+        set: undefined,
+        folder: undefined,
+      };
+      const bindable =
+        remembered.kind !== "folder" || fileLocations.publication !== undefined;
+      if (bindable) {
+        await openSource(
+          remembered.kind,
+          remembered.set,
+          undefined,
+          remembered.folder,
+        );
+      } else if (coordination.isCurrent()) {
+        gridStatus.textContent =
+          "Could not load this source. Retry to continue.";
+      }
     }
   };
-  let sets: ReadonlyArray<AlbumSummary> = [];
+
+  const handleApplicationEvent = (
+    event: ApplicationEvent,
+  ): void | Promise<void> =>
+    event.kind === "summary" || event.kind === "overview"
+      ? presentApplication(event)
+      : coordinateApplication(event);
+
+  const application = createApplicationOwner(fetcher, {
+    emit: handleApplicationEvent,
+  });
   let token = "";
   let total = 0;
   let currentIndex = 0;
@@ -289,8 +367,6 @@ export function mountLibraryBrowser(
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
   let albumForm: AlbumFormModel | undefined;
 
-  const ALBUM_NOTICE_PRIORITY = 10;
-  const ACTIONABLE_NOTICE_PRIORITY = 30;
   const ALBUM_NAME_MAXIMUM = 120;
   const albumNameError = (name: string): string | undefined => {
     const trimmed = name.trim();
@@ -318,7 +394,6 @@ export function mountLibraryBrowser(
   let renderedViewportHeight = 0;
   let connected = false;
   let connectionEstablished = false;
-  let overviewRecovery: RecoveryClaim | undefined;
   let busy = false;
   let openingPhoto = false;
   let currentPhotoMode = false;
@@ -535,21 +610,18 @@ export function mountLibraryBrowser(
       photoGeneration === requestGeneration &&
       currentPhotoMode &&
       capturedPhotoStatus === photoStatusOwner;
-    const settlement = albumSettlements.begin({
+    const mutation = application.beginAlbumMutation({
+      noticeKey: admissionKey ?? path,
       ...(admissionKey ? { admissionKey } : {}),
+      surface,
       ownsSurface: ownsPhotoSurface,
     });
-    if (!settlement)
+    if (!mutation)
       return Promise.resolve({
         admitted: false,
         ok: false,
         announce: () => {},
       });
-    const notice = summaryNotices.issue(
-      "album",
-      admissionKey ?? path,
-      ALBUM_NOTICE_PRIORITY,
-    );
     const disconnect = () => {
       const claim = recoveryGate.issue("album", path, {
         owner: { scope: "source", generation: String(sourceOwner) },
@@ -558,15 +630,11 @@ export function mountLibraryBrowser(
         recoveryGate.discard(claim);
       syncConnection();
     };
-    const report = (text: string) => {
-      if (settlement.canPresent() && surface === "photo")
-        status.textContent = text;
-      else
-        applySummaryUpdate(
-          summaryNotices.present(notice, summaryMessage(text), {
-            fallback: true,
-          }),
-        );
+    const settle = async (result: AlbumMutationSettlement) => {
+      const outcome = await application.settleAlbumMutation(mutation, result);
+      if (outcome.surfaceMessage) status.textContent = outcome.surfaceMessage;
+      if (outcome.disconnect) disconnect();
+      return outcome;
     };
     return (async () => {
       try {
@@ -576,72 +644,54 @@ export function mountLibraryBrowser(
           body: JSON.stringify(body),
         });
         if (!response.ok) {
-          report(failure(response.status));
-          if (response.status >= 500 && settlement.isNewest()) disconnect();
-          settlement.finish();
+          await settle({
+            kind: "failed",
+            message: failure(response.status),
+            transportLost: response.status >= 500,
+          });
           return { admitted: true, ok: false, announce: () => {} };
         }
-        overviewDataFloor += 1;
-        try {
-          await refreshOverviewState({
-            connectivity: () => settlement.isNewest(),
-          });
-          applySummaryUpdate(summaryNotices.releaseKind("album", notice));
-        } catch {
-          // Persistence is already durable. Only the globally newest Album
-          // settlement owns connectivity and the refresh-failure notice.
-          if (settlement.isNewest()) {
-            disconnect();
-            applySummaryUpdate(
-              summaryNotices.present(
-                notice,
-                summaryMessage(
-                  "The Album was saved but the Library summary could not be refreshed.",
-                ),
-                { fallback: true },
-              ),
-            );
-          } else {
-            applySummaryUpdate(summaryNotices.release(notice));
-          }
-        }
-        const mayAnnounce = settlement.canPresent();
-        settlement.finish();
+        const outcome = await settle({ kind: "persisted" });
         return {
           admitted: true,
           ok: true,
           announce: (text: string) => {
-            if (mayAnnounce && ownsPhotoSurface()) status.textContent = text;
+            if (outcome.presentOnSurface && ownsPhotoSurface())
+              status.textContent = text;
           },
         };
       } catch {
-        report(failure(0));
-        if (settlement.isNewest()) disconnect();
-        settlement.finish();
+        await settle({
+          kind: "failed",
+          message: failure(0),
+          transportLost: true,
+        });
         return { admitted: true, ok: false, announce: () => {} };
       }
     })();
   };
 
   // File Location owns navigation lifetime, publication binding, retained
-  // windows, and exact failed ranges. It returns semantic outcomes; this page
-  // remains the sole writer of shared Overview, Summary, and Recovery state.
+  // windows, and exact failed ranges. Application owns shared Overview and
+  // Summary state; this page maps failures to exact global Recovery claims.
   const fileLocations = createFileLocationOwner(fetcher);
-  type FileLocationPresentation = Readonly<{
-    notice: NoticeHandle;
+  type FileLocationPresentationRecord = Readonly<{
+    summary: FileLocationPresentation;
     recovery: RecoveryClaim;
   }>;
   const fileLocationPresentations = new Map<
     FileLocationFailure,
-    FileLocationPresentation
+    FileLocationPresentationRecord
   >();
   const fileLocationOutcomeSettlements = new WeakMap<object, Promise<void>>();
-  let publicationLocationPresentation: FileLocationPresentation | undefined;
+  let publicationLocationPresentation:
+    | FileLocationPresentationRecord
+    | undefined;
 
   const releaseFileLocationPresentation = (
-    presentation: FileLocationPresentation,
+    presentation: FileLocationPresentationRecord,
   ): void => {
-    applySummaryUpdate(summaryNotices.release(presentation.notice));
+    application.releaseFileLocation(presentation.summary);
     recoveryGate.recover(presentation.recovery);
   };
 
@@ -649,19 +699,13 @@ export function mountLibraryBrowser(
     key: string,
     message: string,
     transportLost: boolean,
-  ): FileLocationPresentation => {
-    const notice = summaryNotices.issue(
-      "file-location",
-      key,
-      ACTIONABLE_NOTICE_PRIORITY,
-    );
+  ): FileLocationPresentationRecord => {
+    const summary = application.claimFileLocation(key, message);
     const recovery = recoveryGate.issue("file-location", key);
     recoveryGate.fail(recovery, {
       ...(transportLost ? { transportLost } : {}),
     });
-    const presentation = { notice, recovery };
-    applySummaryUpdate(summaryNotices.present(notice, summaryMessage(message)));
-    return presentation;
+    return { summary, recovery };
   };
 
   const releasePublicationLocationRecovery = (): void => {
@@ -698,9 +742,9 @@ export function mountLibraryBrowser(
   };
 
   const rebindFileLocations = async (): Promise<FileLocationAuthority> => {
-    overviewDataFloor += 1;
+    application.notePublicationConflict();
     const authority = resetFileLocations();
-    await refreshOverviewState().catch(() => {});
+    await application.refreshOverview().catch(() => {});
     await loadFolderWindow("", 0);
     return authority;
   };
@@ -746,11 +790,9 @@ export function mountLibraryBrowser(
     if (outcome.remainingNewest) {
       const remaining = fileLocationPresentations.get(outcome.remainingNewest);
       if (remaining)
-        applySummaryUpdate(
-          summaryNotices.present(
-            remaining.notice,
-            summaryMessage(outcome.remainingNewest.message),
-          ),
+        application.presentFileLocation(
+          remaining.summary,
+          outcome.remainingNewest.message,
         );
     }
     if (outcome.markTransportReachable) setConnected(true);
@@ -900,7 +942,7 @@ export function mountLibraryBrowser(
     sourceList.replaceChildren();
     const libraryButton = sourceButton(
       "All Photos",
-      overview?.photoCount ?? 0,
+      application.overview?.photoCount ?? 0,
       sourceKind === "library",
     );
     libraryButton.addEventListener("click", () => void openSource("library"));
@@ -923,7 +965,7 @@ export function mountLibraryBrowser(
     }
     const rootCard = sourceButton(
       "Library Folder",
-      overview?.photoCount ?? 0,
+      application.overview?.photoCount ?? 0,
       sourceKind === "folder" && sourceFolder?.location === "",
       false,
       false,
@@ -982,7 +1024,7 @@ export function mountLibraryBrowser(
         }),
       );
     }
-    for (const set of sets) {
+    for (const set of application.albums) {
       const button = sourceButton(
         set.name,
         set.photoCount,
@@ -1257,420 +1299,6 @@ export function mountLibraryBrowser(
     button.querySelector("span")!.textContent =
       `${count} Photos${saved ? " · Resume" : ""}`;
     return button;
-  };
-
-  const scanLabel = (scan: LibraryOverviewResponse["scan"]): string => {
-    const completed = scan.completed?.toLocaleString();
-    switch (scan.state) {
-      case "idle":
-        return "Library ready";
-      case "initializing":
-        return "Preparing Photo Library…";
-      case "discovering":
-        return completed
-          ? `Checking Library Folder… ${completed} found`
-          : "Checking Library Folder…";
-      case "inspecting":
-        return scan.total
-          ? `Inspecting Capture Time… ${completed ?? 0} / ${scan.total.toLocaleString()}`
-          : "Inspecting Capture Time…";
-      case "applying":
-        return "Applying Library updates…";
-      case "failed":
-        return "Library check failed; the last complete Library remains available";
-      default:
-        return `Library ${scan.state}`;
-    }
-  };
-  type ScanCycle = {
-    consumed: boolean;
-    admission: "pending" | "admitted";
-  };
-  let observedScanState: string | undefined;
-  let observedPublication: string | undefined;
-  let publicationBaselineEstablished = false;
-  let scanFailureNotice: NoticeHandle | undefined;
-  let scanCompletionNotice: NoticeHandle | undefined;
-  let scanCommandRecovery: RecoveryClaim | undefined;
-  let activeScanCycle: ScanCycle | undefined;
-  let lastCompletedPublication: string | undefined;
-
-  const releaseScanFailure = () => {
-    if (!scanFailureNotice) return;
-    applySummaryUpdate(summaryNotices.release(scanFailureNotice));
-    scanFailureNotice = undefined;
-  };
-  const claimScanFailure = () => {
-    if (!scanFailureNotice)
-      scanFailureNotice = summaryNotices.issue(
-        "scan-failure",
-        "library",
-        ACTIONABLE_NOTICE_PRIORITY,
-      );
-    applySummaryUpdate(
-      summaryNotices.present(
-        scanFailureNotice,
-        summaryMessage(
-          "Library check failed; the last complete Library remains available.",
-          { label: "Retry Library Check", run: retryLibraryCheck },
-        ),
-      ),
-    );
-  };
-  const observePublication = (publication?: string): boolean => {
-    if (!publicationBaselineEstablished) {
-      publicationBaselineEstablished = true;
-      observedPublication = publication;
-      return false;
-    }
-    if (publication === observedPublication) return false;
-    observedPublication = publication;
-    overviewDataFloor += 1;
-    return true;
-  };
-  const completeScan = (cycle?: ScanCycle, publication?: string): void => {
-    if (cycle?.consumed || (cycle && cycle.admission !== "admitted")) return;
-    if (cycle) cycle.consumed = true;
-    if (activeScanCycle === cycle) activeScanCycle = undefined;
-    if (cycle && scanCommandRecovery) {
-      recoveryGate.recover(scanCommandRecovery);
-      scanCommandRecovery = undefined;
-      setConnected(true);
-    }
-    if (!applicationAlive) return;
-    if (publication && publication === lastCompletedPublication) return;
-    if (publication) lastCompletedPublication = publication;
-    if (!observePublication(publication) && !publication)
-      overviewDataFloor += 1;
-    releaseScanFailure();
-    if (scanCompletionNotice)
-      applySummaryUpdate(summaryNotices.release(scanCompletionNotice));
-    const notice = summaryNotices.issue(
-      "scan-completion",
-      "library",
-      ACTIONABLE_NOTICE_PRIORITY,
-    );
-    scanCompletionNotice = notice;
-    applySummaryUpdate(
-      summaryNotices.present(
-        notice,
-        summaryMessage(
-          "Library check complete. Open Browse Snapshots remain unchanged.",
-          {
-            label: "Refresh Current Source",
-            run: () => {
-              if (scanCompletionNotice === notice) {
-                scanCompletionNotice = undefined;
-                applySummaryUpdate(summaryNotices.release(notice));
-              }
-              refresh.click();
-            },
-          },
-        ),
-      ),
-    );
-    resetFileLocations();
-    void refreshOverviewState()
-      .then(() => loadFolderWindow("", 0, false))
-      .catch(() => {});
-  };
-  const ensureStatusMonitor = (
-    baseline?: LibraryOverviewResponse["scan"],
-  ): void => {
-    if (observedScanState === undefined && baseline)
-      observedScanState = baseline.state;
-    if (applicationTasks.current("publication-status")) return;
-    const monitor = applicationTasks.beginLatest("publication-status", {
-      abortTransport: false,
-    });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let wake: (() => void) | undefined;
-    monitor.onCleanup(() => {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
-      wake?.();
-      wake = undefined;
-    });
-    const pause = () =>
-      new Promise<void>((resolve) => {
-        wake = resolve;
-        timer = setTimeout(
-          () => {
-            timer = undefined;
-            wake = undefined;
-            resolve();
-          },
-          observedScanState === "idle" ? 2_000 : 500,
-        );
-      });
-    void (async () => {
-      try {
-        while (monitor.isCurrent()) {
-          await pause();
-          if (!monitor.isCurrent()) return;
-          const background = summaryNotices.backgroundEpoch();
-          let settled = false;
-          try {
-            const response = await fetcher("/api/status");
-            if (!response.ok) continue;
-            const scan =
-              (await response.json()) as LibraryOverviewResponse["scan"];
-            if (!monitor.isCurrent()) return;
-            applySummaryUpdate(
-              summaryNotices.presentBackground(
-                background,
-                summaryMessage(scanLabel(scan)),
-              ),
-            );
-            settled = true;
-            const prior = observedScanState;
-            const publicationChanged =
-              scan.publication !== undefined &&
-              publicationBaselineEstablished &&
-              scan.publication !== observedPublication;
-            observedScanState = scan.state;
-            if (scan.state !== "idle" && scan.state !== "failed") {
-              if (activeScanCycle?.admission === "pending")
-                activeScanCycle.admission = "admitted";
-            }
-            if (scan.state === "failed") {
-              if (activeScanCycle) activeScanCycle.consumed = true;
-              activeScanCycle = undefined;
-              claimScanFailure();
-              return;
-            }
-            if (
-              scan.state === "idle" &&
-              prior &&
-              prior !== "idle" &&
-              prior !== "failed"
-            ) {
-              const admitted =
-                activeScanCycle?.admission === "admitted"
-                  ? activeScanCycle
-                  : undefined;
-              completeScan(admitted, scan.publication);
-            } else if (scan.state === "idle" && publicationChanged) {
-              completeScan(undefined, scan.publication);
-            }
-          } catch {
-            /* answered and transport status failures stay silent */
-          } finally {
-            if (!settled) summaryNotices.discardBackground(background);
-          }
-        }
-      } finally {
-        monitor.finish();
-      }
-    })();
-  };
-  const retryLibraryCheck = async (): Promise<void> => {
-    const settlement = scanSettlements.begin({ admissionKey: "scan" });
-    if (!settlement) return;
-    const cycle: ScanCycle = {
-      consumed: false,
-      admission: "pending",
-    };
-    activeScanCycle = cycle;
-    ensureStatusMonitor();
-    try {
-      const response = await fetcher("/api/scan", { method: "POST" });
-      if (!response.ok) {
-        if (activeScanCycle === cycle) activeScanCycle = undefined;
-        if (response.status >= 500) {
-          if (
-            !scanCommandRecovery ||
-            !recoveryGate.isActive(scanCommandRecovery)
-          ) {
-            scanCommandRecovery = recoveryGate.issue("scan-command", "library");
-            recoveryGate.fail(scanCommandRecovery, { transportLost: true });
-          }
-          syncConnection();
-        }
-        return;
-      }
-      const terminal =
-        (await response.json()) as LibraryOverviewResponse["scan"];
-      cycle.admission = "admitted";
-      if (scanCommandRecovery) {
-        recoveryGate.recover(scanCommandRecovery);
-        scanCommandRecovery = undefined;
-        setConnected(true);
-      }
-      observedScanState = terminal.state;
-      if (terminal.state === "idle") completeScan(cycle, terminal.publication);
-      else if (terminal.state === "failed") claimScanFailure();
-    } catch {
-      if (!scanCommandRecovery || !recoveryGate.isActive(scanCommandRecovery)) {
-        scanCommandRecovery = recoveryGate.issue("scan-command", "library");
-        recoveryGate.fail(scanCommandRecovery, { transportLost: true });
-      }
-      syncConnection();
-    } finally {
-      settlement.finish();
-    }
-  };
-  const electOverviewBootstrap = (committed: LibraryOverviewResponse): void => {
-    const owner = applicationTasks.beginLatest("overview-bootstrap", {
-      abortTransport: false,
-    });
-    void (async () => {
-      try {
-        if (!fileLocations.publication && committed.published) {
-          // Root binding belongs to the independent File Location scope. A
-          // superseded bootstrap awaits it but starts no later child.
-          if (lastSource?.kind === "folder" && !token) {
-            await awaitRootBinding();
-            if (!owner.isCurrent()) return;
-          } else {
-            void loadFolderWindow("", 0, false);
-          }
-        }
-        if (!owner.isCurrent()) return;
-        if (!token && committed.published) {
-          const remembered = lastSource ?? {
-            kind: "library" as const,
-            set: undefined,
-            folder: undefined,
-          };
-          const bindable =
-            remembered.kind !== "folder" ||
-            fileLocations.publication !== undefined;
-          if (bindable) {
-            await openSource(
-              remembered.kind,
-              remembered.set,
-              undefined,
-              remembered.folder,
-            );
-          } else if (owner.isCurrent()) {
-            gridStatus.textContent =
-              "Could not load this source. Retry to continue.";
-          }
-        }
-      } finally {
-        owner.finish();
-      }
-    })();
-  };
-
-  const refreshOverviewState = async (options?: {
-    connectivity?: () => boolean;
-    bootstrap?: boolean;
-  }): Promise<boolean> => {
-    // The scope owns request sequencing and the latest committed sequence at
-    // the current data floor. Requests remain concurrent: a newer failure
-    // does not detach an older valid success.
-    const task = applicationTasks.beginOrdered("overview", overviewDataFloor);
-    const background = summaryNotices.backgroundEpoch();
-    let backgroundSettled = false;
-    try {
-      const response = await fetcher("/api/overview");
-      if (!response.ok) throw new Error("overview failed");
-      const body = (await response.json()) as LibraryOverviewResponse;
-      if (body.published && !body.publication)
-        throw new Error("overview omitted publication generation");
-      // Revalidate the publication immediately before commit. A response body
-      // produced before a replacement cannot cross that observed boundary.
-      const validationEpoch = summaryNotices.backgroundEpoch();
-      let validationSettled = false;
-      try {
-        const validationResponse = await fetcher("/api/status");
-        if (!validationResponse.ok)
-          throw new Error("overview publication validation failed");
-        const validation =
-          (await validationResponse.json()) as LibraryOverviewResponse["scan"];
-        summaryNotices.discardBackground(validationEpoch);
-        validationSettled = true;
-        if (body.publication !== validation.publication) {
-          if (validation.publication !== observedPublication)
-            overviewDataFloor += 1;
-          return false;
-        }
-      } finally {
-        if (!validationSettled)
-          summaryNotices.discardBackground(validationEpoch);
-      }
-      // Re-check both captured floor and commit order after body parsing and
-      // publication validation. observePublication advances the floor
-      // synchronously after a validated new-publication commit, so older
-      // in-flight responses cannot cross that boundary.
-      if (!task.commit(overviewDataFloor)) return false;
-      observePublication(body.publication);
-      overview = body;
-      sets = body.albums;
-      ensureStatusMonitor(body.scan);
-      applySummaryUpdate(
-        summaryNotices.presentBackground(
-          background,
-          summaryMessage(scanLabel(body.scan)),
-        ),
-      );
-      backgroundSettled = true;
-      if (options?.connectivity?.()) setConnected(true);
-      if (sourceKind === "album" && sourceSetId) {
-        const open = sets.find((candidate) => candidate.id === sourceSetId);
-        if (open) {
-          sourceSetName = open.name;
-          gridTitle.textContent = sourceSetName;
-          photoTitle.textContent = sourceSetName;
-          if (lastSource?.kind === "album" && lastSource.set?.id === open.id)
-            lastSource = { ...lastSource, set: open };
-        }
-      }
-      renderMembershipControls();
-      renderSources();
-      if (options?.bootstrap) electOverviewBootstrap(body);
-      return true;
-    } finally {
-      if (!backgroundSettled) summaryNotices.discardBackground(background);
-      task.finish();
-    }
-  };
-
-  const loadOverview = async () => {
-    // Foreground reload ownership is latest-only, while its shared overview
-    // child keeps commit-in-order ownership and may elect bootstrap even when
-    // a newer foreground load fails.
-    const load = applicationTasks.beginLatest("overview-load", {
-      abortTransport: false,
-    });
-    const barrier = summaryNotices.beginBarrier(
-      "reload",
-      "overview",
-      ACTIONABLE_NOTICE_PRIORITY,
-      summaryMessage("Loading Library summary…"),
-    );
-    applySummaryUpdate(barrier.update);
-    try {
-      await refreshOverviewState({
-        bootstrap: true,
-        connectivity: () => load.isCurrent(),
-      });
-      if (load.isCurrent() && overviewRecovery) {
-        recoveryGate.recover(overviewRecovery);
-        overviewRecovery = undefined;
-        setConnected(true);
-      }
-      applySummaryUpdate(summaryNotices.release(barrier.handle));
-    } catch {
-      if (!load.isCurrent()) return;
-      applySummaryUpdate(
-        summaryNotices.present(
-          barrier.handle,
-          summaryMessage(
-            "Could not reach Slipstream. Check the server and retry.",
-          ),
-        ),
-      );
-      if (!overviewRecovery || !recoveryGate.isActive(overviewRecovery)) {
-        overviewRecovery = recoveryGate.issue("overview-reload", "overview");
-        recoveryGate.fail(overviewRecovery, { transportLost: true });
-      }
-      syncConnection();
-    } finally {
-      load.finish();
-    }
   };
 
   const cancelScheduledGridRender = () => {
@@ -2497,12 +2125,15 @@ export function mountLibraryBrowser(
     albumSelect.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = sets.length ? "Choose Album…" : "No Albums yet";
+    placeholder.textContent = application.albums.length
+      ? "Choose Album…"
+      : "No Albums yet";
     placeholder.disabled = true;
-    if (!sets.some((set) => set.id === selectedAlbumId)) selectedAlbumId = "";
+    if (!application.albums.some((set) => set.id === selectedAlbumId))
+      selectedAlbumId = "";
     placeholder.selected = selectedAlbumId === "";
     albumSelect.append(placeholder);
-    for (const set of sets) {
+    for (const set of application.albums) {
       const option = document.createElement("option");
       option.value = set.id;
       option.textContent = set.name;
@@ -2513,13 +2144,13 @@ export function mountLibraryBrowser(
     const adding = Boolean(
       photo &&
         selectedAlbumId &&
-        albumSettlements.isAdmitted(
+        application.isAlbumMutationAdmitted(
           membershipKey("add", selectedAlbumId, photo.id),
         ),
     );
     const removing =
       Boolean(photo && sourceSetId) &&
-      albumSettlements.isAdmitted(
+      application.isAlbumMutationAdmitted(
         membershipKey("remove", sourceSetId!, photo!.id),
       );
     const inOpenAlbum =
@@ -2527,8 +2158,9 @@ export function mountLibraryBrowser(
       Boolean(sourceSetId) &&
       Boolean(photo) &&
       !removedFromCurrentAlbum.has(photo!.id);
-    albumSelect.disabled = !sets.length;
-    addToAlbum.disabled = !sets.length || !photo || !selectedAlbumId || adding;
+    albumSelect.disabled = !application.albums.length;
+    addToAlbum.disabled =
+      !application.albums.length || !photo || !selectedAlbumId || adding;
     removeFromAlbum.hidden = !inOpenAlbum;
     removeFromAlbum.disabled = !inOpenAlbum || removing;
   };
@@ -2544,7 +2176,7 @@ export function mountLibraryBrowser(
     if (!photo || !albumId) return;
     const photoId = photo.id;
     const key = membershipKey("add", albumId, photoId);
-    if (albumSettlements.isAdmitted(key)) return;
+    if (application.isAlbumMutationAdmitted(key)) return;
     const generation = requestGeneration;
     void (async () => {
       addToAlbum.disabled = true;
@@ -2585,7 +2217,7 @@ export function mountLibraryBrowser(
     const albumId = sourceSetId;
     const photoId = photo.id;
     const key = membershipKey("remove", albumId, photoId);
-    if (albumSettlements.isAdmitted(key)) return;
+    if (application.isAlbumMutationAdmitted(key)) return;
     const generation = requestGeneration;
     const snapshotGeneration = sourceGeneration;
     void (async () => {
@@ -2807,9 +2439,7 @@ export function mountLibraryBrowser(
         }
         if (!response.ok) throw new Error("position rejected");
         if (!stillCurrent()) return false;
-        sets = sets.map((set) =>
-          set.id === albumId ? { ...set, hasSavedPosition: true } : set,
-        );
+        application.confirmSavedPosition(albumId);
         renderSources();
         return true;
       } catch {
@@ -3195,7 +2825,7 @@ export function mountLibraryBrowser(
       await openSource(
         sourceKind,
         sourceKind === "album"
-          ? sets.find((set) => set.id === sourceSetId)
+          ? application.albums.find((set) => set.id === sourceSetId)
           : undefined,
         undefined,
         sourceKind === "folder" ? sourceFolder : undefined,
@@ -3204,7 +2834,7 @@ export function mountLibraryBrowser(
   });
   retry.addEventListener("click", () => {
     if (!retrySourceRequired) {
-      void loadOverview();
+      void application.loadOverview();
       return;
     }
     const remembered = lastSource ?? {
@@ -3334,7 +2964,7 @@ export function mountLibraryBrowser(
     finishPointer(event, true),
   );
   window.addEventListener("keydown", keydown);
-  void loadOverview();
+  void application.loadOverview();
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
@@ -3345,15 +2975,12 @@ export function mountLibraryBrowser(
     cancelScheduledGridRender();
     cancelPendingImageLoads(gridLayer, true);
     cancelPendingImageLoads(stage, true);
-    applicationTasks.halt();
+    application.dispose();
     fileLocations.dispose();
     sourceTasks.halt();
     gridTasks.halt();
     photoTasks.halt();
     recoveryGate.close();
-    albumSettlements.closePresentation();
-    scanSettlements.closePresentation();
-    summaryNotices.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
     compactSources.removeEventListener("change", onSourceViewportChange);
