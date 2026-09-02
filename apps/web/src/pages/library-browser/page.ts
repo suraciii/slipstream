@@ -7,7 +7,7 @@ import {
   type RecoveryClaim,
   type NoticeUpdate,
   type RecoveryTransition,
-} from "./async-ownership.js";
+} from "./model/async-ownership.js";
 import type {
   AlbumSummary,
   BrowseOpenResponse,
@@ -20,8 +20,8 @@ import type {
   PreviewSource,
   SelectionState,
   UndoDescription,
-} from "./protocol.js";
-import "./style.css";
+} from "./api/contracts.js";
+import "./ui/library-browser.css";
 
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
@@ -39,7 +39,7 @@ const swipePendingPixels = 24;
 const swipeCommitPixels = 72;
 const swipeCommitVelocity = 0.5;
 
-export function renderApp(
+export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
 ): () => void {
@@ -3522,12 +3522,4 @@ function sourceLabel(source?: PreviewSource): string {
 }
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
-}
-
-if (typeof document !== "undefined") {
-  const root = document.querySelector<HTMLElement>("#app");
-  if (root) {
-    const dispose = renderApp(root);
-    window.addEventListener("pagehide", dispose, { once: true });
-  }
 }

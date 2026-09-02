@@ -3445,12 +3445,19 @@ test("application teardown halts image ownership and releases the Browse token",
     (request) =>
       request.method() === "DELETE" && request.url().includes("/api/browse/"),
   );
-  await page.evaluate(() =>
-    window.dispatchEvent(new PageTransitionEvent("pagehide")),
-  );
+  let browseReleaseRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "DELETE" && request.url().includes("/api/browse/"))
+      browseReleaseRequests += 1;
+  });
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+  });
   releaseStatus();
   await statusResponse;
   await released;
+  expect(browseReleaseRequests).toBe(1);
   await expect(image).not.toHaveAttribute("src", /.+/);
   await expect(
     page.getByRole("button", { name: "Retry Library Check" }),
