@@ -229,12 +229,46 @@ async function state(url: string, albumId: string): Promise<AlbumState> {
 async function openGrid(page: Page, url: string, name: string) {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(url);
+  await openSources(page);
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
   await page.getByText(/^Ready · \d[\d,]* Photos$/).waitFor();
   await waitForGridFrame(page);
+}
+async function openSources(page: Page) {
+  for (const toggle of await page
+    .getByRole("button", { name: "Sources", exact: true })
+    .all()) {
+    if (
+      (await toggle.isVisible()) &&
+      (await toggle.getAttribute("aria-expanded")) !== "true"
+    ) {
+      await toggle.click();
+      return;
+    }
+  }
+}
+function contrastRatio(foreground: string, background: string) {
+  const luminance = (value: string) => {
+    const channels = value
+      .match(/[\d.]+/g)!
+      .slice(0, 3)
+      .map(Number)
+      .map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+    return (
+      0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!
+    );
+  };
+  const light = Math.max(luminance(foreground), luminance(background));
+  const dark = Math.min(luminance(foreground), luminance(background));
+  return (light + 0.05) / (dark + 0.05);
 }
 async function swipe(page: Page, from: number, to: number, y = 320) {
   const preview = page.locator("[data-preview]");
@@ -302,6 +336,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   servers.splice(servers.indexOf(running), 1);
   running = await server(base, root);
   await page.goto(running.url);
+  await page.getByRole("button", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: /^Picks \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -313,6 +348,158 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     page.getByRole("button", { name: "Previous" }).click(),
   );
   await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+});
+
+test("narrow Grid keeps sources in a dismissible drawer and restores focus", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "a.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+
+  const sources = page.locator("[data-source-toggle]");
+  const panel = page.locator("#source-panel");
+  await expect(sources).toBeVisible();
+  await expect(sources).toHaveAttribute("aria-expanded", "false");
+  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  expect(
+    await page
+      .locator("[data-grid-viewport]")
+      .evaluate((node) => node.clientHeight),
+  ).toBeGreaterThan(700);
+
+  await sources.click();
+  await expect(sources).toHaveAttribute("aria-expanded", "true");
+  await expect(panel).toHaveAttribute("aria-hidden", "false");
+  await expect(
+    page.getByRole("button", { name: /^All Photos(?: |$)/ }),
+  ).toBeVisible();
+  const sourceContrast = await panel.evaluate((container) => {
+    const background = getComputedStyle(container).backgroundColor;
+    return Array.from(
+      container.querySelectorAll<HTMLElement>(
+        "[data-summary-status], .source-list h3, .source-card span",
+      ),
+      (node) => ({
+        foreground: getComputedStyle(node).color,
+        background,
+      }),
+    );
+  });
+  expect(
+    sourceContrast.every(
+      ({ foreground, background }) =>
+        contrastRatio(foreground, background) >= 4.5,
+    ),
+  ).toBe(true);
+  expect(
+    await page
+      .locator("[data-grid-view]")
+      .evaluate((node) => (node as HTMLElement).inert),
+  ).toBe(true);
+  await expect(
+    page.getByRole("button", { name: "Close", exact: true }),
+  ).toBeFocused();
+  const drawerTargets = await panel.evaluate((container) =>
+    Array.from(
+      container.querySelectorAll<HTMLElement>(
+        "button:not([hidden]), input:not([hidden])",
+      ),
+    )
+      .filter((target) => target.offsetParent !== null)
+      .map((target) => {
+        const box = target.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      }),
+  );
+  expect(
+    drawerTargets.every(({ width, height }) => width >= 44 && height >= 44),
+  ).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  await expect(sources).toBeFocused();
+  expect(
+    await page
+      .locator("[data-grid-view]")
+      .evaluate((node) => (node as HTMLElement).inert),
+  ).toBe(false);
+
+  await sources.click();
+  await page.getByRole("button", { name: /^All Photos(?: |$)/ }).click();
+  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  await expect(page.locator("[data-grid-viewport]")).toBeFocused();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
+test("Clear is available only for a decided Photo", async ({ page }) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+
+  const clear = page.getByRole("button", { name: "Clear", exact: true });
+  await expect(clear).toBeDisabled();
+  const layout = await page.locator("[data-photo-view]").evaluate((view) => {
+    const bounds = (selector: string) =>
+      (view.querySelector(selector) as HTMLElement).getBoundingClientRect();
+    const targets = Array.from(
+      view.querySelectorAll<HTMLElement>(
+        "button:not([hidden]), select:not([hidden])",
+      ),
+    )
+      .filter((target) => target.offsetParent !== null)
+      .map((target) => {
+        const box = target.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      });
+    return {
+      targets,
+      previewHeight: bounds("[data-preview]").height,
+      reviewBarHeight: bounds(".review-bar").height,
+      reviewToolsHeight: bounds(".review-tools").height,
+    };
+  });
+  expect(
+    layout.targets.every(({ width, height }) => width >= 44 && height >= 44),
+  ).toBe(true);
+  expect(layout.previewHeight).toBeGreaterThan(layout.reviewBarHeight);
+  expect(layout.previewHeight).toBeGreaterThan(layout.reviewToolsHeight);
+  const secondaryContrast = await page
+    .locator("[data-photo-view]")
+    .evaluate((view) =>
+      Array.from(
+        view.querySelectorAll<HTMLElement>(
+          ".facts dt, .rating-controls legend, .membership-controls label",
+        ),
+        (node) => {
+          const surface = node.closest<HTMLElement>(
+            ".review-bar, .review-tools",
+          )!;
+          return {
+            foreground: getComputedStyle(node).color,
+            background: getComputedStyle(surface).backgroundColor,
+          };
+        },
+      ),
+    );
+  expect(
+    secondaryContrast.every(
+      ({ foreground, background }) =>
+        contrastRatio(foreground, background) >= 4.5,
+    ),
+  ).toBe(true);
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Previous" }).click(),
+  );
+  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await expect(clear).toBeEnabled();
 });
 
 test("visible controls and keyboard share mutation, advance, rating independence, and one-level undo semantics", async ({
@@ -351,9 +538,9 @@ test("visible controls and keyboard share mutation, advance, rating independence
   await expect(page.getByText("Last change undone.")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Clear", exact: true }),
-  ).toBeEnabled();
+  ).toBeDisabled();
   await page.keyboard.press("u");
-  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await expect(page.getByText("2 / 3")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
     page.keyboard.press("ArrowRight"),
@@ -545,6 +732,7 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await post(running.url, "/api/scan", {});
   await startReview(page, running.url, "Review", albumId);
   await page.getByRole("button", { name: "Back to Grid" }).click();
+  await openSources(page);
   await page.getByRole("button", { name: /^Review \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -652,7 +840,14 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await page
     .getByLabel("Album", { exact: true })
     .selectOption({ label: "Picks" });
+  const firstAdd = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/members") &&
+      response.status() === 200,
+  );
   await page.getByRole("button", { name: "Add to Album" }).click();
+  await firstAdd;
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -664,7 +859,14 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await page
     .getByLabel("Album", { exact: true })
     .selectOption({ label: "Picks" });
+  const idempotentAdd = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/members") &&
+      response.status() === 200,
+  );
   await page.getByRole("button", { name: "Add to Album" }).click();
+  await idempotentAdd;
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -770,9 +972,11 @@ test("creating an album from the photo view immediately enables adding the curre
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByLabel("Album", { exact: true })).toBeDisabled();
 
+  await openSources(page);
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Fresh");
   await page.getByRole("button", { name: "Create Album" }).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
   // The picker refreshes in place: no Photo View reopen needed.
   await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
   await page
@@ -916,6 +1120,7 @@ test("a late album success cannot overwrite a newer removal notice", async ({
   release!();
   // The admitted add still lands in the Album, but its late success cannot
   // overwrite the newer removal notice.
+  await openSources(page);
   await expect(
     page.getByRole("button", { name: /^Other 1 Photos/ }),
   ).toBeVisible();
@@ -959,6 +1164,7 @@ test("a superseded album failure surfaces in the library summary", async ({
   release!();
   // The superseded failure is not dropped: it surfaces in the Library
   // summary while the Photo status keeps the newer removal notice.
+  await openSources(page);
   await expect(
     page.getByText("The Photo could not be added to the Album."),
   ).toBeVisible();
@@ -1184,10 +1390,9 @@ test("in-flight membership and delete operations stay disabled across re-renders
     await route.continue();
     folderDelivered();
   });
-  const removeButton = page.getByRole("button", {
-    name: "Remove from this Album",
-  });
+  const removeButton = page.locator("[data-remove-from-album]");
   await removeButton.click();
+  await openSources(page);
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
@@ -1196,13 +1401,10 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await folderDeliveredSettled;
   await expect(removeButton).toBeDisabled();
   release!();
-  await expect(
-    page
-      .getByText(
-        "Removed from the Album. It stays in this open view until reopened.",
-      )
-      .first(),
-  ).toBeVisible({ timeout: 15000 });
+  await expect(page.locator("[data-status]")).toContainText(
+    "Removed from the Album. It stays in this open view until reopened.",
+    { timeout: 15000 },
+  );
   expect(calls).toBe(1);
   // The removed member is no longer removable within the open snapshot.
   await expect(removeButton).toBeHidden();
@@ -1311,6 +1513,7 @@ test("source panel album failures report beside the library summary, not the pho
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
 
   await page.route("**/api/albums/*/rename", (route) => route.abort());
+  await openSources(page);
   await page.getByRole("button", { name: "Rename Panel" }).click();
   await page.getByLabel("Album name").fill("Nowhere");
   await page.getByRole("button", { name: "Save Name" }).click();
@@ -1564,7 +1767,7 @@ test("a remembered folder source waits for the File Location binding before reop
     await route.continue();
   });
   await page.route(/\/api\/file-locations/, (route) => route.abort());
-  await page.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("button", { name: "Refresh Source" }).click();
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
@@ -1793,6 +1996,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
     .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
+  await page.getByRole("button", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -1801,6 +2005,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.reload();
+  await page.getByRole("button", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -1820,6 +2025,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   servers.splice(servers.indexOf(running), 1);
   running = await server(base, root);
   await page.goto(running.url);
+  await openSources(page);
   await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -1914,6 +2120,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
 
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.reload();
+  await openSources(page);
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: /Photo 1 of/ }).click();
@@ -2023,6 +2230,7 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
+  await page.getByRole("button", { name: "Sources", exact: true }).click();
   await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -2200,6 +2408,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
+  await openSources(page);
   await page.getByRole("button", { name: /^Snapshot(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -2521,13 +2730,15 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
       .first()
       .elementHandle();
     expect(pendingGridImage).not.toBeNull();
-    await page.getByRole("button", { name: "Refresh" }).click();
+    await openSources(page);
+    await page.getByRole("button", { name: "Refresh Source" }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
     await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
     expect(
       await pendingGridImage!.evaluate((image) => image.hasAttribute("src")),
     ).toBe(false);
 
+    await openSources(page);
     await page
       .getByRole("button", { name: /^Held Derivatives 70 Photos/ })
       .click();
@@ -2613,6 +2824,7 @@ test("source switching aborts a pending current-Photo Preview request", async ({
       (request) => request.url() === canceledUrl,
     );
 
+    await openSources(page);
     await page
       .getByRole("button", { name: /^Preview Abort Target 8 Photos/ })
       .click();
@@ -2700,6 +2912,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
     }
   });
   try {
+    await openSources(page);
     await page.getByRole("button", { name: /^First Source 8 Photos/ }).click();
     await expect.poll(() => staleHeld).toBe(true);
     const staleCanceled = page.waitForEvent("requestfailed", (request) => {
@@ -2713,6 +2926,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
         firstAlbumId
       );
     });
+    await openSources(page);
     await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
     await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
@@ -2833,6 +3047,7 @@ test("source switching cancels the previous pending window", async ({
       (request) => request.url() === oldWindowUrl,
     );
 
+    await openSources(page);
     await page
       .getByRole("button", { name: /^Abort Target 120 Photos/ })
       .click();
@@ -2871,6 +3086,7 @@ test("source switching aborts fallback thumbnail requests", async ({
       new URL(request.url()).pathname.endsWith("/thumbnail"),
     );
 
+    await openSources(page);
     await page
       .getByRole("button", { name: /^Fallback Abort 70 Photos/ })
       .click();
@@ -2922,16 +3138,16 @@ test("Back to Grid restoration supersedes a queued scroll render", async ({
   page,
 }) => {
   const { base, root } = await fixture();
-  await writePhotos(root, 8);
+  await writePhotos(root, 20);
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
-  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  await expect(page.getByText(/^Ready · 20 Photos$/)).toBeVisible();
 
-  const currentCell = page.locator('[data-photo-index="6"]');
+  const currentCell = page.locator('[data-photo-index="16"]');
   await currentCell.scrollIntoViewIfNeeded();
   await currentCell.click();
-  await expect(page.getByText("7 / 8")).toBeVisible();
+  await expect(page.getByText("17 / 20")).toBeVisible();
 
   const restoredScrollTop = await page.evaluate(
     () =>
@@ -3065,6 +3281,7 @@ test("a completed mutation cannot reopen or advance a superseding source", async
         response.status() === 200,
     );
 
+    await openSources(page);
     await page
       .getByRole("button", { name: /^Mutation Target 2 Photos/ })
       .click();
@@ -3165,6 +3382,7 @@ test("opening a Photo from the Grid persists the Album position", async ({
         )
         .catch(() => undefined);
   });
+  await openSources(page);
   await page.getByRole("button", { name: /^GridPos(?: |$)/ }).click();
   await page.getByText(/^Ready · /).waitFor();
   await expect(
