@@ -2682,16 +2682,13 @@ export function renderApp(
       // The protocol intentionally carries explicit non-ready Preview states
       // with HTTP 404. Other non-success statuses are service failures even
       // when their body happens to resemble a typed Preview response.
-      if (
-        !response.ok &&
-        !(
-          response.status === 404 &&
-          (candidate.state === "unavailable" || candidate.state === "failed")
-        )
-      )
-        throw new Error(`preview HTTP ${response.status}`);
-      if (candidate.state === "ready" && !candidate.url)
-        throw new Error("ready Preview omitted URL");
+      const readyResponse =
+        response.ok && candidate.state === "ready" && Boolean(candidate.url);
+      const nonReadyResponse =
+        response.status === 404 &&
+        (candidate.state === "unavailable" || candidate.state === "failed");
+      if (!readyResponse && !nonReadyResponse)
+        throw new Error(`invalid Preview HTTP/state ${response.status}`);
       result = candidate as PreviewResponse;
     } catch {
       if (signal.aborted || generation !== requestGeneration) return false;

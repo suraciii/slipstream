@@ -3256,15 +3256,16 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
-  let previewMode: "typed-503" | "ready-without-url" = "typed-503";
+  let previewMode: "typed-200" | "typed-503" | "ready-without-url" =
+    "typed-200";
   await page.route("**/api/photos/*/preview", async (route) => {
     await route.fulfill({
       status: previewMode === "typed-503" ? 503 : 200,
       contentType: "application/json",
       body:
-        previewMode === "typed-503"
-          ? '{"state":"unavailable","message":"service unavailable"}'
-          : '{"state":"ready"}',
+        previewMode === "ready-without-url"
+          ? '{"state":"ready"}'
+          : '{"state":"unavailable","message":"service unavailable"}',
     });
   });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -3274,8 +3275,23 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
-  previewMode = "ready-without-url";
+  previewMode = "typed-503";
+  const typed503 = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 503,
+  );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await typed503;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  previewMode = "ready-without-url";
+  const malformedReady = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await malformedReady;
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
