@@ -196,7 +196,7 @@ export interface LibraryBrowserView {
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
-  renderGrid(model: GridViewModel): void;
+  renderGrid(model: GridViewModel, position?: number): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
   gridVisible(): boolean;
@@ -796,7 +796,7 @@ export function createLibraryBrowserView(
     cancelAnimationFrame(gridRenderFrame);
     gridRenderFrame = undefined;
   };
-  const renderGrid = (model: GridViewModel) => {
+  const renderGrid = (model: GridViewModel, position?: number) => {
     if (!alive) return;
     const count = columns();
     const viewportHeight = effectiveViewportHeight();
@@ -805,6 +805,8 @@ export function createLibraryBrowserView(
     const height = `${Math.ceil(model.total / count) * GRID_CELL_HEIGHT}px`;
     gridCanvas.style.height = height;
     gridLayer.style.height = height;
+    if (position !== undefined)
+      gridViewport.scrollTop = Math.floor(position / count) * GRID_CELL_HEIGHT;
     const firstRow = Math.max(
       0,
       Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
