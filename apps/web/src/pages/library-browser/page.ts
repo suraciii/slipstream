@@ -2636,9 +2636,9 @@ export function mountLibraryBrowser(
       await openSourceDescriptor(sourceGrid.source);
     })();
   });
-  const currentGridRangeRetries = (): Array<
-    Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
-  > => {
+  const currentSourceRangeRetries = (
+    alignedStart?: number,
+  ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> => {
     const retries: Array<
       Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
     > = [];
@@ -2647,37 +2647,50 @@ export function mountLibraryBrowser(
         failure.ownerScope !== "source" ||
         !failure.retry ||
         !recoveryGate.isActive(failure.claim) ||
-        !sourceGrid.isCurrent(failure.retry.sourceAuthority)
+        !sourceGrid.isCurrent(failure.retry.sourceAuthority) ||
+        (alignedStart !== undefined && failure.retry.start !== alignedStart)
       )
         continue;
       retries.push({ claim: failure.claim, retry: failure.retry });
     }
     return retries;
   };
+  const retryCurrentSourceRanges = async (
+    rangeRetries: ReadonlyArray<
+      Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
+    >,
+  ): Promise<boolean> => {
+    let recovered = true;
+    for (const { claim, retry: range } of rangeRetries) {
+      if (
+        !sourceGrid.isCurrent(range.sourceAuthority) ||
+        !recoveryGate.isActive(claim)
+      ) {
+        recovered = false;
+        continue;
+      }
+      const loaded = await loadWindow(
+        range.start,
+        {
+          kind: range.operationKind,
+          authority: range.sourceAuthority,
+        },
+        range.quiet,
+        range.priority,
+      );
+      if (!loaded || recoveryGate.isActive(claim)) recovered = false;
+    }
+    return recovered;
+  };
   retry.addEventListener("click", () => {
-    const rangeRetries = currentGridRangeRetries();
+    const rangeRetries = currentSourceRangeRetries();
     if (rangeRetries.length > 0) {
       const retryAuthority = sourceGrid.authority;
       void (async () => {
         busy = true;
         updateControls();
         try {
-          for (const { claim, retry: range } of rangeRetries) {
-            if (
-              !sourceGrid.isCurrent(range.sourceAuthority) ||
-              !recoveryGate.isActive(claim)
-            )
-              continue;
-            await loadWindow(
-              range.start,
-              {
-                kind: range.operationKind,
-                authority: range.sourceAuthority,
-              },
-              range.quiet,
-              range.priority,
-            );
-          }
+          await retryCurrentSourceRanges(rangeRetries);
         } finally {
           if (sourceGrid.isCurrent(retryAuthority)) {
             busy = false;
@@ -2710,7 +2723,7 @@ export function mountLibraryBrowser(
       busy = true;
       status.textContent = "Reconnecting…";
       const sourceOwner = sourceGrid.authority;
-      const photoId = currentPhoto()?.id;
+      const expectedPhotoId = currentPhoto()?.id ?? lastCurrentPhotoId;
       const generation = ++requestGeneration;
       const photoTransition = recoveryGate.beginTransition(
         "photo",
@@ -2723,7 +2736,31 @@ export function mountLibraryBrowser(
       updateControls();
       try {
         const start = sourceGrid.alignedStart(currentIndex);
-        sourceGrid.invalidateWindow(currentIndex);
+        const sourceRangeRetries = currentSourceRangeRetries(start);
+        const sourceRangeRecovered = sourceRangeRetries.length > 0;
+        if (
+          sourceRangeRecovered &&
+          !(await retryCurrentSourceRanges(sourceRangeRetries))
+        )
+          return;
+        if (
+          !sourceGrid.isCurrent(sourceOwner) ||
+          generation !== requestGeneration
+        )
+          return;
+        const recoveredPhoto = currentPhoto();
+        if (
+          !recoveredPhoto ||
+          !expectedPhotoId ||
+          recoveredPhoto.id !== expectedPhotoId
+        )
+          return;
+        const photoId = recoveredPhoto.id;
+        lastCurrentPhotoId = photoId;
+        // An exact Source retry just refreshed these facts. Other Photo
+        // failures still invalidate and reload the current window before
+        // trusting Preview or saved-position recovery.
+        if (!sourceRangeRecovered) sourceGrid.invalidateWindow(currentIndex);
         const windowReady = await loadWindow(
           start,
           {

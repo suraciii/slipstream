@@ -4975,6 +4975,160 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
   ).toBeVisible();
 });
 
+test("Photo Retry recovers the exact source range after an expired reopen window fails", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    Object.defineProperty(element, "clientWidth", {
+      configurable: true,
+      value: 900,
+    });
+    Object.defineProperty(element, "clientHeight", {
+      configurable: true,
+      value: 900,
+    });
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await viewport.evaluate((element) => {
+    element.scrollTop = 3 * 178;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.locator('[data-photo-index="59"]')).toHaveCount(1);
+  await expect(page.locator('[data-photo-index="60"]')).toHaveCount(0);
+
+  let releaseAdjacent: () => void = () => undefined;
+  const adjacentGate = new Promise<void>((resolve) => {
+    releaseAdjacent = resolve;
+  });
+  let boundaryRequests = 0;
+  let originalToken = "";
+  let reopenedToken = "";
+  let reopenWindowFailed = false;
+  let browseAllocations = 0;
+  let overviewRequests = 0;
+  let reopenPhotoId = "";
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/api/browse") {
+      browseAllocations += 1;
+      const body = request.postDataJSON() as { photoId?: string };
+      reopenPhotoId = body.photoId ?? "";
+    }
+    if (request.method() === "GET" && url.pathname === "/api/library")
+      overviewRequests += 1;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
+      boundaryRequests += 1;
+      if (boundaryRequests === 1) {
+        await adjacentGate;
+        try {
+          await route.continue();
+        } catch {
+          /* current navigation supersedes this adjacent Photo prefetch */
+        }
+        return;
+      }
+      if (!originalToken) {
+        originalToken = token;
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: '{"error":"Browse source expired or not found"}',
+        });
+        return;
+      }
+      if (token !== originalToken && !reopenWindowFailed) {
+        reopenedToken = token;
+        reopenWindowFailed = true;
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+      await route.continue();
+    },
+  );
+  try {
+    await page.locator('[data-photo-index="59"]').click();
+    await expect(page.getByText("60 / 70")).toBeVisible();
+    await expect.poll(() => boundaryRequests).toBe(1);
+
+    // The first request is the held adjacent prefetch. Navigating across the
+    // boundary promotes that work into a new Photo-owned GET; its 404 reopens
+    // around Photo 60, then the new token's source-owned first window fails.
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect.poll(() => reopenWindowFailed).toBe(true);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-retry-photo]")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    expect(reopenedToken).not.toBe("");
+    expect(reopenedToken).not.toBe(originalToken);
+    expect(browseAllocations).toBe(1);
+    expect(overviewRequests).toBe(0);
+    expect(reopenPhotoId).not.toBe("");
+
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    const allocationsBeforeRetry = browseAllocations;
+    const overviewsBeforeRetry = overviewRequests;
+    const exactSourceRetry = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname.endsWith(`/${reopenedToken}`) &&
+        url.searchParams.get("start") === "10"
+      );
+    });
+    const refreshedPreview = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/photos/${reopenPhotoId}/preview`
+      );
+    });
+    await page.locator("[data-retry-photo]").click();
+    const retried = await exactSourceRetry;
+    await refreshedPreview;
+
+    expect(new URL(retried.url()).pathname).toBe(
+      `/api/browse/${reopenedToken}`,
+    );
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText("60 / 70")).toBeVisible();
+    expect(browseAllocations).toBe(allocationsBeforeRetry);
+    expect(overviewRequests).toBe(overviewsBeforeRetry);
+  } finally {
+    releaseAdjacent();
+  }
+});
+
 test("navigation promotes an aborted adjacent window to current priority", async ({
   page,
 }) => {
