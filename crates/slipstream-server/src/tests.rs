@@ -43,7 +43,10 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
 /// between status polls.
 async fn wait_for_scan_settled(application: &Application) {
     let started = application.shared.runs_started.load(Ordering::Relaxed);
-    let target = started.max(1);
+    wait_for_scan_runs(application, started.max(1)).await;
+}
+
+async fn wait_for_scan_runs(application: &Application, target: u64) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if application.shared.runs_completed.load(Ordering::Relaxed) >= target {
@@ -1994,6 +1997,87 @@ async fn shutdown_drains_background_scan_before_closing() {
     assert_eq!(reopened.published_photo_count(), 1);
     assert_eq!(reopened.scan_status().state, "idle");
     reopened.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn startup_and_explicit_waiters_share_one_scan_cycle_and_terminal_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let application =
+        Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+            .await
+            .unwrap();
+
+    // Startup was admitted synchronously but its leader is parked. Every
+    // explicit waiter must join that same application-owned cycle.
+    let receivers = (0..8)
+        .map(|_| application.admit_scan_cycle(None, None).unwrap())
+        .collect::<Vec<_>>();
+    gate_sender.send(()).unwrap();
+
+    let mut terminal = None;
+    for receiver in receivers {
+        let status = receiver.await.unwrap().unwrap();
+        let facts = (status.state, status.completed, status.total);
+        if let Some(expected) = terminal {
+            assert_eq!(facts, expected);
+        } else {
+            terminal = Some(facts);
+        }
+    }
+    assert_eq!(terminal, Some(("idle", Some(1), Some(1))));
+    assert_eq!(application.shared.runs_started.load(Ordering::Relaxed), 1);
+    assert_eq!(application.shared.runs_completed.load(Ordering::Relaxed), 1);
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
+
+    // A terminal cycle releases admission for one later independent cycle.
+    let next = application.rescan().await.unwrap();
+    assert_eq!(
+        (next.state, next.completed, next.total),
+        ("idle", Some(1), Some(1))
+    );
+    assert_eq!(application.shared.runs_started.load(Ordering::Relaxed), 2);
+    assert_eq!(application.shared.runs_completed.load(Ordering::Relaxed), 2);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let baseline = application.shared.runs_completed.load(Ordering::Relaxed);
+
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let first = application
+        .admit_scan_cycle(Some(gate_receiver), None)
+        .unwrap();
+    let second = application.admit_scan_cycle(None, None).unwrap();
+    // These receivers model HTTP request futures dropped after admission.
+    drop(first);
+    drop(second);
+    gate_sender.send(()).unwrap();
+
+    wait_for_scan_runs(&application, baseline + 1).await;
+    assert_eq!(
+        application.shared.runs_started.load(Ordering::Relaxed),
+        baseline + 1
+    );
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
+    assert_eq!(application.scan_status().state, "idle");
+
+    // Cleanup of the abandoned cycle must leave the next admission usable.
+    let next = application.rescan().await.unwrap();
+    assert_eq!(next.state, "idle");
+    assert_eq!(
+        application.shared.runs_completed.load(Ordering::Relaxed),
+        baseline + 2
+    );
+    application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
