@@ -102,6 +102,7 @@ describe("SettlementFamily", () => {
       ownsSurface: () => firstSurface,
     });
     expect(first).toBeDefined();
+    expect(family.isAdmitted("add:album:photo")).toBe(true);
     expect(family.begin({ admissionKey: "add:album:photo" })).toBeUndefined();
     const second = family.begin({ admissionKey: "remove:album:photo" })!;
     expect(first!.isNewest()).toBe(false);
@@ -113,6 +114,7 @@ describe("SettlementFamily", () => {
     second.finish();
     expect(first!.isNewest()).toBe(false);
     first!.finish();
+    expect(family.isAdmitted("add:album:photo")).toBe(false);
     expect(family.begin({ admissionKey: "add:album:photo" })).toBeDefined();
     family.closePresentation();
     expect(family.begin({ admissionKey: "late" })).toBeUndefined();

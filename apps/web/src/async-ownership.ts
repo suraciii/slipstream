@@ -259,6 +259,10 @@ export class SettlementFamily {
     };
   }
 
+  isAdmitted(admissionKey: string): boolean {
+    return this.#admissions.has(admissionKey);
+  }
+
   closePresentation(): void {
     this.#closed = true;
   }

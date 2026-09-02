@@ -1081,9 +1081,18 @@ test("an older overview success still bootstraps after a newer reload fails", as
   await expect(page.getByText("Disconnected")).toBeVisible();
 
   releaseOlder();
+  // The valid shared response elects bootstrap, but it cannot release the
+  // newer foreground reload's exact failure owner.
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  await expect(
+    page.getByText("Could not reach Slipstream. Check the server and retry."),
+  ).toBeVisible();
+
+  await page.unroute("**/api/overview");
+  await retry.click();
   await expect(page.getByText("Connected")).toBeVisible();
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
 test("a stale overview response cannot revert newer album state", async ({
@@ -1706,6 +1715,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await writeFile(join(root, "shoot/one.jpg"), data);
   await writeFile(join(root, "shoot/nested/two.jpg"), data);
   const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Existing" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
 
@@ -1734,6 +1744,20 @@ test("failed File Location ranges keep siblings and retry only the failed range"
       name: /^Retry File Locations \(shoot items 1–60\)/,
     }),
   ).toBeVisible();
+
+  // A lower-priority admitted Album failure settles behind the actionable
+  // range owner rather than erasing it. Exact range recovery reveals the
+  // pending Album failure.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Existing");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+  ).toBeVisible();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeHidden();
+
   failing = false;
   await page.getByRole("button", { name: /^Retry File Locations/ }).click();
   // Retrying loads only the failed range: the sibling child appears while
@@ -1745,6 +1769,9 @@ test("failed File Location ranges keep siblings and retry only the failed range"
     page.getByRole("button", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
   await expect(page.getByText(/Could not load File Locations/)).toBeHidden();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeVisible();
 });
 
 test("file locations reload coherently when a scan replaces the publication", async ({

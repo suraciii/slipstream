@@ -1,4 +1,12 @@
-import { TaskScope } from "./async-ownership.js";
+import {
+  RecoveryGate,
+  SettlementFamily,
+  SummaryNoticeChannel,
+  TaskScope,
+  type NoticeHandle,
+  type RecoveryClaim,
+  type NoticeUpdate,
+} from "./async-ownership.js";
 import type {
   AlbumSummary,
   BrowseOpenResponse,
@@ -31,6 +39,9 @@ export function renderApp(
   fetcher: typeof fetch = fetch,
 ): () => void {
   const applicationTasks = new TaskScope();
+  const recoveryGate = new RecoveryGate();
+  const albumSettlements = new SettlementFamily();
+  const summaryNotices = new SummaryNoticeChannel<string>();
   let overviewDataFloor = 0;
 
   root.innerHTML = `
@@ -69,14 +80,6 @@ export function renderApp(
     root,
     "[data-summary-status]",
   );
-  const summaryStatus = {
-    get textContent() {
-      return summaryStatusElement.textContent;
-    },
-    set textContent(value: string) {
-      summaryStatusElement.textContent = value;
-    },
-  };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
@@ -96,15 +99,15 @@ export function renderApp(
   const source = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
   const statusElement = required<HTMLElement>(root, "[data-status]");
-  // Photo-status writes are epoch-sequenced so a late Album settlement can
-  // never overwrite a newer Photo status from any writer.
-  let photoStatusEpoch = 0;
+  // A status write replaces the Photo surface's identity. Album settlement
+  // handles capture that identity instead of maintaining a second sequence.
+  let photoStatusOwner: object = {};
   const status = {
     get textContent() {
       return statusElement.textContent;
     },
     set textContent(value: string) {
-      photoStatusEpoch += 1;
+      photoStatusOwner = {};
       statusElement.textContent = value;
     },
   };
@@ -140,6 +143,21 @@ export function renderApp(
   }
 
   let overview: LibraryOverviewResponse | undefined;
+  const applySummaryUpdate = (update: NoticeUpdate<string>): void => {
+    if (!("visible" in update)) return;
+    if (update.visible === null) {
+      const epoch = summaryNotices.backgroundEpoch();
+      applySummaryUpdate(
+        summaryNotices.presentBackground(
+          epoch,
+          overview ? scanLabel(overview.scan) : "Loading Library…",
+        ),
+      );
+      return;
+    }
+    if (update.visible !== undefined)
+      summaryStatusElement.textContent = update.visible;
+  };
   let sets: ReadonlyArray<AlbumSummary> = [];
   let token = "";
   let total = 0;
@@ -188,12 +206,8 @@ export function renderApp(
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
   let albumForm: AlbumFormModel | undefined;
 
-  // Album mutations report on the surface that initiated them. Every write to
-  // a status surface bumps that surface's epoch, so a late Album settlement
-  // can never overwrite a newer status from any writer — Album action, Photo
-  // decision, or scan label alike.
-  let albumActionSequence = 0;
-  let summaryNoticeAction = 0;
+  const ALBUM_NOTICE_PRIORITY = 10;
+  const ACTIONABLE_NOTICE_PRIORITY = 30;
   const ALBUM_NAME_MAXIMUM = 120;
   const albumNameError = (name: string): string | undefined => {
     const trimmed = name.trim();
@@ -225,6 +239,8 @@ export function renderApp(
   let renderedColumns = 0;
   let renderedViewportHeight = 0;
   let connected = false;
+  let legacyRecoveryReady = false;
+  let overviewRecovery: RecoveryClaim | undefined;
   let busy = false;
   let openingPhoto = false;
   let currentPhotoMode = false;
@@ -255,15 +271,20 @@ export function renderApp(
     | undefined;
 
   const currentPhoto = () => loaded.get(currentIndex);
-  const setConnected = (value: boolean, message?: string) => {
-    if (!value) clearPointer();
-    connected = value;
-    connection.textContent = value ? "Connected" : "Disconnected";
-    connection.classList.toggle("offline", !value);
-    retry.hidden = value || currentPhotoMode;
-    retryPhoto.hidden = value || !currentPhotoMode;
+  const syncConnection = (message?: string) => {
+    connected = legacyRecoveryReady && recoveryGate.decisionReady;
+    if (!connected) clearPointer();
+    connection.textContent = connected ? "Connected" : "Disconnected";
+    connection.classList.toggle("offline", !connected);
+    retry.hidden = connected || currentPhotoMode;
+    retryPhoto.hidden = connected || !currentPhotoMode;
     if (message) status.textContent = message;
     updateControls();
+  };
+  const setConnected = (value: boolean, message?: string) => {
+    legacyRecoveryReady = value;
+    if (value) recoveryGate.markReachable();
+    syncConnection(message);
   };
   const updateControls = () => {
     const photo = currentPhoto();
@@ -313,7 +334,10 @@ export function renderApp(
     total: number;
   };
   let fileLocationGeneration = 0;
-  let folderFailure: { parent: string; page: number } | undefined;
+  let fileLocationNotice: NoticeHandle | undefined;
+  let folderFailure:
+    | { parent: string; page: number; notice: NoticeHandle }
+    | undefined;
   // Only one unbound root binder may own the bind at a time, identified by
   // its globally unique request token. A reset invalidates the owner so a
   // newer recovery can take over instead of deadlocking against a discarded
@@ -332,6 +356,9 @@ export function renderApp(
     fileLocationPublication = undefined;
     folderWindows.clear();
     expandedFolders.clear();
+    if (fileLocationNotice)
+      applySummaryUpdate(summaryNotices.release(fileLocationNotice));
+    fileLocationNotice = undefined;
     folderFailure = undefined;
     folderRequestSequence.clear();
     rootBindOwner = 0;
@@ -375,31 +402,40 @@ export function renderApp(
     failure: (httpStatus: number) => string,
     surface: "photo" | "summary",
     photoGeneration = requestGeneration,
-  ): Promise<{ ok: boolean; announce: (text: string) => void }> => {
-    const action = ++albumActionSequence;
-    const photoEpoch = photoStatusEpoch;
-    const stillNewest = () => action === albumActionSequence;
-    // The photo surface only accepts the newest action's notice, for the
-    // Photo generation that initiated it, while Photo View is open and no
-    // newer status of any kind has been written since initiation.
+    admissionKey?: string,
+  ): Promise<{
+    admitted: boolean;
+    ok: boolean;
+    announce: (text: string) => void;
+  }> => {
+    const capturedPhotoStatus = photoStatusOwner;
     const ownsPhotoSurface = () =>
-      stillNewest() &&
       surface === "photo" &&
       photoGeneration === requestGeneration &&
       currentPhotoMode &&
-      photoEpoch === photoStatusEpoch;
-    const reportToSummary = (text: string) => {
-      // A failure that no longer owns the Photo surface still matters:
-      // surface it in the Library summary unless a newer Album notice
-      // already owns that channel.
-      if (action > summaryNoticeAction) {
-        summaryNoticeAction = action;
-        summaryStatus.textContent = text;
-      }
-    };
+      capturedPhotoStatus === photoStatusOwner;
+    const settlement = albumSettlements.begin({
+      ...(admissionKey ? { admissionKey } : {}),
+      ownsSurface: ownsPhotoSurface,
+    });
+    if (!settlement)
+      return Promise.resolve({
+        admitted: false,
+        ok: false,
+        announce: () => {},
+      });
+    const notice = summaryNotices.issue(
+      "album",
+      admissionKey ?? path,
+      ALBUM_NOTICE_PRIORITY,
+    );
     const report = (text: string) => {
-      if (ownsPhotoSurface()) status.textContent = text;
-      else reportToSummary(text);
+      if (settlement.canPresent() && surface === "photo")
+        status.textContent = text;
+      else
+        applySummaryUpdate(
+          summaryNotices.present(notice, text, { fallback: true }),
+        );
     };
     return (async () => {
       try {
@@ -410,54 +446,66 @@ export function renderApp(
         });
         if (!response.ok) {
           report(failure(response.status));
-          // Only transport-class failures change global connectivity: a
-          // duplicate name (409) or unknown Album (404) is a normal,
-          // answered request, not a disconnection — and a superseded
-          // action's failure must not disconnect a newer success.
-          if (response.status >= 500 && stillNewest()) setConnected(false);
-          return { ok: false, announce: () => {} };
+          if (response.status >= 500 && settlement.isNewest())
+            setConnected(false);
+          settlement.finish();
+          return { admitted: true, ok: false, announce: () => {} };
         }
-        // A response that started before this committed mutation may no
-        // longer update shared Album facts.
         overviewDataFloor += 1;
-        // A stale settlement refreshes the bounded data but leaves the
-        // current connection state to whichever action owns the UI now.
         try {
           await refreshOverviewState({
-            connectivity: stillNewest(),
-            action,
+            connectivity: () => settlement.isNewest(),
           });
+          applySummaryUpdate(summaryNotices.releaseKind("album", notice));
         } catch {
-          // The mutation itself persisted; the summary refresh failing must
-          // not silently hide that success. A superseded action must not
-          // disconnect the UI a newer action already restored.
-          if (!stillNewest()) return { ok: true, announce: () => {} };
-          setConnected(false);
-          if (action > summaryNoticeAction) {
-            summaryNoticeAction = action;
-            summaryStatus.textContent =
-              "The Album was saved but the Library summary could not be refreshed.";
+          // Persistence is already durable. Only the globally newest Album
+          // settlement owns connectivity and the refresh-failure notice.
+          if (settlement.isNewest()) {
+            setConnected(false);
+            applySummaryUpdate(
+              summaryNotices.present(
+                notice,
+                "The Album was saved but the Library summary could not be refreshed.",
+                { fallback: true },
+              ),
+            );
+          } else {
+            applySummaryUpdate(summaryNotices.release(notice));
           }
         }
+        const mayAnnounce = settlement.canPresent();
+        settlement.finish();
         return {
+          admitted: true,
           ok: true,
           announce: (text: string) => {
-            if (ownsPhotoSurface()) status.textContent = text;
+            if (mayAnnounce && ownsPhotoSurface()) status.textContent = text;
           },
         };
       } catch {
-        // A transport failure of the newest action is a real connectivity
-        // loss; a superseded action's failure still surfaces as a notice
-        // but must not disconnect UI a newer action already restored.
         report(failure(0));
-        if (stillNewest()) setConnected(false);
-        return { ok: false, announce: () => {} };
+        if (settlement.isNewest()) setConnected(false);
+        settlement.finish();
+        return { admitted: true, ok: false, announce: () => {} };
       }
     })();
   };
 
   const describeRange = (parent: string, page: number) =>
     `${parent || "Library Folder"} items ${(page * FOLDER_PAGE_SIZE + 1).toLocaleString()}–${((page + 1) * FOLDER_PAGE_SIZE).toLocaleString()}`;
+
+  const claimFileLocationNotice = (key: string, text: string): NoticeHandle => {
+    if (fileLocationNotice)
+      applySummaryUpdate(summaryNotices.release(fileLocationNotice));
+    const notice = summaryNotices.issue(
+      "file-location",
+      key,
+      ACTIONABLE_NOTICE_PRIORITY,
+    );
+    fileLocationNotice = notice;
+    applySummaryUpdate(summaryNotices.present(notice, text));
+    return notice;
+  };
 
   const loadFolderWindow = async (
     parent: string,
@@ -490,13 +538,11 @@ export function renderApp(
         await loadFolderWindow("", 0);
         // Only claim a coherent reload when the new root actually bound; a
         // failed rebind keeps its own failure message and retry control.
-        if (fileLocationPublication) {
-          // Deliberate retake: this recovery message outranks a standing
-          // Album notice because it asks the user to act now.
-          summaryNoticeAction = 0;
-          summaryStatus.textContent =
-            "Scan results changed File Locations. Reloaded the current Folders.";
-        }
+        if (fileLocationPublication)
+          claimFileLocationNotice(
+            `publication:${fileLocationPublication}`,
+            "Scan results changed File Locations. Reloaded the current Folders.",
+          );
         return;
       }
       if (!response.ok) throw new Error("file locations failed");
@@ -528,13 +574,11 @@ export function renderApp(
         if (folderFailure.parent === parent && folderFailure.page === page) {
           // Only the failed range's own success clears its retry state; an
           // unrelated range loading must not hide a still-failed range.
+          const recovered = folderFailure;
           folderFailure = undefined;
-          // Follow the Library summary's notice rule: a standing Album
-          // notice is not erased by this background status write.
-          if (summaryNoticeAction === 0)
-            summaryStatus.textContent = overview
-              ? scanLabel(overview.scan)
-              : "Library ready";
+          if (fileLocationNotice === recovered.notice)
+            fileLocationNotice = undefined;
+          applySummaryUpdate(summaryNotices.release(recovered.notice));
         }
         // Any successful load restores the connection a failed range marked
         // offline; the global connection banner must not stay stuck.
@@ -549,10 +593,11 @@ export function renderApp(
       // No window committed for this parent, so its sequencing metadata is
       // dropped: repeated failed exploration cannot grow retained state.
       folderRequestSequence.delete(parent);
-      folderFailure = { parent, page };
-      // Deliberate retake: the failed range's retry control must surface.
-      summaryNoticeAction = 0;
-      summaryStatus.textContent = `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`;
+      const notice = claimFileLocationNotice(
+        `range:${generation}:${parent}:${page}`,
+        `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`,
+      );
+      folderFailure = { parent, page, notice };
       setConnected(false);
       renderSources();
     } finally {
@@ -1080,17 +1125,21 @@ export function renderApp(
     while (generation === statusPoll && overview && !overview.published) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       if (generation !== statusPoll) return;
+      const background = summaryNotices.backgroundEpoch();
+      let settled = false;
       try {
         const response = await fetcher("/api/status");
         if (!response.ok) continue;
         const scan = (await response.json()) as LibraryOverviewResponse["scan"];
-        // Publication polling is background status: it must not erase a
-        // standing Album notice from the Library summary.
-        if (summaryNoticeAction === 0)
-          summaryStatus.textContent = scanLabel(scan);
+        applySummaryUpdate(
+          summaryNotices.presentBackground(background, scanLabel(scan)),
+        );
+        settled = true;
         if (scan.state === "idle") await loadOverview();
       } catch {
         /* keep polling; the connection status reflects hard failures */
+      } finally {
+        if (!settled) summaryNotices.discardBackground(background);
       }
     }
   };
@@ -1141,14 +1190,15 @@ export function renderApp(
   };
 
   const refreshOverviewState = async (options?: {
-    connectivity?: boolean;
-    action?: number;
+    connectivity?: () => boolean;
     bootstrap?: boolean;
   }): Promise<boolean> => {
     // The scope owns request sequencing and the latest committed sequence at
     // the current data floor. Requests remain concurrent: a newer failure
     // does not detach an older valid success.
     const task = applicationTasks.beginOrdered("overview", overviewDataFloor);
+    const background = summaryNotices.backgroundEpoch();
+    let backgroundSettled = false;
     try {
       const response = await fetcher("/api/overview");
       if (!response.ok) throw new Error("overview failed");
@@ -1157,19 +1207,11 @@ export function renderApp(
       if (!task.commit(overviewDataFloor)) return false;
       overview = body;
       sets = body.albums;
-      // The Library summary keeps a standing Album notice until a newer
-      // Album action settles or the user deliberately reloads: background
-      // refreshes (folder recovery, scan polling) must not erase it.
-      const action = options?.action;
-      const mayTakeSummary =
-        action !== undefined
-          ? action >= summaryNoticeAction
-          : summaryNoticeAction === 0;
-      if (mayTakeSummary) {
-        summaryStatus.textContent = scanLabel(body.scan);
-        if (action !== undefined) summaryNoticeAction = 0;
-      }
-      if (options?.connectivity !== false) setConnected(true);
+      applySummaryUpdate(
+        summaryNotices.presentBackground(background, scanLabel(body.scan)),
+      );
+      backgroundSettled = true;
+      if (options?.connectivity?.()) setConnected(true);
       if (sourceKind === "album" && sourceSetId) {
         const open = sets.find((candidate) => candidate.id === sourceSetId);
         if (open) {
@@ -1185,6 +1227,7 @@ export function renderApp(
       if (options?.bootstrap) electOverviewBootstrap(body);
       return true;
     } finally {
+      if (!backgroundSettled) summaryNotices.discardBackground(background);
       task.finish();
     }
   };
@@ -1196,15 +1239,37 @@ export function renderApp(
     const load = applicationTasks.beginLatest("overview-load", {
       abortTransport: false,
     });
-    summaryNoticeAction = 0;
-    summaryStatus.textContent = "Loading Library summary…";
+    const barrier = summaryNotices.beginBarrier(
+      "reload",
+      "overview",
+      ACTIONABLE_NOTICE_PRIORITY,
+      "Loading Library summary…",
+    );
+    applySummaryUpdate(barrier.update);
     try {
-      await refreshOverviewState({ bootstrap: true });
+      await refreshOverviewState({
+        bootstrap: true,
+        connectivity: () => load.isCurrent(),
+      });
+      if (load.isCurrent() && overviewRecovery) {
+        recoveryGate.recover(overviewRecovery);
+        overviewRecovery = undefined;
+        setConnected(true);
+      }
+      applySummaryUpdate(summaryNotices.release(barrier.handle));
     } catch {
       if (!load.isCurrent()) return;
-      summaryStatus.textContent =
-        "Could not reach Slipstream. Check the server and retry.";
-      setConnected(false);
+      applySummaryUpdate(
+        summaryNotices.present(
+          barrier.handle,
+          "Could not reach Slipstream. Check the server and retry.",
+        ),
+      );
+      if (!overviewRecovery || !recoveryGate.isActive(overviewRecovery)) {
+        overviewRecovery = recoveryGate.issue("overview-reload", "overview");
+        recoveryGate.fail(overviewRecovery, { transportLost: true });
+      }
+      syncConnection();
     } finally {
       load.finish();
     }
@@ -1310,12 +1375,11 @@ export function renderApp(
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
         if (generation !== sourceGeneration) return;
-        if (fileLocationPublication) {
-          // Deliberate retake: actionable recovery outranks a standing notice.
-          summaryNoticeAction = 0;
-          summaryStatus.textContent =
-            "Scan results changed File Locations. Reopen the current Folder.";
-        }
+        if (fileLocationPublication)
+          claimFileLocationNotice(
+            `publication:${fileLocationPublication}`,
+            "Scan results changed File Locations. Reopen the current Folder.",
+          );
         throw new Error("file locations expired");
       }
       if (!response.ok) throw new Error("browse open failed");
@@ -1455,12 +1519,11 @@ export function renderApp(
           resetFileLocations();
           await refreshOverviewState().catch(() => {});
           await loadFolderWindow("", 0);
-          if (generation === sourceGeneration && fileLocationPublication) {
-            // Deliberate retake: actionable recovery outranks a standing notice.
-            summaryNoticeAction = 0;
-            summaryStatus.textContent =
-              "Scan results changed File Locations. Reopen the current Folder.";
-          }
+          if (generation === sourceGeneration && fileLocationPublication)
+            claimFileLocationNotice(
+              `publication:${fileLocationPublication}`,
+              "Scan results changed File Locations. Reopen the current Folder.",
+            );
         }
       }
       if (!response.ok) throw new Error("browse reopen failed");
@@ -1838,6 +1901,7 @@ export function renderApp(
   };
   const renderReviewImage = (url: string, generation = requestGeneration) => {
     cancelPendingImageLoads(stage, true);
+    const capturedStatus = photoStatusOwner;
     const image = document.createElement("img");
     image.alt = `Photo ${currentIndex + 1} of ${total}`;
     image.draggable = false;
@@ -1847,7 +1911,12 @@ export function renderApp(
     image.addEventListener(
       "error",
       () => {
-        if (generation !== requestGeneration || !image.isConnected) return;
+        if (
+          generation !== requestGeneration ||
+          !image.isConnected ||
+          capturedStatus !== photoStatusOwner
+        )
+          return;
         status.textContent =
           "Preview could not be loaded. You can continue browsing.";
       },
@@ -1855,11 +1924,8 @@ export function renderApp(
     );
     stage.replaceChildren(image);
   };
-  // Membership state that must survive re-renders: in-flight operations are
-  // keyed by action, Album, and Photo (an Add to one Album never blocks a
-  // Remove from another), and Photos already removed from the open Album
-  // stay non-removable in the retained open snapshot.
-  const membershipInFlight = new Set<string>();
+  // Duplicate membership admission is owned by the Album settlement family;
+  // the open snapshot separately remembers members removed until reopen.
   const membershipKey = (
     verb: "add" | "remove",
     albumId: string,
@@ -1886,12 +1952,14 @@ export function renderApp(
     const adding = Boolean(
       photo &&
         sets.some((set) =>
-          membershipInFlight.has(membershipKey("add", set.id, photo.id)),
+          albumSettlements.isAdmitted(membershipKey("add", set.id, photo.id)),
         ),
     );
     const removing =
       Boolean(photo && sourceSetId) &&
-      membershipInFlight.has(membershipKey("remove", sourceSetId!, photo!.id));
+      albumSettlements.isAdmitted(
+        membershipKey("remove", sourceSetId!, photo!.id),
+      );
     const inOpenAlbum =
       sourceKind === "album" &&
       Boolean(sourceSetId) &&
@@ -1909,9 +1977,8 @@ export function renderApp(
     if (!photo || !albumId) return;
     const photoId = photo.id;
     const key = membershipKey("add", albumId, photoId);
-    if (membershipInFlight.has(key)) return;
+    if (albumSettlements.isAdmitted(key)) return;
     const generation = requestGeneration;
-    membershipInFlight.add(key);
     void (async () => {
       addToAlbum.disabled = true;
       const { ok: added, announce } = await mutateAlbum(
@@ -1920,8 +1987,8 @@ export function renderApp(
         () => "The Photo could not be added to the Album.",
         "photo",
         generation,
+        key,
       );
-      membershipInFlight.delete(key);
       // Re-adding to the open Album clears the retained snapshot's removal
       // mark: the Photo is a member again and may be removed once more.
       if (added && albumId === sourceSetId) {
@@ -1951,10 +2018,9 @@ export function renderApp(
     const albumId = sourceSetId;
     const photoId = photo.id;
     const key = membershipKey("remove", albumId, photoId);
-    if (membershipInFlight.has(key)) return;
+    if (albumSettlements.isAdmitted(key)) return;
     const generation = requestGeneration;
     const snapshotGeneration = sourceGeneration;
-    membershipInFlight.add(key);
     void (async () => {
       removeFromAlbum.disabled = true;
       const { ok: removed, announce } = await mutateAlbum(
@@ -1963,8 +2029,8 @@ export function renderApp(
         () => "The Photo could not be removed from the Album.",
         "photo",
         generation,
+        key,
       );
-      membershipInFlight.delete(key);
       if (removed && snapshotGeneration === sourceGeneration) {
         // The member is gone from the Album; within this open snapshot it
         // must not be removable again. A removal settling after the source
@@ -2016,6 +2082,7 @@ export function renderApp(
     if (generation !== requestGeneration || signal.aborted) return false;
     const photo = currentPhoto();
     if (!photo) return false;
+    const capturedStatus = photoStatusOwner;
     let result: PreviewResponse;
     try {
       // Always contact the server, even for an unavailable Photo: a restored
@@ -2028,7 +2095,12 @@ export function renderApp(
       result = (await response.json()) as PreviewResponse;
     } catch {
       if (signal.aborted || generation !== requestGeneration) return false;
-      setConnected(false, "Connection lost. Retry to refresh this Photo.");
+      setConnected(
+        false,
+        capturedStatus === photoStatusOwner
+          ? "Connection lost. Retry to refresh this Photo."
+          : undefined,
+      );
       return false;
     }
     if (
@@ -2039,7 +2111,8 @@ export function renderApp(
       return false;
     const existingImage = stage.querySelector<HTMLImageElement>("img");
     if (result.state !== "ready" || !result.url) {
-      status.textContent = result.message ?? "Preview unavailable";
+      if (capturedStatus === photoStatusOwner)
+        status.textContent = result.message ?? "Preview unavailable";
       if (!existingImage)
         stage.replaceChildren(paragraph("Preview unavailable"));
       return true;
@@ -2049,9 +2122,10 @@ export function renderApp(
       renderReviewImage(result.url, generation);
     source.textContent = sourceLabel(result.source);
     limited.hidden = !result.limitedDetail;
-    status.textContent = result.stale
-      ? (result.message ?? "Showing a stale Preview.")
-      : "";
+    if (capturedStatus === photoStatusOwner)
+      status.textContent = result.stale
+        ? (result.message ?? "Showing a stale Preview.")
+        : "";
     if (!result.stale) {
       const latest = currentPhoto();
       if (latest && latest.id === photo.id) {
@@ -2568,6 +2642,9 @@ export function renderApp(
   void loadOverview();
   return () => {
     applicationTasks.halt();
+    recoveryGate.close();
+    albumSettlements.closePresentation();
+    summaryNotices.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
     if (token) void closeBrowse(token);
