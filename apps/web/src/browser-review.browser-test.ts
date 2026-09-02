@@ -4649,7 +4649,7 @@ test("an evicted Undo reload cannot write into a replacement source", async ({
   }
 });
 
-test("failed Browse recovery leaves the boundary range retryable", async ({
+test("failed Browse recovery clears the expired token before Retry opens a fresh snapshot", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -4659,21 +4659,19 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
   await openGrid(page, running.url, "All Photos");
 
   let expired = false;
-  let boundaryRequests = 0;
+  let expiredToken = "";
   let reopenAttempts = 0;
-  let releaseRetry!: () => void;
-  const retryGate = new Promise<void>((resolve) => {
-    releaseRetry = resolve;
-  });
+  let releases = 0;
+  const boundaryTokens: string[] = [];
   await page.route(/\/api\/browse/, async (route) => {
     const request = route.request();
-    if (
-      request.method() === "GET" &&
-      new URL(request.url()).searchParams.get("start") === "60"
-    ) {
-      boundaryRequests += 1;
-      if (boundaryRequests === 1) {
+    const url = new URL(request.url());
+    const pathToken = url.pathname.split("/").at(-1)!;
+    if (request.method() === "GET" && url.searchParams.get("start") === "60") {
+      boundaryTokens.push(pathToken);
+      if (!expired) {
         expired = true;
+        expiredToken = pathToken;
         await route.fulfill({
           status: 404,
           contentType: "application/json",
@@ -4681,13 +4679,9 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
         });
         return;
       }
-      await retryGate;
-      try {
-        await route.continue();
-      } catch {
-        /* the browser may cancel duplicate viewport requests */
-      }
-      return;
+    }
+    if (request.method() === "DELETE" && pathToken === expiredToken) {
+      releases += 1;
     }
     if (request.method() === "POST" && expired) {
       reopenAttempts += 1;
@@ -4698,38 +4692,115 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
     }
     await route.continue();
   });
-  try {
-    const viewport = page.locator("[data-grid-viewport]");
-    await viewport.evaluate((element) => {
+  const scrollBoundary = () =>
+    page.locator("[data-grid-viewport]").evaluate((element) => {
       element.scrollTop = 30 * 178;
       element.dispatchEvent(new Event("scroll"));
     });
+  try {
+    await scrollBoundary();
     await expect.poll(() => reopenAttempts).toBe(1);
     await expect(page.locator("[data-status]")).toHaveText(
       "This source expired and could not be reopened. Retry the connection.",
     );
+    const requestsAfterFailure = boundaryTokens.length;
+    await scrollBoundary();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    expect(boundaryTokens).toHaveLength(requestsAfterFailure);
 
-    const retriedWindow = page.waitForResponse((response) => {
-      const url = new URL(response.url());
+    const freshOpen = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/browse",
+    );
+    await page.locator("[data-source-toggle]").click();
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    const freshRequest = await freshOpen;
+    const freshResponse = await freshRequest.response();
+    expect(freshResponse?.status()).toBe(200);
+    const freshToken = ((await freshResponse!.json()) as { token: string })
+      .token;
+    expect(freshToken).not.toBe(expiredToken);
+    await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+
+    const freshBoundary = page.waitForRequest((request) => {
+      const url = new URL(request.url());
       return (
-        response.request().method() === "GET" &&
-        url.pathname.includes("/api/browse/") &&
+        request.method() === "GET" &&
         url.searchParams.get("start") === "60" &&
-        response.status() === 200
+        url.pathname.endsWith(`/${freshToken}`)
       );
     });
-    await viewport.evaluate((element) => {
-      element.dispatchEvent(new Event("scroll"));
-    });
-    await expect.poll(() => boundaryRequests).toBeGreaterThan(1);
-    releaseRetry();
-    await retriedWindow;
+    await scrollBoundary();
+    await freshBoundary;
+    expect(boundaryTokens.slice(1)).not.toContain(expiredToken);
+    expect(releases).toBe(1);
+    expect(reopenAttempts).toBe(2);
   } finally {
-    releaseRetry();
     await page.unroute(/\/api\/browse/);
   }
 });
 
+test("repeated failure of one source range keeps one exact Recovery owner", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGrid(page, running.url, "All Photos");
+
+  let attempts = 0;
+  let failing = true;
+  await page.route(/\/api\/browse\//, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.searchParams.get("start") === "60") {
+      attempts += 1;
+      if (failing) {
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+    }
+    await route.continue();
+  });
+  const scrollBoundary = () =>
+    page.locator("[data-grid-viewport]").evaluate((element) => {
+      element.scrollTop = 30 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+  try {
+    await scrollBoundary();
+    await expect.poll(() => attempts).toBeGreaterThanOrEqual(1);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    const afterFirst = attempts;
+    await scrollBoundary();
+    await expect.poll(() => attempts).toBeGreaterThan(afterFirst);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    failing = false;
+    const recovered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "GET" &&
+        url.searchParams.get("start") === "60" &&
+        response.status() === 200
+      );
+    });
+    await scrollBoundary();
+    await recovered;
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
+  } finally {
+    await page.unroute(/\/api\/browse\//);
+  }
+});
 test("an expired Browse snapshot reopens around the current Photo", async ({
   page,
 }) => {
