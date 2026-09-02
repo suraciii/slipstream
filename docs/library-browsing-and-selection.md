@@ -13,7 +13,7 @@ The Library Browser is Slipstream's primary screen. It must open directly to the
 - current Library loading or scan status; and
 - whether an Album has a saved position.
 
-A wide viewport may keep source navigation beside the Grid. A narrow viewport may present the same sources through a compact control or drawer. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
+A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
 Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. File Locations must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
 
@@ -27,6 +27,20 @@ The first product uses two views:
 The Photographer opens Photo View by activating a Grid cell. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source.
 
 Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or RAW adjustment controls.
+
+## Presentation and Control Hierarchy
+
+The Library Browser must use the current Photo and Photo Grid as its dominant surfaces. Source navigation, status, and controls must support those surfaces without competing with them for attention or space.
+
+The first product uses one neutral dark appearance. Color must communicate keyboard focus, Selection State, Rating, failure, or connectivity rather than decorate unrelated containers. The interface must not depend on color alone to communicate a Photo decision or control state.
+
+Required information must meet WCAG AA text contrast against its rendered background. Controls intended for touch must provide at least a 44 by 44 CSS-pixel target on narrow viewports. Focused controls must remain visibly distinguishable.
+
+Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards.
+
+Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Detail Review, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
+
+Clear must be unavailable while the current Photo is already `undecided`. Undo must be unavailable until the current source has an undoable Selection State or Rating change.
 
 ## Source Order
 
