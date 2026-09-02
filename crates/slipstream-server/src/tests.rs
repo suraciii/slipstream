@@ -371,21 +371,31 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     let _ = fs::remove_dir_all(base);
 }
 
-fn substitute_captured_set_id(value: &serde_json::Value, set_id: &str) -> serde_json::Value {
+fn substitute_protocol_captures(
+    value: &serde_json::Value,
+    set_id: &str,
+    publication: &str,
+) -> serde_json::Value {
     match value {
-        serde_json::Value::String(text) => {
-            serde_json::Value::String(text.replace("$setId", set_id))
-        }
+        serde_json::Value::String(text) => serde_json::Value::String(
+            text.replace("$setId", set_id)
+                .replace("$publication", publication),
+        ),
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
                 .iter()
-                .map(|item| substitute_captured_set_id(item, set_id))
+                .map(|item| substitute_protocol_captures(item, set_id, publication))
                 .collect(),
         ),
         serde_json::Value::Object(entries) => serde_json::Value::Object(
             entries
                 .iter()
-                .map(|(name, item)| (name.clone(), substitute_captured_set_id(item, set_id)))
+                .map(|(name, item)| {
+                    (
+                        name.clone(),
+                        substitute_protocol_captures(item, set_id, publication),
+                    )
+                })
                 .collect(),
         ),
         other => other.clone(),
@@ -406,6 +416,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     )
     .unwrap();
     let mut captured_set_id = String::new();
+    let mut captured_publication = String::new();
     for vector in vectors {
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
@@ -453,12 +464,19 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             {
                 captured_set_id = id.to_owned();
             }
-            let expected = serde_json::to_value(expected).unwrap();
-            let expected = if captured_set_id.is_empty() {
-                expected
-            } else {
-                substitute_captured_set_id(&expected, &captured_set_id)
-            };
+            if captured_publication.is_empty()
+                && let Some(publication) = actual
+                    .get("publication")
+                    .or_else(|| actual.get("scan")?.get("publication"))
+                    .and_then(|value| value.as_str())
+            {
+                captured_publication = publication.to_owned();
+            }
+            let expected = substitute_protocol_captures(
+                &serde_json::to_value(expected).unwrap(),
+                &captured_set_id,
+                &captured_publication,
+            );
             assert_eq!(
                 actual.as_object().unwrap(),
                 expected.as_object().unwrap(),
@@ -571,6 +589,18 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         } else {
             None
         };
+        if publication.is_empty()
+            && let Some(captured) = actual
+                .as_ref()
+                .and_then(|value| {
+                    value
+                        .get("publication")
+                        .or_else(|| value.get("scan")?.get("publication"))
+                })
+                .and_then(|value| value.as_str())
+        {
+            publication = captured.to_owned();
+        }
         if let Some(actual_value) = &actual
             && method == "POST"
             && path == "/api/browse"
@@ -2079,11 +2109,17 @@ async fn dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status()
     let first = application
         .admit_scan_cycle(Some(gate_receiver), None)
         .unwrap();
-    let second = application.admit_scan_cycle(None, None).unwrap();
+    let mut abandoned = vec![first];
+    for _ in 1..64 {
+        abandoned.push(application.admit_scan_cycle(None, None).unwrap());
+    }
     // These receivers model HTTP request futures dropped after admission.
-    drop(first);
-    drop(second);
+    drop(abandoned);
+    // Cancellation must release bounded waiter capacity before the physical
+    // cycle completes; this live caller joins the same leader.
+    let live = application.admit_scan_cycle(None, None).unwrap();
     gate_sender.send(()).unwrap();
+    assert_eq!(live.await.unwrap().unwrap().state, "idle");
 
     wait_for_scan_runs(&application, baseline + 1).await;
     assert_eq!(
@@ -2728,10 +2764,10 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
     )
     .await;
     // The scan response is Loading Status and carries no Photo facts.
-    assert_eq!(
-        scan,
-        serde_json::json!({"state": "idle", "completed": 0, "total": 0})
-    );
+    assert!(scan["publication"].as_str().is_some());
+    assert_eq!(scan["state"], "idle");
+    assert_eq!(scan["completed"], 0);
+    assert_eq!(scan["total"], 0);
     assert_eq!(application.albums().await.unwrap().albums.len(), 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

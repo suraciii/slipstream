@@ -45,7 +45,11 @@ describe("TaskScope", () => {
     let cleanups = 0;
     const first = scope.joinOrStart(
       "root-binding",
-      { abortTransport: false, cleanup: () => (cleanups += 1) },
+      {
+        abortTransport: false,
+        cleanup: () => (cleanups += 1),
+        onCancel: () => "cancelled",
+      },
       async () => {
         starts += 1;
         await gate;
@@ -54,7 +58,7 @@ describe("TaskScope", () => {
     );
     const second = scope.joinOrStart(
       "root-binding",
-      { abortTransport: false },
+      { abortTransport: false, onCancel: () => "cancelled" },
       () => {
         starts += 1;
         return Promise.resolve("duplicate");
@@ -69,6 +73,29 @@ describe("TaskScope", () => {
     expect(starts).toBe(1);
     expect(cleanups).toBe(1);
     expect(first.isCurrent()).toBe(false);
+  });
+
+  test("halting a detached shared task settles all joiners immediately", async () => {
+    const scope = new TaskScope();
+    let cleanups = 0;
+    const first = scope.joinOrStart(
+      "root-binding",
+      {
+        abortTransport: false,
+        cleanup: () => (cleanups += 1),
+        onCancel: () => false,
+      },
+      () => new Promise<boolean>(() => {}),
+    );
+    const second = scope.joinOrStart(
+      "root-binding",
+      { abortTransport: false, onCancel: () => false },
+      () => Promise.resolve(true),
+    );
+    scope.halt();
+    expect(await first.promise).toBe(false);
+    expect(await second.promise).toBe(false);
+    expect(cleanups).toBe(1);
   });
 
   test("ordered work keeps older success after newer failure but honors commit order and floor", () => {

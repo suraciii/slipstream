@@ -19,6 +19,7 @@ type TaskRecord = {
   active: boolean;
   controller: AbortController | undefined;
   cleanups: Array<() => void>;
+  cancellations: Array<() => void>;
 };
 
 type OrderedState = {
@@ -54,6 +55,7 @@ export class TaskScope {
       active: true,
       controller: options.abortTransport ? new AbortController() : undefined,
       cleanups: [],
+      cancellations: [],
     };
     this.#latest.set(key, record);
     this.#records.add(record);
@@ -80,6 +82,7 @@ export class TaskScope {
       active: true,
       controller: undefined,
       cleanups: [],
+      cancellations: [],
     };
     this.#records.add(record);
     const lease = this.#lease(record, () => record.active);
@@ -105,7 +108,11 @@ export class TaskScope {
 
   joinOrStart<T>(
     key: TaskKey,
-    options: { abortTransport: boolean; cleanup?: () => void },
+    options: {
+      abortTransport: boolean;
+      cleanup?: () => void;
+      onCancel: () => T;
+    },
     start: (signal: AbortSignal | undefined) => Promise<T>,
   ): SharedTask<T> {
     this.#assertOpen();
@@ -128,15 +135,22 @@ export class TaskScope {
       active: true,
       controller: options.abortTransport ? new AbortController() : undefined,
       cleanups: options.cleanup ? [options.cleanup] : [],
+      cancellations: [],
       promise: Promise.resolve(undefined),
     };
     this.#latest.set(key, record);
     this.#shared.set(key, record);
     this.#records.add(record);
     const lease = this.#lease(record, () => this.#shared.get(key) === record);
-    record.promise = Promise.resolve()
-      .then(() => start(record.controller?.signal))
-      .finally(() => lease.finish());
+    const cancelled = new Promise<T>((resolve) => {
+      record.cancellations.push(() => resolve(options.onCancel()));
+    });
+    const operation = Promise.resolve().then(() =>
+      start(record.controller?.signal),
+    );
+    record.promise = Promise.race([operation, cancelled]).finally(() =>
+      lease.finish(),
+    );
     return {
       promise: record.promise as Promise<T>,
       signal: record.controller?.signal,
@@ -181,12 +195,15 @@ export class TaskScope {
     if (this.#shared.get(record.key) === record)
       this.#shared.delete(record.key);
     this.#records.delete(record);
+    record.cancellations.splice(0);
     this.#cleanup(record);
   }
 
   #cancel(record: TaskRecord): void {
     if (!record.active) return;
     record.controller?.abort();
+    const cancellations = record.cancellations.splice(0);
+    for (const cancel of cancellations) cancel();
     this.#finish(record);
   }
 

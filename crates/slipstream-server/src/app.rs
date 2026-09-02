@@ -276,6 +276,10 @@ impl Application {
             if cycle.closed {
                 return Err(ServerError::Library(LibraryError::Closed));
             }
+            // A dropped HTTP future closes its receiver immediately. Prune
+            // those presentation waiters before enforcing the bounded live
+            // waiter limit; the application-owned leader remains in flight.
+            cycle.waiters.retain(|waiter| !waiter.is_closed());
             if cycle.waiters.len() >= MAX_APPLICATION_SCAN_WAITERS {
                 return Err(ServerError::Library(LibraryError::ScanBusy));
             }
@@ -413,14 +417,17 @@ impl Application {
     /// counters, and the shared flags decide idle, failed, or initializing.
     pub(crate) fn scan_status(&self) -> ScanStatusWire {
         let progress = self.library.scan_progress();
+        let publication = self.current_publication();
         match progress.phase {
             ScanPhase::Discovering => ScanStatusWire {
                 state: "discovering",
+                publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
             },
             ScanPhase::Inspecting => ScanStatusWire {
                 state: "inspecting",
+                publication: publication.clone(),
                 completed: Some(usize::try_from(progress.inspected).unwrap_or(usize::MAX)),
                 total: progress
                     .inspect_total
@@ -428,6 +435,7 @@ impl Application {
             },
             ScanPhase::Applying => ScanStatusWire {
                 state: "applying",
+                publication: publication.clone(),
                 completed: None,
                 total: None,
             },
@@ -436,12 +444,14 @@ impl Application {
                     // The scan finished; its result is being published.
                     ScanStatusWire {
                         state: "applying",
+                        publication: publication.clone(),
                         completed: None,
                         total: None,
                     }
                 } else if self.shared.failed.load(Ordering::Relaxed) {
                     ScanStatusWire {
                         state: "failed",
+                        publication: publication.clone(),
                         completed: None,
                         total: None,
                     }
@@ -449,18 +459,29 @@ impl Application {
                     let photo_count = self.published_photo_count();
                     ScanStatusWire {
                         state: "idle",
+                        publication: publication.clone(),
                         completed: Some(photo_count),
                         total: Some(photo_count),
                     }
                 } else {
                     ScanStatusWire {
                         state: "initializing",
+                        publication,
                         completed: None,
                         total: None,
                     }
                 }
             }
         }
+    }
+
+    pub(crate) fn current_publication(&self) -> Option<String> {
+        self.shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .map(Published::publication_value)
     }
 
     pub(crate) fn published_photo_count(&self) -> usize {
@@ -535,9 +556,23 @@ impl Application {
             .into_iter()
             .map(album_summary)
             .collect();
+        let (publication, photo_count) = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            guard.as_ref().map_or((None, 0), |published| {
+                (
+                    Some(published.publication_value()),
+                    published.snapshot.photos.len(),
+                )
+            })
+        };
         Ok(LibraryOverviewResponse {
-            published: self.shared.published.load(Ordering::Relaxed),
-            photo_count: self.published_photo_count(),
+            published: publication.is_some(),
+            publication,
+            photo_count,
             scan: self.scan_status(),
             albums,
         })

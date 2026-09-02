@@ -61,6 +61,7 @@
       "status": 200,
       "body": {
         "state": "idle",
+        "publication": "$publication",
         "completed": 0,
         "total": 0
       }

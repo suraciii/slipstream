@@ -345,14 +345,14 @@ impl Library {
             if !state.open {
                 return Err(LibraryError::Closed);
             }
+            let first = state.in_flight.is_none();
             let waiters = state.in_flight.get_or_insert_with(Vec::new);
+            // Receiver cancellation releases waiter capacity without
+            // cancelling the physical scanner operation.
+            waiters.retain(|waiter| !waiter.is_closed());
             if waiters.len() >= MAX_SCAN_WAITERS {
-                if waiters.is_empty() {
-                    state.in_flight = None;
-                }
                 return Err(LibraryError::ScanBusy);
             }
-            let first = waiters.is_empty();
             waiters.push(reply);
             #[cfg(test)]
             scanner_admitted(&self.root);
@@ -863,6 +863,33 @@ mod tests {
                 .await,
             Err(LibraryError::Closed)
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_scan_waiters_release_capacity_before_completion() {
+        let (_base, config) = fixture();
+        let library = Arc::new(Library::open(config).unwrap());
+        let hook = ScannerHookGuard::install(library.canonical_root().to_owned());
+        let first_library = library.clone();
+        let first = tokio::spawn(async move { first_library.scan().await });
+        hook.wait_for_entries(1);
+        let mut abandoned = Vec::new();
+        for _ in 1..MAX_SCAN_WAITERS {
+            let library = library.clone();
+            abandoned.push(tokio::spawn(async move { library.scan().await }));
+        }
+        hook.wait_for_admissions(MAX_SCAN_WAITERS);
+        for waiter in abandoned {
+            waiter.abort();
+        }
+        tokio::task::yield_now().await;
+        let live_library = library.clone();
+        let live = tokio::spawn(async move { live_library.scan().await });
+        hook.wait_for_admissions(MAX_SCAN_WAITERS + 1);
+        hook.release();
+        assert!(live.await.unwrap().is_ok());
+        assert!(first.await.unwrap().is_ok());
+        library.shutdown().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

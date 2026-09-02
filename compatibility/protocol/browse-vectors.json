@@ -9,9 +9,11 @@
       "status": 200,
       "body": {
         "published": true,
+        "publication": "$publication",
         "photoCount": 0,
         "scan": {
           "state": "idle",
+          "publication": "$publication",
           "completed": 0,
           "total": 0
         },

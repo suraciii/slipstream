@@ -114,9 +114,13 @@ with the global `overview` key and **commit-in-order** policy. A newer request
 does not abort or detach an older one. Every request captures both a
 monotonically increasing request sequence and the current **overview data
 floor**. Successful Album mutations and observed publication replacement
-advance that floor before starting their refresh. A response may commit only
-when its captured floor still equals the current floor and its sequence is
-newer than the last response committed at that floor. Thus an older success
+advance that floor before starting their refresh. Published Overview and
+Loading Status responses carry the same opaque publication generation used by
+File Locations. Immediately before commit, an Overview response revalidates
+that generation with Loading Status; a response produced before a replacement
+is discarded and advances the floor to the observed current generation. A
+response may commit only when its captured floor still equals the current
+floor and its sequence is newer than the last response committed at that floor. Thus an older success
 may still commit after a newer request fails when no data-changing boundary
 intervened, but a response started before a committed mutation or publication
 change can never regress shared data. Application teardown detaches every
