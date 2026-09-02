@@ -232,6 +232,12 @@ export function createApplicationOwner(
     if (!closed) void emit({ kind: "mark-reachable" });
   };
 
+  const retainOverviewFailure = (): void => {
+    if (overviewRecovery) return;
+    overviewRecovery = recovery();
+    failApplicationRecovery(overviewRecovery, "overview-reload");
+  };
+
   const observePublication = (publication?: string): boolean => {
     if (!publicationBaselineEstablished) {
       publicationBaselineEstablished = true;
@@ -482,14 +488,25 @@ export function createApplicationOwner(
     );
     applySummaryUpdate(barrier.update);
     try {
-      await refreshOverview({
+      const committed = await refreshOverview({
         bootstrap: true,
         markReachable: () => load.isCurrent(),
       });
-      if (load.isCurrent() && overviewRecovery) {
+
+      if (!load.isCurrent()) return;
+      if (!committed) {
+        applySummaryUpdate(
+          notices.present(
+            barrier.handle,
+            summary("Could not reach Slipstream. Check the server and retry."),
+          ),
+        );
+        retainOverviewFailure();
+        return;
+      }
+      if (overviewRecovery) {
         recover(overviewRecovery);
         overviewRecovery = undefined;
-        markReachable();
       }
       applySummaryUpdate(notices.release(barrier.handle));
     } catch {
@@ -500,8 +517,7 @@ export function createApplicationOwner(
           summary("Could not reach Slipstream. Check the server and retry."),
         ),
       );
-      overviewRecovery ??= recovery();
-      failApplicationRecovery(overviewRecovery, "overview-reload");
+      retainOverviewFailure();
     } finally {
       load.finish();
     }
