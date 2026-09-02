@@ -40,7 +40,7 @@ A Folder source contains every Photo whose projected Folder equals the selected 
 An Album is a Photographer-owned virtual group with:
 
 - one opaque stable ID;
-- one case-insensitively unique name in the flat Album list;
+- one case-insensitively unique name in the flat Album list: uniqueness folds ASCII letter case exactly as SQLite's NOCASE collation does, and scripts without letter case (such as Chinese) are unaffected;
 - creation order;
 - explicitly positioned Photo memberships; and
 - optional saved Photo position.

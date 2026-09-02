@@ -3910,6 +3910,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn album_name_uniqueness_folds_ascii_case_only() {
+        let (_base, library, state, name, _path) = fixture();
+        fs::write(library.canonical_path().join("one.JPG"), b"bytes").unwrap();
+        let photo = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        persistence
+            .apply_scan(vec![photo], Vec::new())
+            .await
+            .unwrap();
+
+        // Exact duplicates conflict in every script, including caseless ones.
+        persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "春节".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            persistence
+                .mutate_album(AlbumMutation::Create {
+                    name: "春节".to_owned(),
+                })
+                .await,
+            Err(MutationError::Conflict)
+        ));
+
+        // ASCII letter case folds: Trip and trip are the same Album name.
+        persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Trip".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            persistence
+                .mutate_album(AlbumMutation::Create {
+                    name: "trip".to_owned(),
+                })
+                .await,
+            Err(MutationError::Conflict)
+        ));
+
+        // Documented boundary: folding applies to ASCII letters only. A name
+        // whose case difference is carried by a non-ASCII letter (É vs é)
+        // does not fold and stays a distinct Album name.
+        persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Éclair".to_owned(),
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "éclair".to_owned(),
+            })
+            .await
+            .unwrap();
+        let names = persistence
+            .list_albums()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|album| album.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"Éclair".to_owned()));
+        assert!(names.contains(&"éclair".to_owned()));
+    }
+
+    #[tokio::test]
     async fn album_crud_normalizes_names_and_preserves_rows_across_restart() {
         let (_base, library, state, name, path) = fixture();
         let original_path = library.canonical_path().join("one.JPG");
