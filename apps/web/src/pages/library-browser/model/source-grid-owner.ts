@@ -40,10 +40,9 @@ export type SourceWindowOperation =
       authority: PhotoWindowAuthority;
     }>;
 
-export type SourceWindowOwner = Readonly<{
-  scope: "source" | "photo";
-  generation: number;
-}>;
+export type SourceWindowOwner =
+  | Readonly<{ scope: "source"; generation: number }>
+  | Readonly<{ scope: "photo"; authority: PhotoWindowAuthority }>;
 
 export type SourceOpenOutcome =
   | Readonly<{
@@ -129,7 +128,7 @@ export interface SourceGridOwner {
   readonly retainedThumbnailCount: number;
   readonly retainedThumbnailFailureCount: number;
   isCurrent(authority: SourceAuthority): boolean;
-  renewPhotoWindow(generation: number): PhotoWindowAuthority;
+  renewPhotoWindow(): PhotoWindowAuthority;
   open(
     source: SourceGridSource,
     options?: Readonly<{
@@ -191,7 +190,6 @@ type ImageTransfer = Readonly<{
 type PhotoWindowRecord = Readonly<{
   authority: PhotoWindowAuthority;
   sourceAuthority: SourceAuthority;
-  generation: number;
   tasks: TaskScope;
 }>;
 
@@ -286,13 +284,12 @@ export function createSourceGridOwner(
     currentPhotoWindow = undefined;
   };
 
-  const renewPhotoWindow = (generation: number): PhotoWindowAuthority => {
+  const renewPhotoWindow = (): PhotoWindowAuthority => {
     stopPhotoWindowWork();
     const photoAuthority = Object.freeze({}) as PhotoWindowAuthority;
     const record = Object.freeze({
       authority: photoAuthority,
       sourceAuthority: authority,
-      generation,
       tasks: new TaskScope(),
     });
     photoWindows.set(photoAuthority, record);
@@ -434,7 +431,10 @@ export function createSourceGridOwner(
         ? photoWindows.get(operation.authority)
         : undefined;
     return operation.kind === "photo"
-      ? { scope: "photo", generation: photoWindow?.generation ?? -1 }
+      ? {
+          scope: "photo",
+          authority: photoWindow?.authority ?? operation.authority,
+        }
       : {
           scope: "source",
           generation: authorityGenerations.get(operation.authority) ?? -1,
@@ -534,7 +534,6 @@ export function createSourceGridOwner(
             };
           const end = Math.min(total, start + WINDOW_SIZE);
           const range = `Photos ${start + 1}–${end}`;
-          if (owner.scope === "source") retryRequired = true;
           return {
             kind: "failed",
             authority: ownerAuthority,

@@ -272,7 +272,7 @@ describe("SourceGridOwner", () => {
     );
     await Promise.resolve();
     owner.stopGridWork();
-    const photoAuthority = owner.renewPhotoWindow(17);
+    const photoAuthority = owner.renewPhotoWindow();
     const foreground = owner.loadWindow(
       0,
       { kind: "photo", authority: photoAuthority },
@@ -288,7 +288,7 @@ describe("SourceGridOwner", () => {
     gridWindow.resolve(windowResponse(0, 60));
   });
 
-  test("renews opaque Photo window ownership without committing the cancelled lifetime", async () => {
+  test("returns the cancelled opaque Photo owner without mapping it to the replacement lifetime", async () => {
     const staleWindow = deferred<Response>();
     let windowRequests = 0;
     const owner = createSourceGridOwner((input, init) => {
@@ -307,18 +307,22 @@ describe("SourceGridOwner", () => {
     });
     await openLibrary(owner);
 
-    const staleAuthority = owner.renewPhotoWindow(41);
+    const staleAuthority = owner.renewPhotoWindow();
     expect(Object.isFrozen(staleAuthority)).toBe(true);
     const stale = owner.loadWindow(0, {
       kind: "photo",
       authority: staleAuthority,
     });
     await Promise.resolve();
-    const currentAuthority = owner.renewPhotoWindow(42);
-    expect(await stale).toMatchObject({
+    const currentAuthority = owner.renewPhotoWindow();
+    const staleOutcome = await stale;
+    expect(staleOutcome).toMatchObject({
       kind: "detached",
-      owner: { scope: "photo", generation: 41 },
+      owner: { scope: "photo", authority: staleAuthority },
     });
+    if (staleOutcome.owner.scope !== "photo")
+      throw new Error("expected opaque Photo owner");
+    expect(staleOutcome.owner.authority).not.toBe(currentAuthority);
 
     expect(
       await owner.loadWindow(0, {
@@ -327,7 +331,7 @@ describe("SourceGridOwner", () => {
       }),
     ).toMatchObject({
       kind: "loaded",
-      owner: { scope: "photo", generation: 42 },
+      owner: { scope: "photo", authority: currentAuthority },
     });
     expect(owner.photoAt(0)?.id).toBe("current-0");
     staleWindow.resolve(windowResponse(0, 60, 60, "stale"));
@@ -356,7 +360,7 @@ describe("SourceGridOwner", () => {
       throw new Error(`unexpected request ${url.pathname}`);
     });
     await openLibrary(owner);
-    const photoAuthority = owner.renewPhotoWindow(9);
+    const photoAuthority = owner.renewPhotoWindow();
     const operation = {
       kind: "photo" as const,
       authority: photoAuthority,
@@ -364,17 +368,17 @@ describe("SourceGridOwner", () => {
 
     expect(await owner.loadWindow(0, operation)).toMatchObject({
       kind: "expired",
-      owner: { scope: "photo", generation: 9 },
+      owner: { scope: "photo", authority: photoAuthority },
     });
     expect(await owner.loadWindow(60, operation)).toMatchObject({
       kind: "failed",
-      owner: { scope: "photo", generation: 9 },
+      owner: { scope: "photo", authority: photoAuthority },
       transportLost: false,
       status: 503,
     });
     expect(await owner.loadWindow(120, operation)).toMatchObject({
       kind: "failed",
-      owner: { scope: "photo", generation: 9 },
+      owner: { scope: "photo", authority: photoAuthority },
       transportLost: true,
     });
   });
@@ -416,6 +420,7 @@ describe("SourceGridOwner", () => {
       malformed: true,
       transportLost: false,
     });
+    expect(owner.retryRequired).toBe(false);
   });
 
   test("owns the Grid position and moves its pending anchor only for the current source", async () => {

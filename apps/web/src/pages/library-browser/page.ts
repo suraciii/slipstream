@@ -32,6 +32,7 @@ import {
 import {
   createSourceGridOwner,
   type PhotoWindowAuthority,
+  type SourceAuthority,
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
@@ -40,6 +41,18 @@ import "./ui/library-browser.css";
 type SessionUndo = UndoDescription &
   Readonly<{ advanced: boolean; snapshotIndex: number }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
+type GridRangeRetry = Readonly<{
+  sourceAuthority: SourceAuthority;
+  operationKind: "source" | "grid";
+  start: number;
+  quiet: boolean;
+  priority: "high" | "low";
+}>;
+type BrowseRangeFailure = Readonly<{
+  claim: RecoveryClaim;
+  ownerScope: "source" | "photo";
+  retry?: GridRangeRetry;
+}>;
 const GRID_CELL_HEIGHT = 178;
 const GRID_CELL_WIDTH = 150;
 const swipePendingPixels = 24;
@@ -368,19 +381,19 @@ export function mountLibraryBrowser(
   let busy = false;
   let openingPhoto = false;
   let currentPhotoMode = false;
-  const browseRangeFailures = new Map<string, RecoveryClaim>();
+  const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
   let photoTasks = new TaskScope();
   let photoWindowAuthority: PhotoWindowAuthority =
-    sourceGrid.renewPhotoWindow(requestGeneration);
+    sourceGrid.renewPhotoWindow();
   let photoSignal = photoTasks.beginLatest("lifetime", {
     abortTransport: true,
   }).signal!;
   const renewPhotoTasks = () => {
     photoTasks.halt();
     photoTasks = new TaskScope();
-    photoWindowAuthority = sourceGrid.renewPhotoWindow(requestGeneration);
+    photoWindowAuthority = sourceGrid.renewPhotoWindow();
     photoSignal = photoTasks.beginLatest("lifetime", {
       abortTransport: true,
     }).signal!;
@@ -409,8 +422,9 @@ export function mountLibraryBrowser(
   const currentPhoto = () => sourceGrid.photoAt(currentIndex);
   const syncConnection = (message?: string) => {
     if (!applicationAlive) return;
-    for (const [key, claim] of browseRangeFailures)
-      if (!recoveryGate.isActive(claim)) browseRangeFailures.delete(key);
+    for (const [key, failure] of browseRangeFailures)
+      if (!recoveryGate.isActive(failure.claim))
+        browseRangeFailures.delete(key);
     connected = connectionEstablished && recoveryGate.decisionReady;
     if (!connected) clearPointer();
     connection.textContent = connected ? "Connected" : "Disconnected";
@@ -431,11 +445,12 @@ export function mountLibraryBrowser(
     generation: number,
     start: number,
     transportLost: boolean,
+    retryRange?: GridRangeRetry,
     transition?: RecoveryTransition,
   ): void => {
     const key = `${ownerScope}:${generation}:${start}`;
     const active = browseRangeFailures.get(key);
-    if (active && recoveryGate.isActive(active)) {
+    if (active && recoveryGate.isActive(active.claim)) {
       syncConnection();
       return;
     }
@@ -463,7 +478,12 @@ export function mountLibraryBrowser(
       if (recoveryGate.fail(candidate, { transportLost })) claim = candidate;
       else recoveryGate.discard(candidate);
     }
-    if (claim) browseRangeFailures.set(key, claim);
+    if (claim)
+      browseRangeFailures.set(key, {
+        claim,
+        ownerScope,
+        ...(retryRange ? { retry: retryRange } : {}),
+      });
     syncConnection();
   };
   const recoverBrowseRange = (
@@ -472,10 +492,10 @@ export function mountLibraryBrowser(
     start: number,
   ): void => {
     const key = `${ownerScope}:${generation}:${start}`;
-    const claim = browseRangeFailures.get(key);
-    if (!claim) return;
+    const failure = browseRangeFailures.get(key);
+    if (!failure) return;
     browseRangeFailures.delete(key);
-    if (recoveryGate.recover(claim)) setConnected(true);
+    if (recoveryGate.recover(failure.claim)) setConnected(true);
   };
   const failPhotoRecovery = (
     generation: number,
@@ -1542,7 +1562,7 @@ export function mountLibraryBrowser(
         // The reopen invalidated the pre-reopen SourceGrid window lifetime.
         // Reissue only that opaque capability; the page-owned Preview signal
         // remains the same Photo operation.
-        photoWindowAuthority = sourceGrid.renewPhotoWindow(photoGeneration);
+        photoWindowAuthority = sourceGrid.renewPhotoWindow();
         gridView.hidden = true;
         photoView.hidden = false;
         syncSourcePanel();
@@ -1596,6 +1616,13 @@ export function mountLibraryBrowser(
     transition?: RecoveryTransition,
   ): Promise<boolean> => {
     if (sourceGrid.total === 0) return true;
+    const sourceAuthority =
+      operation.kind === "photo" ? sourceGrid.authority : operation.authority;
+    const photoAuthority =
+      operation.kind === "photo" ? operation.authority : undefined;
+    const ownerScope = operation.kind === "photo" ? "photo" : "source";
+    const ownerGeneration =
+      operation.kind === "photo" ? requestGeneration : sourceGrid.generation;
     const { range } = sourceGrid.describeWindow(index);
     if (!quiet)
       gridStatus.textContent = `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`;
@@ -1604,6 +1631,16 @@ export function mountLibraryBrowser(
       priority,
     });
     try {
+      const exactOwner =
+        outcome.authority === sourceAuthority &&
+        sourceGrid.isCurrent(sourceAuthority) &&
+        (operation.kind === "photo"
+          ? outcome.owner.scope === "photo" &&
+            outcome.owner.authority === photoAuthority &&
+            photoAuthority === photoWindowAuthority
+          : outcome.owner.scope === "source" &&
+            outcome.owner.generation === ownerGeneration);
+      if (!exactOwner) return false;
       if (outcome.kind === "detached") return false;
       if (outcome.kind === "expired") {
         await reopenExpired(outcome.index, sourceGrid.generation);
@@ -1616,22 +1653,27 @@ export function mountLibraryBrowser(
             : outcome.transportLost
               ? `Connection lost while loading ${outcome.range}. Retry this range.`
               : `${outcome.range} could not be loaded (HTTP ${outcome.status}). Retry this range.`;
-        if (outcome.owner.scope === "photo") status.textContent = message;
+        if (ownerScope === "photo") status.textContent = message;
         else gridStatus.textContent = message;
         failBrowseRange(
-          outcome.owner.scope,
-          outcome.owner.generation,
+          ownerScope,
+          ownerGeneration,
           outcome.start,
           outcome.transportLost,
+          operation.kind === "photo"
+            ? undefined
+            : {
+                sourceAuthority,
+                operationKind: operation.kind,
+                start: outcome.start,
+                quiet,
+                priority,
+              },
           transition,
         );
         return false;
       }
-      recoverBrowseRange(
-        outcome.owner.scope,
-        outcome.owner.generation,
-        outcome.start,
-      );
+      recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
       if (outcome.changed) renderGrid();
       if (!quiet)
         gridStatus.textContent = `Ready · ${sourceGrid.total.toLocaleString()} Photos`;
@@ -2594,7 +2636,57 @@ export function mountLibraryBrowser(
       await openSourceDescriptor(sourceGrid.source);
     })();
   });
+  const currentGridRangeRetries = (): Array<
+    Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
+  > => {
+    const retries: Array<
+      Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
+    > = [];
+    for (const failure of browseRangeFailures.values()) {
+      if (
+        failure.ownerScope !== "source" ||
+        !failure.retry ||
+        !recoveryGate.isActive(failure.claim) ||
+        !sourceGrid.isCurrent(failure.retry.sourceAuthority)
+      )
+        continue;
+      retries.push({ claim: failure.claim, retry: failure.retry });
+    }
+    return retries;
+  };
   retry.addEventListener("click", () => {
+    const rangeRetries = currentGridRangeRetries();
+    if (rangeRetries.length > 0) {
+      const retryAuthority = sourceGrid.authority;
+      void (async () => {
+        busy = true;
+        updateControls();
+        try {
+          for (const { claim, retry: range } of rangeRetries) {
+            if (
+              !sourceGrid.isCurrent(range.sourceAuthority) ||
+              !recoveryGate.isActive(claim)
+            )
+              continue;
+            await loadWindow(
+              range.start,
+              {
+                kind: range.operationKind,
+                authority: range.sourceAuthority,
+              },
+              range.quiet,
+              range.priority,
+            );
+          }
+        } finally {
+          if (sourceGrid.isCurrent(retryAuthority)) {
+            busy = false;
+            updateControls();
+          }
+        }
+      })();
+      return;
+    }
     if (!sourceGrid.retryRequired) {
       void application.loadOverview();
       return;
