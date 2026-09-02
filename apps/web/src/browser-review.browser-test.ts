@@ -714,6 +714,130 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
+test("an answered non-conflict Undo failure remains retryable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  const undo = page.getByRole("button", { name: "Undo" });
+  await expect(undo).toBeEnabled();
+
+  await page.route("**/api/photos/*/state", (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: '{"error":"Undo could not be persisted"}',
+    }),
+  );
+  const rejected = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/state") &&
+      response.status() === 503,
+  );
+  await undo.click();
+  await rejected;
+
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
+    "selected",
+  );
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Undo could not be saved. Try Undo again."),
+  ).toBeVisible();
+  await expect(undo).toBeEnabled();
+
+  await page.unroute("**/api/photos/*/state");
+  await actionWithProgress(page, albumId, () => undo.click());
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.getByText("Last change undone.")).toBeVisible();
+  await expect(undo).toBeDisabled();
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
+    "undecided",
+  );
+});
+
+test("a stale answered Undo failure cannot restore Undo into a replacement source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Undo Source");
+  await startReview(page, running.url, "Undo Source", albumId);
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let intercepted = false;
+  await page.route("**/api/photos/*/state", async (route) => {
+    intercepted = true;
+    await held;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: '{"error":"Undo could not be persisted"}',
+    });
+  });
+  try {
+    await page.getByRole("button", { name: "Undo" }).click();
+    await expect.poll(() => intercepted).toBe(true);
+    await openSources(page);
+    await page.getByRole("button", { name: /^All Photos(?: |$)/ }).click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+    release();
+    await page.getByText(/^Ready · 2 Photos$/).waitFor();
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+    await expect(
+      page.getByText("Undo could not be saved. Try Undo again."),
+    ).toHaveCount(0);
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/state");
+  }
+});
+
+test("an uncertain Undo retires Undo and requires Photo Retry", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+
+  await page.route("**/api/photos/*/state", (route) => route.abort());
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(
+    page.getByText("Connection lost before Undo was confirmed."),
+  ).toBeVisible();
+  await page.unroute("**/api/photos/*/state");
+});
+
 test("stale undo conflict is visible and zoomed horizontal drag pans without mutating; navigation resets fit", async ({
   page,
 }) => {
