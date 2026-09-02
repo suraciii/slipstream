@@ -1095,6 +1095,56 @@ test("an older overview success still bootstraps after a newer reload fails", as
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
 });
 
+test("the application status monitor owns scan failure, retry, and completion", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let scanSucceeds = false;
+  await page.route("**/api/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: scanSucceeds ? "idle" : "failed" }),
+    });
+  });
+  await page.route("**/api/scan", async (route) => {
+    if (!scanSucceeds) {
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "idle", completed: 1, total: 1 }),
+    });
+  });
+
+  const retryCheck = page.getByRole("button", {
+    name: "Retry Library Check",
+  });
+  await expect(retryCheck).toBeVisible();
+  await retryCheck.click();
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  await expect(retryCheck).toBeVisible();
+
+  scanSucceeds = true;
+  await retryCheck.click();
+  await expect(
+    page.getByText(
+      "Library check complete. Open Browse Snapshots remain unchanged.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("Connected")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText(/Library check complete/)).toBeHidden();
+});
+
 test("a stale overview response cannot revert newer album state", async ({
   page,
 }) => {
@@ -1240,6 +1290,11 @@ test("in-flight membership and delete operations stay disabled across re-renders
   const removeButton = page.getByRole("button", {
     name: "Remove from this Album",
   });
+  const removalSettled = page.waitForResponse(
+    (response) =>
+      response.url().includes("/members/remove") &&
+      response.request().method() === "POST",
+  );
   await removeButton.click();
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
@@ -1249,16 +1304,45 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await folderDeliveredSettled;
   await expect(removeButton).toBeDisabled();
   release!();
+  await removalSettled;
   await expect(
-    page
-      .getByText(
-        "Removed from the Album. It stays in this open view until reopened.",
-      )
-      .first(),
-  ).toBeVisible({ timeout: 15000 });
+    page.getByRole("button", { name: /^Slow 1 Photos/ }),
+  ).toBeVisible();
   expect(calls).toBe(1);
   // The removed member is no longer removable within the open snapshot.
   await expect(removeButton).toBeHidden();
+});
+
+test("a current saved-position failure blocks decisions until Photo Retry confirms it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Position Retry");
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /^Position Retry 1 Photos/ }).click();
+
+  await page.route("**/api/albums/*/progress", async (route) => {
+    await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+  });
+  const failed = progressResponse(page, albumId, 503);
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await failed;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      "Album position could not be saved. Retry before making more decisions.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.unroute("**/api/albums/*/progress");
+  const recovered = progressResponse(page, albumId);
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await recovered;
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
 test("an answered stale saved-position write is not a disconnection", async ({
@@ -1743,6 +1827,24 @@ test("failed File Location ranges keep siblings and retry only the failed range"
     page.getByRole("button", {
       name: /^Retry File Locations \(shoot items 1–60\)/,
     }),
+  ).toBeVisible();
+
+  // A successful unrelated root request proves reachability but cannot
+  // release the exact failed-range Recovery claim.
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await rootToggle.click();
+  const rootReloaded = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/file-locations?") &&
+      !response.url().includes("parent=shoot"),
+  );
+  await rootToggle.click();
+  await rootReloaded;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
   ).toBeVisible();
 
   // A lower-priority admitted Album failure settles behind the actionable
@@ -2280,7 +2382,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await expect(page.getByText("2 / 3")).toBeVisible();
 });
 
-test("reconnect retains confirmed undo and a delayed progress failure blocks the active Session", async ({
+test("reconnect retains confirmed undo and a delayed stale progress failure stays silent", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -2331,22 +2433,9 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   releaseFailure();
   await progressFailed;
   await progressAfterFailure;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  await page.unroute("**/api/albums/*/progress");
-  let releaseSuccess!: () => void;
-  const successReleased = new Promise<void>((resolve) => {
-    releaseSuccess = resolve;
-  });
-  await page.route("**/api/albums/*/progress", async (route) => {
-    await successReleased;
-    await route.continue();
-  });
-  const progressRecovered = progressResponse(page, albumId);
-  await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  releaseSuccess();
-  await progressRecovered;
+  // The failed write belongs to the Photo that initiated it. The newer Photo
+  // and its confirmed position remain current and are not disconnected by a
+  // stale settlement.
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/albums/*/progress");
@@ -2611,6 +2700,53 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
     release();
     await page.unroute("**/api/derivatives/**");
   }
+});
+
+test("application teardown halts image ownership and releases the Browse token", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  let releaseStatus!: () => void;
+  const statusReleased = new Promise<void>((resolve) => {
+    releaseStatus = resolve;
+  });
+  await page.route("**/api/status", async (route) => {
+    await statusReleased;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "failed" }),
+    });
+  });
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  const image = page.getByRole("img", { name: "Photo 1 of 1" });
+  await expect(image).toHaveAttribute("src", /.+/);
+
+  const statusRequest = page.waitForRequest((request) =>
+    request.url().endsWith("/api/status"),
+  );
+  await statusRequest;
+  const statusResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/status"),
+  );
+  const released = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" && request.url().includes("/api/browse/"),
+  );
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide")),
+  );
+  releaseStatus();
+  await statusResponse;
+  await released;
+  await expect(image).not.toHaveAttribute("src", /.+/);
+  await expect(
+    page.getByRole("button", { name: "Retry Library Check" }),
+  ).toBeHidden();
 });
 
 test("leaving Photo View cancels a pending review image transfer", async ({
