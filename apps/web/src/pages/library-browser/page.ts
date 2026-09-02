@@ -7,12 +7,11 @@ import {
   type RecoveryClaim,
   type NoticeUpdate,
   type RecoveryTransition,
-} from "./async-ownership.js";
+} from "./model/async-ownership.js";
 import type {
   AlbumSummary,
   BrowseOpenResponse,
   BrowseWindowResponse,
-  FileLocationsResponse,
   FolderChild,
   LibraryOverviewResponse,
   PhotoSummary,
@@ -20,8 +19,15 @@ import type {
   PreviewSource,
   SelectionState,
   UndoDescription,
-} from "./protocol.js";
-import "./style.css";
+} from "./api/contracts.js";
+import {
+  createFileLocationOwner,
+  type FileLocationAuthority,
+  type FileLocationFailure,
+  type FileLocationOutcome,
+  type FileLocationWindow,
+} from "./model/file-location-owner.js";
+import "./ui/library-browser.css";
 
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
@@ -39,7 +45,7 @@ const swipePendingPixels = 24;
 const swipeCommitPixels = 72;
 const swipeCommitVelocity = 0.5;
 
-export function renderApp(
+export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
 ): () => void {
@@ -250,14 +256,6 @@ export function renderApp(
   let sourceSetId: string | undefined;
   let sourceSetName = "All Photos";
   let sourceFolder: { location: string; name: string } | undefined;
-  // File Location navigation retains bounded per-parent windows from one
-  // publication. A newer publication clears them and reloads coherently.
-  let fileLocationPublication: string | undefined;
-  const folderWindows = new Map<
-    string,
-    { page: number; children: FolderChild[]; total: number }
-  >();
-  const expandedFolders = new Set<string>();
   // In-progress Album management form: create, rename, or a two-step delete
   // confirmation. Only one form exists at a time and it lives in the Albums
   // section of the source list. The current model object is the operation's
@@ -513,76 +511,6 @@ export function renderApp(
     preview.classList.toggle("detail", zoomed);
   };
 
-  // ---- File Location navigation -------------------------------------
-  // Retained Folder state is bounded by construction: each expanded parent
-  // retains exactly one current direct-child page, and the expanded set is
-  // capped with FIFO eviction. A navigation generation plus the retained
-  // publication guard against delayed responses from superseded generations.
-  const FOLDER_PAGE_SIZE = 60;
-  const MAXIMUM_EXPANDED_FOLDERS = 32;
-  type FolderPage = {
-    page: number;
-    children: FolderChild[];
-    total: number;
-  };
-  let fileLocationGeneration = 0;
-  let fileLocationTasks = new TaskScope();
-  type FolderFailure = {
-    generation: number;
-    parent: string;
-    page: number;
-    message: string;
-    notice: NoticeHandle;
-    recovery: RecoveryClaim;
-  };
-  let publicationLocationNotice: NoticeHandle | undefined;
-  let publicationLocationRecovery: RecoveryClaim | undefined;
-  const folderFailures = new Map<string, FolderFailure>();
-  const resetFileLocations = () => {
-    fileLocationGeneration += 1;
-    fileLocationTasks.halt();
-    fileLocationTasks = new TaskScope();
-    fileLocationPublication = undefined;
-    folderWindows.clear();
-    expandedFolders.clear();
-    if (publicationLocationNotice)
-      applySummaryUpdate(summaryNotices.release(publicationLocationNotice));
-    if (publicationLocationRecovery)
-      recoveryGate.recover(publicationLocationRecovery);
-    publicationLocationNotice = undefined;
-    publicationLocationRecovery = undefined;
-    for (const failure of folderFailures.values()) {
-      applySummaryUpdate(summaryNotices.release(failure.notice));
-      recoveryGate.recover(failure.recovery);
-    }
-    folderFailures.clear();
-    syncConnection();
-    // Re-render at once: retained Folder cards must not stay clickable with
-    // an unbound publication, and a cleared failure must remove its Retry
-    // control before any handler can dereference it.
-    renderSources();
-  };
-
-  /// Awaits one shared root bind. Resetting the File Location scope detaches
-  /// the operation and settles every joiner with an unbound result.
-  const awaitRootBinding = async () => {
-    if (fileLocationPublication) return true;
-    const scope = fileLocationTasks;
-    const shared = scope.joinOrStart(
-      "root-binding",
-      { abortTransport: false, onCancel: () => false },
-      async () => {
-        await requestFolderWindow("", 0, false, scope);
-        return scope === fileLocationTasks && Boolean(fileLocationPublication);
-      },
-    );
-    try {
-      return await shared.promise;
-    } catch {
-      return false;
-    }
-  };
-
   /// Sends one admitted Album mutation and reports truthful outcomes.
   /// Admitted persistence is never aborted by a source or Photo change; the
   /// response always refreshes the bounded Album list, while notices stay
@@ -694,144 +622,150 @@ export function renderApp(
     })();
   };
 
-  const describeRange = (parent: string, page: number) =>
-    `${parent || "Library Folder"} items ${(page * FOLDER_PAGE_SIZE + 1).toLocaleString()}–${((page + 1) * FOLDER_PAGE_SIZE).toLocaleString()}`;
+  // File Location owns navigation lifetime, publication binding, retained
+  // windows, and exact failed ranges. It returns semantic outcomes; this page
+  // remains the sole writer of shared Overview, Summary, and Recovery state.
+  const fileLocations = createFileLocationOwner(fetcher);
+  type FileLocationPresentation = Readonly<{
+    notice: NoticeHandle;
+    recovery: RecoveryClaim;
+  }>;
+  const fileLocationPresentations = new Map<
+    FileLocationFailure,
+    FileLocationPresentation
+  >();
+  const fileLocationOutcomeSettlements = new WeakMap<object, Promise<void>>();
+  let publicationLocationPresentation: FileLocationPresentation | undefined;
 
-  const releasePublicationLocationRecovery = (): void => {
-    if (publicationLocationNotice)
-      applySummaryUpdate(summaryNotices.release(publicationLocationNotice));
-    if (publicationLocationRecovery)
-      recoveryGate.recover(publicationLocationRecovery);
-    publicationLocationNotice = undefined;
-    publicationLocationRecovery = undefined;
-    syncConnection();
+  const releaseFileLocationPresentation = (
+    presentation: FileLocationPresentation,
+  ): void => {
+    applySummaryUpdate(summaryNotices.release(presentation.notice));
+    recoveryGate.recover(presentation.recovery);
   };
-  const claimPublicationLocationNotice = (key: string, text: string): void => {
-    releasePublicationLocationRecovery();
+
+  const claimFileLocationPresentation = (
+    key: string,
+    message: string,
+    transportLost: boolean,
+  ): FileLocationPresentation => {
     const notice = summaryNotices.issue(
       "file-location",
       key,
       ACTIONABLE_NOTICE_PRIORITY,
     );
     const recovery = recoveryGate.issue("file-location", key);
-    recoveryGate.fail(recovery);
-    publicationLocationNotice = notice;
-    publicationLocationRecovery = recovery;
-    applySummaryUpdate(summaryNotices.present(notice, summaryMessage(text)));
-    syncConnection();
-  };
-  const folderFailureKey = (generation: number, parent: string, page: number) =>
-    `${generation}:${parent}:${page}`;
-  const claimFolderFailure = (
-    generation: number,
-    parent: string,
-    page: number,
-    message: string,
-  ): FolderFailure => {
-    const key = folderFailureKey(generation, parent, page);
-    const prior = folderFailures.get(key);
-    if (prior) {
-      applySummaryUpdate(summaryNotices.release(prior.notice));
-      recoveryGate.recover(prior.recovery);
-    }
-    const notice = summaryNotices.issue(
-      "file-location",
-      `range:${key}`,
-      ACTIONABLE_NOTICE_PRIORITY,
-    );
-    const recovery = recoveryGate.issue("file-location", `range:${key}`);
-    recoveryGate.fail(recovery, { transportLost: true });
-    const failure = { generation, parent, page, message, notice, recovery };
-    folderFailures.set(key, failure);
+    recoveryGate.fail(recovery, {
+      ...(transportLost ? { transportLost } : {}),
+    });
+    const presentation = { notice, recovery };
     applySummaryUpdate(summaryNotices.present(notice, summaryMessage(message)));
-    syncConnection();
-    return failure;
-  };
-  const releaseFolderFailure = (failure: FolderFailure): void => {
-    const key = folderFailureKey(
-      failure.generation,
-      failure.parent,
-      failure.page,
-    );
-    if (folderFailures.get(key) !== failure) return;
-    folderFailures.delete(key);
-    applySummaryUpdate(summaryNotices.release(failure.notice));
-    recoveryGate.recover(failure.recovery);
-    const newest = [...folderFailures.values()].sort(
-      (left, right) => right.notice.ticket - left.notice.ticket,
-    )[0];
-    if (newest)
-      applySummaryUpdate(
-        summaryNotices.present(newest.notice, summaryMessage(newest.message)),
-      );
-    setConnected(true);
+    return presentation;
   };
 
-  async function requestFolderWindow(
-    parent: string,
-    page: number,
-    expand: boolean,
-    scope = fileLocationTasks,
+  const releasePublicationLocationRecovery = (): void => {
+    if (publicationLocationPresentation)
+      releaseFileLocationPresentation(publicationLocationPresentation);
+    publicationLocationPresentation = undefined;
+    syncConnection();
+  };
+
+  const claimPublicationLocationNotice = (
+    key: string,
+    message: string,
+  ): void => {
+    releasePublicationLocationRecovery();
+    publicationLocationPresentation = claimFileLocationPresentation(
+      key,
+      message,
+      false,
+    );
+    syncConnection();
+  };
+
+  const resetFileLocations = (): FileLocationAuthority => {
+    const authority = fileLocations.reset();
+    if (publicationLocationPresentation)
+      releaseFileLocationPresentation(publicationLocationPresentation);
+    publicationLocationPresentation = undefined;
+    for (const presentation of fileLocationPresentations.values())
+      releaseFileLocationPresentation(presentation);
+    fileLocationPresentations.clear();
+    syncConnection();
+    renderSources();
+    return authority;
+  };
+
+  const rebindFileLocations = async (): Promise<FileLocationAuthority> => {
+    overviewDataFloor += 1;
+    const authority = resetFileLocations();
+    await refreshOverviewState().catch(() => {});
+    await loadFolderWindow("", 0);
+    return authority;
+  };
+
+  async function applyFileLocationOutcome(
+    outcome: FileLocationOutcome,
   ): Promise<void> {
-    if (scope.halted) return;
-    const task = scope.beginLatest(`folder:${parent}`, {
-      abortTransport: false,
-    });
-    const generation = fileLocationGeneration;
-    const parameters = new URLSearchParams({
-      start: String(page * FOLDER_PAGE_SIZE),
-      limit: String(FOLDER_PAGE_SIZE),
-    });
-    if (parent) parameters.set("parent", parent);
-    const boundPublication = fileLocationPublication;
-    if (boundPublication) parameters.set("publication", boundPublication);
-    try {
-      const response = await fetcher(`/api/file-locations?${parameters}`);
-      if (!task.isCurrent() || scope !== fileLocationTasks) return;
-      if (response.status === 409) {
-        overviewDataFloor += 1;
-        resetFileLocations();
-        await refreshOverviewState().catch(() => {});
-        await loadFolderWindow("", 0);
-        if (fileLocationPublication)
-          claimPublicationLocationNotice(
-            `publication:${fileLocationPublication}`,
-            "Scan results changed File Locations. Reloaded the current Folders.",
-          );
-        return;
-      }
-      if (!response.ok) throw new Error("file locations failed");
-      const window = (await response.json()) as FileLocationsResponse;
-      if (!task.isCurrent() || scope !== fileLocationTasks) return;
-      if (boundPublication && window.publication !== boundPublication) return;
-      fileLocationPublication = window.publication;
-      folderWindows.set(parent, {
-        page,
-        children: [...window.children],
-        total: window.total,
-      });
-      if (expand) {
-        expandedFolders.add(parent);
-        enforceExpandedCap(parent);
-      }
-      const recovered = folderFailures.get(
-        folderFailureKey(generation, parent, page),
-      );
-      if (recovered) releaseFolderFailure(recovered);
-      else if (folderFailures.size > 0) setConnected(true);
-      renderSources();
-    } catch {
-      if (!task.isCurrent() || scope !== fileLocationTasks) return;
-      claimFolderFailure(
-        generation,
-        parent,
-        page,
-        `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`,
-      );
-      renderSources();
-    } finally {
-      task.finish();
+    if (!fileLocations.accept(outcome)) return;
+    if (outcome.kind === "detached" || outcome.kind === "bound") return;
+    if (outcome.kind === "publication-conflict") {
+      const reboundAuthority = await rebindFileLocations();
+      if (
+        fileLocations.isCurrent(reboundAuthority) &&
+        fileLocations.publication
+      )
+        claimPublicationLocationNotice(
+          `publication:${fileLocations.publication}`,
+          "Scan results changed File Locations. Reloaded the current Folders.",
+        );
+      return;
     }
+    if (outcome.kind === "failed") {
+      if (outcome.replaced) {
+        const replaced = fileLocationPresentations.get(outcome.replaced);
+        if (replaced) releaseFileLocationPresentation(replaced);
+        fileLocationPresentations.delete(outcome.replaced);
+      }
+      const presentation = claimFileLocationPresentation(
+        `range:${outcome.generation}:${outcome.parent}:${outcome.page}`,
+        outcome.failure.message,
+        true,
+      );
+      fileLocationPresentations.set(outcome.failure, presentation);
+      syncConnection();
+      renderSources();
+      return;
+    }
+    if (outcome.recovered) {
+      const recovered = fileLocationPresentations.get(outcome.recovered);
+      if (recovered) releaseFileLocationPresentation(recovered);
+      fileLocationPresentations.delete(outcome.recovered);
+    }
+    if (outcome.remainingNewest) {
+      const remaining = fileLocationPresentations.get(outcome.remainingNewest);
+      if (remaining)
+        applySummaryUpdate(
+          summaryNotices.present(
+            remaining.notice,
+            summaryMessage(outcome.remainingNewest.message),
+          ),
+        );
+    }
+    if (outcome.markTransportReachable) setConnected(true);
+    renderSources();
+  }
+
+  function handleFileLocationOutcome(
+    outcome: FileLocationOutcome,
+  ): Promise<void> {
+    const pending = fileLocationOutcomeSettlements.get(outcome);
+    if (pending) return pending;
+    const settlement = Promise.resolve().then(() =>
+      applyFileLocationOutcome(outcome),
+    );
+    fileLocationOutcomeSettlements.set(outcome, settlement);
+    return settlement;
   }
 
   async function loadFolderWindow(
@@ -839,32 +773,25 @@ export function renderApp(
     page: number,
     expand = true,
   ): Promise<void> {
-    if (parent === "" && !fileLocationPublication) {
-      const bound = await awaitRootBinding();
-      if (bound && expand) {
-        expandedFolders.add("");
-        enforceExpandedCap("");
-        renderSources();
-      }
-      return;
-    }
-    await requestFolderWindow(parent, page, expand);
+    await handleFileLocationOutcome(
+      await fileLocations.loadWindow(parent, page, expand),
+    );
   }
 
-  const enforceExpandedCap = (newest: string) => {
-    while (expandedFolders.size > MAXIMUM_EXPANDED_FOLDERS) {
-      const oldest = [...expandedFolders].find(
-        (location) => location !== newest && location !== "",
-      );
-      if (oldest === undefined) break;
-      expandedFolders.delete(oldest);
-      folderWindows.delete(oldest);
-    }
+  const awaitRootBinding = async (): Promise<boolean> => {
+    const outcome = await fileLocations.awaitRootBinding();
+    const boundByThisOutcome =
+      outcome.kind === "bound" || outcome.kind === "loaded";
+    await handleFileLocationOutcome(outcome);
+    return boundByThisOutcome && Boolean(fileLocations.publication);
   };
 
-  const folderPager = (parent: string, retained: FolderPage) => {
+  const folderPager = (parent: string, retained: FileLocationWindow) => {
     const depth = parent ? parent.split("/").length : 0;
-    const pages = Math.max(1, Math.ceil(retained.total / FOLDER_PAGE_SIZE));
+    const pages = Math.max(
+      1,
+      Math.ceil(retained.total / fileLocations.pageSize),
+    );
     const controls = document.createElement("div");
     controls.className = "folder-pager";
     controls.style.marginLeft = `${Math.min(depth, 6) * 12}px`;
@@ -874,7 +801,7 @@ export function renderApp(
     previous.textContent = "Previous Folders";
     previous.disabled = retained.page === 0;
     previous.addEventListener("click", () => {
-      const current = folderWindows.get(parent);
+      const current = fileLocations.window(parent);
       if (current && current.page > 0)
         void loadFolderWindow(parent, current.page - 1);
     });
@@ -885,11 +812,12 @@ export function renderApp(
     next.type = "button";
     next.className = "folder-page-button";
     next.textContent = "More Folders";
-    next.disabled = (retained.page + 1) * FOLDER_PAGE_SIZE >= retained.total;
+    next.disabled =
+      (retained.page + 1) * fileLocations.pageSize >= retained.total;
     next.addEventListener("click", () => {
       // Read the current page at click time: the retained entry is replaced
       // by each response, so a stale closure would replay the same page.
-      const current = folderWindows.get(parent);
+      const current = fileLocations.window(parent);
       if (current) void loadFolderWindow(parent, current.page + 1);
     });
     controls.append(previous, label, next);
@@ -906,15 +834,13 @@ export function renderApp(
     expand.className = "folder-expand";
     expand.setAttribute(
       "aria-expanded",
-      expandedFolders.has(child.location) ? "true" : "false",
+      fileLocations.isExpanded(child.location) ? "true" : "false",
     );
-    expand.textContent = expandedFolders.has(child.location) ? "▾" : "▸";
+    expand.textContent = fileLocations.isExpanded(child.location) ? "▾" : "▸";
     expand.setAttribute("aria-label", `Toggle ${child.name} subfolders`);
     expand.addEventListener("click", () => {
-      if (expandedFolders.has(child.location)) {
-        expandedFolders.delete(child.location);
-        folderWindows.delete(child.location);
-        renderSources();
+      if (fileLocations.isExpanded(child.location)) {
+        if (fileLocations.collapse(child.location)) renderSources();
       } else {
         // Expanding revalidates against the current publication instead of
         // trusting retained state from a possibly superseded generation.
@@ -929,7 +855,7 @@ export function renderApp(
       false,
     );
     // Folder sources cannot open before a publication is bound.
-    button.disabled = !fileLocationPublication;
+    button.disabled = !fileLocations.publication;
     button.addEventListener(
       "click",
       () =>
@@ -940,19 +866,19 @@ export function renderApp(
     );
     if (!child.hasDescendantFolders) expand.disabled = true;
     row.append(expand, button);
-    if (!expandedFolders.has(child.location)) return row;
+    if (!fileLocations.isExpanded(child.location)) return row;
     const fragment = document.createDocumentFragment();
     fragment.append(row, folderChildrenFragment(child.location));
     return fragment;
   };
 
   const folderChildrenFragment = (parent: string) => {
-    const retained = folderWindows.get(parent);
-    if (!retained || !expandedFolders.has(parent))
+    const retained = fileLocations.window(parent);
+    if (!retained || !fileLocations.isExpanded(parent))
       return document.createDocumentFragment();
     const fragment = document.createDocumentFragment();
     for (const child of retained.children) fragment.append(folderCard(child));
-    if (retained.total > FOLDER_PAGE_SIZE)
+    if (retained.total > fileLocations.pageSize)
       fragment.append(folderPager(parent, retained));
     return fragment;
   };
@@ -982,19 +908,15 @@ export function renderApp(
     const fileHeading = document.createElement("h3");
     fileHeading.textContent = "File Locations";
     sourceList.append(fileHeading);
-    for (const failure of [...folderFailures.values()].sort(
-      (left, right) => left.notice.ticket - right.notice.ticket,
-    )) {
+    for (const failure of fileLocations.failures()) {
       const retryFolders = document.createElement("button");
       retryFolders.type = "button";
       retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry File Locations (${describeRange(failure.parent, failure.page)})`;
+      retryFolders.textContent = `Retry File Locations (${failure.range})`;
       retryFolders.addEventListener("click", () => {
-        const current = folderFailures.get(
-          folderFailureKey(failure.generation, failure.parent, failure.page),
-        );
-        if (current === failure)
-          void loadFolderWindow(failure.parent, failure.page);
+        void (async () => {
+          await handleFileLocationOutcome(await fileLocations.retry(failure));
+        })();
       });
       sourceList.append(retryFolders);
     }
@@ -1014,7 +936,7 @@ export function renderApp(
         }),
     );
     // The root source cannot open before a publication is bound.
-    rootCard.disabled = !fileLocationPublication;
+    rootCard.disabled = !fileLocations.publication;
     const rootRow = document.createElement("div");
     rootRow.className = "folder-row folder-root";
     const rootExpand = document.createElement("button");
@@ -1022,14 +944,13 @@ export function renderApp(
     rootExpand.className = "folder-expand";
     rootExpand.setAttribute(
       "aria-expanded",
-      expandedFolders.has("") ? "true" : "false",
+      fileLocations.isExpanded("") ? "true" : "false",
     );
-    rootExpand.textContent = expandedFolders.has("") ? "▾" : "▸";
+    rootExpand.textContent = fileLocations.isExpanded("") ? "▾" : "▸";
     rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
     rootExpand.addEventListener("click", () => {
-      if (expandedFolders.has("")) {
-        expandedFolders.delete("");
-        renderSources();
+      if (fileLocations.isExpanded("")) {
+        if (fileLocations.collapse("")) renderSources();
       } else {
         void loadFolderWindow("", 0);
       }
@@ -1594,7 +1515,7 @@ export function renderApp(
     });
     void (async () => {
       try {
-        if (!fileLocationPublication && committed.published) {
+        if (!fileLocations.publication && committed.published) {
           // Root binding belongs to the independent File Location scope. A
           // superseded bootstrap awaits it but starts no later child.
           if (lastSource?.kind === "folder" && !token) {
@@ -1613,7 +1534,7 @@ export function renderApp(
           };
           const bindable =
             remembered.kind !== "folder" ||
-            fileLocationPublication !== undefined;
+            fileLocations.publication !== undefined;
           if (bindable) {
             await openSource(
               remembered.kind,
@@ -1835,8 +1756,8 @@ export function renderApp(
               ? {
                   source: "folder",
                   folderPath: folder!.location,
-                  ...(fileLocationPublication
-                    ? { publication: fileLocationPublication }
+                  ...(fileLocations.publication
+                    ? { publication: fileLocations.publication }
                     : {}),
                   ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
                 }
@@ -1854,14 +1775,14 @@ export function renderApp(
         // Locations: a superseded open doing the same would discard the
         // newer recovery and leave the tree unbound.
         if (generation !== sourceGeneration) return;
-        overviewDataFloor += 1;
-        resetFileLocations();
-        await refreshOverviewState().catch(() => {});
-        await loadFolderWindow("", 0);
+        const reboundAuthority = await rebindFileLocations();
         if (generation !== sourceGeneration) return;
-        if (fileLocationPublication)
+        if (
+          fileLocations.isCurrent(reboundAuthority) &&
+          fileLocations.publication
+        )
           claimPublicationLocationNotice(
-            `publication:${fileLocationPublication}`,
+            `publication:${fileLocations.publication}`,
             "Scan results changed File Locations. Reopen the current Folder.",
           );
         throw new Error("file locations expired");
@@ -1889,8 +1810,7 @@ export function renderApp(
         sourceTransition,
       );
       if (generation !== sourceGeneration || !windowReady) return;
-      if (kind === "folder" && publicationLocationNotice)
-        releasePublicationLocationRecovery();
+      if (kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
       retrySourceRequired = false;
       setConnected(true);
@@ -1982,12 +1902,12 @@ export function renderApp(
     syncConnection();
     cancelPendingImageLoads(gridLayer);
     const signal = sourceSignal;
-    let boundPublication = fileLocationPublication;
+    let boundPublication = fileLocations.publication;
     if (sourceKind === "folder" && !boundPublication) {
       // A Folder source must never be reopened publicationless; wait for
       // the root binding and fail truthfully if it cannot be established.
       boundPublication = (await awaitRootBinding())
-        ? fileLocationPublication
+        ? fileLocations.publication
         : undefined;
       if (generation !== sourceGeneration) return;
       if (!boundPublication) {
@@ -2041,13 +1961,14 @@ export function renderApp(
         // Generation-gated exactly like openSource: only the current
         // source's recovery may reset and rebind File Locations.
         if (generation === sourceGeneration) {
-          overviewDataFloor += 1;
-          resetFileLocations();
-          await refreshOverviewState().catch(() => {});
-          await loadFolderWindow("", 0);
-          if (generation === sourceGeneration && fileLocationPublication)
+          const reboundAuthority = await rebindFileLocations();
+          if (
+            generation === sourceGeneration &&
+            fileLocations.isCurrent(reboundAuthority) &&
+            fileLocations.publication
+          )
             claimPublicationLocationNotice(
-              `publication:${fileLocationPublication}`,
+              `publication:${fileLocations.publication}`,
               "Scan results changed File Locations. Reopen the current Folder.",
             );
         }
@@ -2080,8 +2001,7 @@ export function renderApp(
       renderGrid();
       gridStatus.textContent =
         "Source reopened using the latest published Library order.";
-      if (sourceKind === "folder" && publicationLocationNotice)
-        releasePublicationLocationRecovery();
+      if (sourceKind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
       retrySourceRequired = false;
       setConnected(true);
@@ -3245,9 +3165,9 @@ export function renderApp(
     void (async () => {
       // A Folder reopen needs the File Location binding: never send a
       // publicationless browse (it can only fail as expired/invalid).
-      if (sourceKind === "folder" && !fileLocationPublication) {
+      if (sourceKind === "folder" && !fileLocations.publication) {
         await awaitRootBinding();
-        if (!fileLocationPublication) {
+        if (!fileLocations.publication) {
           gridStatus.textContent =
             "Could not load this source. Retry to continue.";
           return;
@@ -3407,7 +3327,7 @@ export function renderApp(
     cancelPendingImageLoads(gridLayer, true);
     cancelPendingImageLoads(stage, true);
     applicationTasks.halt();
-    fileLocationTasks.halt();
+    fileLocations.dispose();
     sourceTasks.halt();
     gridTasks.halt();
     photoTasks.halt();
@@ -3522,12 +3442,4 @@ function sourceLabel(source?: PreviewSource): string {
 }
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
-}
-
-if (typeof document !== "undefined") {
-  const root = document.querySelector<HTMLElement>("#app");
-  if (root) {
-    const dispose = renderApp(root);
-    window.addEventListener("pagehide", dispose, { once: true });
-  }
 }

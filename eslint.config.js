@@ -26,4 +26,37 @@ export default tseslint.config(
       },
     },
   },
+  {
+    files: ["apps/web/src/**/*.ts"],
+    ignores: ["apps/web/src/pages/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "^(?:\\.\\.?/)+(?:src/)?pages/[^/]+(?:$|/(?!index\\.js$))",
+              message: "Import a page through its public index.ts API.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["apps/web/src/pages/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              regex: "^(?:\\.\\.?/)+(?:src/)?app(?:/|$)",
+              message: "A page must not import from the app layer.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );
