@@ -121,6 +121,8 @@ type ScanCycle = {
   admission: "pending" | "admitted";
 };
 
+type OverviewRefreshResult = "committed" | "detached" | "incoherent";
+
 const defaultSchedule: ApplicationSchedule = (delayMs, run) => {
   const timer = setTimeout(() => void run(), delayMs);
   return () => clearTimeout(timer);
@@ -232,6 +234,12 @@ export function createApplicationOwner(
     if (!closed) void emit({ kind: "mark-reachable" });
   };
 
+  const retainOverviewFailure = (): void => {
+    if (overviewRecovery) return;
+    overviewRecovery = recovery();
+    failApplicationRecovery(overviewRecovery, "overview-reload");
+  };
+
   const observePublication = (publication?: string): boolean => {
     if (!publicationBaselineEstablished) {
       publicationBaselineEstablished = true;
@@ -255,11 +263,11 @@ export function createApplicationOwner(
     }).finally(() => lease.finish());
   };
 
-  const refreshOverview = async (refreshOptions?: {
+  const refreshOverviewResult = async (refreshOptions?: {
     bootstrap?: boolean;
     markReachable?: () => boolean;
-  }): Promise<boolean> => {
-    if (closed) return false;
+  }): Promise<OverviewRefreshResult> => {
+    if (closed) return "detached";
     const task = tasks.beginOrdered("overview", overviewDataFloor);
     const background = notices.backgroundEpoch();
     let backgroundSettled = false;
@@ -274,12 +282,12 @@ export function createApplicationOwner(
         if (body.publication !== validation.publication) {
           if (validation.publication !== observedPublication)
             overviewDataFloor += 1;
-          return false;
+          return "incoherent";
         }
       } finally {
         if (!validationSettled) notices.discardBackground(validationEpoch);
       }
-      if (!task.commit(overviewDataFloor)) return false;
+      if (!task.commit(overviewDataFloor)) return "detached";
       observePublication(body.publication);
       overview = body;
       albums = Object.freeze([...body.albums]);
@@ -291,12 +299,15 @@ export function createApplicationOwner(
       publishOverview();
       if (refreshOptions?.markReachable?.()) markReachable();
       if (refreshOptions?.bootstrap) startBootstrap(body);
-      return true;
+      return "committed";
     } finally {
       if (!backgroundSettled) notices.discardBackground(background);
       task.finish();
     }
   };
+
+  const refreshOverview = async (): Promise<boolean> =>
+    (await refreshOverviewResult()) === "committed";
 
   const releaseScanFailure = (): void => {
     if (!scanFailureNotice) return;
@@ -482,14 +493,29 @@ export function createApplicationOwner(
     );
     applySummaryUpdate(barrier.update);
     try {
-      await refreshOverview({
+      const result = await refreshOverviewResult({
         bootstrap: true,
         markReachable: () => load.isCurrent(),
       });
-      if (load.isCurrent() && overviewRecovery) {
+
+      if (!load.isCurrent()) return;
+      if (result === "incoherent") {
+        applySummaryUpdate(
+          notices.present(
+            barrier.handle,
+            summary("Could not reach Slipstream. Check the server and retry."),
+          ),
+        );
+        retainOverviewFailure();
+        return;
+      }
+      if (result === "detached") {
+        applySummaryUpdate(notices.release(barrier.handle));
+        return;
+      }
+      if (overviewRecovery) {
         recover(overviewRecovery);
         overviewRecovery = undefined;
-        markReachable();
       }
       applySummaryUpdate(notices.release(barrier.handle));
     } catch {
@@ -500,8 +526,7 @@ export function createApplicationOwner(
           summary("Could not reach Slipstream. Check the server and retry."),
         ),
       );
-      overviewRecovery ??= recovery();
-      failApplicationRecovery(overviewRecovery, "overview-reload");
+      retainOverviewFailure();
     } finally {
       load.finish();
     }

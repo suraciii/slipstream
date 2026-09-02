@@ -214,6 +214,104 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
+  test("keeps a first foreground publication mismatch recoverable", async () => {
+    const { owner, events } = harness((input) =>
+      input === "/api/overview"
+        ? Promise.resolve(response(overview("publication-1", "Stale")))
+        : Promise.resolve(response(scan("idle", "publication-2"))),
+    );
+
+    await owner.loadOverview();
+
+    expect(owner.overview).toBeUndefined();
+    expect(overviewEvents(events)).toHaveLength(0);
+    expect(
+      events.filter((event) => event.kind === "fail-application-recovery"),
+    ).toHaveLength(1);
+    expect(
+      events.filter((event) => event.kind === "mark-reachable"),
+    ).toHaveLength(0);
+    expect(latestSummary(events)?.text).toBe(
+      "Could not reach Slipstream. Check the server and retry.",
+    );
+    owner.dispose();
+  });
+
+  test("retains Overview recovery across a failed retry mismatch", async () => {
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return overviewRequests === 1
+          ? Promise.resolve(new Response(null, { status: 503 }))
+          : Promise.resolve(response(overview("publication-1", "Stale")));
+      }
+      return Promise.resolve(response(scan("idle", "publication-2")));
+    });
+
+    await owner.loadOverview();
+    const failureCount = events.filter(
+      (event) => event.kind === "fail-application-recovery",
+    ).length;
+    const reachableCount = events.filter(
+      (event) => event.kind === "mark-reachable",
+    ).length;
+
+    await owner.loadOverview();
+
+    expect(owner.overview).toBeUndefined();
+    expect(
+      events.filter((event) => event.kind === "fail-application-recovery"),
+    ).toHaveLength(failureCount);
+    expect(
+      events.filter((event) => event.kind === "mark-reachable"),
+    ).toHaveLength(reachableCount);
+    expect(events.filter((event) => event.kind === "recover")).toHaveLength(0);
+    expect(latestSummary(events)?.text).toBe(
+      "Could not reach Slipstream. Check the server and retry.",
+    );
+    owner.dispose();
+  });
+
+  test("releases Overview recovery and reaches once after a current commit", async () => {
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return overviewRequests === 1
+          ? Promise.resolve(new Response(null, { status: 503 }))
+          : Promise.resolve(response(overview("publication-1", "Album")));
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    await owner.loadOverview();
+    await owner.loadOverview();
+
+    expect(owner.overview?.publication).toBe("publication-1");
+    expect(
+      events.filter((event) => event.kind === "fail-application-recovery"),
+    ).toHaveLength(1);
+    expect(events.filter((event) => event.kind === "recover")).toHaveLength(1);
+    expect(
+      events.filter((event) => event.kind === "mark-reachable"),
+    ).toHaveLength(1);
+    const failed = events.find(
+      (event) => event.kind === "fail-application-recovery",
+    );
+    const recovered = events.find((event) => event.kind === "recover");
+    if (
+      !failed ||
+      failed.kind !== "fail-application-recovery" ||
+      !recovered ||
+      recovered.kind !== "recover"
+    )
+      throw new Error("expected one recovered Overview failure");
+    expect(recovered.recovery).toBe(failed.recovery);
+    expect(latestSummary(events)?.text).toBe("Library ready");
+    owner.dispose();
+  });
+
   test("uses idle and active poll cadence while status failures stay silent", async () => {
     let statusRequests = 0;
     const { owner, events, nextScheduled } = harness((input) => {
@@ -472,6 +570,42 @@ describe("ApplicationOwner", () => {
     expect(overviewEvents(events).at(-1)?.albums[0]?.hasSavedPosition).toBe(
       true,
     );
+    owner.dispose();
+  });
+
+  test("a locally superseded foreground load releases its barrier without failing Recovery", async () => {
+    const stale = deferred<Response>();
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return overviewRequests === 1
+          ? Promise.resolve(response(overview("publication-1", "Album")))
+          : stale.promise;
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    expect(await owner.refreshOverview()).toBe(true);
+    events.splice(0);
+    const pending = owner.loadOverview();
+    await Promise.resolve();
+    owner.confirmSavedPosition("album-1");
+    stale.resolve(
+      response(overview("publication-1", "Album", { hasSavedPosition: false })),
+    );
+    await pending;
+
+    expect(owner.albums[0]?.hasSavedPosition).toBe(true);
+    expect(latestSummary(events)?.text).toBe("Library ready");
+    expect(
+      events.some(
+        (event) =>
+          event.kind === "fail-application-recovery" ||
+          event.kind === "recover" ||
+          event.kind === "mark-reachable",
+      ),
+    ).toBe(false);
     owner.dispose();
   });
 

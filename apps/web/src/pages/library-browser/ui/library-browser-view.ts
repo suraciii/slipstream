@@ -1,7 +1,7 @@
 import "./library-browser.css";
 
-export type ViewSelectionState = "undecided" | "selected" | "rejected";
-export type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
+type ViewSelectionState = "undecided" | "selected" | "rejected";
+type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
 
 const GRID_CELL_HEIGHT = 178;
 const GRID_CELL_WIDTH = 150;
@@ -9,7 +9,7 @@ const SWIPE_PENDING_PIXELS = 24;
 const SWIPE_COMMIT_PIXELS = 72;
 const SWIPE_COMMIT_VELOCITY = 0.5;
 
-export type SourceReference =
+type SourceReference =
   | Readonly<{ kind: "library" }>
   | Readonly<{ kind: "album"; id: string }>
   | Readonly<{ kind: "folder"; location: string; name: string }>;
@@ -56,13 +56,13 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "membership-add"; albumId: string }>
   | Readonly<{ kind: "membership-remove" }>;
 
-export type GridThumbnailBinding = Readonly<{
+type GridThumbnailBinding = Readonly<{
   photoId: string;
   preview: GridPhotoViewModel["preview"];
   target: GridThumbnailTarget;
 }>;
 
-export interface GridThumbnailTarget {
+interface GridThumbnailTarget {
   alt: string;
   complete: boolean;
   isConnected: boolean;
@@ -72,7 +72,7 @@ export interface GridThumbnailTarget {
   removeAttribute(name: string): void;
 }
 
-export interface ReviewImageTarget {
+interface ReviewImageTarget {
   readonly connected: boolean;
   readonly source: string;
   setHandlers(onLoad: () => void, onError: () => void): void;
@@ -81,7 +81,7 @@ export interface ReviewImageTarget {
   clearSource(): void;
 }
 
-export type ReviewImagePresentation = Readonly<{
+type ReviewImagePresentation = Readonly<{
   target: ReviewImageTarget;
   resolvedUrl: string;
   surface: object;
@@ -124,7 +124,7 @@ export type SourceListViewModel = Readonly<{
   >;
 }>;
 
-export type GridPhotoViewModel = Readonly<{
+type GridPhotoViewModel = Readonly<{
   id: string;
   selectionState: ViewSelectionState;
   rating: number;
@@ -134,19 +134,19 @@ export type GridPhotoViewModel = Readonly<{
   }>;
 }>;
 
-export type GridViewModel = Readonly<{
+type GridViewModel = Readonly<{
   total: number;
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
 
-export type PhotoFactsViewModel = Readonly<{
+type PhotoFactsViewModel = Readonly<{
   index: number;
   total: number;
   selectionState?: ViewSelectionState | undefined;
   rating?: number | undefined;
 }>;
 
-export type PhotoShellViewModel = PhotoFactsViewModel &
+type PhotoShellViewModel = PhotoFactsViewModel &
   Readonly<{
     sourceName: string;
     photoId?: string | undefined;
@@ -156,7 +156,7 @@ export type PhotoShellViewModel = PhotoFactsViewModel &
     previewUrl?: string | undefined;
   }>;
 
-export type MembershipViewModel = Readonly<{
+type MembershipViewModel = Readonly<{
   albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
   photoPresent: boolean;
   addingAlbumIds: ReadonlyArray<string>;
@@ -164,7 +164,7 @@ export type MembershipViewModel = Readonly<{
   removing: boolean;
 }>;
 
-export type ControlsViewModel = Readonly<{
+type ControlsViewModel = Readonly<{
   decisionEnabled: boolean;
   clearEnabled: boolean;
   backEnabled: boolean;
