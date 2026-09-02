@@ -2936,15 +2936,19 @@ export function mountLibraryBrowser(
         }),
       });
       if (!response.ok) {
-        if (generation !== sourceGeneration) return;
+        if (
+          generation !== sourceGeneration ||
+          photoGeneration !== requestGeneration ||
+          loaded.get(affectedIndex)?.id !== action.photoId
+        )
+          return;
         if (response.status === 409) {
           status.textContent =
             "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
-          if (photoGeneration === requestGeneration)
-            failPhotoRecovery(photoGeneration, "undo");
+          failPhotoRecovery(photoGeneration, "undo");
         } else {
-          status.textContent =
-            "Undo could not be saved. Try Undo again or Retry the connection.";
+          undo = action;
+          status.textContent = "Undo could not be saved. Try Undo again.";
         }
         return;
       }
