@@ -104,11 +104,22 @@ Conceptual protocol surfaces are:
 ```text literal
 GET    /api/overview
 GET    /api/status
+POST   /api/scan
 GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}&limit={count}
 POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
 DELETE /api/browse/{token}
 ```
+
+`POST /api/scan` takes no semantic request fields; an empty JSON object is
+accepted. A same-service request admits one scan and waits for its terminal
+Loading Status. Concurrent accepted requests coalesce onto that scan within
+the server's bounded waiter capacity and each returns the same terminal status;
+the browser suppresses a duplicate Retry Library Check while its own command
+is in flight. Success is `200` with the bounded Loading Status shape used by
+`GET /api/status` and no Photo facts. Cross-origin mutation is `403`; an
+unavailable, saturated, or failed scan is `5xx`. Wrong-method handling remains
+the shared `405` protocol rule.
 
 `POST /api/browse` accepts one source:
 

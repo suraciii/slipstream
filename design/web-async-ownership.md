@@ -58,15 +58,21 @@ separate operation family.
 ### Publication status polling
 
 `GET /api/status` is a presentation read owned by the application scope with
-the global `publication-status` key. Starting a new publication poll detaches
-the preceding timer, loop, and in-flight continuation; transport need not be
-aborted. Application teardown does the same. A detached poll never writes
-scan status or starts an overview load.
+the global `publication-status` key. The first committed overview starts one
+application-lifetime status monitor whether the Library is published or not.
+The monitor continues at a bounded idle cadence so it observes scans triggered
+outside the current tab; while scan state is non-idle it may use a foreground
+progress cadence. Starting a replacement monitor detaches the preceding timer,
+loop, and in-flight continuation; transport need not be aborted. Application
+teardown does the same. A detached monitor never writes scan status or starts
+an overview load.
 
 An answered HTTP non-success or transport failure is silent, does not create
-or release a Recovery claim, and leaves the current loop polling. A successful
-response may write scan progress only as a background update through the
-Summary Notice Channel.
+or release a Recovery claim, and leaves the current monitor running. A
+successful response may write scan progress only as a background update
+through the Summary Notice Channel. Transition handling compares the response
+with the last scan state observed by this monitor, so an already-idle baseline
+does not invent a completion event.
 
 A semantic `failed` scan retains the prior Published Library, stops that poll,
 and claims an actionable `scan-failure` Summary notice with a **Retry Library
@@ -298,10 +304,12 @@ a superseded presentation workflow.
   response commits and the application still lacks its initial source, that
   commit elects a bootstrap owner which starts or awaits independent root
   binding and then may start source-scoped Browse open. A newer failed request
-  cannot strand an older valid committed response. A committed unpublished
-  overview starts the keyed publication-status poll. Every follow-up rechecks
-  the elected commit sequence and application lifetime before starting its
-  next child.
+  cannot strand an older valid committed response. Every first committed
+  overview ensures the single application-lifetime publication-status monitor
+  is running; an unpublished commit withholds Browse opening until publication,
+  while a published non-idle commit remains browsable and the same monitor
+  reports its background scan. Every follow-up rechecks the elected commit
+  sequence and application lifetime before starting its next child.
 - Opening a Photo creates a new Photo scope and aborts Grid-speculative work.
   If the Photo lies outside retained facts, it starts a high-priority,
   Photo-owned Browse-window read; it never coalesces with an aborted adjacent
@@ -329,17 +337,23 @@ a superseded presentation workflow.
 
 The Library summary has one **Summary Notice Channel** shared by Album,
 File Location, overview, status, scan failure/completion, failed-range
-recovery, and explicit reload. Every operation that may write it receives an
+recovery, and explicit reload. An operation that may own a notice receives an
 opaque claim handle containing a monotonically increasing ticket, owner kind,
-and exact owner key (for example a failed Folder range). Persistent claims are
-identified by that full handle; within the same priority, only a newer ticket
-replaces the visible owner.
+and exact owner key (for example a failed Folder range). A non-owning
+background operation captures an opaque **background epoch** from the same
+monotonic sequence when it starts. Persistent claims are identified by their
+full handle; within the same priority, only a newer ticket replaces the visible
+owner.
 
 Actionable scan failure/completion, File Location and range-retry notices, and
 explicit reload own the highest priority. Album failures are fallback notices.
-Ordinary overview and in-progress status are background updates and may write
-only while no persistent owner exists.
-Background writes never acquire ownership. A lower-priority settled failure
+Ordinary overview and in-progress status are background updates. A background
+write is accepted only while no persistent owner exists, its epoch is not
+older than `reloadBarrierTicket`, and it is not older than the last accepted
+background epoch. Rejection returns a stale/no-op result and performs no DOM,
+owner, pending, barrier, or Recovery change. An accepted background write
+updates the last background epoch but never acquires ownership. A
+lower-priority settled failure
 blocked by a higher-priority owner is retained as pending and is presented
 when that owner releases, unless an explicit reload ticket invalidated all
 older pending notices. This prevents a late Album failure from erasing a newer
@@ -379,9 +393,16 @@ prove that the server is reachable, but only the designated recovery under the
 same current owner releases the claim. Decision controls are enabled only when
 no blocking current claim remains and the current bounded source and Photo
 facts have been confirmed.
-Changing source or Photo retires claims from the old owner only after the new
-source window or Photo window is successfully established; independent File
-Location claims remain until their own range succeeds. Claim creation and
+Changing source or Photo creates a transition lineage. Claims from owner A
+become predecessor claims for the in-progress owner B: they cannot present into
+B, but they keep decisions blocked during establishment. If B establishes its
+bounded current facts successfully, that exact transition retires A's
+predecessor claims and any B establishment claim. If B establishment fails, a
+current B claim replaces the predecessor blocker and A's claims retire; a
+later B retry or later successor releases only the then-current lineage. An
+old A claim never reactivates if the UI later returns to the same logical Photo
+under a new generation. Independent File Location claims remain outside this
+lineage until their own range succeeds. Claim creation, replacement, and
 release are generation-gated, so stale failure and success cannot change the
 current gate.
 
@@ -404,9 +425,11 @@ four orthogonal mechanisms:
   and run cleanup exactly once;
 - settlement handles run admitted writes without cancellation and decide
   whether their captured surface may still present the result;
-- the Summary Notice Channel issues opaque `(ticket, kind, key)` handles,
-  retains a reload-barrier floor, arbitrates persistent owners by priority and
-  ticket, performs exact-handle release, and retains at most the newest
+- the Summary Notice Channel issues opaque owning `(ticket, kind, key)` handles
+  and non-owning background epochs from one monotonic sequence, retains a
+  reload-barrier floor and last accepted background epoch, arbitrates
+  persistent owners by priority and ticket, reports stale/no-op background
+  writes, performs exact-handle release, and retains at most the newest
   eligible pending fallback per owner kind;
 - the Recovery Gate creates and releases exact-owner revalidation claims,
   separately records transport reachability, and reports whether current
@@ -441,10 +464,12 @@ Focused automated coverage must prove:
 - detached status and File Location responses may settle but cannot write
   after their key is superseded, while source and Photo changes leave the
   independent File Location scope running;
-- status HTTP non-success and transport failure remain silent and polling; a
-  semantic failed scan retains the prior publication and owns Retry Library
-  Check; accepted retry starts one current poll; and scan completion owns the
-  Refresh Current Source notice without changing an open snapshot;
+- the first committed overview starts exactly one application-lifetime status
+  monitor for both published and unpublished Libraries; idle monitoring
+  detects externally triggered scans; HTTP non-success and transport failure
+  remain silent; a semantic failed scan retains the prior publication and owns
+  Retry Library Check; accepted retry reuses the monitor; and scan completion
+  owns Refresh Current Source without changing an open snapshot;
 - every File Location, Browse open/window, current/adjacent Preview, and
   thumbnail failure follows its specified notice, retry, and Recovery route;
 - unrelated File Location or background success cannot release a current
@@ -461,9 +486,12 @@ Focused automated coverage must prove:
 - Summary claim handles prevent stale cross-family overwrite, exact-range
   release cannot clear another owner, eligible pending Album failures surface,
   and the persistent reload barrier rejects older claims, releases, pending
-  fallbacks, and background writes after the visible reload notice clears;
-- Recovery claims are released only by exact current-owner recovery, and stale
-  failure or success cannot alter the gate;
+  fallbacks, and non-owning background epochs after the visible reload notice
+  clears; stale background writes are no-ops and never acquire ownership;
+- Recovery claims are released only by exact current-owner recovery, stale
+  failure or success cannot alter the gate, and an A→B transition where B also
+  fails replaces A's predecessor blocker with B without leaving an invisible A
+  claim or permitting either stale owner to change controls;
 - Photo opening promotes an aborted adjacent boundary window to a new
   high-priority Photo-owned request;
 - moving an adjacent prefetched Photo to current causes the shared Preview
