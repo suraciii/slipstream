@@ -1042,6 +1042,50 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("an older overview success still bootstraps after a newer reload fails", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+
+  let calls = 0;
+  let releaseOlder!: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseOlder = resolve;
+  });
+  await page.route("**/api/overview", async (route) => {
+    calls += 1;
+    if (calls === 1 || calls === 3) {
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    if (calls === 2) {
+      const response = await route.fetch();
+      await held;
+      await route.fulfill({ response });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(running.url);
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry connection" });
+  await retry.click();
+  await expect.poll(() => calls).toBe(2);
+  // The second foreground reload owns failure presentation, but its failure
+  // must not detach the older shared overview request.
+  await retry.click();
+  await expect.poll(() => calls).toBe(3);
+  await expect(page.getByText("Disconnected")).toBeVisible();
+
+  releaseOlder();
+  await expect(page.getByText("Connected")).toBeVisible();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+});
+
 test("a stale overview response cannot revert newer album state", async ({
   page,
 }) => {

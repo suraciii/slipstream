@@ -1,3 +1,4 @@
+import { TaskScope } from "./async-ownership.js";
 import type {
   AlbumSummary,
   BrowseOpenResponse,
@@ -29,6 +30,9 @@ export function renderApp(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
 ): () => void {
+  const applicationTasks = new TaskScope();
+  let overviewDataFloor = 0;
+
   root.innerHTML = `
     <main class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
@@ -413,6 +417,9 @@ export function renderApp(
           if (response.status >= 500 && stillNewest()) setConnected(false);
           return { ok: false, announce: () => {} };
         }
+        // A response that started before this committed mutation may no
+        // longer update shared Album facts.
+        overviewDataFloor += 1;
         // A stale settlement refreshes the bounded data but leaves the
         // current connection state to whichever action owns the UI now.
         try {
@@ -477,6 +484,7 @@ export function renderApp(
       if (generation !== fileLocationGeneration) return;
       if (folderRequestSequence.get(parent) !== sequence) return;
       if (response.status === 409) {
+        overviewDataFloor += 1;
         resetFileLocations();
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
@@ -1086,102 +1094,119 @@ export function renderApp(
       }
     }
   };
-  let overviewRequestSequence = 0;
-  let overviewCommitted = 0;
+  const electOverviewBootstrap = (committed: LibraryOverviewResponse): void => {
+    const owner = applicationTasks.beginLatest("overview-bootstrap", {
+      abortTransport: false,
+    });
+    void (async () => {
+      try {
+        if (!fileLocationPublication && committed.published) {
+          // Root binding belongs to the independent File Location scope. A
+          // superseded bootstrap awaits it but starts no later child.
+          if (lastSource?.kind === "folder" && !token) {
+            await awaitRootBinding();
+            if (!owner.isCurrent()) return;
+          } else {
+            void loadFolderWindow("", 0, false);
+          }
+        }
+        if (!owner.isCurrent()) return;
+        if (!token && committed.published) {
+          const remembered = lastSource ?? {
+            kind: "library" as const,
+            set: undefined,
+            folder: undefined,
+          };
+          const bindable =
+            remembered.kind !== "folder" ||
+            fileLocationPublication !== undefined;
+          if (bindable) {
+            await openSource(
+              remembered.kind,
+              remembered.set,
+              undefined,
+              remembered.folder,
+            );
+          } else if (owner.isCurrent()) {
+            gridStatus.textContent =
+              "Could not load this source. Retry to continue.";
+          }
+        } else if (!committed.published && owner.isCurrent()) {
+          void pollUntilPublished();
+        }
+      } finally {
+        owner.finish();
+      }
+    })();
+  };
+
   const refreshOverviewState = async (options?: {
     connectivity?: boolean;
     action?: number;
-  }) => {
-    // Overview responses commit shared state in commit order: a response may
-    // land only if it is newer than the last COMMITTED overview, so a late
-    // older response cannot revert Albums, counts, titles, or retry state,
-    // while a newer request that FAILS never discards an older success.
-    const request = ++overviewRequestSequence;
-    const response = await fetcher("/api/overview");
-    if (!response.ok) throw new Error("overview failed");
-    const body = (await response.json()) as LibraryOverviewResponse;
-    // Re-check after the body resolves: a slow parse must not let an
-    // obsolete overview revert newer committed state either.
-    if (request <= overviewCommitted) return;
-    overviewCommitted = request;
-    overview = body;
-    sets = overview.albums;
-    // The Library summary keeps a standing Album notice until a newer
-    // Album action settles or the user deliberately reloads: background
-    // refreshes (folder recovery, scan polling) must not erase it.
-    const owner = options?.action;
-    const mayTakeSummary =
-      owner !== undefined
-        ? owner >= summaryNoticeAction
-        : summaryNoticeAction === 0;
-    if (mayTakeSummary) {
-      summaryStatus.textContent = scanLabel(overview.scan);
-      // A successfully settled action supersedes any prior notice: clear
-      // the marker so background refreshes may take the summary again.
-      // (A failing action keeps its marker until a newer action settles.)
-      if (owner !== undefined) summaryNoticeAction = 0;
-    }
-    if (options?.connectivity !== false) setConnected(true);
-    // A refreshed Album list must not leave stale presentation behind: the
-    // open Album keeps its (possibly renamed) name on every heading, the
-    // remembered retry source follows the rename, and the current-Photo
-    // membership controls follow the refreshed Album list.
-    if (sourceKind === "album" && sourceSetId) {
-      const open = sets.find((candidate) => candidate.id === sourceSetId);
-      if (open) {
-        sourceSetName = open.name;
-        gridTitle.textContent = sourceSetName;
-        photoTitle.textContent = sourceSetName;
-        if (lastSource?.kind === "album" && lastSource.set?.id === open.id) {
-          lastSource = { ...lastSource, set: open };
+    bootstrap?: boolean;
+  }): Promise<boolean> => {
+    // The scope owns request sequencing and the latest committed sequence at
+    // the current data floor. Requests remain concurrent: a newer failure
+    // does not detach an older valid success.
+    const task = applicationTasks.beginOrdered("overview", overviewDataFloor);
+    try {
+      const response = await fetcher("/api/overview");
+      if (!response.ok) throw new Error("overview failed");
+      const body = (await response.json()) as LibraryOverviewResponse;
+      // Re-check both captured floor and commit order after body parsing.
+      if (!task.commit(overviewDataFloor)) return false;
+      overview = body;
+      sets = body.albums;
+      // The Library summary keeps a standing Album notice until a newer
+      // Album action settles or the user deliberately reloads: background
+      // refreshes (folder recovery, scan polling) must not erase it.
+      const action = options?.action;
+      const mayTakeSummary =
+        action !== undefined
+          ? action >= summaryNoticeAction
+          : summaryNoticeAction === 0;
+      if (mayTakeSummary) {
+        summaryStatus.textContent = scanLabel(body.scan);
+        if (action !== undefined) summaryNoticeAction = 0;
+      }
+      if (options?.connectivity !== false) setConnected(true);
+      if (sourceKind === "album" && sourceSetId) {
+        const open = sets.find((candidate) => candidate.id === sourceSetId);
+        if (open) {
+          sourceSetName = open.name;
+          gridTitle.textContent = sourceSetName;
+          photoTitle.textContent = sourceSetName;
+          if (lastSource?.kind === "album" && lastSource.set?.id === open.id)
+            lastSource = { ...lastSource, set: open };
         }
       }
+      renderMembershipControls();
+      renderSources();
+      if (options?.bootstrap) electOverviewBootstrap(body);
+      return true;
+    } finally {
+      task.finish();
     }
-    renderMembershipControls();
-    renderSources();
   };
 
-  let overviewLoadSequence = 0;
   const loadOverview = async () => {
-    // A deliberate reload or retry retakes the Library summary channel.
-    // Sequence loads so an older failed load cannot mark a newer successful
-    // load disconnected: only the newest load owns the failure surface.
-    const load = ++overviewLoadSequence;
+    // Foreground reload ownership is latest-only, while its shared overview
+    // child keeps commit-in-order ownership and may elect bootstrap even when
+    // a newer foreground load fails.
+    const load = applicationTasks.beginLatest("overview-load", {
+      abortTransport: false,
+    });
     summaryNoticeAction = 0;
     summaryStatus.textContent = "Loading Library summary…";
     try {
-      await refreshOverviewState();
-      const current = overview;
-      if (!current) throw new Error("overview missing");
-      if (!fileLocationPublication && current.published) {
-        // A remembered Folder source must reopen only after the publication
-        // is bound; otherwise the request would be rejected as invalid.
-        if (lastSource?.kind === "folder" && !token) {
-          await awaitRootBinding();
-        } else {
-          void loadFolderWindow("", 0, false);
-        }
-      }
-      if (!token && current.published) {
-        const source = lastSource ?? {
-          kind: "library" as const,
-          set: undefined,
-          folder: undefined,
-        };
-        const bindable =
-          source.kind !== "folder" || fileLocationPublication !== undefined;
-        if (bindable) {
-          await openSource(source.kind, source.set, undefined, source.folder);
-        } else {
-          gridStatus.textContent =
-            "Could not load this source. Retry to continue.";
-        }
-      } else if (!current.published) void pollUntilPublished();
+      await refreshOverviewState({ bootstrap: true });
     } catch {
-      if (load !== overviewLoadSequence) return;
+      if (!load.isCurrent()) return;
       summaryStatus.textContent =
         "Could not reach Slipstream. Check the server and retry.";
       setConnected(false);
+    } finally {
+      load.finish();
     }
   };
 
@@ -1280,6 +1305,7 @@ export function renderApp(
         // Locations: a superseded open doing the same would discard the
         // newer recovery and leave the tree unbound.
         if (generation !== sourceGeneration) return;
+        overviewDataFloor += 1;
         resetFileLocations();
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
@@ -1425,6 +1451,7 @@ export function renderApp(
         // Generation-gated exactly like openSource: only the current
         // source's recovery may reset and rebind File Locations.
         if (generation === sourceGeneration) {
+          overviewDataFloor += 1;
           resetFileLocations();
           await refreshOverviewState().catch(() => {});
           await loadFolderWindow("", 0);
@@ -2540,6 +2567,7 @@ export function renderApp(
   window.addEventListener("keydown", keydown);
   void loadOverview();
   return () => {
+    applicationTasks.halt();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
     if (token) void closeBrowse(token);
