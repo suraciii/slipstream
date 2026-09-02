@@ -70,9 +70,12 @@ an overview load.
 An answered HTTP non-success or transport failure is silent, does not create
 or release a Recovery claim, and leaves the current monitor running. A
 successful response may write scan progress only as a background update
-through the Summary Notice Channel. Transition handling compares the response
-with the last scan state observed by this monitor, so an already-idle baseline
-does not invent a completion event.
+through the Summary Notice Channel. Each individual status request captures a
+fresh non-owning background epoch when that request starts; the lifetime
+monitor does not reuse one epoch. Transition handling compares the response
+with the last scan state observed by this monitor. A first committed overview
+whose scan is already `idle` establishes the baseline and does not invent a
+completion event because no open snapshot predates that commit.
 
 A semantic `failed` scan retains the prior Published Library, stops that poll,
 and claims an actionable `scan-failure` Summary notice with a **Retry Library
@@ -89,12 +92,20 @@ notice replaces it.
 
 `POST /api/scan` is a non-abortable admitted server command owned by the
 application. Duplicate Retry Library Check admission while one command is in
-flight is a no-op. An answered `4xx` keeps the scan-failure notice without
-adding a transport Recovery claim. `5xx` or transport failure adds a
-scan-command Recovery claim and keeps the same retry action. Successful
-admission releases that exact claim and starts a new current publication poll.
-Application teardown detaches presentation from the command but cannot treat
-accepted scan work as rolled back.
+flight is a no-op. Starting the command creates a scan-completion handle and
+records a known non-idle transition for that handle before awaiting the
+terminal response. The existing status monitor remains running. The first of
+(a monitor transition to `idle`) or (the command's successful terminal `idle`
+response) consumes the handle, advances the overview floor, and presents the
+completion notice; the other path is an exact-handle no-op. This guarantees
+exactly-once completion even when the scan finishes between monitor polls.
+
+An answered `4xx` keeps the scan-failure notice without adding a transport
+Recovery claim. `5xx` or transport failure adds a scan-command Recovery claim
+and keeps the same retry action. Successful terminal settlement releases that
+exact claim. Application teardown detaches presentation from the command but
+cannot treat accepted scan work as rolled back; the application-owned server
+Scan Cycle continues independently of the HTTP waiter.
 
 ### Shared overview refresh
 
@@ -340,10 +351,11 @@ File Location, overview, status, scan failure/completion, failed-range
 recovery, and explicit reload. An operation that may own a notice receives an
 opaque claim handle containing a monotonically increasing ticket, owner kind,
 and exact owner key (for example a failed Folder range). A non-owning
-background operation captures an opaque **background epoch** from the same
-monotonic sequence when it starts. Persistent claims are identified by their
-full handle; within the same priority, only a newer ticket replaces the visible
-owner.
+background HTTP request captures an opaque **background epoch** from the same
+monotonic sequence when that request starts. A lifetime monitor therefore uses
+a fresh epoch for every status request, and each overview request does the
+same. Persistent claims are identified by their full handle; within the same
+priority, only a newer ticket replaces the visible owner.
 
 Actionable scan failure/completion, File Location and range-retry notices, and
 explicit reload own the highest priority. Album failures are fallback notices.
@@ -366,11 +378,13 @@ success may release an already displayed older Album notice, but it does not
 predeclare an in-flight older write successful; if that older write later
 fails, it may claim an otherwise free channel.
 
-An explicit reload claims the channel before its first request and advances a
-persistent `reloadBarrierTicket`. Every later claim, pending fallback,
-background write, and release is rejected when its ticket is older than that
-barrier, even after the reload's visible notice is released. Application
-teardown invalidates all claim handles.
+An explicit reload atomically advances a persistent `reloadBarrierTicket`,
+invalidates and removes every active or pending handle older than that barrier,
+and then claims the channel before its first request. Every later claim,
+pending fallback, background write, and release is rejected when its ticket is
+older than the barrier, even after the reload's visible notice is released.
+No invalidated owner remains present to block background writes or await an
+impossible release. Application teardown invalidates all claim handles.
 
 If the initiating source, Photo, or form disappears after an Album write is
 sent, success stays locally silent and shared data still refreshes; failure
@@ -426,11 +440,12 @@ four orthogonal mechanisms:
 - settlement handles run admitted writes without cancellation and decide
   whether their captured surface may still present the result;
 - the Summary Notice Channel issues opaque owning `(ticket, kind, key)` handles
-  and non-owning background epochs from one monotonic sequence, retains a
-  reload-barrier floor and last accepted background epoch, arbitrates
-  persistent owners by priority and ticket, reports stale/no-op background
-  writes, performs exact-handle release, and retains at most the newest
-  eligible pending fallback per owner kind;
+  and a fresh non-owning background epoch per HTTP request from one monotonic
+  sequence; atomically invalidates pre-barrier active and pending handles;
+  retains a reload-barrier floor and last accepted background epoch;
+  arbitrates persistent owners by priority and ticket; reports stale/no-op
+  background writes; performs exact-handle release; and retains at most the
+  newest eligible pending fallback per owner kind;
 - the Recovery Gate creates and releases exact-owner revalidation claims,
   separately records transport reachability, and reports whether current
   decision facts are ready.
@@ -468,8 +483,12 @@ Focused automated coverage must prove:
   monitor for both published and unpublished Libraries; idle monitoring
   detects externally triggered scans; HTTP non-success and transport failure
   remain silent; a semantic failed scan retains the prior publication and owns
-  Retry Library Check; accepted retry reuses the monitor; and scan completion
-  owns Refresh Current Source without changing an open snapshot;
+  Retry Library Check; and the retry command's terminal result and monitor
+  transition consume one completion handle exactly once without changing an
+  open snapshot;
+- concurrent startup/explicit scan admissions run one application-owned leader,
+  publish once, return one captured terminal status to all live waiters, and
+  finish status accounting even when one or every HTTP waiter disconnects;
 - every File Location, Browse open/window, current/adjacent Preview, and
   thumbnail failure follows its specified notice, retry, and Recovery route;
 - unrelated File Location or background success cannot release a current
@@ -485,9 +504,12 @@ Focused automated coverage must prove:
   fallback when the token is unknown;
 - Summary claim handles prevent stale cross-family overwrite, exact-range
   release cannot clear another owner, eligible pending Album failures surface,
-  and the persistent reload barrier rejects older claims, releases, pending
-  fallbacks, and non-owning background epochs after the visible reload notice
-  clears; stale background writes are no-ops and never acquire ownership;
+  and reload atomically removes active and pending pre-barrier claims before
+  rejecting older claims, releases, pending fallbacks, and non-owning
+  background epochs after the visible reload notice clears;
+- every status and overview HTTP request captures a fresh background epoch, so
+  two successive monitor writes remain eligible around an intervening newer
+  background writer while genuinely late settlements are stale no-ops;
 - Recovery claims are released only by exact current-owner recovery, stale
   failure or success cannot alter the gate, and an A→B transition where B also
   fails replaces A's predecessor blocker with B without leaving an invisible A
