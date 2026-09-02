@@ -1432,7 +1432,17 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
+    let published = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key='published_once'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?
+        .is_some_and(|value| value == "1");
     Ok(ScanSnapshot {
+        published,
         originals,
         photos,
         errors: Vec::new(),
@@ -1766,6 +1776,13 @@ fn apply_scan(
                 ])
                 .map_err(|_| PersistenceError::Storage)?;
         }
+        transaction
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('published_once','1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
         Ok(())
     })?;
     let mut result = snapshot(connection)?;

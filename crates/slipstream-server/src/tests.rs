@@ -1833,6 +1833,29 @@ async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publi
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
     application.shutdown().await.unwrap();
+
+    // A completed empty publication is durable: restart serves the empty
+    // Library immediately instead of regressing to initializing.
+    let (restart_gate_sender, restart_gate_receiver) = tokio::sync::oneshot::channel();
+    let reopened = Application::open_with_gate(
+        &config,
+        ScanLimits::default(),
+        Some(restart_gate_receiver),
+        None,
+    )
+    .await
+    .unwrap();
+    let overview = reopened.overview().await.unwrap();
+    assert!(overview.published);
+    assert_eq!(overview.photo_count, 0);
+    assert_eq!(overview.scan.state, "idle");
+    let opened = reopened
+        .browse_open(BrowseSourceRequest::Library, None)
+        .await
+        .unwrap();
+    assert_eq!(opened.total, 0);
+    restart_gate_sender.send(()).unwrap();
+    reopened.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
@@ -2078,6 +2101,34 @@ async fn dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status()
         baseline + 2
     );
     application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn shutdown_returns_only_after_live_scan_waiters_receive_terminal_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let mut receive = application
+        .admit_scan_cycle(Some(gate_receiver), None)
+        .unwrap();
+    let closing = {
+        let application = Arc::clone(&application);
+        tokio::spawn(async move { application.shutdown().await })
+    };
+    tokio::task::yield_now().await;
+    gate_sender.send(()).unwrap();
+    closing.await.unwrap().unwrap();
+
+    let terminal = receive
+        .try_recv()
+        .expect("shutdown returned before scan waiter fan-out")
+        .unwrap();
+    assert_eq!(terminal.state, "idle");
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
     let _ = fs::remove_dir_all(base);
 }
 

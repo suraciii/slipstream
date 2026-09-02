@@ -232,9 +232,6 @@ impl SharedLibrary {
                 }
                 match self.publish_fresh(library).await {
                     Ok(()) => Ok(()),
-                    Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => {
-                        Err(error)
-                    }
                     Err(error) => {
                         self.failed.store(true, Ordering::Relaxed);
                         Err(error)
@@ -242,8 +239,10 @@ impl SharedLibrary {
                 }
             }
             // Shutdown drained this admitted scan; it is not a Library failure.
-            Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => Err(error),
             Err(error) => {
+                // Application shutdown drains an admitted cycle before
+                // closing the Library, so Closed/ScannerStopped here is an
+                // unexpected scan failure and must remain visible as failed.
                 self.failed.store(true, Ordering::Relaxed);
                 Err(error)
             }
@@ -300,19 +299,21 @@ impl Application {
                     .await
                     .map(|()| application.scan_status())
                     .map_err(|error| error.to_string());
-                let waiters = {
+                {
+                    // Fan-out is non-blocking. Keep admission serialized until
+                    // every terminal outcome is delivered, then expose idle to
+                    // shutdown and the next cycle together.
                     let mut cycle = application
                         .scan_cycle
                         .state
                         .lock()
                         .expect("scan cycle poisoned");
+                    for waiter in std::mem::take(&mut cycle.waiters) {
+                        let _ = waiter.send(outcome.clone());
+                    }
                     cycle.in_flight = false;
-                    std::mem::take(&mut cycle.waiters)
-                };
-                application.scan_cycle.idle.notify_waiters();
-                for waiter in waiters {
-                    let _ = waiter.send(outcome.clone());
                 }
+                application.scan_cycle.idle.notify_waiters();
             });
         }
         Ok(receive)
@@ -355,7 +356,11 @@ impl Application {
         // without a published Library stays initializing until its first scan
         // publishes one.
         let persisted = library.snapshot().await?;
-        let published_initial = !persisted.photos.is_empty() || !persisted.originals.is_empty();
+        // Non-empty v2-v5 stores predate the durable marker and remain
+        // published-compatible. Every completed scan now writes the marker,
+        // which also preserves an intentionally empty Published Library.
+        let published_initial =
+            persisted.published || !persisted.photos.is_empty() || !persisted.originals.is_empty();
         let shared = Arc::new(SharedLibrary {
             snapshot: RwLock::new(published_initial.then(|| Published::new(persisted))),
             published: AtomicBool::new(published_initial),
