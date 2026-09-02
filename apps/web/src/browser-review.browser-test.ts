@@ -433,6 +433,58 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
+test("Album names and management actions do not overlap", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await createAlbum(running.url, "26春节");
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    if (viewport.width === 390)
+      await page.locator("[data-source-toggle]").click();
+
+    const row = page.locator(".album-row").filter({
+      has: page.getByRole("button", { name: /^26春节 1 Photos/ }),
+    });
+    const card = row.locator(".source-card");
+    const tools = row.locator(".album-tools");
+    await expect(card).toBeVisible();
+    await expect(tools).toBeVisible();
+
+    const layout = await row.evaluate((container) => {
+      const bounds = (selector: string) =>
+        (
+          container.querySelector(selector) as HTMLElement
+        ).getBoundingClientRect();
+      const rowBox = container.getBoundingClientRect();
+      const cardBox = bounds(".source-card");
+      const toolsBox = bounds(".album-tools");
+      const label = container.querySelector(
+        ".source-card strong",
+      ) as HTMLElement;
+      return {
+        contained:
+          cardBox.left >= rowBox.left &&
+          cardBox.right <= rowBox.right &&
+          toolsBox.left >= rowBox.left &&
+          toolsBox.right <= rowBox.right,
+        separated: cardBox.bottom <= toolsBox.top,
+        labelFits: label.scrollWidth <= label.clientWidth,
+      };
+    });
+    expect(layout).toEqual({
+      contained: true,
+      separated: true,
+      labelFits: true,
+    });
+  }
+});
+
 test("Clear is available only for a decided Photo", async ({ page }) => {
   const { base, root } = await fixture();
   for (const name of ["a.jpg", "b.jpg"])
@@ -996,11 +1048,15 @@ test("a failed removal stays retryable from the photo view", async ({
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
-  await createAlbum(running.url, "Retry");
+  const { albumId } = await createAlbum(running.url, "Retry");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Retry 1 Photos/ }).click();
-  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  );
 
   await page.route("**/api/albums/*/members/remove", (route) => route.abort());
   await page.getByRole("button", { name: "Remove from this Album" }).click();
@@ -1367,6 +1423,14 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Slow 2 Photos/ }).click();
+  let releasePreview!: () => void;
+  const previewReleased = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  await page.route("**/api/photos/*/preview", async (route) => {
+    await previewReleased;
+    await route.continue();
+  });
   await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
 
   // Hold the removal while a background re-render lands: the control must
@@ -1392,6 +1456,11 @@ test("in-flight membership and delete operations stay disabled across re-renders
   });
   const removeButton = page.locator("[data-remove-from-album]");
   await removeButton.click();
+  await expect(removeButton).toBeDisabled();
+  // A routine Preview completion must not silently take ownership from the
+  // user-initiated removal while that mutation is still in flight.
+  releasePreview();
+  await expect(page.locator("[data-stage] img")).toBeVisible();
   await openSources(page);
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })

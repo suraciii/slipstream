@@ -313,12 +313,14 @@ dd {
 .album-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
+  gap: 0.1rem;
 }
 
 .album-tools {
   min-width: 0;
+  justify-content: flex-end;
 }
 
 .album-tools:has(.album-form),
