@@ -573,6 +573,42 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
+  test("a locally superseded foreground load releases its barrier without failing Recovery", async () => {
+    const stale = deferred<Response>();
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return overviewRequests === 1
+          ? Promise.resolve(response(overview("publication-1", "Album")))
+          : stale.promise;
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    expect(await owner.refreshOverview()).toBe(true);
+    events.splice(0);
+    const pending = owner.loadOverview();
+    await Promise.resolve();
+    owner.confirmSavedPosition("album-1");
+    stale.resolve(
+      response(overview("publication-1", "Album", { hasSavedPosition: false })),
+    );
+    await pending;
+
+    expect(owner.albums[0]?.hasSavedPosition).toBe(true);
+    expect(latestSummary(events)?.text).toBe("Library ready");
+    expect(
+      events.some(
+        (event) =>
+          event.kind === "fail-application-recovery" ||
+          event.kind === "recover" ||
+          event.kind === "mark-reachable",
+      ),
+    ).toBe(false);
+    owner.dispose();
+  });
+
   test("dispose silences a held Overview response", async () => {
     const held = deferred<Response>();
     const { owner, events } = harness((input) =>
