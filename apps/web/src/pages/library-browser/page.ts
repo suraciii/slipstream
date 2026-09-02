@@ -6,8 +6,6 @@ import {
 import type {
   AlbumSummary,
   FolderChild,
-  PhotoSummary,
-  PreviewSource,
   SelectionState,
 } from "./api/contracts.js";
 import {
@@ -23,6 +21,7 @@ import {
   type ApplicationEvent,
   type ApplicationPresentation,
   type ApplicationRecovery,
+  type ApplicationSummaryAction,
   type FileLocationPresentation,
 } from "./model/application-owner.js";
 import {
@@ -39,7 +38,14 @@ import {
 } from "./model/album-action-owner.js";
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
-import "./ui/library-browser.css";
+import {
+  createLibraryBrowserView,
+  type AlbumFormReference,
+  type FolderViewModel,
+  type LibraryBrowserIntent,
+  type LibraryBrowserView,
+  type SourceListViewModel,
+} from "./ui/library-browser-view.js";
 
 type GridRangeRetry = Readonly<{
   sourceAuthority: SourceAuthority;
@@ -57,12 +63,6 @@ type AlbumRecoveryRecord = Readonly<{
   claim: RecoveryClaim;
   sourceAuthority: SourceAuthority;
 }>;
-const GRID_CELL_HEIGHT = 178;
-const GRID_CELL_WIDTH = 150;
-const swipePendingPixels = 24;
-const swipeCommitPixels = 72;
-const swipeCommitVelocity = 0.5;
-
 export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
@@ -70,91 +70,24 @@ export function mountLibraryBrowser(
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher);
-
-  root.innerHTML = `
-    <main class="app-shell">
-      <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
-      <section class="browser" data-browser aria-labelledby="browser-title">
-        <div class="source-scrim" data-source-scrim aria-hidden="true"></div>
-        <aside class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
-          <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
-          <p data-summary-status role="status">Loading Library…</p>
-          <div class="source-list" data-source-list></div>
-          <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
-        </aside>
-        <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div></header>
-          <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div></div>
-        </section>
-        <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
-          <section class="preview" data-preview aria-label="Photo Preview">
-            <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
-            <div class="image-stage" data-stage><p>Loading Preview…</p></div>
-            <div class="swipe-feedback select" data-select-feedback>Select</div>
-          </section>
-          <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div>
-            <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
-          </section>
-          <section class="review-tools" aria-label="Review tools">
-            <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-            <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
-            <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-detail aria-pressed="false">Detail Review</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
-          </section>
-        </section>
-      </section>
-    </main>`;
-
-  const browser = required<HTMLElement>(root, "[data-browser]");
-  const sourcePanel = required<HTMLElement>(root, "#source-panel");
-  const sourceToggle = required<HTMLButtonElement>(
+  const view: LibraryBrowserView = createLibraryBrowserView(
     root,
-    "[data-source-toggle]",
-  );
-  const photoSourceToggle = required<HTMLButtonElement>(
-    root,
-    "[data-photo-source-toggle]",
-  );
-  const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
-  const sourceScrim = required<HTMLElement>(root, "[data-source-scrim]");
-  const connection = required<HTMLElement>(root, "[data-connection]");
-  const summaryStatusElement = required<HTMLElement>(
-    root,
-    "[data-summary-status]",
-  );
-  const sourceList = required<HTMLElement>(root, "[data-source-list]");
-  const retry = required<HTMLButtonElement>(root, "[data-retry]");
-  const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
-  const gridView = required<HTMLElement>(root, "[data-grid-view]");
-  const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
-  const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
-  const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
-  const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
-  const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
-  const photoView = required<HTMLElement>(root, "[data-photo-view]");
-  const photoTitle = required<HTMLElement>(root, "[data-photo-title]");
-  const position = required<HTMLElement>(root, "[data-position]");
-  const stage = required<HTMLElement>(root, "[data-stage]");
-  const preview = required<HTMLElement>(root, "[data-preview]");
-  const selection = required<HTMLElement>(root, "[data-selection]");
-  const rating = required<HTMLElement>(root, "[data-rating]");
-  const source = required<HTMLElement>(root, "[data-source]");
-  const limited = required<HTMLElement>(root, "[data-limited]");
-  const statusElement = required<HTMLElement>(root, "[data-status]");
-  // A status write replaces the Photo surface's identity. Album settlement
-  // handles capture that identity instead of maintaining a second sequence.
-  let photoStatusOwner: object = {};
-  const status = {
-    get textContent() {
-      return statusElement.textContent;
+    handleViewIntent,
+    (binding) => {
+      if (binding.preview.state === "unavailable") {
+        sourceGrid.markThumbnailUnavailable(binding.photoId, binding.target);
+      } else if (binding.preview.thumbnailUrl) {
+        sourceGrid.presentThumbnail(
+          binding.photoId,
+          binding.target,
+          binding.preview.thumbnailUrl,
+          true,
+        );
+      } else {
+        void sourceGrid.loadThumbnail(binding.photoId, binding.target);
+      }
     },
-    set textContent(value: string) {
-      if (statusElement.textContent === value) return;
-      photoStatusOwner = {};
-      statusElement.textContent = value;
-    },
-  };
+  );
   const photoOwner = createPhotoOwner(
     fetcher,
     {
@@ -181,11 +114,12 @@ export function mountLibraryBrowser(
       emit: (event) => {
         if (
           !photoOwner.isCurrent(event.authority) ||
-          event.surface !== photoStatusOwner
+          !view.isPhotoStatusSurfaceCurrent(event.surface)
         )
           return;
-        status.textContent =
-          "Preview could not be loaded. You can continue browsing.";
+        view.setPhotoStatus(
+          "Preview could not be loaded. You can continue browsing.",
+        );
       },
     },
   );
@@ -202,101 +136,28 @@ export function mountLibraryBrowser(
     isPhotoCurrent: (authority, photoId) =>
       photoOwner.isCurrent(authority) && photoOwner.current?.id === photoId,
   });
-  const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
-  const back = required<HTMLButtonElement>(root, "[data-back]");
-  const previous = required<HTMLButtonElement>(root, "[data-previous]");
-  const next = required<HTMLButtonElement>(root, "[data-next]");
-  const select = required<HTMLButtonElement>(root, "[data-select]");
-  const albumSelect = required<HTMLSelectElement>(root, "[data-album-select]");
-  const addToAlbum = required<HTMLButtonElement>(root, "[data-add-to-album]");
-  const removeFromAlbum = required<HTMLButtonElement>(
-    root,
-    "[data-remove-from-album]",
-  );
-  const reject = required<HTMLButtonElement>(root, "[data-reject]");
-  const clear = required<HTMLButtonElement>(root, "[data-clear]");
-  const undoButton = required<HTMLButtonElement>(root, "[data-undo]");
-  const detail = required<HTMLButtonElement>(root, "[data-detail]");
-  const ratings = required<HTMLElement>(root, "[data-ratings]");
-  const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
-  const rejectFeedback = required<HTMLElement>(root, "[data-reject-feedback]");
-
-  const compactSources = window.matchMedia("(max-width: 760px)");
-  let sourceReturn = sourceToggle;
-  const syncSourcePanel = () => {
-    const drawerMode = compactSources.matches || !photoView.hidden;
-    const drawerOpen = drawerMode && browser.classList.contains("sources-open");
-    const concealed = drawerMode && !drawerOpen;
-    sourcePanel.inert = concealed;
-    sourcePanel.setAttribute("aria-hidden", String(concealed));
-    gridView.inert = drawerOpen;
-    photoView.inert = drawerOpen;
-  };
-  const setSourcesExpanded = (expanded: boolean) => {
-    sourceToggle.setAttribute("aria-expanded", String(expanded));
-    photoSourceToggle.setAttribute("aria-expanded", String(expanded));
-  };
-  const openSources = (returnTo: HTMLButtonElement) => {
-    sourceReturn = returnTo;
-    browser.classList.add("sources-open");
-    setSourcesExpanded(true);
-    syncSourcePanel();
-    sourceClose.focus();
-  };
-  const closeSources = (restoreFocus = true) => {
-    browser.classList.remove("sources-open");
-    setSourcesExpanded(false);
-    syncSourcePanel();
-    if (restoreFocus) sourceReturn.focus();
-  };
-  const onSourceViewportChange = () => {
-    browser.classList.remove("sources-open");
-    setSourcesExpanded(false);
-    syncSourcePanel();
-  };
-  compactSources.addEventListener("change", onSourceViewportChange);
-  sourceToggle.addEventListener("click", () => openSources(sourceToggle));
-  photoSourceToggle.addEventListener("click", () =>
-    openSources(photoSourceToggle),
-  );
-  sourceClose.addEventListener("click", () => closeSources());
-  sourceScrim.addEventListener("click", () => closeSources());
-  syncSourcePanel();
-
-  for (let value = 0; value <= 5; value += 1) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.ratingValue = String(value);
-    button.setAttribute(
-      "aria-label",
-      value === 0 ? "Clear Rating" : `Rate ${value} stars`,
-    );
-    button.textContent = value === 0 ? "0" : `${value}★`;
-    ratings.append(button);
-  }
-
   const applicationRecoveries = new Map<ApplicationRecovery, RecoveryClaim>();
+  let nextSummaryPresentationId = 0;
+  let summaryAction:
+    | Readonly<{
+        presentationId: number;
+        action: ApplicationSummaryAction;
+      }>
+    | undefined;
 
   const presentApplication = (presentation: ApplicationPresentation): void => {
     if (!applicationAlive) return;
     if (presentation.kind === "summary") {
-      summaryStatusElement.replaceChildren(
-        document.createTextNode(presentation.summary.text),
+      const presentationId = ++nextSummaryPresentationId;
+      summaryAction = presentation.summary.action
+        ? { presentationId, action: presentation.summary.action }
+        : undefined;
+      view.presentSummary(
+        presentation.summary.text,
+        presentation.summary.action
+          ? { kind: presentation.summary.action.kind, presentationId }
+          : undefined,
       );
-      if (!presentation.summary.action) return;
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = "summary-action";
-      action.textContent =
-        presentation.summary.action.kind === "retry-library-check"
-          ? "Retry Library Check"
-          : "Refresh Current Source";
-      const owner = presentation.summary.action;
-      action.addEventListener("click", () => {
-        const intent = application.activateSummaryAction(owner);
-        if (intent?.kind === "refresh-current-source") refresh.click();
-      });
-      summaryStatusElement.append(" ", action);
       return;
     }
     if (sourceGrid.kind === "album" && sourceGrid.albumId) {
@@ -305,8 +166,7 @@ export function mountLibraryBrowser(
       );
       if (open) {
         sourceGrid.updateAlbum(open);
-        gridTitle.textContent = sourceGrid.name;
-        photoTitle.textContent = sourceGrid.name;
+        view.setSourceTitle(sourceGrid.name);
       }
     }
     renderMembershipControls();
@@ -368,8 +228,7 @@ export function mountLibraryBrowser(
       if (bindable) {
         await openSourceDescriptor(remembered);
       } else if (coordination.isCurrent()) {
-        gridStatus.textContent =
-          "Could not load this source. Retry to continue.";
+        view.setGridStatus("Could not load this source. Retry to continue.");
       }
     }
   };
@@ -385,44 +244,19 @@ export function mountLibraryBrowser(
     emit: handleApplicationEvent,
   });
   const albumActions = createAlbumActionOwner(fetcher);
-  // In-progress Album management form: create, rename, or a two-step delete
-  // confirmation. Only one form exists at a time and it lives in the Albums
-  // section of the source list. The current model object is the operation's
-  // identity: an asynchronous continuation only clears or updates the form it
-  // still owns, so a newer form is never clobbered by an older settle.
-  type AlbumFormModel =
-    | {
-        kind: "create";
-        formId: string;
-        authority: AlbumFormAuthority;
-        name: string;
-        pending?: boolean;
-        message?: string;
-      }
-    | {
-        kind: "rename";
-        formId: string;
-        authority: AlbumFormAuthority;
-        id: string;
-        name: string;
-        pending?: boolean;
-        message?: string;
-      }
-    | {
-        kind: "delete";
-        formId: string;
-        authority: AlbumFormAuthority;
-        id: string;
-        name: string;
-        pending?: boolean;
-      };
-  let albumFormCounter = 0;
-  const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
-  let albumForm: AlbumFormModel | undefined;
-  const dismissAlbumForm = (model: AlbumFormModel): boolean => {
-    if (!albumActions.isFormCurrent(model.authority)) return false;
-    albumActions.closeForm(model.authority);
-    albumForm = undefined;
+  type AlbumFormRecord = Readonly<{
+    formId: string;
+    kind: AlbumFormReference["kind"];
+    authority: AlbumFormAuthority;
+    albumId?: string;
+    initialName: string;
+  }>;
+  let albumForm: AlbumFormRecord | undefined;
+  const dismissAlbumForm = (record: AlbumFormRecord): boolean => {
+    if (!albumActions.isFormCurrent(record.authority)) return false;
+    albumActions.closeForm(record.authority);
+    if (albumForm === record) albumForm = undefined;
+    view.dismissAlbumForm(record.formId);
     return true;
   };
 
@@ -449,25 +283,6 @@ export function mountLibraryBrowser(
     photoRecoveryKeys.set(authority, key);
     return key;
   };
-  let renderedColumns = 0;
-  let renderedViewportHeight = 0;
-  let gridRenderFrame: number | undefined;
-  let zoomed = false;
-  let panX = 0;
-  let panY = 0;
-  let pointer:
-    | {
-        id: number;
-        startX: number;
-        startY: number;
-        lastX: number;
-        lastY: number;
-        startedAt: number;
-        vertical: boolean;
-        authority: PhotoAuthority;
-        photoId: string;
-      }
-    | undefined;
 
   const currentPhoto = () => photoOwner.current;
   const currentAlbumRecovery = (): AlbumRecoveryRecord | undefined => {
@@ -486,12 +301,12 @@ export function mountLibraryBrowser(
       if (!recoveryGate.isActive(failure.claim))
         browseRangeFailures.delete(key);
     connected = connectionEstablished && recoveryGate.decisionReady;
-    if (!connected) clearPointer();
-    connection.textContent = connected ? "Connected" : "Disconnected";
-    connection.classList.toggle("offline", !connected);
-    retry.hidden = connected || photoOwner.active;
-    retryPhoto.hidden = connected || !photoOwner.active;
-    if (message) status.textContent = message;
+    view.setConnection(
+      connected,
+      !connected && !photoOwner.active,
+      !connected && photoOwner.active,
+    );
+    if (message) view.setPhotoStatus(message);
     updateControls();
   };
   const setConnected = (value: boolean, message?: string) => {
@@ -597,44 +412,24 @@ export function mountLibraryBrowser(
     const photo = currentPhoto();
     const interactionBusy = pageBusy || photoOwner.busy;
     const enabled = Boolean(photo) && connected && !interactionBusy;
-    for (const button of [
-      select,
-      reject,
-      ...Array.from(ratings.querySelectorAll<HTMLButtonElement>("button")),
-    ])
-      button.disabled = !enabled;
-    clear.disabled = !enabled || photo?.selectionState === "undecided";
-    back.disabled = interactionBusy;
-    refresh.disabled = interactionBusy;
-    previous.disabled =
-      interactionBusy || photoOwner.opening || photoOwner.currentIndex <= 0;
-    next.disabled =
-      interactionBusy ||
-      photoOwner.opening ||
-      sourceGrid.total === 0 ||
-      photoOwner.currentIndex >= sourceGrid.total - 1;
-    undoButton.disabled =
-      !connected ||
-      interactionBusy ||
-      photoOwner.opening ||
-      !photoOwner.canUndo;
-    detail.disabled = !stage.querySelector("img");
-  };
-  const resetTransform = () => {
-    zoomed = false;
-    panX = 0;
-    panY = 0;
-    detail.setAttribute("aria-pressed", "false");
-    detail.textContent = "Detail Review";
-    applyTransform();
-  };
-  const applyTransform = () => {
-    const image = stage.querySelector<HTMLImageElement>("img");
-    if (!image) return;
-    image.style.transform = zoomed
-      ? `translate(${panX}px, ${panY}px) scale(2)`
-      : "translate(0, 0) scale(1)";
-    preview.classList.toggle("detail", zoomed);
+    view.setControls({
+      decisionEnabled: enabled,
+      clearEnabled: enabled && photo?.selectionState !== "undecided",
+      backEnabled: !interactionBusy,
+      refreshEnabled: !interactionBusy,
+      previousEnabled:
+        !interactionBusy && !photoOwner.opening && photoOwner.currentIndex > 0,
+      nextEnabled:
+        !interactionBusy &&
+        !photoOwner.opening &&
+        sourceGrid.total > 0 &&
+        photoOwner.currentIndex < sourceGrid.total - 1,
+      undoEnabled:
+        connected &&
+        !interactionBusy &&
+        !photoOwner.opening &&
+        photoOwner.canUndo,
+    });
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -656,13 +451,13 @@ export function mountLibraryBrowser(
       sourceAuthority: SourceAuthority;
     }>;
   }> => {
-    const capturedPhotoStatus = photoStatusOwner;
+    const capturedPhotoStatus = view.photoStatusSurface;
     const sourceOwner = sourceGrid.authority;
     const ownsPhotoSurface = () =>
       surface === "photo" &&
       photoOwner.isCurrent(photoOwnerAuthority) &&
       photoOwner.active &&
-      capturedPhotoStatus === photoStatusOwner;
+      view.isPhotoStatusSurfaceCurrent(capturedPhotoStatus);
     const action = start({
       sourceAuthority: sourceOwner,
       surface:
@@ -718,7 +513,7 @@ export function mountLibraryBrowser(
 
         if (outcome.kind === "failed") {
           const presentOnPhoto = albumActions.canPresent(outcome.surface);
-          if (presentOnPhoto) status.textContent = outcome.failureMessage;
+          if (presentOnPhoto) view.setPhotoStatus(outcome.failureMessage);
           else
             application.presentAlbumSummary(
               summaryPresentation,
@@ -764,7 +559,7 @@ export function mountLibraryBrowser(
           ok: true,
           announce: (text: string) => {
             if (presentOnSurface && ownsPhotoSurface())
-              status.textContent = text;
+              view.setPhotoStatus(text);
           },
           ...(outcome.removedFromCurrentAlbum
             ? { removedFromCurrentAlbum: outcome.removedFromCurrentAlbum }
@@ -934,475 +729,153 @@ export function mountLibraryBrowser(
     return boundByThisOutcome && Boolean(fileLocations.publication);
   };
 
-  const folderPager = (parent: string, retained: FileLocationWindow) => {
-    const depth = parent ? parent.split("/").length : 0;
-    const pages = Math.max(
-      1,
-      Math.ceil(retained.total / fileLocations.pageSize),
-    );
-    const controls = document.createElement("div");
-    controls.className = "folder-pager";
-    controls.style.marginLeft = `${Math.min(depth, 6) * 12}px`;
-    const previous = document.createElement("button");
-    previous.type = "button";
-    previous.className = "folder-page-button";
-    previous.textContent = "Previous Folders";
-    previous.disabled = retained.page === 0;
-    previous.addEventListener("click", () => {
-      const current = fileLocations.window(parent);
-      if (current && current.page > 0)
-        void loadFolderWindow(parent, current.page - 1);
-    });
-    const label = document.createElement("span");
-    label.className = "folder-page-label";
-    label.textContent = `${retained.page + 1} / ${pages}`;
-    const next = document.createElement("button");
-    next.type = "button";
-    next.className = "folder-page-button";
-    next.textContent = "More Folders";
-    next.disabled =
-      (retained.page + 1) * fileLocations.pageSize >= retained.total;
-    next.addEventListener("click", () => {
-      // Read the current page at click time: the retained entry is replaced
-      // by each response, so a stale closure would replay the same page.
-      const current = fileLocations.window(parent);
-      if (current) void loadFolderWindow(parent, current.page + 1);
-    });
-    controls.append(previous, label, next);
-    return controls;
+  const fileLocationFailuresByKey = new Map<string, FileLocationFailure>();
+
+  const folderPagerModel = (
+    retained: FileLocationWindow | undefined,
+  ): FolderViewModel["pager"] => {
+    if (!retained || retained.total <= fileLocations.pageSize) return undefined;
+    return {
+      page: retained.page,
+      pages: Math.max(1, Math.ceil(retained.total / fileLocations.pageSize)),
+      hasPrevious: retained.page > 0,
+      hasNext: (retained.page + 1) * fileLocations.pageSize < retained.total,
+    };
   };
 
-  const folderCard = (child: FolderChild) => {
-    const depth = child.location.split("/").length;
-    const row = document.createElement("div");
-    row.className = "folder-row folder-child";
-    row.style.marginLeft = `${Math.min(depth - 1, 6) * 12}px`;
-    const expand = document.createElement("button");
-    expand.type = "button";
-    expand.className = "folder-expand";
-    expand.setAttribute(
-      "aria-expanded",
-      fileLocations.isExpanded(child.location) ? "true" : "false",
-    );
-    expand.textContent = fileLocations.isExpanded(child.location) ? "▾" : "▸";
-    expand.setAttribute("aria-label", `Toggle ${child.name} subfolders`);
-    expand.addEventListener("click", () => {
-      if (fileLocations.isExpanded(child.location)) {
-        if (fileLocations.collapse(child.location)) renderSources();
-      } else {
-        // Expanding revalidates against the current publication instead of
-        // trusting retained state from a possibly superseded generation.
-        void loadFolderWindow(child.location, 0);
-      }
-    });
-    const button = sourceButton(
-      `${child.name}${child.hasDescendantFolders ? " · Subfolders" : ""}`,
-      child.photoCount,
-      sourceGrid.kind === "folder" &&
+  const folderViewModel = (child: FolderChild): FolderViewModel => {
+    const expanded = fileLocations.isExpanded(child.location);
+    const retained = expanded
+      ? fileLocations.window(child.location)
+      : undefined;
+    const pager = folderPagerModel(retained);
+    return {
+      location: child.location,
+      name: child.name,
+      photoCount: child.photoCount,
+      hasDescendantFolders: child.hasDescendantFolders,
+      expanded,
+      enabled: Boolean(fileLocations.publication),
+      active:
+        sourceGrid.kind === "folder" &&
         sourceGrid.folder?.location === child.location,
-      false,
-      false,
-    );
-    // Folder sources cannot open before a publication is bound.
-    button.disabled = !fileLocations.publication;
-    button.addEventListener(
-      "click",
-      () =>
-        void openSource("folder", undefined, undefined, {
-          location: child.location,
-          name: child.name,
-        }),
-    );
-    if (!child.hasDescendantFolders) expand.disabled = true;
-    row.append(expand, button);
-    if (!fileLocations.isExpanded(child.location)) return row;
-    const fragment = document.createDocumentFragment();
-    fragment.append(row, folderChildrenFragment(child.location));
-    return fragment;
-  };
-
-  const folderChildrenFragment = (parent: string) => {
-    const retained = fileLocations.window(parent);
-    if (!retained || !fileLocations.isExpanded(parent))
-      return document.createDocumentFragment();
-    const fragment = document.createDocumentFragment();
-    for (const child of retained.children) fragment.append(folderCard(child));
-    if (retained.total > fileLocations.pageSize)
-      fragment.append(folderPager(parent, retained));
-    return fragment;
+      children: retained?.children.map(folderViewModel) ?? [],
+      ...(pager ? { pager } : {}),
+    };
   };
 
   const renderSources = () => {
     if (!applicationAlive) return;
-    // Background refreshes rebuild the source list; an Album form input that
-    // held focus keeps its focus and caret through the rebuild.
-    const focused = document.activeElement;
-    const focusedFormId =
-      focused instanceof HTMLInputElement
-        ? focused.dataset.albumFormId
-        : undefined;
-    const focusedSelection =
-      focused instanceof HTMLInputElement
-        ? [focused.selectionStart, focused.selectionEnd]
-        : undefined;
-    sourceList.replaceChildren();
-    const libraryButton = sourceButton(
-      "All Photos",
-      application.overview?.photoCount ?? 0,
-      sourceGrid.kind === "library",
-    );
-    libraryButton.addEventListener("click", () => void openSource("library"));
-    sourceList.append(libraryButton);
-
-    const fileHeading = document.createElement("h3");
-    fileHeading.textContent = "File Locations";
-    sourceList.append(fileHeading);
-    for (const failure of fileLocations.failures()) {
-      const retryFolders = document.createElement("button");
-      retryFolders.type = "button";
-      retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry File Locations (${failure.range})`;
-      retryFolders.addEventListener("click", () => {
-        void (async () => {
-          await handleFileLocationOutcome(await fileLocations.retry(failure));
-        })();
-      });
-      sourceList.append(retryFolders);
-    }
-    const rootCard = sourceButton(
-      "Library Folder",
-      application.overview?.photoCount ?? 0,
-      sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
-      false,
-      false,
-    );
-    rootCard.addEventListener(
-      "click",
-      () =>
-        void openSource("folder", undefined, undefined, {
-          location: "",
-          name: "Library Folder",
-        }),
-    );
-    // The root source cannot open before a publication is bound.
-    rootCard.disabled = !fileLocations.publication;
-    const rootRow = document.createElement("div");
-    rootRow.className = "folder-row folder-root";
-    const rootExpand = document.createElement("button");
-    rootExpand.type = "button";
-    rootExpand.className = "folder-expand";
-    rootExpand.setAttribute(
-      "aria-expanded",
-      fileLocations.isExpanded("") ? "true" : "false",
-    );
-    rootExpand.textContent = fileLocations.isExpanded("") ? "▾" : "▸";
-    rootExpand.setAttribute("aria-label", "Toggle Library Folder subfolders");
-    rootExpand.addEventListener("click", () => {
-      if (fileLocations.isExpanded("")) {
-        if (fileLocations.collapse("")) renderSources();
-      } else {
-        void loadFolderWindow("", 0);
-      }
+    fileLocationFailuresByKey.clear();
+    const failures = fileLocations.failures().map((failure) => {
+      const key = `${failure.generation}:${failure.parent}:${failure.page}`;
+      fileLocationFailuresByKey.set(key, failure);
+      return { key, range: failure.range };
     });
-    rootRow.append(rootExpand, rootCard);
-    sourceList.append(rootRow, folderChildrenFragment(""));
+    const rootWindow = fileLocations.window("");
+    const rootPager = folderPagerModel(rootWindow);
+    const model: SourceListViewModel = {
+      libraryCount: application.overview?.photoCount ?? 0,
+      libraryActive: sourceGrid.kind === "library",
+      fileLocationsEnabled: Boolean(fileLocations.publication),
+      fileLocationFailures: failures,
+      rootExpanded: fileLocations.isExpanded(""),
+      rootActive:
+        sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
+      rootChildren:
+        fileLocations.isExpanded("") && rootWindow
+          ? rootWindow.children.map(folderViewModel)
+          : [],
+      ...(rootPager ? { rootPager } : {}),
+      albums: application.albums.map((album) => ({
+        id: album.id,
+        name: album.name,
+        photoCount: album.photoCount,
+        hasSavedPosition: album.hasSavedPosition,
+        active: sourceGrid.kind === "album" && sourceGrid.albumId === album.id,
+      })),
+    };
+    view.renderSources(model);
+  };
 
-    const albumHeadingRow = document.createElement("div");
-    albumHeadingRow.className = "album-heading";
-    const albumHeading = document.createElement("h3");
-    albumHeading.textContent = "Albums";
-    const newAlbum = document.createElement("button");
-    newAlbum.type = "button";
-    newAlbum.className = "album-new";
-    newAlbum.textContent = "New Album";
-    newAlbum.addEventListener("click", () => {
-      const formId = nextAlbumFormId();
-      albumForm = {
-        kind: "create",
-        formId,
-        authority: albumActions.openForm(formId),
-        name: "",
-      };
-      renderSources();
-    });
-    albumHeadingRow.append(albumHeading, newAlbum);
-    sourceList.append(albumHeadingRow);
+  const openAlbumForm = (form: AlbumFormReference): void => {
+    albumForm = {
+      formId: form.formId,
+      kind: form.kind,
+      authority: albumActions.openForm(form.formId),
+      ...(form.albumId ? { albumId: form.albumId } : {}),
+      initialName: form.name,
+    };
+  };
 
-    if (albumForm?.kind === "create") {
-      sourceList.append(albumCreateForm());
-    }
-    for (const set of application.albums) {
-      const button = sourceButton(
-        set.name,
-        set.photoCount,
-        sourceGrid.kind === "album" && sourceGrid.albumId === set.id,
-        set.hasSavedPosition,
-        false,
+  const closeAlbumForm = (formId: string): void => {
+    const record = albumForm;
+    if (!record || record.formId !== formId) return;
+    dismissAlbumForm(record);
+  };
+
+  const submitAlbumForm = async (
+    formId: string,
+    draft?: string,
+  ): Promise<void> => {
+    const record = albumForm;
+    if (
+      !record ||
+      record.formId !== formId ||
+      !albumActions.isFormCurrent(record.authority)
+    )
+      return;
+    if (record.kind === "delete") {
+      const albumId = record.albumId!;
+      view.setAlbumFormPending(formId, true);
+      const { ok: deleted } = await mutateAlbum(
+        (context) => albumActions.delete(albumId, context),
+        "summary",
+        photoOwner.authority,
+        record.authority,
       );
-      button.addEventListener("click", () => void openSource("album", set));
-      const row = document.createElement("div");
-      row.className = "album-row";
-      row.append(button, albumTools(set));
-      sourceList.append(row);
-    }
-    if (focusedFormId) {
-      const restored = sourceList.querySelector<HTMLInputElement>(
-        `input[data-album-form-id="${focusedFormId}"]`,
-      );
-      if (restored) {
-        const end = restored.value.length;
-        const start = Math.min(focusedSelection?.[0] ?? end, end);
-        const finish = Math.min(focusedSelection?.[1] ?? end, end);
-        restored.focus();
-        restored.setSelectionRange(start, finish);
-      }
-    }
-  };
-
-  const albumNameInput = (
-    model: Extract<AlbumFormModel, { kind: "create" | "rename" }>,
-    initial: string,
-  ) => {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.name = "name";
-    input.dataset.albumFormId = model.formId;
-    input.setAttribute("aria-label", "Album name");
-    // Keep the model's draft current so a re-render during editing preserves
-    // exactly what the user typed, and validate by Unicode code points like
-    // the server instead of native UTF-16 code-unit maxlength.
-    const draft = model;
-    input.addEventListener("input", () => {
-      if (albumActions.isFormCurrent(draft.authority)) {
-        draft.name = input.value;
-        if (draft.message) delete draft.message;
-      }
-    });
-    input.value = initial;
-    return input;
-  };
-
-  const albumFormMessage = () => {
-    const message = document.createElement("p");
-    message.className = "album-form-message";
-    message.setAttribute("role", "alert");
-    return message;
-  };
-
-  const albumCreateForm = () => {
-    const model = albumForm as Extract<AlbumFormModel, { kind: "create" }>;
-    const form = document.createElement("form");
-    form.className = "album-form";
-    form.setAttribute("aria-label", "Create Album");
-    const input = albumNameInput(model, model.name);
-    const message = albumFormMessage();
-    message.textContent = model.message ?? "";
-    const save = document.createElement("button");
-    save.type = "submit";
-    save.textContent = "Create Album";
-    save.disabled = Boolean(model.pending);
-    const abort = document.createElement("button");
-    abort.type = "button";
-    abort.textContent = "Cancel";
-    abort.addEventListener("click", () => {
-      dismissAlbumForm(model);
+      if (albumActions.isFormCurrent(record.authority))
+        dismissAlbumForm(record);
       renderSources();
-    });
-    form.append(input, save, abort, message);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const name = input.value.trim();
-      const invalid = albumNameError(name);
-      if (invalid) {
-        // Stored in the model so a background re-render cannot erase it.
-        model.message = invalid;
-        message.textContent = invalid;
-        return;
-      }
-      delete model.message;
-      message.textContent = "";
-      model.name = name;
-      model.pending = true;
-      renderSources();
-      void (async () => {
-        const { ok: created } = await mutateAlbum(
-          (context) => albumActions.create(name, context),
-          "summary",
-          photoOwner.authority,
-          model.authority,
-        );
-        if (albumActions.isFormCurrent(model.authority)) {
-          if (created) dismissAlbumForm(model);
-          else model.pending = false;
-        }
-        renderSources();
-      })();
-    });
-    return form;
-  };
+      if (
+        deleted &&
+        sourceGrid.kind === "album" &&
+        sourceGrid.albumId === albumId
+      )
+        await openSource("library");
+      return;
+    }
 
-  const albumTools = (set: AlbumSummary) => {
-    const tools = document.createElement("div");
-    tools.className = "album-tools";
-    if (albumForm?.kind === "rename" && albumForm.id === set.id) {
-      const model = albumForm;
-      const form = document.createElement("form");
-      form.className = "album-form";
-      form.setAttribute("aria-label", "Rename Album");
-      const input = albumNameInput(model, model.name);
-      const message = albumFormMessage();
-      message.textContent = model.message ?? "";
-      const save = document.createElement("button");
-      save.type = "submit";
-      save.textContent = "Save Name";
-      save.disabled = Boolean(model.pending);
-      const abort = document.createElement("button");
-      abort.type = "button";
-      abort.textContent = "Cancel";
-      abort.addEventListener("click", () => {
-        dismissAlbumForm(model);
-        renderSources();
-      });
-      form.append(input, save, abort, message);
-      form.addEventListener("submit", (event) => {
-        event.preventDefault();
-        const name = input.value.trim();
-        if (!name || name === set.name) {
-          dismissAlbumForm(model);
-          renderSources();
-          return;
-        }
-        const invalid = albumNameError(name);
-        if (invalid) {
-          // Stored in the model so a background re-render cannot erase it.
-          model.message = invalid;
-          message.textContent = invalid;
-          return;
-        }
-        delete model.message;
-        message.textContent = "";
-        model.name = name;
-        model.pending = true;
-        renderSources();
-        void (async () => {
-          const { ok: renamed } = await mutateAlbum(
-            (context) => albumActions.rename(set.id, name, context),
-            "summary",
-            photoOwner.authority,
-            model.authority,
-          );
-          if (albumActions.isFormCurrent(model.authority)) {
-            if (renamed) dismissAlbumForm(model);
-            else model.pending = false;
-          }
-          renderSources();
-        })();
-      });
-      tools.append(form);
-      return tools;
-    }
-    if (albumForm?.kind === "delete" && albumForm.id === set.id) {
-      const model: AlbumFormModel = albumForm;
-      const confirmBox = document.createElement("div");
-      confirmBox.className = "album-confirm";
-      confirmBox.setAttribute("role", "alert");
-      const text = document.createElement("p");
-      text.textContent = "Photos and Original Files remain unchanged.";
-      const confirmButton = document.createElement("button");
-      confirmButton.type = "button";
-      confirmButton.textContent = "Delete Album";
-      confirmButton.disabled = Boolean(model.pending);
-      const abort = document.createElement("button");
-      abort.type = "button";
-      abort.textContent = "Cancel";
-      abort.addEventListener("click", () => {
-        dismissAlbumForm(model);
-        renderSources();
-      });
-      confirmButton.addEventListener("click", () => {
-        void (async () => {
-          confirmButton.disabled = true;
-          model.pending = true;
-          const { ok: deleted } = await mutateAlbum(
-            (context) => albumActions.delete(set.id, context),
-            "summary",
-            photoOwner.authority,
-            model.authority,
-          );
-          if (albumActions.isFormCurrent(model.authority))
-            dismissAlbumForm(model);
-          renderSources();
-          if (
-            deleted &&
-            sourceGrid.kind === "album" &&
-            sourceGrid.albumId === set.id
-          ) {
-            // The open source object is gone; return to the system source.
-            await openSource("library");
-          }
-        })();
-      });
-      confirmBox.append(text, confirmButton, abort);
-      tools.append(confirmBox);
-      return tools;
-    }
-    const rename = document.createElement("button");
-    rename.type = "button";
-    rename.className = "album-tool";
-    rename.textContent = "Rename";
-    rename.setAttribute("aria-label", `Rename ${set.name}`);
-    rename.addEventListener("click", () => {
-      const formId = nextAlbumFormId();
-      albumForm = {
-        kind: "rename",
-        formId,
-        authority: albumActions.openForm(formId),
-        id: set.id,
-        name: set.name,
-      };
+    const name = (draft ?? "").trim();
+    if (record.kind === "rename" && (!name || name === record.initialName)) {
+      dismissAlbumForm(record);
       renderSources();
-    });
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "album-tool";
-    remove.textContent = "Delete";
-    remove.setAttribute("aria-label", `Delete ${set.name}`);
-    remove.addEventListener("click", () => {
-      const formId = nextAlbumFormId();
-      albumForm = {
-        kind: "delete",
-        formId,
-        authority: albumActions.openForm(formId),
-        id: set.id,
-        name: set.name,
-      };
-      renderSources();
-    });
-    tools.append(rename, remove);
-    return tools;
-  };
-  const sourceButton = (
-    name: string,
-    count: number,
-    active: boolean,
-    saved = false,
-    disableWhenEmpty = true,
-  ) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `source-card${active ? " active" : ""}`;
-    button.disabled = disableWhenEmpty && count === 0;
-    button.innerHTML = "<strong></strong><span></span>";
-    button.querySelector("strong")!.textContent = name;
-    button.querySelector("span")!.textContent =
-      `${count} Photos${saved ? " · Resume" : ""}`;
-    return button;
+      return;
+    }
+    const invalid = albumNameError(name);
+    if (invalid) {
+      view.setAlbumFormMessage(formId, invalid);
+      return;
+    }
+    view.setAlbumFormPending(formId, true, name);
+    const { ok } = await mutateAlbum(
+      (context) =>
+        record.kind === "create"
+          ? albumActions.create(name, context)
+          : albumActions.rename(record.albumId!, name, context),
+      "summary",
+      photoOwner.authority,
+      record.authority,
+    );
+    if (albumActions.isFormCurrent(record.authority)) {
+      if (ok) dismissAlbumForm(record);
+      else view.setAlbumFormPending(formId, false);
+    }
+    renderSources();
   };
 
   const cancelScheduledGridRender = () => {
-    if (gridRenderFrame === undefined) return;
-    cancelAnimationFrame(gridRenderFrame);
-    gridRenderFrame = undefined;
+    view.cancelGridRender();
   };
 
   const openSource = async (
@@ -1435,7 +908,6 @@ export function mountLibraryBrowser(
       requested.kind === "folder" && fileLocations.publication
         ? { ...requested, publication: fileLocations.publication }
         : requested;
-    const sourceDrawerWasOpen = browser.classList.contains("sources-open");
     pageBusy = true;
     cancelScheduledGridRender();
     const pendingOpen = sourceGrid.open(descriptor, {
@@ -1460,16 +932,9 @@ export function mountLibraryBrowser(
     );
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
-    gridLayer.replaceChildren();
-    stage.replaceChildren();
-    gridView.hidden = false;
-    photoView.hidden = true;
-    closeSources(false);
-    if (sourceDrawerWasOpen) gridViewport.focus();
+    view.prepareSourceOpen(sourceGrid.name);
     // A new open snapshot ends the previous source's removal memory.
     removedFromCurrentAlbum.clear();
-    gridTitle.textContent = sourceGrid.name;
-    gridStatus.textContent = "Preparing Library order…";
     try {
       const opened = await pendingOpen;
       if (opened.kind === "detached") return;
@@ -1500,8 +965,7 @@ export function mountLibraryBrowser(
         ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
         ...(preferredPhotoId ? { preferredPhotoId } : {}),
       });
-      gridViewport.scrollTop =
-        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
+      view.scrollToGridIndex(gridPosition);
       renderSources();
       const windowReady = await loadWindow(
         gridPosition,
@@ -1516,12 +980,14 @@ export function mountLibraryBrowser(
       sourceGrid.establish(authority);
       setConnected(true);
       renderGrid();
-      gridStatus.textContent = sourceGrid.total
-        ? `Ready · ${sourceGrid.total.toLocaleString()} Photos`
-        : "No Photos in this source";
+      view.setGridStatus(
+        sourceGrid.total
+          ? `Ready · ${sourceGrid.total.toLocaleString()} Photos`
+          : "No Photos in this source",
+      );
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
-      gridStatus.textContent = "Could not load this source. Retry to continue.";
+      view.setGridStatus("Could not load this source. Retry to continue.");
       const claim = recoveryGate.issue("source-open", String(generation), {
         owner: { scope: "source", generation: String(generation) },
         transition: sourceTransition,
@@ -1538,13 +1004,6 @@ export function mountLibraryBrowser(
     }
   }
 
-  const columns = () =>
-    Math.max(
-      1,
-      Math.floor(Math.max(320, gridViewport.clientWidth) / GRID_CELL_WIDTH),
-    );
-  const effectiveViewportHeight = () =>
-    Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
   const reopenExpired = async (
     anchorIndex: number,
     expectedGeneration = sourceGrid.generation,
@@ -1580,8 +1039,7 @@ export function mountLibraryBrowser(
       if (expectedGeneration !== sourceGrid.generation) return;
       if (!boundPublication) {
         // Fail truthfully instead of sending a publicationless request.
-        gridStatus.textContent =
-          "Could not load this source. Retry to continue.";
+        view.setGridStatus("Could not load this source. Retry to continue.");
         const claim = recoveryGate.issue(
           "source-reopen",
           String(expectedGeneration),
@@ -1631,8 +1089,8 @@ export function mountLibraryBrowser(
     syncConnection();
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
-    gridStatus.textContent = notice;
-    status.textContent = notice;
+    view.setGridStatus(notice);
+    view.setPhotoStatus(notice);
     try {
       const opened = await pendingOpen;
       if (opened.kind === "detached") return;
@@ -1671,19 +1129,17 @@ export function mountLibraryBrowser(
         sourceTransition,
       );
       if (!sourceGrid.isCurrent(authority) || !windowReady) return;
-      gridViewport.scrollTop =
-        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
+      view.scrollToGridIndex(gridPosition);
       renderGrid();
-      gridStatus.textContent =
-        "Source reopened using the latest published Library order.";
+      view.setGridStatus(
+        "Source reopened using the latest published Library order.",
+      );
       if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
       setConnected(true);
       if (resumePhoto && photoOwner.isCurrent(photoAuthority)) {
-        gridView.hidden = true;
-        photoView.hidden = false;
-        syncSourcePanel();
+        view.enterPhoto();
         renderPhotoShell(photoAuthority);
         void showPreview(photoAuthority, photoTransition).then(
           async (refreshed) => {
@@ -1700,8 +1156,8 @@ export function mountLibraryBrowser(
       if (!sourceGrid.isCurrent(authority)) return;
       const failure =
         "This source expired and could not be reopened. Retry the connection.";
-      gridStatus.textContent = failure;
-      status.textContent = failure;
+      view.setGridStatus(failure);
+      view.setPhotoStatus(failure);
       const claim = recoveryGate.issue("source-reopen", String(generation), {
         owner: { scope: "source", generation: String(generation) },
         transition: sourceTransition,
@@ -1740,7 +1196,9 @@ export function mountLibraryBrowser(
         : String(sourceGrid.generation);
     const { range } = sourceGrid.describeWindow(index);
     if (!quiet)
-      gridStatus.textContent = `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`;
+      view.setGridStatus(
+        `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`,
+      );
     const outcome = await sourceGrid.loadWindow(index, operation, {
       quiet,
       priority,
@@ -1768,8 +1226,8 @@ export function mountLibraryBrowser(
             : outcome.transportLost
               ? `Connection lost while loading ${outcome.range}. Retry this range.`
               : `${outcome.range} could not be loaded (HTTP ${outcome.status}). Retry this range.`;
-        if (ownerScope === "photo") status.textContent = message;
-        else gridStatus.textContent = message;
+        if (ownerScope === "photo") view.setPhotoStatus(message);
+        else view.setGridStatus(message);
         failBrowseRange(
           ownerScope,
           ownerGeneration,
@@ -1791,101 +1249,31 @@ export function mountLibraryBrowser(
       recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
       if (outcome.changed) renderGrid();
       if (!quiet)
-        gridStatus.textContent = `Ready · ${sourceGrid.total.toLocaleString()} Photos`;
+        view.setGridStatus(
+          `Ready · ${sourceGrid.total.toLocaleString()} Photos`,
+        );
       return true;
     } finally {
       if (
         outcome.kind === "detached" &&
         operation.kind === "grid" &&
         sourceGrid.isCurrent(operation.authority) &&
-        !gridView.hidden
+        view.gridVisible()
       )
         scheduleGridRender();
       updateControls();
     }
   };
-  const syncGridHeight = (count: number) => {
-    const height = `${Math.ceil(sourceGrid.total / count) * GRID_CELL_HEIGHT}px`;
-    gridCanvas.style.height = height;
-    gridLayer.style.height = height;
-  };
   const renderGrid = () => {
     if (!applicationAlive) return;
-    const count = columns();
-    const viewportHeight = effectiveViewportHeight();
-    renderedColumns = count;
-    renderedViewportHeight = viewportHeight;
-    syncGridHeight(count);
-    const firstRow = Math.max(
-      0,
-      Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
-    );
-    const visibleRows = Math.ceil(viewportHeight / GRID_CELL_HEIGHT) + 4;
-    const start = firstRow * count;
-    const end = Math.min(sourceGrid.total, start + visibleRows * count);
     sourceGrid.beginGridRender();
-    gridLayer.replaceChildren();
-    for (let index = start; index < end; index += 1) {
-      const cell = document.createElement("button");
-      cell.type = "button";
-      cell.className = "photo-cell";
-      cell.style.left = `${(index % count) * GRID_CELL_WIDTH}px`;
-      cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
-      const photo = sourceGrid.photoAt(index);
-      if (!photo) {
-        cell.disabled = true;
-        cell.textContent = "Loading…";
-        void loadWindow(index);
-      } else {
-        cell.dataset.photoIndex = String(index);
-        renderCell(cell, photo, index);
-        cell.addEventListener("click", () => void openPhoto(index));
-      }
-      gridLayer.append(cell);
-    }
+    view.renderGrid({
+      total: sourceGrid.total,
+      photoAt: (index) => sourceGrid.photoAt(index),
+    });
     updateControls();
   };
-  const renderCell = (
-    cell: HTMLButtonElement,
-    photo: PhotoSummary,
-    index: number,
-  ) => {
-    const image = document.createElement("img");
-    image.alt = `Photo ${index + 1} of ${sourceGrid.total}`;
-    image.loading = "lazy";
-    image.fetchPriority = "low";
-    image.decoding = "async";
-    image.draggable = false;
-    image.className = "thumbnail";
-    cell.append(image);
-    const badge = document.createElement("span");
-    badge.className = `cell-state ${photo.selectionState}`;
-    badge.textContent =
-      photo.selectionState === "undecided"
-        ? ""
-        : photo.selectionState === "selected"
-          ? "✓"
-          : "×";
-    cell.append(badge);
-    const caption = document.createElement("span");
-    caption.className = "cell-caption";
-    caption.textContent = photo.rating
-      ? `${index + 1} · ${photo.rating}★`
-      : String(index + 1);
-    cell.append(caption);
-    if (photo.preview.state === "unavailable") {
-      sourceGrid.markThumbnailUnavailable(photo.id, image);
-    } else if (photo.preview.thumbnailUrl) {
-      sourceGrid.presentThumbnail(
-        photo.id,
-        image,
-        photo.preview.thumbnailUrl,
-        true,
-      );
-    } else {
-      void sourceGrid.loadThumbnail(photo.id, image);
-    }
-  };
+
   const openPhoto = async (index: number) => {
     if (pageBusy || photoOwner.busy || photoOwner.opening) return;
     const navigation = photoOwner.beginOpen(index);
@@ -1896,11 +1284,7 @@ export function mountLibraryBrowser(
     );
     syncConnection();
     sourceGrid.stopGridWork();
-    gridView.hidden = true;
-    photoView.hidden = false;
-    syncSourcePanel();
-    photoView.focus();
-    resetTransform();
+    view.enterPhoto();
     let windowReady = true;
     try {
       if (!sourceGrid.photoAt(index))
@@ -1945,144 +1329,94 @@ export function mountLibraryBrowser(
   };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();
-    position.textContent = `${photoOwner.currentIndex + 1} / ${sourceGrid.total}`;
-    selection.textContent = selectionLabel(photo?.selectionState);
-    rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
+    view.renderPhotoFacts({
+      index: photoOwner.currentIndex,
+      total: sourceGrid.total,
+      selectionState: photo?.selectionState,
+      rating: photo?.rating,
+    });
     updateControls();
   };
+
   const renderReviewImage = (url: string, authority = photoOwner.authority) => {
-    const capturedStatus = photoStatusOwner;
-    const image = document.createElement("img");
-    image.alt = `Photo ${photoOwner.currentIndex + 1} of ${sourceGrid.total}`;
-    image.draggable = false;
-    image.fetchPriority = "high";
-    image.decoding = "async";
-    stage.replaceChildren(image);
-    const resolvedUrl = new URL(url, window.location.href).href;
+    const image = view.presentReviewImage(
+      url,
+      photoOwner.currentIndex,
+      sourceGrid.total,
+    );
+    if (!image) return;
     photoOwner.attachReviewImage(
       authority,
-      {
-        get connected() {
-          return image.isConnected;
-        },
-        get source() {
-          return image.src;
-        },
-        setHandlers(onLoad, onError) {
-          image.onload = onLoad;
-          image.onerror = onError;
-        },
-        clearHandlers() {
-          image.onload = null;
-          image.onerror = null;
-        },
-        setSource(next) {
-          image.src = next;
-        },
-        clearSource() {
-          image.removeAttribute("src");
-        },
-      },
-      resolvedUrl,
-      capturedStatus,
+      image.target,
+      image.resolvedUrl,
+      image.surface,
     );
   };
+
   // Album action ownership suppresses duplicate membership admissions. The
   // open snapshot separately remembers members removed until reopen.
   const removedFromCurrentAlbum = new Set<string>();
-  let selectedAlbumId = "";
 
-  /// Populates the current-Photo Album membership controls.
   const renderMembershipControls = () => {
     if (!applicationAlive) return;
-    albumSelect.replaceChildren();
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = application.albums.length
-      ? "Choose Album…"
-      : "No Albums yet";
-    placeholder.disabled = true;
-    if (!application.albums.some((set) => set.id === selectedAlbumId))
-      selectedAlbumId = "";
-    placeholder.selected = selectedAlbumId === "";
-    albumSelect.append(placeholder);
-    for (const set of application.albums) {
-      const option = document.createElement("option");
-      option.value = set.id;
-      option.textContent = set.name;
-      option.selected = set.id === selectedAlbumId;
-      albumSelect.append(option);
-    }
     const photo = currentPhoto();
-    const adding = Boolean(
-      photo &&
-        selectedAlbumId &&
-        albumActions.isMembershipAdmitted("add", selectedAlbumId, photo.id),
-    );
-    const removing =
-      Boolean(photo && sourceGrid.albumId) &&
-      albumActions.isMembershipAdmitted(
-        "remove",
-        sourceGrid.albumId!,
-        photo!.id,
-      );
-    const inOpenAlbum =
-      sourceGrid.kind === "album" &&
-      Boolean(sourceGrid.albumId) &&
-      Boolean(photo) &&
-      !removedFromCurrentAlbum.has(photo!.id);
-    albumSelect.disabled = !application.albums.length;
-    addToAlbum.disabled =
-      !application.albums.length || !photo || !selectedAlbumId || adding;
-    removeFromAlbum.hidden = !inOpenAlbum;
-    removeFromAlbum.disabled = !inOpenAlbum || removing;
+    view.renderMembership({
+      albums: application.albums.map(({ id, name }) => ({ id, name })),
+      photoPresent: Boolean(photo),
+      addingAlbumIds: photo
+        ? application.albums
+            .filter((album) =>
+              albumActions.isMembershipAdmitted("add", album.id, photo.id),
+            )
+            .map((album) => album.id)
+        : [],
+      inOpenAlbum:
+        sourceGrid.kind === "album" &&
+        Boolean(sourceGrid.albumId) &&
+        Boolean(photo) &&
+        !removedFromCurrentAlbum.has(photo!.id),
+      removing:
+        Boolean(photo && sourceGrid.albumId) &&
+        albumActions.isMembershipAdmitted(
+          "remove",
+          sourceGrid.albumId!,
+          photo!.id,
+        ),
+    });
   };
 
-  albumSelect.addEventListener("change", () => {
-    selectedAlbumId = albumSelect.value;
-    renderMembershipControls();
-  });
-
-  addToAlbum.addEventListener("click", () => {
+  const addMembership = (albumId: string): void => {
     const photo = currentPhoto();
-    const albumId = albumSelect.value;
     if (!photo || !albumId) return;
     const photoId = photo.id;
     if (albumActions.isMembershipAdmitted("add", albumId, photoId)) return;
     const photoAuthority = photoOwner.authority;
     const snapshotAuthority = sourceGrid.authority;
     void (async () => {
-      addToAlbum.disabled = true;
-      const { ok: added, announce } = await mutateAlbum(
+      const settlement = mutateAlbum(
         (context) => albumActions.addMembership(albumId, photoId, context),
         "photo",
         photoAuthority,
       );
-      // Re-adding to the open Album clears the retained snapshot's removal
-      // mark: the Photo is a member again and may be removed once more.
+      renderMembershipControls();
+      const { ok: added, announce } = await settlement;
       if (
         added &&
         sourceGrid.isCurrent(snapshotAuthority) &&
         albumId === sourceGrid.albumId
-      ) {
+      )
         removedFromCurrentAlbum.delete(photoId);
-      }
-      // Admitted persistence is never aborted by a source change; the
-      // continuation only touches this Photo's controls while it is still
-      // the current Photo of the initiating generation.
+      renderMembershipControls();
       if (
+        added &&
         photoOwner.isCurrent(photoAuthority) &&
         currentPhoto()?.id === photoId
-      ) {
-        renderMembershipControls();
-        if (added) announce("Added to the Album.");
-      } else {
-        renderMembershipControls();
-      }
+      )
+        announce("Added to the Album.");
     })();
-  });
+  };
 
-  removeFromAlbum.addEventListener("click", () => {
+  const removeMembership = (): void => {
     const photo = currentPhoto();
     if (
       !photo ||
@@ -2096,100 +1430,90 @@ export function mountLibraryBrowser(
     if (albumActions.isMembershipAdmitted("remove", albumId, photoId)) return;
     const photoAuthority = photoOwner.authority;
     void (async () => {
-      removeFromAlbum.disabled = true;
-      const {
-        ok: removed,
-        announce,
-        removedFromCurrentAlbum: removedFact,
-      } = await mutateAlbum(
+      const settlement = mutateAlbum(
         (context) => albumActions.removeMembership(albumId, photoId, context),
         "photo",
         photoAuthority,
       );
+      renderMembershipControls();
+      const {
+        ok: removed,
+        announce,
+        removedFromCurrentAlbum: removedFact,
+      } = await settlement;
       if (
         removed &&
         removedFact !== undefined &&
         sourceGrid.isCurrent(removedFact.sourceAuthority) &&
         removedFact.albumId === sourceGrid.albumId
-      ) {
-        // The member is gone from the Album; within this open snapshot it
-        // must not be removable again. A removal settling after the source
-        // changed must not mark the Photo in a different Album's snapshot.
+      )
         removedFromCurrentAlbum.add(photoId);
-      }
-      // Recomputing the controls re-enables removal after a failure so the
-      // failed action stays retryable.
+      renderMembershipControls();
       if (
+        removed &&
         photoOwner.isCurrent(photoAuthority) &&
         currentPhoto()?.id === photoId
-      ) {
-        renderMembershipControls();
-        if (removed)
-          announce(
-            "Removed from the Album. It stays in this open view until reopened.",
-          );
-      } else {
-        renderMembershipControls();
-      }
+      )
+        announce(
+          "Removed from the Album. It stays in this open view until reopened.",
+        );
     })();
-  });
+  };
 
   const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
-    photoTitle.textContent = sourceGrid.name;
     renderMembershipControls();
-    renderPhotoFacts();
-    source.textContent = photo?.preview.source
-      ? sourceLabel(photo.preview.source)
-      : "—";
-    limited.hidden = !photo?.preview.limitedDetail;
-    const knownUrl = photo?.preview.url;
-    if (knownUrl) {
-      renderReviewImage(knownUrl, authority);
-    } else {
-      stage.replaceChildren(
-        paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
+    const image = view.renderPhotoShell({
+      sourceName: sourceGrid.name,
+      index: photoOwner.currentIndex,
+      total: sourceGrid.total,
+      photoId: photo?.id,
+      available: photo?.available,
+      selectionState: photo?.selectionState,
+      rating: photo?.rating,
+      previewSource: photo?.preview.source,
+      limitedDetail: photo?.preview.limitedDetail,
+      previewUrl: photo?.preview.url,
+    });
+    if (image)
+      photoOwner.attachReviewImage(
+        authority,
+        image.target,
+        image.resolvedUrl,
+        image.surface,
       );
-    }
-    status.textContent =
-      photo && !photo.available
-        ? "Original File is unavailable. Decisions remain available."
-        : "";
     updateControls();
-    return Boolean(knownUrl);
+    return Boolean(image);
   };
+
   const showPreview = async (
     authority: PhotoAuthority,
     transition?: RecoveryTransition,
   ): Promise<boolean> => {
-    const capturedStatus = photoStatusOwner;
+    const capturedStatus = view.photoStatusSurface;
     const outcome = await photoOwner.loadCurrentPreview(authority);
     if (outcome.kind === "detached") return false;
     if (outcome.kind === "failed") {
-      if (capturedStatus === photoStatusOwner)
-        status.textContent = "Connection lost. Retry to refresh this Photo.";
+      if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
+        view.setPhotoStatus("Connection lost. Retry to refresh this Photo.");
       failPhotoRecovery(authority, "preview", transition);
       return false;
     }
     if (!photoOwner.isCurrent(authority)) return false;
-    const existingImage = stage.querySelector<HTMLImageElement>("img");
     if (outcome.kind === "not-ready") {
-      if (capturedStatus === photoStatusOwner)
-        status.textContent = outcome.preview.message ?? "Preview unavailable";
-      if (!existingImage)
-        stage.replaceChildren(paragraph("Preview unavailable"));
+      if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
+        view.setPhotoStatus(outcome.preview.message ?? "Preview unavailable");
+      view.showPreviewUnavailable("Preview unavailable");
       return true;
     }
     const result = outcome.preview;
-    const resolvedUrl = new URL(result.url, window.location.href).href;
-    if (!existingImage || existingImage.src !== resolvedUrl)
+    if (!view.reviewImageMatches(result.url))
       renderReviewImage(result.url, authority);
-    source.textContent = sourceLabel(result.source);
-    limited.hidden = !result.limitedDetail;
-    if (capturedStatus === photoStatusOwner)
-      status.textContent = result.stale
-        ? (result.message ?? "Showing a stale Preview.")
-        : "";
+    view.setPreviewFacts(result.source, Boolean(result.limitedDetail));
+    if (view.isPhotoStatusSurfaceCurrent(capturedStatus))
+      view.setPhotoStatus(
+        result.stale ? (result.message ?? "Showing a stale Preview.") : "",
+      );
     updateControls();
     void prefetchAdjacent(photoOwner.currentIndex - 1, authority);
     void prefetchAdjacent(photoOwner.currentIndex + 1, authority);
@@ -2227,19 +1551,11 @@ export function mountLibraryBrowser(
     );
     recoveryGate.succeedTransition(photoTransition);
     setConnected(true);
-    photoView.hidden = true;
-    gridView.hidden = false;
-    closeSources(false);
     renderGrid();
     cancelScheduledGridRender();
     const gridAuthority = sourceGrid.authority;
-    scheduleGridRender(() => {
-      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
-      if (gridPosition === undefined) return;
-      gridViewport.scrollTop =
-        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
-      renderGrid();
-    });
+    const gridPosition = sourceGrid.readGridPosition(gridAuthority);
+    view.showGrid(gridPosition);
     updateControls();
   };
   const persistPosition = (
@@ -2267,8 +1583,9 @@ export function mountLibraryBrowser(
       )
         return false;
       if (outcome.kind === "failed") {
-        status.textContent =
-          "Album position could not be saved. Retry before making more decisions.";
+        view.setPhotoStatus(
+          "Album position could not be saved. Retry before making more decisions.",
+        );
         failPhotoRecovery(
           outcome.target.photoAuthority,
           "saved-position",
@@ -2301,19 +1618,23 @@ export function mountLibraryBrowser(
     if (!connected || pageBusy) return;
     const admission = photoOwner.mutate(field, value, advance);
     if (!admission) return;
-    status.textContent = `Saving ${field === "rating" ? "Rating" : "Selection State"}…`;
+    view.setPhotoStatus(
+      `Saving ${field === "rating" ? "Rating" : "Selection State"}…`,
+    );
     updateControls();
     const outcome = await admission.settlement;
     if (outcome.kind === "detached") return;
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
-        status.textContent =
+        view.setPhotoStatus(
           outcome.status === 409
             ? "The Photo changed elsewhere. Retry to refresh its current state."
-            : "The change could not be saved.";
+            : "The change could not be saved.",
+        );
       } else {
-        status.textContent =
-          "Connection lost before the change was confirmed. Retry to refresh.";
+        view.setPhotoStatus(
+          "Connection lost before the change was confirmed. Retry to refresh.",
+        );
       }
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "photo-write");
@@ -2321,7 +1642,9 @@ export function mountLibraryBrowser(
       return;
     }
     if (!outcome.applied) return;
-    status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
+    view.setPhotoStatus(
+      `${field === "rating" ? "Rating" : "Selection"} saved.`,
+    );
     if (outcome.advance) await moveTo(outcome.index + 1);
     else renderPhotoFacts();
     updateControls();
@@ -2332,7 +1655,7 @@ export function mountLibraryBrowser(
     if (!preparation) return;
     updateControls();
     if (preparation.needsWindow) {
-      status.textContent = "Loading Photo for Undo…";
+      view.setPhotoStatus("Loading Photo for Undo…");
       const windowReady = await loadWindow(
         preparation.index,
         { kind: "photo", authority: preparation.windowAuthority },
@@ -2351,23 +1674,20 @@ export function mountLibraryBrowser(
     if (outcome.kind === "detached") return;
     if (outcome.kind === "failed") {
       if (outcome.failure === "transport") {
-        status.textContent = "Connection lost before Undo was confirmed.";
+        view.setPhotoStatus("Connection lost before Undo was confirmed.");
       } else if (outcome.status === 409) {
-        status.textContent =
-          "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
+        view.setPhotoStatus(
+          "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
+        );
       } else {
-        status.textContent = "Undo could not be saved. Try Undo again.";
+        view.setPhotoStatus("Undo could not be saved. Try Undo again.");
       }
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "undo");
       updateControls();
       return;
     }
-    gridView.hidden = true;
-    photoView.hidden = false;
-    syncSourcePanel();
-    photoView.focus();
-    resetTransform();
+    view.enterPhoto();
     const photoTransition = recoveryGate.beginTransition(
       "photo",
       photoRecoveryKey(outcome.authority),
@@ -2390,192 +1710,35 @@ export function mountLibraryBrowser(
     ) {
       recoveryGate.succeedTransition(photoTransition);
       setConnected(true);
-      status.textContent = "Last change undone.";
+      view.setPhotoStatus("Last change undone.");
     }
     updateControls();
   };
 
-  const pointerDown = (event: PointerEvent) => {
-    const photo = currentPhoto();
-    if (
-      pointer ||
-      !event.isPrimary ||
-      pageBusy ||
-      photoOwner.busy ||
-      !connected ||
-      !photo
-    )
-      return;
-    pointer = {
-      id: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      lastX: event.clientX,
-      lastY: event.clientY,
-      startedAt: event.timeStamp,
-      vertical: false,
-      authority: photoOwner.authority,
-      photoId: photo.id,
-    };
-    preview.setPointerCapture(event.pointerId);
-  };
-  const clearPointer = () => {
-    const id = pointer?.id;
-    pointer = undefined;
-    if (id !== undefined && preview.hasPointerCapture(id))
-      preview.releasePointerCapture(id);
-    stage.style.transform = "";
-    selectFeedback.classList.remove("pending");
-    rejectFeedback.classList.remove("pending");
-  };
-  const pointerMove = (event: PointerEvent) => {
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const dx = event.clientX - pointer.startX;
-    const dy = event.clientY - pointer.startY;
-    const stepX = event.clientX - pointer.lastX;
-    const stepY = event.clientY - pointer.lastY;
-    pointer.lastX = event.clientX;
-    pointer.lastY = event.clientY;
-    if (zoomed) {
-      panX = clamp(panX + stepX, -stage.clientWidth / 2, stage.clientWidth / 2);
-      panY = clamp(
-        panY + stepY,
-        -stage.clientHeight / 2,
-        stage.clientHeight / 2,
-      );
-      applyTransform();
-      return;
-    }
-    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12)
-      pointer.vertical = true;
-    if (pointer.vertical) return;
-    stage.style.transform = `translateX(${clamp(dx, -140, 140)}px)`;
-    selectFeedback.classList.toggle("pending", dx > swipePendingPixels);
-    rejectFeedback.classList.toggle("pending", dx < -swipePendingPixels);
-  };
-  const finishPointer = (event: PointerEvent, cancelled = false) => {
-    if (!pointer || pointer.id !== event.pointerId) return;
-    const active = pointer;
-    clearPointer();
-    if (
-      zoomed ||
-      cancelled ||
-      active.vertical ||
-      !connected ||
-      !photoOwner.isCurrent(active.authority) ||
-      currentPhoto()?.id !== active.photoId
-    )
-      return;
-    const dx = event.clientX - active.startX;
-    const elapsed = Math.max(1, event.timeStamp - active.startedAt);
-    const velocity = Math.abs(dx) / elapsed;
-    if (
-      Math.abs(dx) >= swipeCommitPixels ||
-      (Math.abs(dx) >= 48 && velocity >= swipeCommitVelocity)
-    )
-      void mutate("selectionState", dx > 0 ? "selected" : "rejected", true);
-  };
-  const keydown = (event: KeyboardEvent) => {
-    const target = event.target as HTMLElement | null;
-    if (
-      event.isComposing ||
-      target?.matches("input, textarea, select, [contenteditable=true]") ||
-      target?.isContentEditable ||
-      event.altKey
-    )
-      return;
-    if (
-      event.key === "Escape" &&
-      (compactSources.matches || !photoView.hidden) &&
-      browser.classList.contains("sources-open")
-    ) {
-      event.preventDefault();
-      closeSources();
-      return;
-    }
-    const modifier = event.ctrlKey || event.metaKey;
-    if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
-      event.preventDefault();
-      void performUndo();
-      return;
-    }
-    if (modifier || event.shiftKey || !photoOwner.active) return;
-    if (event.key === "ArrowLeft") void moveTo(photoOwner.currentIndex - 1);
-    else if (event.key === "ArrowRight")
-      void moveTo(photoOwner.currentIndex + 1);
-    else if (event.key.toLowerCase() === "p")
-      void mutate("selectionState", "selected", true);
-    else if (event.key.toLowerCase() === "x")
-      void mutate("selectionState", "rejected", true);
-    else if (
-      event.key.toLowerCase() === "u" &&
-      currentPhoto()?.selectionState !== "undecided"
-    )
-      void mutate("selectionState", "undecided", false);
-    else if (/^[0-5]$/.test(event.key))
-      void mutate("rating", Number(event.key), false);
+  const scheduleGridRender = () => {
+    view.scheduleGridRender();
   };
 
-  const scheduleGridRender = (render = renderGrid) => {
-    if (gridRenderFrame !== undefined) return;
-    const authority = sourceGrid.authority;
-    gridRenderFrame = requestAnimationFrame(() => {
-      gridRenderFrame = undefined;
-      if (sourceGrid.isCurrent(authority)) render();
-    });
-  };
-  gridViewport.addEventListener("scroll", () => {
-    scheduleGridRender();
-    const count = columns();
-    void loadWindow(
-      Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * count,
-    );
-  });
-  const onResize = () => {
-    const gridAuthority = sourceGrid.authority;
-    requestAnimationFrame(() => {
-      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
-      if (gridPosition === undefined) return;
-      if (gridView.hidden) return;
-      const nextColumns = columns();
-      const nextViewportHeight = effectiveViewportHeight();
-      if (
-        nextColumns === renderedColumns &&
-        nextViewportHeight === renderedViewportHeight
-      )
-        return;
-      if (nextColumns !== renderedColumns) {
-        syncGridHeight(nextColumns);
-        gridViewport.scrollTop =
-          Math.floor(gridPosition / nextColumns) * GRID_CELL_HEIGHT;
-      }
-      renderGrid();
-    });
-  };
-  window.addEventListener("resize", onResize);
-  back.addEventListener("click", showGrid);
-  refresh.addEventListener("click", () => {
-    void (async () => {
-      // A Folder reopen needs the File Location binding: never send a
-      // publicationless browse (it can only fail as expired/invalid).
-      if (sourceGrid.kind === "folder" && !fileLocations.publication) {
-        await awaitRootBinding();
-        if (!fileLocations.publication) {
-          gridStatus.textContent =
-            "Could not load this source. Retry to continue.";
-          return;
-        }
-      }
-      if (sourceGrid.kind === "album") {
-        const album = application.albums.find(
-          (set) => set.id === sourceGrid.albumId,
-        );
-        if (album) await openSource("album", album);
+  const refreshSource = async (): Promise<void> => {
+    // A Folder reopen needs the File Location binding: never send a
+    // publicationless browse (it can only fail as expired/invalid).
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      await awaitRootBinding();
+      if (!fileLocations.publication) {
+        view.setGridStatus("Could not load this source. Retry to continue.");
         return;
       }
-      await openSourceDescriptor(sourceGrid.source);
-    })();
-  });
+    }
+    if (sourceGrid.kind === "album") {
+      const album = application.albums.find(
+        (set) => set.id === sourceGrid.albumId,
+      );
+      if (album) await openSource("album", album);
+      return;
+    }
+    await openSourceDescriptor(sourceGrid.source);
+  };
+
   const currentSourceRangeRetries = (
     alignedStart?: number,
   ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> => {
@@ -2622,7 +1785,7 @@ export function mountLibraryBrowser(
     }
     return recovered;
   };
-  retry.addEventListener("click", () => {
+  const retrySource = (): void => {
     const rangeRetries = currentSourceRangeRetries();
     if (rangeRetries.length > 0) {
       const retryAuthority = sourceGrid.authority;
@@ -2650,19 +1813,19 @@ export function mountLibraryBrowser(
         resetFileLocations();
         const bound = await awaitRootBinding();
         if (!bound) {
-          gridStatus.textContent =
-            "Could not load this source. Retry to continue.";
+          view.setGridStatus("Could not load this source. Retry to continue.");
           return;
         }
       }
       await openSourceDescriptor(remembered);
     })();
-  });
-  retryPhoto.addEventListener("click", () => {
+  };
+
+  const retryCurrentPhoto = (): void => {
     void (async () => {
       const retry = photoOwner.beginRetry();
       if (!retry) return;
-      status.textContent = "Reconnecting…";
+      view.setPhotoStatus("Reconnecting…");
       const photoTransition = recoveryGate.beginTransition(
         "photo",
         photoRecoveryKey(retry.authority),
@@ -2683,16 +1846,10 @@ export function mountLibraryBrowser(
           !photoOwner.retryPhotoIsCurrent(retry)
         )
           return;
-        // An exact Source retry just refreshed these facts. Other Photo
-        // failures still invalidate and reload the current window before
-        // trusting Preview or saved-position recovery.
         if (!sourceRangeRecovered) sourceGrid.invalidateWindow(retry.index);
         const windowReady = await loadWindow(
           start,
-          {
-            kind: "photo",
-            authority: retry.windowAuthority,
-          },
+          { kind: "photo", authority: retry.windowAuthority },
           true,
           "high",
           photoTransition,
@@ -2714,66 +1871,123 @@ export function mountLibraryBrowser(
         ) {
           recoveryGate.succeedTransition(photoTransition);
           setConnected(true);
-          status.textContent = "Connected. Current state refreshed.";
+          view.setPhotoStatus("Connected. Current state refreshed.");
         }
       } finally {
         photoOwner.finishRetry(retry);
         updateControls();
       }
     })();
-  });
-  previous.addEventListener(
-    "click",
-    () => void moveTo(photoOwner.currentIndex - 1),
-  );
-  next.addEventListener(
-    "click",
-    () => void moveTo(photoOwner.currentIndex + 1),
-  );
-  undoButton.addEventListener("click", () => void performUndo());
-  detail.addEventListener("click", () => {
-    if (!stage.querySelector("img")) return;
-    zoomed = !zoomed;
-    panX = 0;
-    panY = 0;
-    detail.setAttribute("aria-pressed", String(zoomed));
-    detail.textContent = zoomed ? "Exit Detail" : "Detail Review";
-    applyTransform();
-  });
-  stage.addEventListener("dblclick", () => detail.click());
-  select.addEventListener(
-    "click",
-    () => void mutate("selectionState", "selected", true),
-  );
-  reject.addEventListener(
-    "click",
-    () => void mutate("selectionState", "rejected", true),
-  );
-  clear.addEventListener(
-    "click",
-    () => void mutate("selectionState", "undecided", false),
-  );
-  ratings.addEventListener("click", (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
-      "[data-rating-value]",
-    );
-    if (button)
-      void mutate("rating", Number(button.dataset.ratingValue), false);
-  });
-  preview.addEventListener("pointerdown", pointerDown);
-  preview.addEventListener("pointermove", pointerMove);
-  preview.addEventListener("pointerup", (event) => finishPointer(event));
-  preview.addEventListener("pointercancel", (event) =>
-    finishPointer(event, true),
-  );
-  preview.addEventListener("lostpointercapture", (event) =>
-    finishPointer(event, true),
-  );
-  window.addEventListener("keydown", keydown);
+  };
+
+  function handleViewIntent(intent: LibraryBrowserIntent): void {
+    if (!applicationAlive) return;
+    switch (intent.kind) {
+      case "summary-action": {
+        const current = summaryAction;
+        if (!current || current.presentationId !== intent.presentationId)
+          return;
+        const outcome = application.activateSummaryAction(current.action);
+        if (outcome?.kind === "refresh-current-source") void refreshSource();
+        return;
+      }
+      case "source-open": {
+        const source = intent.source;
+        if (source.kind === "library") {
+          void openSource("library");
+        } else if (source.kind === "album") {
+          const album = application.albums.find(
+            (candidate) => candidate.id === source.id,
+          );
+          if (album) void openSource("album", album);
+        } else if (fileLocations.publication) {
+          void openSource("folder", undefined, undefined, source);
+        }
+        return;
+      }
+      case "file-location-retry": {
+        const failure = fileLocationFailuresByKey.get(intent.key);
+        if (failure)
+          void fileLocations.retry(failure).then(handleFileLocationOutcome);
+        return;
+      }
+      case "folder-toggle":
+        if (intent.expanded) {
+          if (fileLocations.collapse(intent.location)) renderSources();
+        } else {
+          void loadFolderWindow(intent.location, 0);
+        }
+        return;
+      case "folder-page": {
+        const retained = fileLocations.window(intent.location);
+        if (!retained) return;
+        const page = retained.page + intent.direction;
+        if (page >= 0) void loadFolderWindow(intent.location, page);
+        return;
+      }
+      case "album-form-open":
+        openAlbumForm(intent.form);
+        return;
+      case "album-form-close":
+        closeAlbumForm(intent.formId);
+        return;
+      case "album-form-submit":
+        void submitAlbumForm(intent.formId, intent.name);
+        return;
+      case "grid-render":
+        renderGrid();
+        return;
+      case "grid-resize": {
+        const authority = sourceGrid.authority;
+        const position = sourceGrid.readGridPosition(authority);
+        if (position === undefined || !view.gridVisible()) return;
+        view.scrollToGridIndex(position);
+        if (sourceGrid.isCurrent(authority)) renderGrid();
+        return;
+      }
+      case "grid-window":
+        void loadWindow(intent.index);
+        return;
+      case "open-photo":
+        void openPhoto(intent.index);
+        return;
+      case "show-grid":
+        showGrid();
+        return;
+      case "refresh":
+        void refreshSource();
+        return;
+      case "retry-source":
+        retrySource();
+        return;
+      case "retry-photo":
+        retryCurrentPhoto();
+        return;
+      case "previous":
+        void moveTo(photoOwner.currentIndex - 1);
+        return;
+      case "next":
+        void moveTo(photoOwner.currentIndex + 1);
+        return;
+      case "undo":
+        void performUndo();
+        return;
+      case "photo-mutation":
+        void mutate(intent.field, intent.value, intent.advance);
+        return;
+      case "membership-add":
+        addMembership(intent.albumId);
+        return;
+      case "membership-remove":
+        removeMembership();
+    }
+  }
+
   void application.loadOverview();
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
+    view.dispose();
     cancelScheduledGridRender();
     albumRecovery = undefined;
     albumActions.dispose();
@@ -2783,36 +1997,5 @@ export function mountLibraryBrowser(
     photoOwner.dispose();
     sourceGrid.dispose();
     recoveryGate.close();
-    window.removeEventListener("keydown", keydown);
-    window.removeEventListener("resize", onResize);
-    compactSources.removeEventListener("change", onSourceViewportChange);
   };
-}
-
-function required<T extends Element>(root: ParentNode, selector: string): T {
-  const value = root.querySelector<T>(selector);
-  if (!value) throw new Error(`Missing ${selector}`);
-  return value;
-}
-function paragraph(text: string): HTMLParagraphElement {
-  const value = document.createElement("p");
-  value.textContent = text;
-  return value;
-}
-function selectionLabel(value?: SelectionState): string {
-  return value === "selected"
-    ? "Selected"
-    : value === "rejected"
-      ? "Rejected"
-      : "Undecided";
-}
-function sourceLabel(source?: PreviewSource): string {
-  return source === "matching-jpeg"
-    ? "JPEG"
-    : source === "embedded-raw-jpeg"
-      ? "RAW embedded JPEG"
-      : "—";
-}
-function clamp(value: number, low: number, high: number): number {
-  return Math.max(low, Math.min(high, value));
 }
