@@ -3256,8 +3256,11 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
-  let previewMode: "typed-200" | "typed-503" | "ready-without-url" =
-    "typed-200";
+  let previewMode:
+    | "typed-200"
+    | "typed-503"
+    | "unknown-state"
+    | "ready-without-url" = "typed-200";
   await page.route("**/api/photos/*/preview", async (route) => {
     await route.fulfill({
       status: previewMode === "typed-503" ? 503 : 200,
@@ -3265,7 +3268,9 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
       body:
         previewMode === "ready-without-url"
           ? '{"state":"ready"}'
-          : '{"state":"unavailable","message":"service unavailable"}',
+          : previewMode === "unknown-state"
+            ? '{"state":"pending"}'
+            : '{"state":"unavailable","message":"service unavailable"}',
     });
   });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -3282,6 +3287,16 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await typed503;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  previewMode = "unknown-state";
+  const unknownState = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await unknownState;
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
