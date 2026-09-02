@@ -111,6 +111,12 @@ GET    /api/browse/{token}?start={position}&limit={count}
 DELETE /api/browse/{token}
 ```
 
+When a Published Library exists, both `GET /api/overview` and
+`GET /api/status` include its opaque publication generation. The browser uses
+that generation to revalidate an Overview immediately before committing
+shared counts and Album summaries, so a response captured before replacement
+cannot cross the publication boundary. An unpublished Library omits it.
+
 `POST /api/scan` takes no semantic request fields; an empty JSON object is
 accepted. A same-service request admits one application-owned Scan Cycle and
 waits for its terminal Loading Status. Concurrent accepted requests join that

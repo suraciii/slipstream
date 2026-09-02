@@ -946,6 +946,66 @@ test("the current photo joins and leaves albums from the photo view", async ({
   ).toBeVisible();
 });
 
+test("different Album membership keys admit independently", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const createdA = (await (
+    await post(running.url, "/api/albums", { name: "A" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumA = createdA.albums.find((album) => album.name === "A")!.id;
+  const createdB = (await (
+    await post(running.url, "/api/albums", { name: "B" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumB = createdB.albums.find((album) => album.name === "B")!.id;
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  let releaseA!: () => void;
+  const heldA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  await page.route(`**/api/albums/${albumA}/members`, async (route) => {
+    await heldA;
+    await route.continue();
+  });
+  const picker = page.getByLabel("Album", { exact: true });
+  await picker.selectOption(albumA);
+  const requestA = page.waitForResponse((response) =>
+    response.url().includes(`/api/albums/${albumA}/members`),
+  );
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await expect(picker).toBeEnabled();
+
+  await picker.selectOption(albumB);
+  await expect(
+    page.getByRole("button", { name: "Add to Album" }),
+  ).toBeEnabled();
+  const requestB = page.waitForResponse((response) =>
+    response.url().includes(`/api/albums/${albumB}/members`),
+  );
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await requestB;
+  releaseA();
+  await requestA;
+  await expect
+    .poll(async () => {
+      const overview = (await (
+        await fetch(`${running.url}/api/overview`)
+      ).json()) as { albums: Array<{ id: string; photoCount: number }> };
+      const countA = overview.albums.find(
+        (album) => album.id === albumA,
+      )?.photoCount;
+      const countB = overview.albums.find(
+        (album) => album.id === albumB,
+      )?.photoCount;
+      return `${countA}:${countB}`;
+    })
+    .toBe("1:1");
+});
+
 test("album management failures are reported without claiming completion", async ({
   page,
 }) => {
@@ -1304,6 +1364,211 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("an older overview success still bootstraps after a newer reload fails", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+
+  let calls = 0;
+  let releaseOlder!: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseOlder = resolve;
+  });
+  await page.route("**/api/overview", async (route) => {
+    calls += 1;
+    if (calls === 1 || calls === 3) {
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    if (calls === 2) {
+      const response = await route.fetch();
+      await held;
+      await route.fulfill({ response });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(running.url);
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry connection" });
+  await retry.click();
+  await expect.poll(() => calls).toBe(2);
+  // The second foreground reload owns failure presentation, but its failure
+  // must not detach the older shared overview request.
+  await retry.click();
+  await expect.poll(() => calls).toBe(3);
+  await expect(page.getByText("Disconnected")).toBeVisible();
+
+  releaseOlder();
+  // The valid shared response elects bootstrap, but it cannot release the
+  // newer foreground reload's exact failure owner.
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  await expect(
+    page.getByText("Could not reach Slipstream. Check the server and retry."),
+  ).toBeVisible();
+
+  await page.unroute("**/api/overview");
+  await retry.click();
+  await expect(page.getByText("Connected")).toBeVisible();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+});
+
+test("the application status monitor owns scan failure, retry, and completion", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let command: "rejected" | "lost" = "rejected";
+  let statusMode: "failed" | "idle" | "cycle" = "failed";
+  let cycleStatusCalls = 0;
+  await page.route("**/api/status", async (route) => {
+    const state =
+      statusMode === "cycle"
+        ? cycleStatusCalls++ === 0
+          ? "applying"
+          : "idle"
+        : statusMode;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state }),
+    });
+  });
+  await page.route("**/api/scan", async (route) => {
+    if (command === "rejected") {
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    await route.abort();
+  });
+
+  const retryCheck = page.getByRole("button", {
+    name: "Retry Library Check",
+  });
+  await expect(retryCheck).toBeVisible();
+  statusMode = "idle";
+  await retryCheck.click();
+  await expect(page.getByText("Disconnected")).toBeVisible();
+  await expect(retryCheck).toBeVisible();
+  await expect(page.getByText(/Library check complete/)).toBeHidden();
+
+  // A lost HTTP response remains ambiguous until the monitor observes a real
+  // non-idle→idle cycle. That monitor completion consumes the command once
+  // and releases its exact Recovery claim.
+  command = "lost";
+  statusMode = "cycle";
+  cycleStatusCalls = 0;
+  await retryCheck.click();
+  await expect(
+    page.getByText(
+      "Library check complete. Open Browse Snapshots remain unchanged.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("Connected")).toBeVisible();
+  await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText(/Library check complete/)).toBeHidden();
+});
+
+test("terminal scan completion fences a delayed applying-to-idle status pair", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const initialStatus = (await (
+    await fetch(`${running.url}/api/status`)
+  ).json()) as { publication: string };
+  const nextPublication = "0000000000000002";
+  await page.goto(running.url);
+
+  let race = false;
+  let statusCalls = 0;
+  let statusStarted!: () => void;
+  const firstStatusStarted = new Promise<void>((resolve) => {
+    statusStarted = resolve;
+  });
+  let releaseApplying!: () => void;
+  const applyingHeld = new Promise<void>((resolve) => {
+    releaseApplying = resolve;
+  });
+  await page.route("**/api/status", async (route) => {
+    if (!race) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "failed",
+          publication: initialStatus.publication,
+        }),
+      });
+      return;
+    }
+    statusCalls += 1;
+    if (statusCalls === 1) {
+      statusStarted();
+      await applyingHeld;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "applying",
+          publication: initialStatus.publication,
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "idle",
+        publication: nextPublication,
+        completed: 1,
+        total: 1,
+      }),
+    });
+  });
+  await page.route("**/api/scan", async (route) => {
+    await firstStatusStarted;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "idle",
+        publication: nextPublication,
+        completed: 1,
+        total: 1,
+      }),
+    });
+  });
+  let overviewCalls = 0;
+  await page.route("**/api/overview", async (route) => {
+    overviewCalls += 1;
+    await route.continue();
+  });
+
+  const retryCheck = page.getByRole("button", {
+    name: "Retry Library Check",
+  });
+  await expect(retryCheck).toBeVisible();
+  race = true;
+  await retryCheck.click();
+  await expect(page.getByText(/Library check complete/)).toBeVisible();
+  await expect.poll(() => overviewCalls).toBe(1);
+  releaseApplying();
+  await expect.poll(() => statusCalls).toBeGreaterThanOrEqual(3);
+  expect(overviewCalls).toBe(1);
+});
+
 test("a stale overview response cannot revert newer album state", async ({
   page,
 }) => {
@@ -1361,6 +1626,101 @@ test("a stale overview response cannot revert newer album state", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /^Two 0 Photos/ }),
+  ).toBeVisible();
+});
+
+test("publication validation rejects an overview body captured before replacement", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(
+    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
+  ).toBeVisible();
+
+  let captured!: () => void;
+  const capturedOverview = new Promise<void>((resolve) => {
+    captured = resolve;
+  });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let first = true;
+  await page.route("**/api/overview", async (route) => {
+    if (!first) {
+      await route.continue();
+      return;
+    }
+    first = false;
+    const response = await route.fetch();
+    const body = (await response.json()) as Record<string, unknown>;
+    body.photoCount = 999;
+    captured();
+    await held;
+    await route.fulfill({ response, json: body });
+  });
+  const capturedResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/overview"),
+  );
+  await page.locator("[data-retry]").evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await capturedOverview;
+
+  await writeFile(join(root, "two.jpg"), await jpeg());
+  const scan = await post(running.url, "/api/scan", {});
+  expect(scan.ok).toBe(true);
+  release();
+  await capturedResponse;
+  await expect(
+    page.getByRole("button", { name: /^All Photos 999 Photos/ }),
+  ).toBeHidden();
+  // A fresh request at the advanced publication floor commits current facts.
+  await page.locator("[data-retry]").evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await expect(
+    page.getByRole("button", { name: /^All Photos 2 Photos/ }),
+  ).toBeVisible({ timeout: 10_000 });
+});
+
+test("an unpublished Overview cannot replace an already published generation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(
+    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
+  ).toBeVisible();
+  await page.route("**/api/overview", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        published: false,
+        photoCount: 0,
+        scan: { state: "initializing" },
+        albums: [],
+      }),
+    });
+  });
+  const response = page.waitForResponse((item) =>
+    item.url().endsWith("/api/overview"),
+  );
+  await page.locator("[data-retry]").evaluate((button) => {
+    (button as HTMLButtonElement).click();
+  });
+  await response;
+  await expect(
+    page.getByRole("button", { name: /^All Photos 0 Photos/ }),
+  ).toBeHidden();
+  await expect(
+    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
   ).toBeVisible();
 });
 
@@ -1455,6 +1815,11 @@ test("in-flight membership and delete operations stay disabled across re-renders
     folderDelivered();
   });
   const removeButton = page.locator("[data-remove-from-album]");
+  const removalSettled = page.waitForResponse(
+    (response) =>
+      response.url().includes("/members/remove") &&
+      response.request().method() === "POST",
+  );
   await removeButton.click();
   await expect(removeButton).toBeDisabled();
   // A routine Preview completion must not silently take ownership from the
@@ -1470,13 +1835,49 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await folderDeliveredSettled;
   await expect(removeButton).toBeDisabled();
   release!();
+  await removalSettled;
   await expect(page.locator("[data-status]")).toContainText(
     "Removed from the Album. It stays in this open view until reopened.",
     { timeout: 15000 },
   );
+  await expect(
+    page.getByRole("button", { name: /^Slow 1 Photos/ }),
+  ).toBeVisible();
   expect(calls).toBe(1);
   // The removed member is no longer removable within the open snapshot.
   await expect(removeButton).toBeHidden();
+});
+
+test("a current saved-position failure blocks decisions until Photo Retry confirms it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Position Retry");
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /^Position Retry 1 Photos/ }).click();
+
+  await page.route("**/api/albums/*/progress", async (route) => {
+    await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+  });
+  const failed = progressResponse(page, albumId, 503);
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await failed;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      "Album position could not be saved. Retry before making more decisions.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.unroute("**/api/albums/*/progress");
+  const recovered = progressResponse(page, albumId);
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await recovered;
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
 test("an answered stale saved-position write is not a disconnection", async ({
@@ -1508,6 +1909,70 @@ test("an answered stale saved-position write is not a disconnection", async ({
     .toBe(writesBeforeNavigation + 1);
   await expect(page.getByRole("heading", { name: "Positions" })).toBeVisible();
   await expect(page.getByText("Disconnected")).toBeHidden();
+});
+
+test("queued stale saved positions are skipped and sent stale success is silent", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Progress Ownership");
+  await startReview(page, running.url, "Progress Ownership", albumId);
+  const members = (await state(running.url, albumId)).members;
+
+  let releaseFirst!: () => void;
+  let releaseCurrent!: () => void;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const currentGate = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const sentPhotoIds: string[] = [];
+  await page.route("**/api/albums/*/progress", async (route) => {
+    const body = route.request().postDataJSON() as { photoId: string };
+    sentPhotoIds.push(body.photoId);
+    if (sentPhotoIds.length === 1) await firstGate;
+    else if (sentPhotoIds.length === 2) await currentGate;
+    await route.continue();
+  });
+
+  const firstResponse = progressResponse(page, albumId);
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 4")).toBeVisible();
+  await expect.poll(() => sentPhotoIds.length).toBe(1);
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("3 / 4")).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("4 / 4")).toBeVisible();
+
+  await page.evaluate(() => {
+    (window as typeof window & { sourceMutations?: number }).sourceMutations =
+      0;
+    const source = document.querySelector("[data-source-list]")!;
+    new MutationObserver(() => {
+      const state = window as typeof window & { sourceMutations?: number };
+      state.sourceMutations = (state.sourceMutations ?? 0) + 1;
+    }).observe(source, { childList: true, subtree: true });
+  });
+  const currentResponse = progressResponse(page, albumId);
+  releaseFirst();
+  await firstResponse;
+  await expect.poll(() => sentPhotoIds.length).toBe(2);
+  expect(sentPhotoIds).toEqual([members[1]!.photoId, members[3]!.photoId]);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { sourceMutations?: number })
+          .sourceMutations ?? 0,
+    ),
+  ).toBe(0);
+
+  releaseCurrent();
+  await currentResponse;
+  await page.unroute("**/api/albums/*/progress");
 });
 
 test("duplicate album names answer without presenting a disconnection", async ({
@@ -1934,6 +2399,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await writeFile(join(root, "shoot/one.jpg"), data);
   await writeFile(join(root, "shoot/nested/two.jpg"), data);
   const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Existing" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
 
@@ -1962,6 +2428,38 @@ test("failed File Location ranges keep siblings and retry only the failed range"
       name: /^Retry File Locations \(shoot items 1–60\)/,
     }),
   ).toBeVisible();
+
+  // A successful unrelated root request proves reachability but cannot
+  // release the exact failed-range Recovery claim.
+  const rootToggle = page.getByRole("button", {
+    name: "Toggle Library Folder subfolders",
+  });
+  await rootToggle.click();
+  const rootReloaded = page.waitForResponse(
+    (response) =>
+      response.url().includes("/api/file-locations?") &&
+      !response.url().includes("parent=shoot"),
+  );
+  await rootToggle.click();
+  await rootReloaded;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+  ).toBeVisible();
+
+  // A lower-priority admitted Album failure settles behind the actionable
+  // range owner rather than erasing it. Exact range recovery reveals the
+  // pending Album failure.
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Existing");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+  ).toBeVisible();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeHidden();
+
   failing = false;
   await page.getByRole("button", { name: /^Retry File Locations/ }).click();
   // Retrying loads only the failed range: the sibling child appears while
@@ -1973,6 +2471,67 @@ test("failed File Location ranges keep siblings and retry only the failed range"
     page.getByRole("button", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
   await expect(page.getByText(/Could not load File Locations/)).toBeHidden();
+  await expect(
+    page.getByText("An Album with this name already exists."),
+  ).toBeVisible();
+});
+
+test("independent failed File Location parents keep exact retry ownership", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const data = await jpeg();
+  for (const parent of ["a", "b"]) {
+    await mkdir(join(root, parent, "nested"), { recursive: true });
+    await writeFile(join(root, parent, "one.jpg"), data);
+    await writeFile(join(root, parent, "nested", "two.jpg"), data);
+  }
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /a · Subfolders/ }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /b · Subfolders/ }),
+  ).toBeVisible();
+
+  const failing = new Set(["a", "b"]);
+  await page.route("**/api/file-locations*", async (route) => {
+    const parent = new URL(route.request().url()).searchParams.get("parent");
+    if (parent && failing.has(parent)) {
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole("button", { name: "Toggle a subfolders" }).click();
+  await page.getByRole("button", { name: "Toggle b subfolders" }).click();
+  const retryA = page.getByRole("button", {
+    name: /^Retry File Locations \(a items 1–60\)/,
+  });
+  const retryB = page.getByRole("button", {
+    name: /^Retry File Locations \(b items 1–60\)/,
+  });
+  await expect(retryA).toBeVisible();
+  await expect(retryB).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+  failing.delete("a");
+  await retryA.click();
+  await expect(
+    page.getByRole("button", { name: /nested 1 Photos/ }).first(),
+  ).toBeVisible();
+  await expect(retryA).toBeHidden();
+  await expect(retryB).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+  failing.delete("b");
+  await retryB.click();
+  await expect(retryB).toBeHidden();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 });
 
 test("file locations reload coherently when a scan replaces the publication", async ({
@@ -2487,7 +3046,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await expect(page.getByText("2 / 3")).toBeVisible();
 });
 
-test("reconnect retains confirmed undo and a delayed progress failure blocks the active Session", async ({
+test("reconnect retains confirmed undo and a delayed stale progress failure stays silent", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -2538,22 +3097,9 @@ test("reconnect retains confirmed undo and a delayed progress failure blocks the
   releaseFailure();
   await progressFailed;
   await progressAfterFailure;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  await page.unroute("**/api/albums/*/progress");
-  let releaseSuccess!: () => void;
-  const successReleased = new Promise<void>((resolve) => {
-    releaseSuccess = resolve;
-  });
-  await page.route("**/api/albums/*/progress", async (route) => {
-    await successReleased;
-    await route.continue();
-  });
-  const progressRecovered = progressResponse(page, albumId);
-  await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  releaseSuccess();
-  await progressRecovered;
+  // The failed write belongs to the Photo that initiated it. The newer Photo
+  // and its confirmed position remain current and are not disconnected by a
+  // stale settlement.
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/albums/*/progress");
@@ -2822,6 +3368,95 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
   }
 });
 
+test("an admitted Album write settles after application teardown without presentation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Detached" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Detached")!.id;
+  await page.goto(running.url);
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await page.getByLabel("Album", { exact: true }).selectOption(albumId);
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/api/albums/${albumId}/members`, async (route) => {
+    await held;
+    await route.continue();
+  });
+  const settled = page.waitForResponse((response) =>
+    response.url().includes(`/api/albums/${albumId}/members`),
+  );
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide")),
+  );
+  release();
+  await settled;
+  await expect
+    .poll(async () => {
+      const overview = (await (
+        await fetch(`${running.url}/api/overview`)
+      ).json()) as { albums: Array<{ id: string; photoCount: number }> };
+      return overview.albums.find((album) => album.id === albumId)?.photoCount;
+    })
+    .toBe(1);
+  await expect(page.getByText("Added to the Album.")).toBeHidden();
+});
+
+test("application teardown halts image ownership and releases the Browse token", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  let releaseStatus!: () => void;
+  const statusReleased = new Promise<void>((resolve) => {
+    releaseStatus = resolve;
+  });
+  await page.route("**/api/status", async (route) => {
+    await statusReleased;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "failed" }),
+    });
+  });
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  const image = page.getByRole("img", { name: "Photo 1 of 1" });
+  await expect(image).toHaveAttribute("src", /.+/);
+
+  const statusRequest = page.waitForRequest((request) =>
+    request.url().endsWith("/api/status"),
+  );
+  await statusRequest;
+  const statusResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/status"),
+  );
+  const released = page.waitForRequest(
+    (request) =>
+      request.method() === "DELETE" && request.url().includes("/api/browse/"),
+  );
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide")),
+  );
+  releaseStatus();
+  await statusResponse;
+  await released;
+  await expect(image).not.toHaveAttribute("src", /.+/);
+  await expect(
+    page.getByRole("button", { name: "Retry Library Check" }),
+  ).toBeHidden();
+});
+
 test("leaving Photo View cancels a pending review image transfer", async ({
   page,
 }) => {
@@ -2864,6 +3499,120 @@ test("leaving Photo View cancels a pending review image transfer", async ({
     release();
     await page.unroute("**/api/derivatives/**/review/**");
   }
+});
+
+test("answered Browse-window failure owns source Retry and does not declare Ready", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  let windowMode: "wrong-range" | "bad-photo" | "failed" | "ready" =
+    "wrong-range";
+  await page.route(/\/api\/browse\//, async (route) => {
+    if (route.request().method() !== "GET" || windowMode === "ready") {
+      await route.continue();
+      return;
+    }
+    if (windowMode === "wrong-range" || windowMode === "bad-photo") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body:
+          windowMode === "wrong-range"
+            ? '{"start":999,"total":1,"photos":[]}'
+            : '{"start":0,"total":1,"photos":[null]}',
+      });
+      return;
+    }
+    await route.fulfill({ status: 500, body: '{"error":"failed"}' });
+  });
+
+  await page.goto(running.url);
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByText(/returned an invalid response/)).toBeVisible();
+  await expect(page.getByText(/Ready · 1 Photos/)).toBeHidden();
+
+  windowMode = "bad-photo";
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(page.getByText(/returned an invalid response/)).toBeVisible();
+  windowMode = "failed";
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(
+    page.getByText(/could not be loaded \(HTTP 500\)/),
+  ).toBeVisible();
+  windowMode = "ready";
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+});
+
+test("current Preview HTTP failure disconnects until Photo Retry", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  let previewMode:
+    | "typed-200"
+    | "typed-503"
+    | "unknown-state"
+    | "ready-without-url" = "typed-200";
+  await page.route("**/api/photos/*/preview", async (route) => {
+    await route.fulfill({
+      status: previewMode === "typed-503" ? 503 : 200,
+      contentType: "application/json",
+      body:
+        previewMode === "ready-without-url"
+          ? '{"state":"ready"}'
+          : previewMode === "unknown-state"
+            ? '{"state":"pending"}'
+            : '{"state":"unavailable","message":"service unavailable"}',
+    });
+  });
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Connection lost. Retry to refresh this Photo."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  previewMode = "typed-503";
+  const typed503 = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 503,
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await typed503;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  previewMode = "unknown-state";
+  const unknownState = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await unknownState;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  previewMode = "ready-without-url";
+  const malformedReady = page.waitForResponse(
+    (response) =>
+      response.url().includes("/preview") && response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await malformedReady;
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.unroute("**/api/photos/*/preview");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
 test("source switching aborts a pending current-Photo Preview request", async ({

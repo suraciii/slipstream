@@ -137,6 +137,7 @@ pub struct PhotoRecord {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScanSnapshot {
+    pub published: bool,
     pub originals: Vec<OriginalRecord>,
     pub photos: Vec<PhotoRecord>,
     pub errors: Vec<OriginalScanError>,

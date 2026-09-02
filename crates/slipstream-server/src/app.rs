@@ -78,6 +78,47 @@ pub(crate) struct BrowseSnapshot {
     pub(crate) last_used: Instant,
 }
 
+const MAX_APPLICATION_SCAN_WAITERS: usize = 64;
+pub(crate) type ScanCycleOutcome = Result<ScanStatusWire, String>;
+
+struct ScanCycleState {
+    closed: bool,
+    in_flight: bool,
+    waiters: Vec<oneshot::Sender<ScanCycleOutcome>>,
+}
+
+struct ScanCycle {
+    state: Mutex<ScanCycleState>,
+    idle: Notify,
+}
+
+impl ScanCycle {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ScanCycleState {
+                closed: false,
+                in_flight: false,
+                waiters: Vec::new(),
+            }),
+            idle: Notify::new(),
+        }
+    }
+
+    fn close(&self) {
+        self.state.lock().expect("scan cycle poisoned").closed = true;
+    }
+
+    async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if !self.state.lock().expect("scan cycle poisoned").in_flight {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// The published Library plus shared scan-lifecycle flags. The snapshot is
 /// refreshed from persisted state at every publication, so facts committed
 /// after a scan's apply (Selection State, Rating, Review Preview seeds) can
@@ -174,8 +215,7 @@ impl SharedLibrary {
         true
     }
 
-    /// One owned scan cycle shared by the background startup rescan and
-    /// explicit rescan requests; the Library coalesces concurrent waiters.
+    /// One application-owned scan leader calls this for each admitted cycle.
     /// The optional publish gate (test-only) parks this cycle after the scan's
     /// apply and before publication so tests can commit facts in between.
     async fn run_scan(
@@ -192,9 +232,6 @@ impl SharedLibrary {
                 }
                 match self.publish_fresh(library).await {
                     Ok(()) => Ok(()),
-                    Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => {
-                        Err(error)
-                    }
                     Err(error) => {
                         self.failed.store(true, Ordering::Relaxed);
                         Err(error)
@@ -202,8 +239,10 @@ impl SharedLibrary {
                 }
             }
             // Shutdown drained this admitted scan; it is not a Library failure.
-            Err(error @ (LibraryError::Closed | LibraryError::ScannerStopped)) => Err(error),
             Err(error) => {
+                // Application shutdown drains an admitted cycle before
+                // closing the Library, so Closed/ScannerStopped here is an
+                // unexpected scan failure and must remain visible as failed.
                 self.failed.store(true, Ordering::Relaxed);
                 Err(error)
             }
@@ -218,7 +257,7 @@ pub struct Application {
     pub(crate) library: Arc<Library>,
     pub(crate) preview: PreviewService,
     pub(crate) shared: Arc<SharedLibrary>,
-    pub(crate) background_scan: Mutex<Option<JoinHandle<()>>>,
+    scan_cycle: ScanCycle,
     pub(crate) browse_snapshots: Mutex<std::collections::HashMap<String, BrowseSnapshot>>,
     pub(crate) browse_namespace: u128,
     pub(crate) browse_counter: AtomicU64,
@@ -226,6 +265,73 @@ pub struct Application {
 }
 
 impl Application {
+    pub(crate) fn admit_scan_cycle(
+        self: &Arc<Self>,
+        scan_gate: Option<oneshot::Receiver<()>>,
+        publish_gate: Option<oneshot::Receiver<()>>,
+    ) -> Result<oneshot::Receiver<ScanCycleOutcome>, ServerError> {
+        let (reply, receive) = oneshot::channel();
+        let starts_leader = {
+            let mut cycle = self.scan_cycle.state.lock().expect("scan cycle poisoned");
+            if cycle.closed {
+                return Err(ServerError::Library(LibraryError::Closed));
+            }
+            // A dropped HTTP future closes its receiver immediately. Prune
+            // those presentation waiters before enforcing the bounded live
+            // waiter limit; the application-owned leader remains in flight.
+            cycle.waiters.retain(|waiter| !waiter.is_closed());
+            if cycle.waiters.len() >= MAX_APPLICATION_SCAN_WAITERS {
+                return Err(ServerError::Library(LibraryError::ScanBusy));
+            }
+            cycle.waiters.push(reply);
+            if cycle.in_flight {
+                false
+            } else {
+                cycle.in_flight = true;
+                true
+            }
+        };
+        if starts_leader {
+            let application = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Some(gate) = scan_gate {
+                    let _ = gate.await;
+                }
+                let outcome = application
+                    .shared
+                    .run_scan(&application.library, publish_gate)
+                    .await
+                    .map(|()| application.scan_status())
+                    .map_err(|error| error.to_string());
+                {
+                    // Fan-out is non-blocking. Keep admission serialized until
+                    // every terminal outcome is delivered, then expose idle to
+                    // shutdown and the next cycle together.
+                    let mut cycle = application
+                        .scan_cycle
+                        .state
+                        .lock()
+                        .expect("scan cycle poisoned");
+                    for waiter in std::mem::take(&mut cycle.waiters) {
+                        let _ = waiter.send(outcome.clone());
+                    }
+                    cycle.in_flight = false;
+                }
+                application.scan_cycle.idle.notify_waiters();
+            });
+        }
+        Ok(receive)
+    }
+
+    async fn await_scan_cycle(
+        receive: oneshot::Receiver<ScanCycleOutcome>,
+    ) -> Result<ScanStatusWire, ServerError> {
+        receive
+            .await
+            .map_err(|_| ServerError::Join("scan cycle stopped before settlement".to_owned()))?
+            .map_err(ServerError::Join)
+    }
+
     pub async fn open(config: &Config) -> Result<Arc<Self>, ServerError> {
         Self::open_with_gate(config, ScanLimits::default(), None, None).await
     }
@@ -254,7 +360,11 @@ impl Application {
         // without a published Library stays initializing until its first scan
         // publishes one.
         let persisted = library.snapshot().await?;
-        let published_initial = !persisted.photos.is_empty() || !persisted.originals.is_empty();
+        // Non-empty v2-v5 stores predate the durable marker and remain
+        // published-compatible. Every completed scan now writes the marker,
+        // which also preserves an intentionally empty Published Library.
+        let published_initial =
+            persisted.published || !persisted.photos.is_empty() || !persisted.originals.is_empty();
         let shared = Arc::new(SharedLibrary {
             snapshot: RwLock::new(published_initial.then(|| Published::new(persisted))),
             published: AtomicBool::new(published_initial),
@@ -284,40 +394,40 @@ impl Application {
             .as_nanos()
             ^ (u128::from(std::process::id()) << 64)
             ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
-        let background_scan = {
-            let library = Arc::clone(&library);
-            let shared = Arc::clone(&shared);
-            tokio::spawn(async move {
-                if let Some(gate) = scan_gate {
-                    let _ = gate.await;
-                }
-                let _ = shared.run_scan(&library, publish_gate).await;
-            })
-        };
-        Ok(Arc::new(Self {
+        let application = Arc::new(Self {
             library,
             preview,
             shared,
-            background_scan: Mutex::new(Some(background_scan)),
+            scan_cycle: ScanCycle::new(),
             browse_snapshots: Mutex::new(std::collections::HashMap::new()),
             browse_namespace,
             browse_counter: AtomicU64::new(0),
             shutdown: Mutex::new(false),
-        }))
+        });
+        // Admit the startup cycle synchronously before returning the
+        // Application, so an immediate explicit rescan joins this leader.
+        let startup = application
+            .admit_scan_cycle(scan_gate, publish_gate)
+            .expect("a new Application admits its startup scan");
+        drop(startup);
+        Ok(application)
     }
 
     /// Truthful Library status: the scanner owns measurable phases and
     /// counters, and the shared flags decide idle, failed, or initializing.
     pub(crate) fn scan_status(&self) -> ScanStatusWire {
         let progress = self.library.scan_progress();
+        let publication = self.current_publication();
         match progress.phase {
             ScanPhase::Discovering => ScanStatusWire {
                 state: "discovering",
+                publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
             },
             ScanPhase::Inspecting => ScanStatusWire {
                 state: "inspecting",
+                publication: publication.clone(),
                 completed: Some(usize::try_from(progress.inspected).unwrap_or(usize::MAX)),
                 total: progress
                     .inspect_total
@@ -325,6 +435,7 @@ impl Application {
             },
             ScanPhase::Applying => ScanStatusWire {
                 state: "applying",
+                publication: publication.clone(),
                 completed: None,
                 total: None,
             },
@@ -333,12 +444,14 @@ impl Application {
                     // The scan finished; its result is being published.
                     ScanStatusWire {
                         state: "applying",
+                        publication: publication.clone(),
                         completed: None,
                         total: None,
                     }
                 } else if self.shared.failed.load(Ordering::Relaxed) {
                     ScanStatusWire {
                         state: "failed",
+                        publication: publication.clone(),
                         completed: None,
                         total: None,
                     }
@@ -346,18 +459,29 @@ impl Application {
                     let photo_count = self.published_photo_count();
                     ScanStatusWire {
                         state: "idle",
+                        publication: publication.clone(),
                         completed: Some(photo_count),
                         total: Some(photo_count),
                     }
                 } else {
                     ScanStatusWire {
                         state: "initializing",
+                        publication,
                         completed: None,
                         total: None,
                     }
                 }
             }
         }
+    }
+
+    pub(crate) fn current_publication(&self) -> Option<String> {
+        self.shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .map(Published::publication_value)
     }
 
     pub(crate) fn published_photo_count(&self) -> usize {
@@ -432,9 +556,23 @@ impl Application {
             .into_iter()
             .map(album_summary)
             .collect();
+        let (publication, photo_count) = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            guard.as_ref().map_or((None, 0), |published| {
+                (
+                    Some(published.publication_value()),
+                    published.snapshot.photos.len(),
+                )
+            })
+        };
         Ok(LibraryOverviewResponse {
-            published: self.shared.published.load(Ordering::Relaxed),
-            photo_count: self.published_photo_count(),
+            published: publication.is_some(),
+            publication,
+            photo_count,
             scan: self.scan_status(),
             albums,
         })
@@ -713,9 +851,9 @@ impl Application {
         })
     }
 
-    pub async fn rescan(&self) -> Result<ScanStatusWire, ServerError> {
-        self.shared.run_scan(&self.library, None).await?;
-        Ok(self.scan_status())
+    pub async fn rescan(self: &Arc<Self>) -> Result<ScanStatusWire, ServerError> {
+        let receive = self.admit_scan_cycle(None, None)?;
+        Self::await_scan_cycle(receive).await
     }
 
     pub async fn mutate_album(
@@ -1010,16 +1148,10 @@ impl Application {
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), ServerError> {
-        // Drain the admitted background scan before closing the Library so a
-        // completed scan is always published and shutdown observes no torn work.
-        let background = self
-            .background_scan
-            .lock()
-            .expect("background scan poisoned")
-            .take();
-        if let Some(handle) = background {
-            let _ = handle.await;
-        }
+        // Stop new admissions and drain the application-owned leader before
+        // closing the Library, so publication and status accounting complete.
+        self.scan_cycle.close();
+        self.scan_cycle.wait_for_idle().await;
         let application = Arc::clone(self);
         tokio::task::spawn_blocking(move || application.shutdown_blocking())
             .await

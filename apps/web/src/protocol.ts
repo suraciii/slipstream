@@ -16,9 +16,11 @@ export type AlbumSummary = Readonly<{
 
 export type LibraryOverviewResponse = Readonly<{
   published: boolean;
+  publication?: string;
   photoCount: number;
   scan: Readonly<{
     state: string;
+    publication?: string;
     completed?: number;
     total?: number;
   }>;

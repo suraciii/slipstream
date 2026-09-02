@@ -3,6 +3,8 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 pub struct LibraryOverviewResponse {
     pub published: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<String>,
     pub photo_count: usize,
     pub scan: ScanStatusWire,
     pub albums: Vec<AlbumSummaryWire>,
@@ -12,6 +14,8 @@ pub struct LibraryOverviewResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ScanStatusWire {
     pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

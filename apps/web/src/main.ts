@@ -1,3 +1,13 @@
+import {
+  RecoveryGate,
+  SettlementFamily,
+  SummaryNoticeChannel,
+  TaskScope,
+  type NoticeHandle,
+  type RecoveryClaim,
+  type NoticeUpdate,
+  type RecoveryTransition,
+} from "./async-ownership.js";
 import type {
   AlbumSummary,
   BrowseOpenResponse,
@@ -15,6 +25,10 @@ import "./style.css";
 
 type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
+type SummaryMessage = Readonly<{
+  text: string;
+  action?: Readonly<{ label: string; run: () => void | Promise<void> }>;
+}>;
 
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
@@ -29,6 +43,14 @@ export function renderApp(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
 ): () => void {
+  let applicationAlive = true;
+  const applicationTasks = new TaskScope();
+  const recoveryGate = new RecoveryGate();
+  const albumSettlements = new SettlementFamily();
+  const scanSettlements = new SettlementFamily();
+  const summaryNotices = new SummaryNoticeChannel<SummaryMessage>();
+  let overviewDataFloor = 0;
+
   root.innerHTML = `
     <main class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
@@ -81,14 +103,6 @@ export function renderApp(
     root,
     "[data-summary-status]",
   );
-  const summaryStatus = {
-    get textContent() {
-      return summaryStatusElement.textContent;
-    },
-    set textContent(value: string) {
-      summaryStatusElement.textContent = value;
-    },
-  };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
@@ -108,16 +122,16 @@ export function renderApp(
   const source = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
   const statusElement = required<HTMLElement>(root, "[data-status]");
-  // Photo-status writes are epoch-sequenced so a late Album settlement can
-  // never overwrite a newer Photo status from any writer.
-  let photoStatusEpoch = 0;
+  // A status write replaces the Photo surface's identity. Album settlement
+  // handles capture that identity instead of maintaining a second sequence.
+  let photoStatusOwner: object = {};
   const status = {
     get textContent() {
       return statusElement.textContent;
     },
     set textContent(value: string) {
       if (statusElement.textContent === value) return;
-      photoStatusEpoch += 1;
+      photoStatusOwner = {};
       statusElement.textContent = value;
     },
   };
@@ -195,6 +209,39 @@ export function renderApp(
   }
 
   let overview: LibraryOverviewResponse | undefined;
+  const summaryMessage = (
+    text: string,
+    action?: SummaryMessage["action"],
+  ): SummaryMessage => ({ text, ...(action ? { action } : {}) });
+  const applySummaryUpdate = (update: NoticeUpdate<SummaryMessage>): void => {
+    if (!applicationAlive || !("visible" in update)) return;
+    if (update.visible === null) {
+      const epoch = summaryNotices.backgroundEpoch();
+      applySummaryUpdate(
+        summaryNotices.presentBackground(
+          epoch,
+          summaryMessage(
+            overview ? scanLabel(overview.scan) : "Loading Library…",
+          ),
+        ),
+      );
+      return;
+    }
+    if (update.visible === undefined) return;
+    summaryStatusElement.replaceChildren(
+      document.createTextNode(update.visible.text),
+    );
+    if (update.visible.action) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "summary-action";
+      action.textContent = update.visible.action.label;
+      action.addEventListener("click", () => {
+        void update.visible!.action!.run();
+      });
+      summaryStatusElement.append(" ", action);
+    }
+  };
   let sets: ReadonlyArray<AlbumSummary> = [];
   let token = "";
   let total = 0;
@@ -243,12 +290,8 @@ export function renderApp(
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
   let albumForm: AlbumFormModel | undefined;
 
-  // Album mutations report on the surface that initiated them. Every write to
-  // a status surface bumps that surface's epoch, so a late Album settlement
-  // can never overwrite a newer status from any writer — Album action, Photo
-  // decision, or scan label alike.
-  let albumActionSequence = 0;
-  let summaryNoticeAction = 0;
+  const ALBUM_NOTICE_PRIORITY = 10;
+  const ACTIONABLE_NOTICE_PRIORITY = 30;
   const ALBUM_NAME_MAXIMUM = 120;
   const albumNameError = (name: string): string | undefined => {
     const trimmed = name.trim();
@@ -268,27 +311,56 @@ export function renderApp(
       }
     | undefined;
   let loaded = new Map<number, PhotoSummary>();
-  let windowRequests = new Map<
-    number,
-    { promise: Promise<void>; signal: AbortSignal }
-  >();
   let thumbnailUrls = new Map<string, string>();
-  let thumbnailRequests = new Map<string, Promise<string | undefined>>();
   let thumbnailFailures = new Set<string>();
   let renderedThumbnailImages = new Map<string, HTMLImageElement>();
   let lastCurrentPhotoId: string | undefined;
   let renderedColumns = 0;
   let renderedViewportHeight = 0;
   let connected = false;
+  let connectionEstablished = false;
+  let overviewRecovery: RecoveryClaim | undefined;
   let busy = false;
   let openingPhoto = false;
   let currentPhotoMode = false;
+  let retrySourceRequired = false;
+  const browseRangeFailures = new Map<string, RecoveryClaim>();
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
   let sourceGeneration = 0;
-  let sourceAbortController = new AbortController();
-  let gridAbortController = new AbortController();
-  let photoAbortController = new AbortController();
+  let sourceTasks = new TaskScope();
+  let gridTasks = new TaskScope();
+  let photoTasks = new TaskScope();
+  let sourceSignal = sourceTasks.beginLatest("lifetime", {
+    abortTransport: true,
+  }).signal!;
+  let gridSignal = gridTasks.beginLatest("lifetime", {
+    abortTransport: true,
+  }).signal!;
+  let photoSignal = photoTasks.beginLatest("lifetime", {
+    abortTransport: true,
+  }).signal!;
+  const renewSourceTasks = () => {
+    sourceTasks.halt();
+    sourceTasks = new TaskScope();
+    sourceSignal = sourceTasks.beginLatest("lifetime", {
+      abortTransport: true,
+    }).signal!;
+  };
+  const renewGridTasks = () => {
+    gridTasks.halt();
+    gridTasks = new TaskScope();
+    gridSignal = gridTasks.beginLatest("lifetime", {
+      abortTransport: true,
+    }).signal!;
+  };
+  const renewPhotoTasks = () => {
+    photoTasks.halt();
+    photoTasks = new TaskScope();
+    photoSignal = photoTasks.beginLatest("lifetime", {
+      abortTransport: true,
+    }).signal!;
+  };
   let browseTokenGeneration = 0;
   let gridRenderFrame: number | undefined;
   let progressQueue: Promise<void> = Promise.resolve();
@@ -310,17 +382,103 @@ export function renderApp(
     | undefined;
 
   const currentPhoto = () => loaded.get(currentIndex);
-  const setConnected = (value: boolean, message?: string) => {
-    if (!value) clearPointer();
-    connected = value;
-    connection.textContent = value ? "Connected" : "Disconnected";
-    connection.classList.toggle("offline", !value);
-    retry.hidden = value || currentPhotoMode;
-    retryPhoto.hidden = value || !currentPhotoMode;
+  const syncConnection = (message?: string) => {
+    if (!applicationAlive) return;
+    for (const [key, claim] of browseRangeFailures)
+      if (!recoveryGate.isActive(claim)) browseRangeFailures.delete(key);
+    connected = connectionEstablished && recoveryGate.decisionReady;
+    if (!connected) clearPointer();
+    connection.textContent = connected ? "Connected" : "Disconnected";
+    connection.classList.toggle("offline", !connected);
+    retry.hidden = connected || currentPhotoMode;
+    retryPhoto.hidden = connected || !currentPhotoMode;
     if (message) status.textContent = message;
     updateControls();
   };
+  const setConnected = (value: boolean, message?: string) => {
+    if (!applicationAlive) return;
+    connectionEstablished = value;
+    if (value) recoveryGate.markReachable();
+    syncConnection(message);
+  };
+  const failBrowseRange = (
+    ownerScope: "source" | "photo",
+    generation: number,
+    start: number,
+    transportLost: boolean,
+    transition?: RecoveryTransition,
+  ): void => {
+    const key = `${ownerScope}:${generation}:${start}`;
+    const owner = { scope: ownerScope, generation: String(generation) };
+    let claim: RecoveryClaim | undefined;
+    if (transition) {
+      try {
+        const replacement = recoveryGate.issue("browse-window", key, {
+          owner,
+          transition,
+        });
+        if (
+          recoveryGate.failTransition(transition, replacement, {
+            transportLost,
+          })
+        )
+          claim = replacement;
+        else recoveryGate.discard(replacement);
+      } catch {
+        /* superseded transitions cannot affect the current range */
+      }
+    } else {
+      const candidate = recoveryGate.issue("browse-window", key, { owner });
+      if (recoveryGate.fail(candidate, { transportLost })) claim = candidate;
+      else recoveryGate.discard(candidate);
+    }
+    if (claim) browseRangeFailures.set(key, claim);
+    if (ownerScope === "source") retrySourceRequired = true;
+    syncConnection();
+  };
+  const recoverBrowseRange = (
+    ownerScope: "source" | "photo",
+    generation: number,
+    start: number,
+  ): void => {
+    const key = `${ownerScope}:${generation}:${start}`;
+    const claim = browseRangeFailures.get(key);
+    if (!claim) return;
+    browseRangeFailures.delete(key);
+    if (recoveryGate.recover(claim)) setConnected(true);
+  };
+  const failPhotoRecovery = (
+    generation: number,
+    kind: string,
+    transition?: RecoveryTransition,
+  ): void => {
+    const owner = { scope: "photo" as const, generation: String(generation) };
+    if (transition) {
+      try {
+        const replacement = recoveryGate.issue(kind, String(generation), {
+          owner,
+          transition,
+        });
+        if (
+          recoveryGate.failTransition(transition, replacement, {
+            transportLost: true,
+          })
+        ) {
+          syncConnection();
+          return;
+        }
+        recoveryGate.discard(replacement);
+      } catch {
+        /* the transition was already superseded or settled */
+      }
+    }
+    const claim = recoveryGate.issue(kind, String(generation), { owner });
+    if (!recoveryGate.fail(claim, { transportLost: true }))
+      recoveryGate.discard(claim);
+    syncConnection();
+  };
   const updateControls = () => {
+    if (!applicationAlive) return;
     const photo = currentPhoto();
     const enabled = Boolean(photo) && connected && !busy;
     for (const button of [
@@ -368,56 +526,61 @@ export function renderApp(
     total: number;
   };
   let fileLocationGeneration = 0;
-  let folderFailure: { parent: string; page: number } | undefined;
-  // Only one unbound root binder may own the bind at a time, identified by
-  // its globally unique request token. A reset invalidates the owner so a
-  // newer recovery can take over instead of deadlocking against a discarded
-  // in-flight bind.
-  let rootBindOwner = 0;
-  // Per-parent request tokens drawn from one globally monotonic counter:
-  // only the newest request for one parent may commit its window, delayed
-  // duplicates cannot regress the current page, and tokens are never reused,
-  // so collapse/eviction cleanup can never let a stale in-flight request
-  // impersonate a newer one.
-  const folderRequestSequence = new Map<string, number>();
-  let folderRequestCounter = 0;
-
+  let fileLocationTasks = new TaskScope();
+  type FolderFailure = {
+    generation: number;
+    parent: string;
+    page: number;
+    message: string;
+    notice: NoticeHandle;
+    recovery: RecoveryClaim;
+  };
+  let publicationLocationNotice: NoticeHandle | undefined;
+  let publicationLocationRecovery: RecoveryClaim | undefined;
+  const folderFailures = new Map<string, FolderFailure>();
   const resetFileLocations = () => {
     fileLocationGeneration += 1;
+    fileLocationTasks.halt();
+    fileLocationTasks = new TaskScope();
     fileLocationPublication = undefined;
     folderWindows.clear();
     expandedFolders.clear();
-    folderFailure = undefined;
-    folderRequestSequence.clear();
-    rootBindOwner = 0;
-    releaseRootBindingWaiters();
+    if (publicationLocationNotice)
+      applySummaryUpdate(summaryNotices.release(publicationLocationNotice));
+    if (publicationLocationRecovery)
+      recoveryGate.recover(publicationLocationRecovery);
+    publicationLocationNotice = undefined;
+    publicationLocationRecovery = undefined;
+    for (const failure of folderFailures.values()) {
+      applySummaryUpdate(summaryNotices.release(failure.notice));
+      recoveryGate.recover(failure.recovery);
+    }
+    folderFailures.clear();
+    syncConnection();
     // Re-render at once: retained Folder cards must not stay clickable with
     // an unbound publication, and a cleared failure must remove its Retry
     // control before any handler can dereference it.
     renderSources();
   };
 
-  /// Awaits a bound File Location publication. Folder-source requests must
-  /// never be sent publicationless: retry and reconnect paths wait for (or
-  /// re-establish) the root binding first and report failure truthfully.
-  let rootBindingWaiters: Array<() => void> = [];
-  const releaseRootBindingWaiters = () => {
-    const waiters = rootBindingWaiters;
-    rootBindingWaiters = [];
-    for (const waiter of waiters) waiter();
-  };
+  /// Awaits one shared root bind. Resetting the File Location scope detaches
+  /// the operation and settles every joiner with an unbound result.
   const awaitRootBinding = async () => {
     if (fileLocationPublication) return true;
-    if (rootBindOwner !== 0) {
-      // A root bind is already in flight: await its settlement instead of
-      // reporting no publication while one is on the way.
-      await new Promise<void>((resolve) => {
-        rootBindingWaiters.push(resolve);
-      });
-      return fileLocationPublication !== undefined;
+    const scope = fileLocationTasks;
+    const shared = scope.joinOrStart(
+      "root-binding",
+      { abortTransport: false, onCancel: () => false },
+      async () => {
+        await requestFolderWindow("", 0, false, scope);
+        return scope === fileLocationTasks && Boolean(fileLocationPublication);
+      },
+    );
+    try {
+      return await shared.promise;
+    } catch {
+      return false;
     }
-    await loadFolderWindow("", 0, false);
-    return fileLocationPublication !== undefined;
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -430,31 +593,51 @@ export function renderApp(
     failure: (httpStatus: number) => string,
     surface: "photo" | "summary",
     photoGeneration = requestGeneration,
-  ): Promise<{ ok: boolean; announce: (text: string) => void }> => {
-    const action = ++albumActionSequence;
-    const photoEpoch = photoStatusEpoch;
-    const stillNewest = () => action === albumActionSequence;
-    // The photo surface only accepts the newest action's notice, for the
-    // Photo generation that initiated it, while Photo View is open and no
-    // newer status of any kind has been written since initiation.
+    admissionKey?: string,
+  ): Promise<{
+    admitted: boolean;
+    ok: boolean;
+    announce: (text: string) => void;
+  }> => {
+    const capturedPhotoStatus = photoStatusOwner;
+    const sourceOwner = sourceGeneration;
     const ownsPhotoSurface = () =>
-      stillNewest() &&
       surface === "photo" &&
       photoGeneration === requestGeneration &&
       currentPhotoMode &&
-      photoEpoch === photoStatusEpoch;
-    const reportToSummary = (text: string) => {
-      // A failure that no longer owns the Photo surface still matters:
-      // surface it in the Library summary unless a newer Album notice
-      // already owns that channel.
-      if (action > summaryNoticeAction) {
-        summaryNoticeAction = action;
-        summaryStatus.textContent = text;
-      }
+      capturedPhotoStatus === photoStatusOwner;
+    const settlement = albumSettlements.begin({
+      ...(admissionKey ? { admissionKey } : {}),
+      ownsSurface: ownsPhotoSurface,
+    });
+    if (!settlement)
+      return Promise.resolve({
+        admitted: false,
+        ok: false,
+        announce: () => {},
+      });
+    const notice = summaryNotices.issue(
+      "album",
+      admissionKey ?? path,
+      ALBUM_NOTICE_PRIORITY,
+    );
+    const disconnect = () => {
+      const claim = recoveryGate.issue("album", path, {
+        owner: { scope: "source", generation: String(sourceOwner) },
+      });
+      if (!recoveryGate.fail(claim, { transportLost: true }))
+        recoveryGate.discard(claim);
+      syncConnection();
     };
     const report = (text: string) => {
-      if (ownsPhotoSurface()) status.textContent = text;
-      else reportToSummary(text);
+      if (settlement.canPresent() && surface === "photo")
+        status.textContent = text;
+      else
+        applySummaryUpdate(
+          summaryNotices.present(notice, summaryMessage(text), {
+            fallback: true,
+          }),
+        );
     };
     return (async () => {
       try {
@@ -465,45 +648,48 @@ export function renderApp(
         });
         if (!response.ok) {
           report(failure(response.status));
-          // Only transport-class failures change global connectivity: a
-          // duplicate name (409) or unknown Album (404) is a normal,
-          // answered request, not a disconnection — and a superseded
-          // action's failure must not disconnect a newer success.
-          if (response.status >= 500 && stillNewest()) setConnected(false);
-          return { ok: false, announce: () => {} };
+          if (response.status >= 500 && settlement.isNewest()) disconnect();
+          settlement.finish();
+          return { admitted: true, ok: false, announce: () => {} };
         }
-        // A stale settlement refreshes the bounded data but leaves the
-        // current connection state to whichever action owns the UI now.
+        overviewDataFloor += 1;
         try {
           await refreshOverviewState({
-            connectivity: stillNewest(),
-            action,
+            connectivity: () => settlement.isNewest(),
           });
+          applySummaryUpdate(summaryNotices.releaseKind("album", notice));
         } catch {
-          // The mutation itself persisted; the summary refresh failing must
-          // not silently hide that success. A superseded action must not
-          // disconnect the UI a newer action already restored.
-          if (!stillNewest()) return { ok: true, announce: () => {} };
-          setConnected(false);
-          if (action > summaryNoticeAction) {
-            summaryNoticeAction = action;
-            summaryStatus.textContent =
-              "The Album was saved but the Library summary could not be refreshed.";
+          // Persistence is already durable. Only the globally newest Album
+          // settlement owns connectivity and the refresh-failure notice.
+          if (settlement.isNewest()) {
+            disconnect();
+            applySummaryUpdate(
+              summaryNotices.present(
+                notice,
+                summaryMessage(
+                  "The Album was saved but the Library summary could not be refreshed.",
+                ),
+                { fallback: true },
+              ),
+            );
+          } else {
+            applySummaryUpdate(summaryNotices.release(notice));
           }
         }
+        const mayAnnounce = settlement.canPresent();
+        settlement.finish();
         return {
+          admitted: true,
           ok: true,
           announce: (text: string) => {
-            if (ownsPhotoSurface()) status.textContent = text;
+            if (mayAnnounce && ownsPhotoSurface()) status.textContent = text;
           },
         };
       } catch {
-        // A transport failure of the newest action is a real connectivity
-        // loss; a superseded action's failure still surfaces as a notice
-        // but must not disconnect UI a newer action already restored.
         report(failure(0));
-        if (stillNewest()) setConnected(false);
-        return { ok: false, announce: () => {} };
+        if (settlement.isNewest()) disconnect();
+        settlement.finish();
+        return { admitted: true, ok: false, announce: () => {} };
       }
     })();
   };
@@ -511,17 +697,87 @@ export function renderApp(
   const describeRange = (parent: string, page: number) =>
     `${parent || "Library Folder"} items ${(page * FOLDER_PAGE_SIZE + 1).toLocaleString()}–${((page + 1) * FOLDER_PAGE_SIZE).toLocaleString()}`;
 
-  const loadFolderWindow = async (
+  const releasePublicationLocationRecovery = (): void => {
+    if (publicationLocationNotice)
+      applySummaryUpdate(summaryNotices.release(publicationLocationNotice));
+    if (publicationLocationRecovery)
+      recoveryGate.recover(publicationLocationRecovery);
+    publicationLocationNotice = undefined;
+    publicationLocationRecovery = undefined;
+    syncConnection();
+  };
+  const claimPublicationLocationNotice = (key: string, text: string): void => {
+    releasePublicationLocationRecovery();
+    const notice = summaryNotices.issue(
+      "file-location",
+      key,
+      ACTIONABLE_NOTICE_PRIORITY,
+    );
+    const recovery = recoveryGate.issue("file-location", key);
+    recoveryGate.fail(recovery);
+    publicationLocationNotice = notice;
+    publicationLocationRecovery = recovery;
+    applySummaryUpdate(summaryNotices.present(notice, summaryMessage(text)));
+    syncConnection();
+  };
+  const folderFailureKey = (generation: number, parent: string, page: number) =>
+    `${generation}:${parent}:${page}`;
+  const claimFolderFailure = (
+    generation: number,
     parent: string,
     page: number,
-    expand = true,
-  ) => {
-    const unboundRoot = parent === "" && !fileLocationPublication;
-    if (unboundRoot && rootBindOwner !== 0) return;
+    message: string,
+  ): FolderFailure => {
+    const key = folderFailureKey(generation, parent, page);
+    const prior = folderFailures.get(key);
+    if (prior) {
+      applySummaryUpdate(summaryNotices.release(prior.notice));
+      recoveryGate.recover(prior.recovery);
+    }
+    const notice = summaryNotices.issue(
+      "file-location",
+      `range:${key}`,
+      ACTIONABLE_NOTICE_PRIORITY,
+    );
+    const recovery = recoveryGate.issue("file-location", `range:${key}`);
+    recoveryGate.fail(recovery, { transportLost: true });
+    const failure = { generation, parent, page, message, notice, recovery };
+    folderFailures.set(key, failure);
+    applySummaryUpdate(summaryNotices.present(notice, summaryMessage(message)));
+    syncConnection();
+    return failure;
+  };
+  const releaseFolderFailure = (failure: FolderFailure): void => {
+    const key = folderFailureKey(
+      failure.generation,
+      failure.parent,
+      failure.page,
+    );
+    if (folderFailures.get(key) !== failure) return;
+    folderFailures.delete(key);
+    applySummaryUpdate(summaryNotices.release(failure.notice));
+    recoveryGate.recover(failure.recovery);
+    const newest = [...folderFailures.values()].sort(
+      (left, right) => right.notice.ticket - left.notice.ticket,
+    )[0];
+    if (newest)
+      applySummaryUpdate(
+        summaryNotices.present(newest.notice, summaryMessage(newest.message)),
+      );
+    setConnected(true);
+  };
+
+  async function requestFolderWindow(
+    parent: string,
+    page: number,
+    expand: boolean,
+    scope = fileLocationTasks,
+  ): Promise<void> {
+    if (scope.halted) return;
+    const task = scope.beginLatest(`folder:${parent}`, {
+      abortTransport: false,
+    });
     const generation = fileLocationGeneration;
-    const sequence = (folderRequestCounter += 1);
-    folderRequestSequence.set(parent, sequence);
-    if (unboundRoot) rootBindOwner = sequence;
     const parameters = new URLSearchParams({
       start: String(page * FOLDER_PAGE_SIZE),
       limit: String(FOLDER_PAGE_SIZE),
@@ -531,91 +787,69 @@ export function renderApp(
     if (boundPublication) parameters.set("publication", boundPublication);
     try {
       const response = await fetcher(`/api/file-locations?${parameters}`);
-      // A response from a superseded navigation generation or an outdated
-      // same-parent request is discarded, whatever its outcome.
-      if (generation !== fileLocationGeneration) return;
-      if (folderRequestSequence.get(parent) !== sequence) return;
+      if (!task.isCurrent() || scope !== fileLocationTasks) return;
       if (response.status === 409) {
+        overviewDataFloor += 1;
         resetFileLocations();
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
-        // Only claim a coherent reload when the new root actually bound; a
-        // failed rebind keeps its own failure message and retry control.
-        if (fileLocationPublication) {
-          // Deliberate retake: this recovery message outranks a standing
-          // Album notice because it asks the user to act now.
-          summaryNoticeAction = 0;
-          summaryStatus.textContent =
-            "Scan results changed File Locations. Reloaded the current Folders.";
-        }
+        if (fileLocationPublication)
+          claimPublicationLocationNotice(
+            `publication:${fileLocationPublication}`,
+            "Scan results changed File Locations. Reloaded the current Folders.",
+          );
         return;
       }
       if (!response.ok) throw new Error("file locations failed");
       const window = (await response.json()) as FileLocationsResponse;
-      if (generation !== fileLocationGeneration) return;
-      if (boundPublication && window.publication !== boundPublication) {
-        // A delayed response bound to a different publication: discard it,
-        // for the root exactly as for descendant windows.
-        return;
-      }
-      if (folderRequestSequence.get(parent) !== sequence) {
-        // A superseded request for this parent already committed a newer
-        // window; a delayed duplicate must not regress the current page.
-        return;
-      }
+      if (!task.isCurrent() || scope !== fileLocationTasks) return;
+      if (boundPublication && window.publication !== boundPublication) return;
       fileLocationPublication = window.publication;
       folderWindows.set(parent, {
         page,
         children: [...window.children],
         total: window.total,
       });
-      // Startup binding publishes the window without visually expanding it;
-      // user navigation expands retained state instead of refetching.
       if (expand) {
         expandedFolders.add(parent);
         enforceExpandedCap(parent);
       }
-      if (folderFailure) {
-        if (folderFailure.parent === parent && folderFailure.page === page) {
-          // Only the failed range's own success clears its retry state; an
-          // unrelated range loading must not hide a still-failed range.
-          folderFailure = undefined;
-          // Follow the Library summary's notice rule: a standing Album
-          // notice is not erased by this background status write.
-          if (summaryNoticeAction === 0)
-            summaryStatus.textContent = overview
-              ? scanLabel(overview.scan)
-              : "Library ready";
-        }
-        // Any successful load restores the connection a failed range marked
-        // offline; the global connection banner must not stay stuck.
-        setConnected(true);
-      }
+      const recovered = folderFailures.get(
+        folderFailureKey(generation, parent, page),
+      );
+      if (recovered) releaseFolderFailure(recovered);
+      else if (folderFailures.size > 0) setConnected(true);
       renderSources();
     } catch {
-      if (generation !== fileLocationGeneration) return;
-      // A superseded request's delayed failure must not overwrite the
-      // failure state or connection of a newer committed request.
-      if (folderRequestSequence.get(parent) !== sequence) return;
-      // No window committed for this parent, so its sequencing metadata is
-      // dropped: repeated failed exploration cannot grow retained state.
-      folderRequestSequence.delete(parent);
-      folderFailure = { parent, page };
-      // Deliberate retake: the failed range's retry control must surface.
-      summaryNoticeAction = 0;
-      summaryStatus.textContent = `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`;
-      setConnected(false);
+      if (!task.isCurrent() || scope !== fileLocationTasks) return;
+      claimFolderFailure(
+        generation,
+        parent,
+        page,
+        `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`,
+      );
       renderSources();
     } finally {
-      // Clear ownership only when this request still owns it: a reset that
-      // invalidated the bind must not let a discarded request clear a newer
-      // owner's flag.
-      if (unboundRoot && rootBindOwner === sequence) {
-        rootBindOwner = 0;
-        releaseRootBindingWaiters();
-      }
+      task.finish();
     }
-  };
+  }
+
+  async function loadFolderWindow(
+    parent: string,
+    page: number,
+    expand = true,
+  ): Promise<void> {
+    if (parent === "" && !fileLocationPublication) {
+      const bound = await awaitRootBinding();
+      if (bound && expand) {
+        expandedFolders.add("");
+        enforceExpandedCap("");
+        renderSources();
+      }
+      return;
+    }
+    await requestFolderWindow(parent, page, expand);
+  }
 
   const enforceExpandedCap = (newest: string) => {
     while (expandedFolders.size > MAXIMUM_EXPANDED_FOLDERS) {
@@ -625,7 +859,6 @@ export function renderApp(
       if (oldest === undefined) break;
       expandedFolders.delete(oldest);
       folderWindows.delete(oldest);
-      folderRequestSequence.delete(oldest);
     }
   };
 
@@ -681,7 +914,6 @@ export function renderApp(
       if (expandedFolders.has(child.location)) {
         expandedFolders.delete(child.location);
         folderWindows.delete(child.location);
-        folderRequestSequence.delete(child.location);
         renderSources();
       } else {
         // Expanding revalidates against the current publication instead of
@@ -726,6 +958,7 @@ export function renderApp(
   };
 
   const renderSources = () => {
+    if (!applicationAlive) return;
     // Background refreshes rebuild the source list; an Album form input that
     // held focus keeps its focus and caret through the rebuild.
     const focused = document.activeElement;
@@ -749,16 +982,19 @@ export function renderApp(
     const fileHeading = document.createElement("h3");
     fileHeading.textContent = "File Locations";
     sourceList.append(fileHeading);
-    if (folderFailure) {
+    for (const failure of [...folderFailures.values()].sort(
+      (left, right) => left.notice.ticket - right.notice.ticket,
+    )) {
       const retryFolders = document.createElement("button");
       retryFolders.type = "button";
       retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry File Locations (${describeRange(folderFailure.parent, folderFailure.page)})`;
+      retryFolders.textContent = `Retry File Locations (${describeRange(failure.parent, failure.page)})`;
       retryFolders.addEventListener("click", () => {
-        // The control only renders while folderFailure is set, and reset
-        // removes it on the same render that clears the failure.
-        const failure = folderFailure;
-        if (failure) void loadFolderWindow(failure.parent, failure.page);
+        const current = folderFailures.get(
+          folderFailureKey(failure.generation, failure.parent, failure.page),
+        );
+        if (current === failure)
+          void loadFolderWindow(failure.parent, failure.page);
       });
       sourceList.append(retryFolders);
     }
@@ -793,7 +1029,6 @@ export function renderApp(
     rootExpand.addEventListener("click", () => {
       if (expandedFolders.has("")) {
         expandedFolders.delete("");
-        folderRequestSequence.delete("");
         renderSources();
       } else {
         void loadFolderWindow("", 0);
@@ -1125,122 +1360,394 @@ export function renderApp(
         return `Library ${scan.state}`;
     }
   };
-  let statusPoll = 0;
-  const pollUntilPublished = async () => {
-    const generation = ++statusPoll;
-    while (generation === statusPoll && overview && !overview.published) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      if (generation !== statusPoll) return;
+  type ScanCycle = {
+    consumed: boolean;
+    admission: "pending" | "admitted";
+  };
+  let observedScanState: string | undefined;
+  let observedPublication: string | undefined;
+  let publicationBaselineEstablished = false;
+  let scanFailureNotice: NoticeHandle | undefined;
+  let scanCompletionNotice: NoticeHandle | undefined;
+  let scanCommandRecovery: RecoveryClaim | undefined;
+  let activeScanCycle: ScanCycle | undefined;
+  let lastCompletedPublication: string | undefined;
+
+  const releaseScanFailure = () => {
+    if (!scanFailureNotice) return;
+    applySummaryUpdate(summaryNotices.release(scanFailureNotice));
+    scanFailureNotice = undefined;
+  };
+  const claimScanFailure = () => {
+    if (!scanFailureNotice)
+      scanFailureNotice = summaryNotices.issue(
+        "scan-failure",
+        "library",
+        ACTIONABLE_NOTICE_PRIORITY,
+      );
+    applySummaryUpdate(
+      summaryNotices.present(
+        scanFailureNotice,
+        summaryMessage(
+          "Library check failed; the last complete Library remains available.",
+          { label: "Retry Library Check", run: retryLibraryCheck },
+        ),
+      ),
+    );
+  };
+  const observePublication = (publication?: string): boolean => {
+    if (!publicationBaselineEstablished) {
+      publicationBaselineEstablished = true;
+      observedPublication = publication;
+      return false;
+    }
+    if (publication === observedPublication) return false;
+    observedPublication = publication;
+    overviewDataFloor += 1;
+    return true;
+  };
+  const completeScan = (cycle?: ScanCycle, publication?: string): void => {
+    if (cycle?.consumed || (cycle && cycle.admission !== "admitted")) return;
+    if (cycle) cycle.consumed = true;
+    if (activeScanCycle === cycle) activeScanCycle = undefined;
+    if (cycle && scanCommandRecovery) {
+      recoveryGate.recover(scanCommandRecovery);
+      scanCommandRecovery = undefined;
+      setConnected(true);
+    }
+    if (!applicationAlive) return;
+    if (publication && publication === lastCompletedPublication) return;
+    if (publication) lastCompletedPublication = publication;
+    if (!observePublication(publication) && !publication)
+      overviewDataFloor += 1;
+    releaseScanFailure();
+    if (scanCompletionNotice)
+      applySummaryUpdate(summaryNotices.release(scanCompletionNotice));
+    const notice = summaryNotices.issue(
+      "scan-completion",
+      "library",
+      ACTIONABLE_NOTICE_PRIORITY,
+    );
+    scanCompletionNotice = notice;
+    applySummaryUpdate(
+      summaryNotices.present(
+        notice,
+        summaryMessage(
+          "Library check complete. Open Browse Snapshots remain unchanged.",
+          {
+            label: "Refresh Current Source",
+            run: () => {
+              if (scanCompletionNotice === notice) {
+                scanCompletionNotice = undefined;
+                applySummaryUpdate(summaryNotices.release(notice));
+              }
+              refresh.click();
+            },
+          },
+        ),
+      ),
+    );
+    resetFileLocations();
+    void refreshOverviewState()
+      .then(() => loadFolderWindow("", 0, false))
+      .catch(() => {});
+  };
+  const ensureStatusMonitor = (
+    baseline?: LibraryOverviewResponse["scan"],
+  ): void => {
+    if (observedScanState === undefined && baseline)
+      observedScanState = baseline.state;
+    if (applicationTasks.current("publication-status")) return;
+    const monitor = applicationTasks.beginLatest("publication-status", {
+      abortTransport: false,
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let wake: (() => void) | undefined;
+    monitor.onCleanup(() => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      wake?.();
+      wake = undefined;
+    });
+    const pause = () =>
+      new Promise<void>((resolve) => {
+        wake = resolve;
+        timer = setTimeout(
+          () => {
+            timer = undefined;
+            wake = undefined;
+            resolve();
+          },
+          observedScanState === "idle" ? 2_000 : 500,
+        );
+      });
+    void (async () => {
       try {
-        const response = await fetcher("/api/status");
-        if (!response.ok) continue;
-        const scan = (await response.json()) as LibraryOverviewResponse["scan"];
-        // Publication polling is background status: it must not erase a
-        // standing Album notice from the Library summary.
-        if (summaryNoticeAction === 0)
-          summaryStatus.textContent = scanLabel(scan);
-        if (scan.state === "idle") await loadOverview();
-      } catch {
-        /* keep polling; the connection status reflects hard failures */
+        while (monitor.isCurrent()) {
+          await pause();
+          if (!monitor.isCurrent()) return;
+          const background = summaryNotices.backgroundEpoch();
+          let settled = false;
+          try {
+            const response = await fetcher("/api/status");
+            if (!response.ok) continue;
+            const scan =
+              (await response.json()) as LibraryOverviewResponse["scan"];
+            if (!monitor.isCurrent()) return;
+            applySummaryUpdate(
+              summaryNotices.presentBackground(
+                background,
+                summaryMessage(scanLabel(scan)),
+              ),
+            );
+            settled = true;
+            const prior = observedScanState;
+            const publicationChanged =
+              scan.publication !== undefined &&
+              publicationBaselineEstablished &&
+              scan.publication !== observedPublication;
+            observedScanState = scan.state;
+            if (scan.state !== "idle" && scan.state !== "failed") {
+              if (activeScanCycle?.admission === "pending")
+                activeScanCycle.admission = "admitted";
+            }
+            if (scan.state === "failed") {
+              if (activeScanCycle) activeScanCycle.consumed = true;
+              activeScanCycle = undefined;
+              claimScanFailure();
+              return;
+            }
+            if (
+              scan.state === "idle" &&
+              prior &&
+              prior !== "idle" &&
+              prior !== "failed"
+            ) {
+              const admitted =
+                activeScanCycle?.admission === "admitted"
+                  ? activeScanCycle
+                  : undefined;
+              completeScan(admitted, scan.publication);
+            } else if (scan.state === "idle" && publicationChanged) {
+              completeScan(undefined, scan.publication);
+            }
+          } catch {
+            /* answered and transport status failures stay silent */
+          } finally {
+            if (!settled) summaryNotices.discardBackground(background);
+          }
+        }
+      } finally {
+        monitor.finish();
       }
+    })();
+  };
+  const retryLibraryCheck = async (): Promise<void> => {
+    const settlement = scanSettlements.begin({ admissionKey: "scan" });
+    if (!settlement) return;
+    const cycle: ScanCycle = {
+      consumed: false,
+      admission: "pending",
+    };
+    activeScanCycle = cycle;
+    ensureStatusMonitor();
+    try {
+      const response = await fetcher("/api/scan", { method: "POST" });
+      if (!response.ok) {
+        if (activeScanCycle === cycle) activeScanCycle = undefined;
+        if (response.status >= 500) {
+          if (
+            !scanCommandRecovery ||
+            !recoveryGate.isActive(scanCommandRecovery)
+          ) {
+            scanCommandRecovery = recoveryGate.issue("scan-command", "library");
+            recoveryGate.fail(scanCommandRecovery, { transportLost: true });
+          }
+          syncConnection();
+        }
+        return;
+      }
+      const terminal =
+        (await response.json()) as LibraryOverviewResponse["scan"];
+      cycle.admission = "admitted";
+      if (scanCommandRecovery) {
+        recoveryGate.recover(scanCommandRecovery);
+        scanCommandRecovery = undefined;
+        setConnected(true);
+      }
+      observedScanState = terminal.state;
+      if (terminal.state === "idle") completeScan(cycle, terminal.publication);
+      else if (terminal.state === "failed") claimScanFailure();
+    } catch {
+      if (!scanCommandRecovery || !recoveryGate.isActive(scanCommandRecovery)) {
+        scanCommandRecovery = recoveryGate.issue("scan-command", "library");
+        recoveryGate.fail(scanCommandRecovery, { transportLost: true });
+      }
+      syncConnection();
+    } finally {
+      settlement.finish();
     }
   };
-  let overviewRequestSequence = 0;
-  let overviewCommitted = 0;
-  const refreshOverviewState = async (options?: {
-    connectivity?: boolean;
-    action?: number;
-  }) => {
-    // Overview responses commit shared state in commit order: a response may
-    // land only if it is newer than the last COMMITTED overview, so a late
-    // older response cannot revert Albums, counts, titles, or retry state,
-    // while a newer request that FAILS never discards an older success.
-    const request = ++overviewRequestSequence;
-    const response = await fetcher("/api/overview");
-    if (!response.ok) throw new Error("overview failed");
-    const body = (await response.json()) as LibraryOverviewResponse;
-    // Re-check after the body resolves: a slow parse must not let an
-    // obsolete overview revert newer committed state either.
-    if (request <= overviewCommitted) return;
-    overviewCommitted = request;
-    overview = body;
-    sets = overview.albums;
-    // The Library summary keeps a standing Album notice until a newer
-    // Album action settles or the user deliberately reloads: background
-    // refreshes (folder recovery, scan polling) must not erase it.
-    const owner = options?.action;
-    const mayTakeSummary =
-      owner !== undefined
-        ? owner >= summaryNoticeAction
-        : summaryNoticeAction === 0;
-    if (mayTakeSummary) {
-      summaryStatus.textContent = scanLabel(overview.scan);
-      // A successfully settled action supersedes any prior notice: clear
-      // the marker so background refreshes may take the summary again.
-      // (A failing action keeps its marker until a newer action settles.)
-      if (owner !== undefined) summaryNoticeAction = 0;
-    }
-    if (options?.connectivity !== false) setConnected(true);
-    // A refreshed Album list must not leave stale presentation behind: the
-    // open Album keeps its (possibly renamed) name on every heading, the
-    // remembered retry source follows the rename, and the current-Photo
-    // membership controls follow the refreshed Album list.
-    if (sourceKind === "album" && sourceSetId) {
-      const open = sets.find((candidate) => candidate.id === sourceSetId);
-      if (open) {
-        sourceSetName = open.name;
-        gridTitle.textContent = sourceSetName;
-        photoTitle.textContent = sourceSetName;
-        if (lastSource?.kind === "album" && lastSource.set?.id === open.id) {
-          lastSource = { ...lastSource, set: open };
+  const electOverviewBootstrap = (committed: LibraryOverviewResponse): void => {
+    const owner = applicationTasks.beginLatest("overview-bootstrap", {
+      abortTransport: false,
+    });
+    void (async () => {
+      try {
+        if (!fileLocationPublication && committed.published) {
+          // Root binding belongs to the independent File Location scope. A
+          // superseded bootstrap awaits it but starts no later child.
+          if (lastSource?.kind === "folder" && !token) {
+            await awaitRootBinding();
+            if (!owner.isCurrent()) return;
+          } else {
+            void loadFolderWindow("", 0, false);
+          }
         }
+        if (!owner.isCurrent()) return;
+        if (!token && committed.published) {
+          const remembered = lastSource ?? {
+            kind: "library" as const,
+            set: undefined,
+            folder: undefined,
+          };
+          const bindable =
+            remembered.kind !== "folder" ||
+            fileLocationPublication !== undefined;
+          if (bindable) {
+            await openSource(
+              remembered.kind,
+              remembered.set,
+              undefined,
+              remembered.folder,
+            );
+          } else if (owner.isCurrent()) {
+            gridStatus.textContent =
+              "Could not load this source. Retry to continue.";
+          }
+        }
+      } finally {
+        owner.finish();
       }
-    }
-    renderMembershipControls();
-    renderSources();
+    })();
   };
 
-  let overviewLoadSequence = 0;
-  const loadOverview = async () => {
-    // A deliberate reload or retry retakes the Library summary channel.
-    // Sequence loads so an older failed load cannot mark a newer successful
-    // load disconnected: only the newest load owns the failure surface.
-    const load = ++overviewLoadSequence;
-    summaryNoticeAction = 0;
-    summaryStatus.textContent = "Loading Library summary…";
+  const refreshOverviewState = async (options?: {
+    connectivity?: () => boolean;
+    bootstrap?: boolean;
+  }): Promise<boolean> => {
+    // The scope owns request sequencing and the latest committed sequence at
+    // the current data floor. Requests remain concurrent: a newer failure
+    // does not detach an older valid success.
+    const task = applicationTasks.beginOrdered("overview", overviewDataFloor);
+    const background = summaryNotices.backgroundEpoch();
+    let backgroundSettled = false;
     try {
-      await refreshOverviewState();
-      const current = overview;
-      if (!current) throw new Error("overview missing");
-      if (!fileLocationPublication && current.published) {
-        // A remembered Folder source must reopen only after the publication
-        // is bound; otherwise the request would be rejected as invalid.
-        if (lastSource?.kind === "folder" && !token) {
-          await awaitRootBinding();
-        } else {
-          void loadFolderWindow("", 0, false);
+      const response = await fetcher("/api/overview");
+      if (!response.ok) throw new Error("overview failed");
+      const body = (await response.json()) as LibraryOverviewResponse;
+      if (body.published && !body.publication)
+        throw new Error("overview omitted publication generation");
+      // Revalidate the publication immediately before commit. A response body
+      // produced before a replacement cannot cross that observed boundary.
+      const validationEpoch = summaryNotices.backgroundEpoch();
+      let validationSettled = false;
+      try {
+        const validationResponse = await fetcher("/api/status");
+        if (!validationResponse.ok)
+          throw new Error("overview publication validation failed");
+        const validation =
+          (await validationResponse.json()) as LibraryOverviewResponse["scan"];
+        summaryNotices.discardBackground(validationEpoch);
+        validationSettled = true;
+        if (body.publication !== validation.publication) {
+          if (validation.publication !== observedPublication)
+            overviewDataFloor += 1;
+          return false;
+        }
+      } finally {
+        if (!validationSettled)
+          summaryNotices.discardBackground(validationEpoch);
+      }
+      // Re-check both captured floor and commit order after body parsing and
+      // publication validation. observePublication advances the floor
+      // synchronously after a validated new-publication commit, so older
+      // in-flight responses cannot cross that boundary.
+      if (!task.commit(overviewDataFloor)) return false;
+      observePublication(body.publication);
+      overview = body;
+      sets = body.albums;
+      ensureStatusMonitor(body.scan);
+      applySummaryUpdate(
+        summaryNotices.presentBackground(
+          background,
+          summaryMessage(scanLabel(body.scan)),
+        ),
+      );
+      backgroundSettled = true;
+      if (options?.connectivity?.()) setConnected(true);
+      if (sourceKind === "album" && sourceSetId) {
+        const open = sets.find((candidate) => candidate.id === sourceSetId);
+        if (open) {
+          sourceSetName = open.name;
+          gridTitle.textContent = sourceSetName;
+          photoTitle.textContent = sourceSetName;
+          if (lastSource?.kind === "album" && lastSource.set?.id === open.id)
+            lastSource = { ...lastSource, set: open };
         }
       }
-      if (!token && current.published) {
-        const source = lastSource ?? {
-          kind: "library" as const,
-          set: undefined,
-          folder: undefined,
-        };
-        const bindable =
-          source.kind !== "folder" || fileLocationPublication !== undefined;
-        if (bindable) {
-          await openSource(source.kind, source.set, undefined, source.folder);
-        } else {
-          gridStatus.textContent =
-            "Could not load this source. Retry to continue.";
-        }
-      } else if (!current.published) void pollUntilPublished();
+      renderMembershipControls();
+      renderSources();
+      if (options?.bootstrap) electOverviewBootstrap(body);
+      return true;
+    } finally {
+      if (!backgroundSettled) summaryNotices.discardBackground(background);
+      task.finish();
+    }
+  };
+
+  const loadOverview = async () => {
+    // Foreground reload ownership is latest-only, while its shared overview
+    // child keeps commit-in-order ownership and may elect bootstrap even when
+    // a newer foreground load fails.
+    const load = applicationTasks.beginLatest("overview-load", {
+      abortTransport: false,
+    });
+    const barrier = summaryNotices.beginBarrier(
+      "reload",
+      "overview",
+      ACTIONABLE_NOTICE_PRIORITY,
+      summaryMessage("Loading Library summary…"),
+    );
+    applySummaryUpdate(barrier.update);
+    try {
+      await refreshOverviewState({
+        bootstrap: true,
+        connectivity: () => load.isCurrent(),
+      });
+      if (load.isCurrent() && overviewRecovery) {
+        recoveryGate.recover(overviewRecovery);
+        overviewRecovery = undefined;
+        setConnected(true);
+      }
+      applySummaryUpdate(summaryNotices.release(barrier.handle));
     } catch {
-      if (load !== overviewLoadSequence) return;
-      summaryStatus.textContent =
-        "Could not reach Slipstream. Check the server and retry.";
-      setConnected(false);
+      if (!load.isCurrent()) return;
+      applySummaryUpdate(
+        summaryNotices.present(
+          barrier.handle,
+          summaryMessage(
+            "Could not reach Slipstream. Check the server and retry.",
+          ),
+        ),
+      );
+      if (!overviewRecovery || !recoveryGate.isActive(overviewRecovery)) {
+        overviewRecovery = recoveryGate.issue("overview-reload", "overview");
+        recoveryGate.fail(overviewRecovery, { transportLost: true });
+      }
+      syncConnection();
+    } finally {
+      load.finish();
     }
   };
 
@@ -1274,18 +1781,25 @@ export function renderApp(
     sourceGeneration += 1;
     requestGeneration += 1;
     const generation = sourceGeneration;
+    const sourceTransition = recoveryGate.beginTransition(
+      "source",
+      String(generation),
+    );
+    const photoTransition = recoveryGate.beginTransition(
+      "photo",
+      String(requestGeneration),
+    );
+    recoveryGate.succeedTransition(photoTransition);
+    syncConnection();
     openingPhoto = false;
     cancelPendingImageLoads(gridLayer, true);
     gridLayer.replaceChildren();
     cancelPendingImageLoads(stage, true);
     stage.replaceChildren();
-    sourceAbortController.abort();
-    sourceAbortController = new AbortController();
-    gridAbortController.abort();
-    gridAbortController = new AbortController();
-    photoAbortController.abort();
-    photoAbortController = new AbortController();
-    const signal = sourceAbortController.signal;
+    renewSourceTasks();
+    renewGridTasks();
+    renewPhotoTasks();
+    const signal = sourceSignal;
     currentPhotoMode = false;
     gridView.hidden = false;
     photoView.hidden = true;
@@ -1302,9 +1816,7 @@ export function renderApp(
     gridStatus.textContent = "Preparing Library order…";
     undo = undefined;
     loaded = new Map();
-    windowRequests = new Map();
     thumbnailUrls = new Map();
-    thumbnailRequests = new Map();
     thumbnailFailures = new Set();
     lastCurrentPhotoId = preferredPhotoId;
     const priorToken = token;
@@ -1342,16 +1854,16 @@ export function renderApp(
         // Locations: a superseded open doing the same would discard the
         // newer recovery and leave the tree unbound.
         if (generation !== sourceGeneration) return;
+        overviewDataFloor += 1;
         resetFileLocations();
         await refreshOverviewState().catch(() => {});
         await loadFolderWindow("", 0);
         if (generation !== sourceGeneration) return;
-        if (fileLocationPublication) {
-          // Deliberate retake: actionable recovery outranks a standing notice.
-          summaryNoticeAction = 0;
-          summaryStatus.textContent =
-            "Scan results changed File Locations. Reopen the current Folder.";
-        }
+        if (fileLocationPublication)
+          claimPublicationLocationNotice(
+            `publication:${fileLocationPublication}`,
+            "Scan results changed File Locations. Reopen the current Folder.",
+          );
         throw new Error("file locations expired");
       }
       if (!response.ok) throw new Error("browse open failed");
@@ -1368,8 +1880,20 @@ export function renderApp(
       gridViewport.scrollTop =
         Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
       renderSources();
-      await loadWindow(currentIndex, generation);
-      if (generation !== sourceGeneration) return;
+      const windowReady = await loadWindow(
+        currentIndex,
+        generation,
+        false,
+        sourceSignal,
+        "high",
+        sourceTransition,
+      );
+      if (generation !== sourceGeneration || !windowReady) return;
+      if (kind === "folder" && publicationLocationNotice)
+        releasePublicationLocationRecovery();
+      recoveryGate.succeedTransition(sourceTransition);
+      retrySourceRequired = false;
+      setConnected(true);
       renderGrid();
       gridStatus.textContent = total
         ? `Ready · ${total.toLocaleString()} Photos`
@@ -1379,7 +1903,15 @@ export function renderApp(
       token = "";
       if (priorToken) void closeBrowse(priorToken);
       gridStatus.textContent = "Could not load this source. Retry to continue.";
-      setConnected(false);
+      retrySourceRequired = true;
+      const claim = recoveryGate.issue("source-open", String(generation), {
+        owner: { scope: "source", generation: String(generation) },
+        transition: sourceTransition,
+      });
+      recoveryGate.failTransition(sourceTransition, claim, {
+        transportLost: true,
+      });
+      syncConnection();
     } finally {
       if (generation === sourceGeneration) {
         busy = false;
@@ -1407,6 +1939,7 @@ export function renderApp(
     try {
       await fetcher(`/api/browse/${encodeURIComponent(browseToken)}`, {
         method: "DELETE",
+        keepalive: true,
       });
     } catch {
       /* bounded server expiry remains the fallback */
@@ -1420,22 +1953,35 @@ export function renderApp(
     busy = true;
     const resumePhoto = currentPhotoMode;
     const photoGeneration = ++requestGeneration;
-    photoAbortController.abort();
-    photoAbortController = new AbortController();
-    const photoSignal = photoAbortController.signal;
+    const photoTransition = resumePhoto
+      ? recoveryGate.beginTransition("photo", String(photoGeneration))
+      : undefined;
+    if (!photoTransition) {
+      const gridTransition = recoveryGate.beginTransition(
+        "photo",
+        String(photoGeneration),
+      );
+      recoveryGate.succeedTransition(gridTransition);
+    }
+    syncConnection();
+    renewPhotoTasks();
+    const currentPhotoSignal = photoSignal;
     cancelPendingImageLoads(stage);
     openingPhoto = false;
     const oldToken = token;
     const anchorId =
       loaded.get(anchorIndex)?.id ?? lastCurrentPhotoId ?? currentPhoto()?.id;
-    sourceAbortController.abort();
-    sourceAbortController = new AbortController();
-    gridAbortController.abort();
-    gridAbortController = new AbortController();
+    renewSourceTasks();
+    renewGridTasks();
     cancelScheduledGridRender();
     const generation = ++sourceGeneration;
+    const sourceTransition = recoveryGate.beginTransition(
+      "source",
+      String(generation),
+    );
+    syncConnection();
     cancelPendingImageLoads(gridLayer);
-    const signal = sourceAbortController.signal;
+    const signal = sourceSignal;
     let boundPublication = fileLocationPublication;
     if (sourceKind === "folder" && !boundPublication) {
       // A Folder source must never be reopened publicationless; wait for
@@ -1448,7 +1994,15 @@ export function renderApp(
         // Fail truthfully instead of sending a publicationless request.
         gridStatus.textContent =
           "Could not load this source. Retry to continue.";
-        setConnected(false);
+        retrySourceRequired = true;
+        const claim = recoveryGate.issue("source-reopen", String(generation), {
+          owner: { scope: "source", generation: String(generation) },
+          transition: sourceTransition,
+        });
+        recoveryGate.failTransition(sourceTransition, claim, {
+          transportLost: true,
+        });
+        syncConnection();
         busy = false;
         updateControls();
         return;
@@ -1487,15 +2041,15 @@ export function renderApp(
         // Generation-gated exactly like openSource: only the current
         // source's recovery may reset and rebind File Locations.
         if (generation === sourceGeneration) {
+          overviewDataFloor += 1;
           resetFileLocations();
           await refreshOverviewState().catch(() => {});
           await loadFolderWindow("", 0);
-          if (generation === sourceGeneration && fileLocationPublication) {
-            // Deliberate retake: actionable recovery outranks a standing notice.
-            summaryNoticeAction = 0;
-            summaryStatus.textContent =
-              "Scan results changed File Locations. Reopen the current Folder.";
-          }
+          if (generation === sourceGeneration && fileLocationPublication)
+            claimPublicationLocationNotice(
+              `publication:${fileLocationPublication}`,
+              "Scan results changed File Locations. Reopen the current Folder.",
+            );
         }
       }
       if (!response.ok) throw new Error("browse reopen failed");
@@ -1509,27 +2063,48 @@ export function renderApp(
       total = opened.total;
       currentIndex = Math.min(opened.position, Math.max(0, total - 1));
       loaded = new Map();
-      windowRequests = new Map();
       thumbnailUrls = new Map();
-      thumbnailRequests = new Map();
       thumbnailFailures = new Set();
       if (oldToken && oldToken !== token) void closeBrowse(oldToken);
-      await loadWindow(currentIndex, generation);
-      if (generation !== sourceGeneration) return;
+      const windowReady = await loadWindow(
+        currentIndex,
+        generation,
+        false,
+        sourceSignal,
+        "high",
+        sourceTransition,
+      );
+      if (generation !== sourceGeneration || !windowReady) return;
       gridViewport.scrollTop =
         Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
       gridStatus.textContent =
         "Source reopened using the latest published Library order.";
+      if (sourceKind === "folder" && publicationLocationNotice)
+        releasePublicationLocationRecovery();
+      recoveryGate.succeedTransition(sourceTransition);
+      retrySourceRequired = false;
       setConnected(true);
       if (resumePhoto && photoGeneration === requestGeneration) {
         gridView.hidden = true;
         photoView.hidden = false;
         syncSourcePanel();
         renderPhotoShell(photoGeneration);
-        void showPreview(photoGeneration, photoSignal).then((refreshed) => {
-          if (refreshed && photoGeneration === requestGeneration)
-            void persistPosition();
+        void showPreview(
+          photoGeneration,
+          currentPhotoSignal,
+          photoTransition,
+        ).then(async (refreshed) => {
+          if (!refreshed || photoGeneration !== requestGeneration) return;
+          const persisted = await persistPosition();
+          if (
+            persisted &&
+            photoGeneration === requestGeneration &&
+            photoTransition
+          ) {
+            recoveryGate.succeedTransition(photoTransition);
+            setConnected(true);
+          }
         });
       }
     } catch {
@@ -1539,7 +2114,15 @@ export function renderApp(
         "This source expired and could not be reopened. Retry the connection.";
       gridStatus.textContent = failure;
       status.textContent = failure;
-      setConnected(false);
+      retrySourceRequired = true;
+      const claim = recoveryGate.issue("source-reopen", String(generation), {
+        owner: { scope: "source", generation: String(generation) },
+        transition: sourceTransition,
+      });
+      recoveryGate.failTransition(sourceTransition, claim, {
+        transportLost: true,
+      });
+      syncConnection();
     } finally {
       if (generation === sourceGeneration) {
         busy = false;
@@ -1557,75 +2140,122 @@ export function renderApp(
     index: number,
     generation = sourceGeneration,
     quiet = false,
-    signal = sourceAbortController.signal,
+    signal = gridSignal,
     priority: "high" | "low" = quiet ? "low" : "high",
-  ): Promise<void> => {
+    transition?: RecoveryTransition,
+  ): Promise<boolean> => {
     if (
       generation !== sourceGeneration ||
       !token ||
-      browseTokenGeneration !== sourceGeneration ||
-      total === 0
+      browseTokenGeneration !== sourceGeneration
     )
-      return Promise.resolve();
+      return Promise.resolve(false);
+    if (total === 0) return Promise.resolve(true);
     const start = alignedStart(index);
-    const existing = windowRequests.get(start);
-    if (existing && !existing.signal.aborted) return existing.promise;
-    if (existing) windowRequests.delete(start);
-    if (windowLoaded(start)) return Promise.resolve();
+    if (windowLoaded(start)) return Promise.resolve(true);
     const browseToken = token;
+    const expectedTotal = total;
+    const photoGeneration = requestGeneration;
+    const scope =
+      signal === sourceSignal
+        ? sourceTasks
+        : signal === photoSignal
+          ? photoTasks
+          : gridTasks;
+    const ownerScope = scope === photoTasks ? "photo" : "source";
+    const ownerGeneration =
+      ownerScope === "photo" ? photoGeneration : generation;
+    const rangeMessage = `Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)}`;
     if (!quiet)
-      gridStatus.textContent = `Loading Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)} of ${total.toLocaleString()}…`;
-    const request = (async () => {
-      try {
+      gridStatus.textContent = `Loading ${rangeMessage} of ${total.toLocaleString()}…`;
+    const shared = scope.joinOrStart(
+      `window:${start}`,
+      { abortTransport: true, onCancel: () => false },
+      async (requestSignal) => {
+        const ownedSignal = requestSignal!;
         let response: Response;
         try {
           response = await fetcher(
             `/api/browse/${encodeURIComponent(browseToken)}?start=${start}&limit=${WINDOW_SIZE}`,
-            { signal, priority },
+            { signal: ownedSignal, priority },
           );
         } catch {
-          if (!signal.aborted && generation === sourceGeneration)
-            setConnected(
-              false,
-              "Connection lost. Retry to refresh this range.",
+          if (!ownedSignal.aborted && generation === sourceGeneration) {
+            const message = `Connection lost while loading ${rangeMessage}. Retry this range.`;
+            if (ownerScope === "photo") status.textContent = message;
+            else gridStatus.textContent = message;
+            failBrowseRange(
+              ownerScope,
+              ownerGeneration,
+              start,
+              true,
+              transition,
             );
-          return;
+          }
+          return false;
         }
         if (response.status === 404) {
-          if (!signal.aborted && generation === sourceGeneration)
+          if (!ownedSignal.aborted && generation === sourceGeneration)
             await reopenExpired(index, generation);
-          return;
+          return false;
         }
-        if (!response.ok) throw new Error("window failed");
-        const result = (await response.json()) as BrowseWindowResponse;
-        if (generation !== sourceGeneration || signal.aborted) return;
+        if (!response.ok) {
+          if (!ownedSignal.aborted && generation === sourceGeneration) {
+            const message = `${rangeMessage} could not be loaded (HTTP ${response.status}). Retry this range.`;
+            if (ownerScope === "photo") status.textContent = message;
+            else gridStatus.textContent = message;
+            failBrowseRange(
+              ownerScope,
+              ownerGeneration,
+              start,
+              false,
+              transition,
+            );
+          }
+          return false;
+        }
+        let result: BrowseWindowResponse;
+        try {
+          const candidate: unknown = await response.json();
+          const decoded = decodeBrowseWindow(candidate, start, expectedTotal);
+          if (!decoded) throw new Error("malformed window");
+          result = decoded;
+        } catch {
+          if (!ownedSignal.aborted && generation === sourceGeneration) {
+            const message = `${rangeMessage} returned an invalid response. Retry this range.`;
+            if (ownerScope === "photo") status.textContent = message;
+            else gridStatus.textContent = message;
+            failBrowseRange(
+              ownerScope,
+              ownerGeneration,
+              start,
+              false,
+              transition,
+            );
+          }
+          return false;
+        }
+        if (generation !== sourceGeneration || ownedSignal.aborted)
+          return false;
         for (const [offset, photo] of result.photos.entries())
           loaded.set(result.start + offset, photo);
+        recoverBrowseRange(ownerScope, ownerGeneration, start);
         trimLoaded(index);
         renderGrid();
         if (!quiet)
           gridStatus.textContent = `Ready · ${total.toLocaleString()} Photos`;
-      } catch {
-        if (!signal.aborted && generation === sourceGeneration)
-          gridStatus.textContent =
-            "Some Photos could not load. Scroll or retry this range.";
-      }
-    })();
-    const entry = {
-      signal,
-      promise: request.finally(() => {
-        if (windowRequests.get(start) === entry) windowRequests.delete(start);
-        if (
-          signal.aborted &&
-          generation === sourceGeneration &&
-          !gridView.hidden
-        )
-          scheduleGridRender();
-        updateControls();
-      }),
-    };
-    windowRequests.set(start, entry);
-    return entry.promise;
+        return true;
+      },
+    );
+    return shared.promise.finally(() => {
+      if (
+        shared.signal?.aborted &&
+        generation === sourceGeneration &&
+        !gridView.hidden
+      )
+        scheduleGridRender();
+      updateControls();
+    });
   };
   const trimLoaded = (anchor: number) => {
     if (loaded.size <= MAX_RETAINED_FACTS) return;
@@ -1642,6 +2272,7 @@ export function renderApp(
     gridLayer.style.height = height;
   };
   const renderGrid = () => {
+    if (!applicationAlive) return;
     const count = columns();
     renderedColumns = count;
     renderedViewportHeight = effectiveViewportHeight();
@@ -1763,7 +2394,22 @@ export function renderApp(
         image.alt = `${image.alt} — Thumbnail unavailable`;
       return;
     }
-    image.onerror = () => markThumbnailUnavailable(photoId, image, generation);
+    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
+      abortTransport: false,
+    });
+    const expectedUrl = new URL(url, window.location.href).href;
+    transfer.onCleanup(() => {
+      image.onload = null;
+      image.onerror = null;
+      if (!image.complete && image.src === expectedUrl)
+        image.removeAttribute("src");
+    });
+    image.onload = () => transfer.finish();
+    image.onerror = () => {
+      if (!transfer.isCurrent()) return;
+      markThumbnailUnavailable(photoId, image, generation);
+      transfer.finish();
+    };
     if (attachDisconnected || image.isConnected) image.src = url;
   };
   const loadThumbnail = (
@@ -1786,35 +2432,26 @@ export function renderApp(
         image.alt = `${image.alt} — Thumbnail unavailable`;
       return;
     }
-    const pending = thumbnailRequests.get(photoId);
-    if (pending) {
-      void pending.then((url) =>
-        attachThumbnail(photoId, image, url, false, generation),
-      );
-      return;
-    }
-    const signal = gridAbortController.signal;
-    const request = (async () => {
-      try {
-        const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
-          signal,
-          priority: "low",
-        });
-        if (!response.ok) return undefined;
-        const result = (await response.json()) as PreviewResponse;
-        return result.url ?? undefined;
-      } catch {
-        return undefined;
-      }
-    })();
-    thumbnailRequests.set(photoId, request);
-    void request.then((url) => {
-      if (
-        generation !== sourceGeneration ||
-        thumbnailRequests.get(photoId) !== request
-      )
-        return;
-      thumbnailRequests.delete(photoId);
+    const scope = gridTasks;
+    const request = scope.joinOrStart(
+      `thumbnail:${photoId}`,
+      { abortTransport: true, onCancel: () => undefined },
+      async (signal) => {
+        try {
+          const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
+            ...(signal ? { signal } : {}),
+            priority: "low",
+          });
+          if (!response.ok) return undefined;
+          const result = (await response.json()) as PreviewResponse;
+          return result.url ?? undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    );
+    void request.promise.then((url) => {
+      if (generation !== sourceGeneration || scope !== gridTasks) return;
       if (url) {
         rememberThumbnail(photoId, url);
         thumbnailFailures.delete(photoId);
@@ -1830,14 +2467,16 @@ export function renderApp(
     openingPhoto = true;
     currentIndex = index;
     const generation = ++requestGeneration;
-    photoAbortController.abort();
-    photoAbortController = new AbortController();
-    const signal = photoAbortController.signal;
+    const photoTransition = recoveryGate.beginTransition(
+      "photo",
+      String(generation),
+    );
+    syncConnection();
+    renewPhotoTasks();
+    const signal = photoSignal;
     cancelPendingImageLoads(stage, true);
     renderedThumbnailImages = new Map();
-    gridAbortController.abort();
-    gridAbortController = new AbortController();
-    thumbnailRequests = new Map();
+    renewGridTasks();
     cancelPendingImageLoads(gridLayer);
     currentPhotoMode = true;
     gridView.hidden = true;
@@ -1845,9 +2484,17 @@ export function renderApp(
     syncSourcePanel();
     photoView.focus();
     resetTransform();
+    let windowReady = true;
     try {
       if (!loaded.has(index))
-        await loadWindow(index, sourceGeneration, true, signal, "high");
+        windowReady = await loadWindow(
+          index,
+          sourceGeneration,
+          true,
+          signal,
+          "high",
+          photoTransition,
+        );
     } finally {
       // Back to Grid or a superseding view may end this request while an
       // unloaded boundary window is still loading. Release the open gate so
@@ -1855,17 +2502,21 @@ export function renderApp(
       openingPhoto = false;
       updateControls();
     }
-    if (generation !== requestGeneration) return;
+    if (generation !== requestGeneration || !windowReady) return;
     const current = loaded.get(index);
     if (current) lastCurrentPhotoId = current.id;
     const hasKnownPreview = renderPhotoShell(generation);
     updateControls();
-    const previewRequest = showPreview(generation, signal);
-    if (!hasKnownPreview) await previewRequest;
+    const previewRequest = showPreview(generation, signal, photoTransition);
+    const previewReady = hasKnownPreview || (await previewRequest);
     // A superseded open must not persist or touch controls afterwards: the
     // newer navigation persists its own position.
     if (generation !== requestGeneration) return;
-    await persistPosition();
+    const positionReady = await persistPosition();
+    if (previewReady && positionReady && generation === requestGeneration) {
+      recoveryGate.succeedTransition(photoTransition);
+      setConnected(true);
+    }
     updateControls();
   };
   const renderPhotoFacts = () => {
@@ -1877,70 +2528,94 @@ export function renderApp(
   };
   const renderReviewImage = (url: string, generation = requestGeneration) => {
     cancelPendingImageLoads(stage, true);
+    const capturedStatus = photoStatusOwner;
+    const transfer = photoTasks.beginLatest("review-image", {
+      abortTransport: false,
+    });
     const image = document.createElement("img");
     image.alt = `Photo ${currentIndex + 1} of ${total}`;
     image.draggable = false;
     image.fetchPriority = "high";
     image.decoding = "async";
-    image.src = url;
-    image.addEventListener(
-      "error",
-      () => {
-        if (generation !== requestGeneration || !image.isConnected) return;
+    const expectedUrl = new URL(url, window.location.href).href;
+    transfer.onCleanup(() => {
+      image.onload = null;
+      image.onerror = null;
+      if (!image.complete && image.src === expectedUrl)
+        image.removeAttribute("src");
+    });
+    image.onload = () => transfer.finish();
+    image.onerror = () => {
+      if (!transfer.isCurrent()) return;
+      if (
+        generation === requestGeneration &&
+        image.isConnected &&
+        capturedStatus === photoStatusOwner
+      )
         status.textContent =
           "Preview could not be loaded. You can continue browsing.";
-      },
-      { once: true },
-    );
+      image.removeAttribute("src");
+      transfer.finish();
+    };
+    image.src = url;
     stage.replaceChildren(image);
   };
-  // Membership state that must survive re-renders: in-flight operations are
-  // keyed by action, Album, and Photo (an Add to one Album never blocks a
-  // Remove from another), and Photos already removed from the open Album
-  // stay non-removable in the retained open snapshot.
-  const membershipInFlight = new Set<string>();
+  // Duplicate membership admission is owned by the Album settlement family;
+  // the open snapshot separately remembers members removed until reopen.
   const membershipKey = (
     verb: "add" | "remove",
     albumId: string,
     photoId: string,
   ) => `${verb}:${albumId}:${photoId}`;
   const removedFromCurrentAlbum = new Set<string>();
+  let selectedAlbumId = "";
 
   /// Populates the current-Photo Album membership controls.
   const renderMembershipControls = () => {
+    if (!applicationAlive) return;
     albumSelect.replaceChildren();
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.textContent = sets.length ? "Choose Album…" : "No Albums yet";
     placeholder.disabled = true;
-    placeholder.selected = true;
+    if (!sets.some((set) => set.id === selectedAlbumId)) selectedAlbumId = "";
+    placeholder.selected = selectedAlbumId === "";
     albumSelect.append(placeholder);
     for (const set of sets) {
       const option = document.createElement("option");
       option.value = set.id;
       option.textContent = set.name;
+      option.selected = set.id === selectedAlbumId;
       albumSelect.append(option);
     }
     const photo = currentPhoto();
     const adding = Boolean(
       photo &&
-        sets.some((set) =>
-          membershipInFlight.has(membershipKey("add", set.id, photo.id)),
+        selectedAlbumId &&
+        albumSettlements.isAdmitted(
+          membershipKey("add", selectedAlbumId, photo.id),
         ),
     );
     const removing =
       Boolean(photo && sourceSetId) &&
-      membershipInFlight.has(membershipKey("remove", sourceSetId!, photo!.id));
+      albumSettlements.isAdmitted(
+        membershipKey("remove", sourceSetId!, photo!.id),
+      );
     const inOpenAlbum =
       sourceKind === "album" &&
       Boolean(sourceSetId) &&
       Boolean(photo) &&
       !removedFromCurrentAlbum.has(photo!.id);
-    albumSelect.disabled = !sets.length || adding;
-    addToAlbum.disabled = !sets.length || !photo || adding;
+    albumSelect.disabled = !sets.length;
+    addToAlbum.disabled = !sets.length || !photo || !selectedAlbumId || adding;
     removeFromAlbum.hidden = !inOpenAlbum;
     removeFromAlbum.disabled = !inOpenAlbum || removing;
   };
+
+  albumSelect.addEventListener("change", () => {
+    selectedAlbumId = albumSelect.value;
+    renderMembershipControls();
+  });
 
   addToAlbum.addEventListener("click", () => {
     const photo = currentPhoto();
@@ -1948,9 +2623,8 @@ export function renderApp(
     if (!photo || !albumId) return;
     const photoId = photo.id;
     const key = membershipKey("add", albumId, photoId);
-    if (membershipInFlight.has(key)) return;
+    if (albumSettlements.isAdmitted(key)) return;
     const generation = requestGeneration;
-    membershipInFlight.add(key);
     void (async () => {
       addToAlbum.disabled = true;
       const { ok: added, announce } = await mutateAlbum(
@@ -1959,8 +2633,8 @@ export function renderApp(
         () => "The Photo could not be added to the Album.",
         "photo",
         generation,
+        key,
       );
-      membershipInFlight.delete(key);
       // Re-adding to the open Album clears the retained snapshot's removal
       // mark: the Photo is a member again and may be removed once more.
       if (added && albumId === sourceSetId) {
@@ -1990,10 +2664,9 @@ export function renderApp(
     const albumId = sourceSetId;
     const photoId = photo.id;
     const key = membershipKey("remove", albumId, photoId);
-    if (membershipInFlight.has(key)) return;
+    if (albumSettlements.isAdmitted(key)) return;
     const generation = requestGeneration;
     const snapshotGeneration = sourceGeneration;
-    membershipInFlight.add(key);
     void (async () => {
       removeFromAlbum.disabled = true;
       const { ok: removed, announce } = await mutateAlbum(
@@ -2002,8 +2675,8 @@ export function renderApp(
         () => "The Photo could not be removed from the Album.",
         "photo",
         generation,
+        key,
       );
-      membershipInFlight.delete(key);
       if (removed && snapshotGeneration === sourceGeneration) {
         // The member is gone from the Album; within this open snapshot it
         // must not be removable again. A removal settling after the source
@@ -2051,10 +2724,12 @@ export function renderApp(
   const showPreview = async (
     generation: number,
     signal: AbortSignal,
+    transition?: RecoveryTransition,
   ): Promise<boolean> => {
     if (generation !== requestGeneration || signal.aborted) return false;
     const photo = currentPhoto();
     if (!photo) return false;
+    const capturedStatus = photoStatusOwner;
     let result: PreviewResponse;
     try {
       // Always contact the server, even for an unavailable Photo: a restored
@@ -2064,10 +2739,28 @@ export function renderApp(
         signal,
         priority: "high",
       });
-      result = (await response.json()) as PreviewResponse;
+      const candidate = (await response.json()) as Partial<PreviewResponse>;
+      const explicitState =
+        candidate.state === "ready" ||
+        candidate.state === "unavailable" ||
+        candidate.state === "failed";
+      if (!explicitState) throw new Error("malformed Preview response");
+      // The protocol intentionally carries explicit non-ready Preview states
+      // with HTTP 404. Other non-success statuses are service failures even
+      // when their body happens to resemble a typed Preview response.
+      const readyResponse =
+        response.ok && candidate.state === "ready" && Boolean(candidate.url);
+      const nonReadyResponse =
+        response.status === 404 &&
+        (candidate.state === "unavailable" || candidate.state === "failed");
+      if (!readyResponse && !nonReadyResponse)
+        throw new Error(`invalid Preview HTTP/state ${response.status}`);
+      result = candidate as PreviewResponse;
     } catch {
       if (signal.aborted || generation !== requestGeneration) return false;
-      setConnected(false, "Connection lost. Retry to refresh this Photo.");
+      if (capturedStatus === photoStatusOwner)
+        status.textContent = "Connection lost. Retry to refresh this Photo.";
+      failPhotoRecovery(generation, "preview", transition);
       return false;
     }
     if (
@@ -2078,7 +2771,8 @@ export function renderApp(
       return false;
     const existingImage = stage.querySelector<HTMLImageElement>("img");
     if (result.state !== "ready" || !result.url) {
-      status.textContent = result.message ?? "Preview unavailable";
+      if (capturedStatus === photoStatusOwner)
+        status.textContent = result.message ?? "Preview unavailable";
       if (!existingImage)
         stage.replaceChildren(paragraph("Preview unavailable"));
       return true;
@@ -2088,9 +2782,10 @@ export function renderApp(
       renderReviewImage(result.url, generation);
     source.textContent = sourceLabel(result.source);
     limited.hidden = !result.limitedDetail;
-    status.textContent = result.stale
-      ? (result.message ?? "Showing a stale Preview.")
-      : "";
+    if (capturedStatus === photoStatusOwner)
+      status.textContent = result.stale
+        ? (result.message ?? "Showing a stale Preview.")
+        : "";
     if (!result.stale) {
       const latest = currentPhoto();
       if (latest && latest.id === photo.id) {
@@ -2142,8 +2837,13 @@ export function renderApp(
     currentPhotoMode = false;
     openingPhoto = false;
     requestGeneration += 1;
-    photoAbortController.abort();
-    photoAbortController = new AbortController();
+    const photoTransition = recoveryGate.beginTransition(
+      "photo",
+      String(requestGeneration),
+    );
+    recoveryGate.succeedTransition(photoTransition);
+    setConnected(true);
+    renewPhotoTasks();
     cancelPendingImageLoads(stage, true);
     photoView.hidden = true;
     gridView.hidden = false;
@@ -2163,7 +2863,16 @@ export function renderApp(
     const albumId = sourceSetId;
     const photoId = currentPhoto()!.id;
     const generation = sourceGeneration;
+    const photoGeneration = requestGeneration;
+    const stillCurrent = () =>
+      applicationAlive &&
+      generation === sourceGeneration &&
+      photoGeneration === requestGeneration &&
+      sourceKind === "album" &&
+      sourceSetId === albumId &&
+      currentPhoto()?.id === photoId;
     const task = progressQueue.then(async () => {
+      if (!stillCurrent()) return false;
       try {
         const response = await fetcher(`/api/albums/${albumId}/progress`, {
           method: "POST",
@@ -2176,17 +2885,18 @@ export function renderApp(
           return false;
         }
         if (!response.ok) throw new Error("position rejected");
+        if (!stillCurrent()) return false;
         sets = sets.map((set) =>
           set.id === albumId ? { ...set, hasSavedPosition: true } : set,
         );
         renderSources();
         return true;
       } catch {
-        if (generation === sourceGeneration && sourceSetId === albumId)
-          setConnected(
-            false,
-            "Album position could not be saved. Retry before making more decisions.",
-          );
+        if (stillCurrent()) {
+          status.textContent =
+            "Album position could not be saved. Retry before making more decisions.";
+          failPhotoRecovery(photoGeneration, "saved-position");
+        }
         return false;
       }
     });
@@ -2205,6 +2915,7 @@ export function renderApp(
     const photo = currentPhoto();
     if (!photo || !connected || busy) return;
     const generation = sourceGeneration;
+    const photoGeneration = requestGeneration;
     const photoIndex = currentIndex;
     const albumId = sourceSetId;
     const prior = undo;
@@ -2229,7 +2940,12 @@ export function renderApp(
           response.status === 409
             ? "The Photo changed elsewhere. Retry to refresh its current state."
             : "The change could not be saved.";
-        if (response.status === 409) setConnected(false);
+        if (
+          response.status === 409 &&
+          photoGeneration === requestGeneration &&
+          currentPhoto()?.id === photo.id
+        )
+          failPhotoRecovery(photoGeneration, "photo-write");
         return;
       }
       const result = (await response.json()) as MutationResponse;
@@ -2252,12 +2968,16 @@ export function renderApp(
         await moveTo(currentIndex + 1);
       } else renderPhotoFacts();
     } catch {
-      if (generation !== sourceGeneration) return;
+      if (
+        generation !== sourceGeneration ||
+        photoGeneration !== requestGeneration ||
+        currentPhoto()?.id !== photo.id
+      )
+        return;
       undo = undefined;
-      setConnected(
-        false,
-        "Connection lost before the change was confirmed. Retry to refresh.",
-      );
+      status.textContent =
+        "Connection lost before the change was confirmed. Retry to refresh.";
+      failPhotoRecovery(photoGeneration, "photo-write");
     } finally {
       if (generation === sourceGeneration) {
         busy = false;
@@ -2269,6 +2989,7 @@ export function renderApp(
     const action = undo;
     if (!action || !connected || busy) return;
     const generation = sourceGeneration;
+    const photoGeneration = requestGeneration;
     const albumId = sourceSetId;
     const affectedIndex = Array.from(loaded.entries()).find(
       ([, photo]) => photo.id === action.photoId,
@@ -2297,10 +3018,10 @@ export function renderApp(
       if (!response.ok) {
         if (generation !== sourceGeneration) return;
         if (response.status === 409) {
-          setConnected(
-            false,
-            "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
-          );
+          status.textContent =
+            "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
+          if (photoGeneration === requestGeneration)
+            failPhotoRecovery(photoGeneration, "undo");
         } else {
           status.textContent =
             "Undo could not be saved. Try Undo again or Retry the connection.";
@@ -2327,14 +3048,18 @@ export function renderApp(
       photoView.focus();
       resetTransform();
       const previewGeneration = ++requestGeneration;
-      photoAbortController.abort();
-      photoAbortController = new AbortController();
-      const signal = photoAbortController.signal;
+      const photoTransition = recoveryGate.beginTransition(
+        "photo",
+        String(previewGeneration),
+      );
+      syncConnection();
+      renewPhotoTasks();
+      const signal = photoSignal;
       cancelPendingImageLoads(stage, true);
       renderPhotoShell(previewGeneration);
       busy = false;
       updateControls();
-      await showPreview(previewGeneration, signal);
+      await showPreview(previewGeneration, signal, photoTransition);
       if (
         generation !== sourceGeneration ||
         previewGeneration !== requestGeneration ||
@@ -2347,11 +3072,19 @@ export function renderApp(
         generation === sourceGeneration &&
         previewGeneration === requestGeneration &&
         currentPhoto()?.id === action.photoId
-      )
+      ) {
+        recoveryGate.succeedTransition(photoTransition);
+        setConnected(true);
         status.textContent = "Last change undone.";
+      }
     } catch {
-      if (generation === sourceGeneration)
-        setConnected(false, "Connection lost before Undo was confirmed.");
+      if (
+        generation === sourceGeneration &&
+        photoGeneration === requestGeneration
+      ) {
+        status.textContent = "Connection lost before Undo was confirmed.";
+        failPhotoRecovery(photoGeneration, "undo");
+      }
     } finally {
       if (generation === sourceGeneration) {
         busy = false;
@@ -2530,7 +3263,34 @@ export function renderApp(
       );
     })();
   });
-  retry.addEventListener("click", () => void loadOverview());
+  retry.addEventListener("click", () => {
+    if (!retrySourceRequired) {
+      void loadOverview();
+      return;
+    }
+    const remembered = lastSource ?? {
+      kind: "library" as const,
+      set: undefined,
+      folder: undefined,
+    };
+    void (async () => {
+      if (remembered.kind === "folder") {
+        resetFileLocations();
+        const bound = await awaitRootBinding();
+        if (!bound) {
+          gridStatus.textContent =
+            "Could not load this source. Retry to continue.";
+          return;
+        }
+      }
+      await openSource(
+        remembered.kind,
+        remembered.set,
+        undefined,
+        remembered.folder,
+      );
+    })();
+  });
   retryPhoto.addEventListener("click", () => {
     void (async () => {
       busy = true;
@@ -2538,23 +3298,39 @@ export function renderApp(
       const sourceOwner = sourceGeneration;
       const photoId = currentPhoto()?.id;
       const generation = ++requestGeneration;
-      photoAbortController.abort();
-      photoAbortController = new AbortController();
-      const signal = photoAbortController.signal;
+      const photoTransition = recoveryGate.beginTransition(
+        "photo",
+        String(generation),
+      );
+      syncConnection();
+      renewPhotoTasks();
+      const signal = photoSignal;
       cancelPendingImageLoads(stage, true);
       updateControls();
       try {
         const start = alignedStart(currentIndex);
         const end = Math.min(total, start + WINDOW_SIZE);
         for (let index = start; index < end; index += 1) loaded.delete(index);
-        await loadWindow(start, sourceOwner, true, signal, "high");
+        const windowReady = await loadWindow(
+          start,
+          sourceOwner,
+          true,
+          signal,
+          "high",
+          photoTransition,
+        );
         if (
+          !windowReady ||
           sourceOwner !== sourceGeneration ||
           generation !== requestGeneration ||
           currentPhoto()?.id !== photoId
         )
           return;
-        const refreshed = await showPreview(generation, signal);
+        const refreshed = await showPreview(
+          generation,
+          signal,
+          photoTransition,
+        );
         const persisted = refreshed && (await persistPosition());
         if (
           refreshed &&
@@ -2562,6 +3338,7 @@ export function renderApp(
           sourceOwner === sourceGeneration &&
           generation === requestGeneration
         ) {
+          recoveryGate.succeedTransition(photoTransition);
           setConnected(true);
           status.textContent = "Connected. Current state refreshed.";
         }
@@ -2620,11 +3397,103 @@ export function renderApp(
   window.addEventListener("keydown", keydown);
   void loadOverview();
   return () => {
+    if (!applicationAlive) return;
+    applicationAlive = false;
+    sourceGeneration += 1;
+    requestGeneration += 1;
+    const browseToken = token;
+    token = "";
+    cancelScheduledGridRender();
+    cancelPendingImageLoads(gridLayer, true);
+    cancelPendingImageLoads(stage, true);
+    applicationTasks.halt();
+    fileLocationTasks.halt();
+    sourceTasks.halt();
+    gridTasks.halt();
+    photoTasks.halt();
+    recoveryGate.close();
+    albumSettlements.closePresentation();
+    scanSettlements.closePresentation();
+    summaryNotices.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
     compactSources.removeEventListener("change", onSourceViewportChange);
-    if (token) void closeBrowse(token);
+    if (browseToken) void closeBrowse(browseToken);
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function validOptional(
+  value: unknown,
+  predicate: (candidate: unknown) => boolean,
+): boolean {
+  return value === undefined || predicate(value);
+}
+
+function validPhotoSummary(value: unknown): value is PhotoSummary {
+  if (!isRecord(value) || !isRecord(value.preview)) return false;
+  const preview = value.preview;
+  const previewState = preview.state;
+  if (
+    previewState !== "inspection-pending" &&
+    previewState !== "ready" &&
+    previewState !== "failed" &&
+    previewState !== "unavailable"
+  )
+    return false;
+  if (
+    !Array.isArray(value.originals) ||
+    !value.originals.every(
+      (original) =>
+        isRecord(original) &&
+        (original.kind === "raw" || original.kind === "jpeg") &&
+        typeof original.available === "boolean",
+    )
+  )
+    return false;
+  return (
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    typeof value.available === "boolean" &&
+    typeof value.ambiguous === "boolean" &&
+    (value.selectionState === "undecided" ||
+      value.selectionState === "selected" ||
+      value.selectionState === "rejected") &&
+    Number.isInteger(value.rating) &&
+    Number(value.rating) >= 0 &&
+    Number(value.rating) <= 5 &&
+    validOptional(
+      preview.source,
+      (source) => source === "matching-jpeg" || source === "embedded-raw-jpeg",
+    ) &&
+    validOptional(preview.width, Number.isInteger) &&
+    validOptional(preview.height, Number.isInteger) &&
+    validOptional(preview.limitedDetail, (item) => typeof item === "boolean") &&
+    validOptional(preview.url, (item) => typeof item === "string") &&
+    validOptional(preview.thumbnailUrl, (item) => typeof item === "string") &&
+    validOptional(preview.message, (item) => typeof item === "string")
+  );
+}
+
+function decodeBrowseWindow(
+  value: unknown,
+  expectedStart: number,
+  expectedTotal: number,
+): BrowseWindowResponse | undefined {
+  if (
+    !isRecord(value) ||
+    value.start !== expectedStart ||
+    value.total !== expectedTotal ||
+    !Array.isArray(value.photos) ||
+    value.photos.length > WINDOW_SIZE ||
+    expectedStart + value.photos.length > expectedTotal ||
+    !value.photos.every(validPhotoSummary)
+  )
+    return undefined;
+  return value as BrowseWindowResponse;
 }
 
 function required<T extends Element>(root: ParentNode, selector: string): T {
@@ -2657,5 +3526,8 @@ function clamp(value: number, low: number, high: number): number {
 
 if (typeof document !== "undefined") {
   const root = document.querySelector<HTMLElement>("#app");
-  if (root) renderApp(root);
+  if (root) {
+    const dispose = renderApp(root);
+    window.addEventListener("pagehide", dispose, { once: true });
+  }
 }

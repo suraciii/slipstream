@@ -43,7 +43,10 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
 /// between status polls.
 async fn wait_for_scan_settled(application: &Application) {
     let started = application.shared.runs_started.load(Ordering::Relaxed);
-    let target = started.max(1);
+    wait_for_scan_runs(application, started.max(1)).await;
+}
+
+async fn wait_for_scan_runs(application: &Application, target: u64) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         if application.shared.runs_completed.load(Ordering::Relaxed) >= target {
@@ -368,21 +371,31 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     let _ = fs::remove_dir_all(base);
 }
 
-fn substitute_captured_set_id(value: &serde_json::Value, set_id: &str) -> serde_json::Value {
+fn substitute_protocol_captures(
+    value: &serde_json::Value,
+    set_id: &str,
+    publication: &str,
+) -> serde_json::Value {
     match value {
-        serde_json::Value::String(text) => {
-            serde_json::Value::String(text.replace("$setId", set_id))
-        }
+        serde_json::Value::String(text) => serde_json::Value::String(
+            text.replace("$setId", set_id)
+                .replace("$publication", publication),
+        ),
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
                 .iter()
-                .map(|item| substitute_captured_set_id(item, set_id))
+                .map(|item| substitute_protocol_captures(item, set_id, publication))
                 .collect(),
         ),
         serde_json::Value::Object(entries) => serde_json::Value::Object(
             entries
                 .iter()
-                .map(|(name, item)| (name.clone(), substitute_captured_set_id(item, set_id)))
+                .map(|(name, item)| {
+                    (
+                        name.clone(),
+                        substitute_protocol_captures(item, set_id, publication),
+                    )
+                })
                 .collect(),
         ),
         other => other.clone(),
@@ -403,6 +416,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     )
     .unwrap();
     let mut captured_set_id = String::new();
+    let mut captured_publication = String::new();
     for vector in vectors {
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
@@ -450,12 +464,19 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             {
                 captured_set_id = id.to_owned();
             }
-            let expected = serde_json::to_value(expected).unwrap();
-            let expected = if captured_set_id.is_empty() {
-                expected
-            } else {
-                substitute_captured_set_id(&expected, &captured_set_id)
-            };
+            if captured_publication.is_empty()
+                && let Some(publication) = actual
+                    .get("publication")
+                    .or_else(|| actual.get("scan")?.get("publication"))
+                    .and_then(|value| value.as_str())
+            {
+                captured_publication = publication.to_owned();
+            }
+            let expected = substitute_protocol_captures(
+                &serde_json::to_value(expected).unwrap(),
+                &captured_set_id,
+                &captured_publication,
+            );
             assert_eq!(
                 actual.as_object().unwrap(),
                 expected.as_object().unwrap(),
@@ -568,6 +589,18 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         } else {
             None
         };
+        if publication.is_empty()
+            && let Some(captured) = actual
+                .as_ref()
+                .and_then(|value| {
+                    value
+                        .get("publication")
+                        .or_else(|| value.get("scan")?.get("publication"))
+                })
+                .and_then(|value| value.as_str())
+        {
+            publication = captured.to_owned();
+        }
         if let Some(actual_value) = &actual
             && method == "POST"
             && path == "/api/browse"
@@ -1830,6 +1863,29 @@ async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publi
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
     application.shutdown().await.unwrap();
+
+    // A completed empty publication is durable: restart serves the empty
+    // Library immediately instead of regressing to initializing.
+    let (restart_gate_sender, restart_gate_receiver) = tokio::sync::oneshot::channel();
+    let reopened = Application::open_with_gate(
+        &config,
+        ScanLimits::default(),
+        Some(restart_gate_receiver),
+        None,
+    )
+    .await
+    .unwrap();
+    let overview = reopened.overview().await.unwrap();
+    assert!(overview.published);
+    assert_eq!(overview.photo_count, 0);
+    assert_eq!(overview.scan.state, "idle");
+    let opened = reopened
+        .browse_open(BrowseSourceRequest::Library, None)
+        .await
+        .unwrap();
+    assert_eq!(opened.total, 0);
+    restart_gate_sender.send(()).unwrap();
+    reopened.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
@@ -1994,6 +2050,121 @@ async fn shutdown_drains_background_scan_before_closing() {
     assert_eq!(reopened.published_photo_count(), 1);
     assert_eq!(reopened.scan_status().state, "idle");
     reopened.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn startup_and_explicit_waiters_share_one_scan_cycle_and_terminal_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let application =
+        Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
+            .await
+            .unwrap();
+
+    // Startup was admitted synchronously but its leader is parked. Every
+    // explicit waiter must join that same application-owned cycle.
+    let receivers = (0..8)
+        .map(|_| application.admit_scan_cycle(None, None).unwrap())
+        .collect::<Vec<_>>();
+    gate_sender.send(()).unwrap();
+
+    let mut terminal = None;
+    for receiver in receivers {
+        let status = receiver.await.unwrap().unwrap();
+        let facts = (status.state, status.completed, status.total);
+        if let Some(expected) = terminal {
+            assert_eq!(facts, expected);
+        } else {
+            terminal = Some(facts);
+        }
+    }
+    assert_eq!(terminal, Some(("idle", Some(1), Some(1))));
+    assert_eq!(application.shared.runs_started.load(Ordering::Relaxed), 1);
+    assert_eq!(application.shared.runs_completed.load(Ordering::Relaxed), 1);
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
+
+    // A terminal cycle releases admission for one later independent cycle.
+    let next = application.rescan().await.unwrap();
+    assert_eq!(
+        (next.state, next.completed, next.total),
+        ("idle", Some(1), Some(1))
+    );
+    assert_eq!(application.shared.runs_started.load(Ordering::Relaxed), 2);
+    assert_eq!(application.shared.runs_completed.load(Ordering::Relaxed), 2);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let baseline = application.shared.runs_completed.load(Ordering::Relaxed);
+
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let first = application
+        .admit_scan_cycle(Some(gate_receiver), None)
+        .unwrap();
+    let mut abandoned = vec![first];
+    for _ in 1..64 {
+        abandoned.push(application.admit_scan_cycle(None, None).unwrap());
+    }
+    // These receivers model HTTP request futures dropped after admission.
+    drop(abandoned);
+    // Cancellation must release bounded waiter capacity before the physical
+    // cycle completes; this live caller joins the same leader.
+    let live = application.admit_scan_cycle(None, None).unwrap();
+    gate_sender.send(()).unwrap();
+    assert_eq!(live.await.unwrap().unwrap().state, "idle");
+
+    wait_for_scan_runs(&application, baseline + 1).await;
+    assert_eq!(
+        application.shared.runs_started.load(Ordering::Relaxed),
+        baseline + 1
+    );
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
+    assert_eq!(application.scan_status().state, "idle");
+
+    // Cleanup of the abandoned cycle must leave the next admission usable.
+    let next = application.rescan().await.unwrap();
+    assert_eq!(next.state, "idle");
+    assert_eq!(
+        application.shared.runs_completed.load(Ordering::Relaxed),
+        baseline + 2
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn shutdown_returns_only_after_live_scan_waiters_receive_terminal_status() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 09:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+
+    let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
+    let mut receive = application
+        .admit_scan_cycle(Some(gate_receiver), None)
+        .unwrap();
+    let closing = {
+        let application = Arc::clone(&application);
+        tokio::spawn(async move { application.shutdown().await })
+    };
+    tokio::task::yield_now().await;
+    gate_sender.send(()).unwrap();
+    closing.await.unwrap().unwrap();
+
+    let terminal = receive
+        .try_recv()
+        .expect("shutdown returned before scan waiter fan-out")
+        .unwrap();
+    assert_eq!(terminal.state, "idle");
+    assert_eq!(application.shared.awaiting_scan.load(Ordering::Relaxed), 0);
     let _ = fs::remove_dir_all(base);
 }
 
@@ -2593,10 +2764,10 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
     )
     .await;
     // The scan response is Loading Status and carries no Photo facts.
-    assert_eq!(
-        scan,
-        serde_json::json!({"state": "idle", "completed": 0, "total": 0})
-    );
+    assert!(scan["publication"].as_str().is_some());
+    assert_eq!(scan["state"], "idle");
+    assert_eq!(scan["completed"], 0);
+    assert_eq!(scan["total"], 0);
     assert_eq!(application.albums().await.unwrap().albums.len(), 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
