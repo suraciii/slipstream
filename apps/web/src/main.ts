@@ -116,6 +116,7 @@ export function renderApp(
       return statusElement.textContent;
     },
     set textContent(value: string) {
+      if (statusElement.textContent === value) return;
       photoStatusEpoch += 1;
       statusElement.textContent = value;
     },
