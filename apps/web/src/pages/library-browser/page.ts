@@ -31,6 +31,7 @@ import {
 } from "./model/application-owner.js";
 import {
   createSourceGridOwner,
+  type PhotoWindowAuthority,
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
@@ -371,12 +372,15 @@ export function mountLibraryBrowser(
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
   let photoTasks = new TaskScope();
+  let photoWindowAuthority: PhotoWindowAuthority =
+    sourceGrid.renewPhotoWindow(requestGeneration);
   let photoSignal = photoTasks.beginLatest("lifetime", {
     abortTransport: true,
   }).signal!;
   const renewPhotoTasks = () => {
     photoTasks.halt();
     photoTasks = new TaskScope();
+    photoWindowAuthority = sourceGrid.renewPhotoWindow(requestGeneration);
     photoSignal = photoTasks.beginLatest("lifetime", {
       abortTransport: true,
     }).signal!;
@@ -1365,12 +1369,14 @@ export function mountLibraryBrowser(
         throw new Error("source open failed");
       }
       if (opened.kind === "failed") throw new Error("source open failed");
-      currentIndex = opened.position;
+      const gridPosition = sourceGrid.readGridPosition(authority);
+      if (gridPosition === undefined) return;
+      currentIndex = gridPosition;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderSources();
       const windowReady = await loadWindow(
-        currentIndex,
+        gridPosition,
         { kind: "source", authority },
         false,
         "high",
@@ -1512,9 +1518,11 @@ export function mountLibraryBrowser(
         throw new Error("browse reopen failed");
       }
       if (opened.kind === "failed") throw new Error("browse reopen failed");
-      currentIndex = opened.position;
+      const gridPosition = sourceGrid.readGridPosition(authority);
+      if (gridPosition === undefined) return;
+      currentIndex = gridPosition;
       const windowReady = await loadWindow(
-        currentIndex,
+        gridPosition,
         { kind: "source", authority },
         false,
         "high",
@@ -1522,7 +1530,7 @@ export function mountLibraryBrowser(
       );
       if (!sourceGrid.isCurrent(authority) || !windowReady) return;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
       gridStatus.textContent =
         "Source reopened using the latest published Library order.";
@@ -1531,6 +1539,10 @@ export function mountLibraryBrowser(
       sourceGrid.establish(authority);
       setConnected(true);
       if (resumePhoto && photoGeneration === requestGeneration) {
+        // The reopen invalidated the pre-reopen SourceGrid window lifetime.
+        // Reissue only that opaque capability; the page-owned Preview signal
+        // remains the same Photo operation.
+        photoWindowAuthority = sourceGrid.renewPhotoWindow(photoGeneration);
         gridView.hidden = true;
         photoView.hidden = false;
         syncSourcePanel();
@@ -1721,9 +1733,13 @@ export function mountLibraryBrowser(
   const openPhoto = async (index: number) => {
     if (busy || openingPhoto || index < 0 || index >= sourceGrid.total) return;
     openingPhoto = true;
-    currentIndex = index;
     const generation = ++requestGeneration;
     const sourceAuthority = sourceGrid.authority;
+    if (!sourceGrid.moveGridPosition(sourceAuthority, index)) {
+      openingPhoto = false;
+      return;
+    }
+    currentIndex = index;
     const photoTransition = recoveryGate.beginTransition(
       "photo",
       String(generation),
@@ -1746,9 +1762,7 @@ export function mountLibraryBrowser(
           index,
           {
             kind: "photo",
-            authority: sourceAuthority,
-            generation,
-            tasks: photoTasks,
+            authority: photoWindowAuthority,
           },
           true,
           "high",
@@ -1763,7 +1777,8 @@ export function mountLibraryBrowser(
     }
     if (generation !== requestGeneration || !windowReady) return;
     const current = sourceGrid.photoAt(index);
-    if (current) lastCurrentPhotoId = current.id;
+    if (!current) return;
+    lastCurrentPhotoId = current.id;
     const hasKnownPreview = renderPhotoShell(generation);
     updateControls();
     const previewRequest = showPreview(generation, signal, photoTransition);
@@ -1992,6 +2007,8 @@ export function mountLibraryBrowser(
     if (generation !== requestGeneration || signal.aborted) return false;
     const photo = currentPhoto();
     if (!photo) return false;
+    const factAuthority = sourceGrid.authority;
+    const photoIndex = currentIndex;
     const capturedStatus = photoStatusOwner;
     let result: PreviewResponse;
     try {
@@ -2052,19 +2069,16 @@ export function mountLibraryBrowser(
     if (!result.stale) {
       const latest = currentPhoto();
       if (latest && latest.id === photo.id) {
-        sourceGrid.replacePhoto(currentIndex, {
-          ...latest,
-          preview: {
-            ...latest.preview,
-            state: "ready",
-            ...(result.source ? { source: result.source } : {}),
-            ...(result.width !== undefined ? { width: result.width } : {}),
-            ...(result.height !== undefined ? { height: result.height } : {}),
-            ...(result.limitedDetail !== undefined
-              ? { limitedDetail: result.limitedDetail }
-              : {}),
-            url: result.url,
-          },
+        sourceGrid.setPhotoPreview(factAuthority, photoIndex, photo.id, {
+          ...latest.preview,
+          state: "ready",
+          ...(result.source ? { source: result.source } : {}),
+          ...(result.width !== undefined ? { width: result.width } : {}),
+          ...(result.height !== undefined ? { height: result.height } : {}),
+          ...(result.limitedDetail !== undefined
+            ? { limitedDetail: result.limitedDetail }
+            : {}),
+          url: result.url,
         });
       }
     }
@@ -2086,9 +2100,7 @@ export function mountLibraryBrowser(
         index,
         {
           kind: "photo",
-          authority: sourceGrid.authority,
-          generation,
-          tasks: photoTasks,
+          authority: photoWindowAuthority,
         },
         true,
         "low",
@@ -2123,9 +2135,12 @@ export function mountLibraryBrowser(
     closeSources(false);
     renderGrid();
     cancelScheduledGridRender();
+    const gridAuthority = sourceGrid.authority;
     scheduleGridRender(() => {
+      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
+      if (gridPosition === undefined) return;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
     });
     updateControls();
@@ -2187,6 +2202,7 @@ export function mountLibraryBrowser(
     const photo = currentPhoto();
     if (!photo || !connected || busy) return;
     const generation = sourceGrid.generation;
+    const sourceAuthority = sourceGrid.authority;
     const photoGeneration = requestGeneration;
     const photoIndex = currentIndex;
     const albumId = sourceGrid.albumId;
@@ -2226,13 +2242,21 @@ export function mountLibraryBrowser(
         sourceGrid.photoAt(photoIndex)?.id !== photo.id
       )
         return;
-      const updated = {
-        ...photo,
-        ...(field === "selectionState"
-          ? { selectionState: value as SelectionState }
-          : { rating: value as number }),
-      };
-      sourceGrid.replacePhoto(photoIndex, updated);
+      const patched =
+        field === "selectionState"
+          ? sourceGrid.setPhotoSelection(
+              sourceAuthority,
+              photoIndex,
+              photo.id,
+              value as SelectionState,
+            )
+          : sourceGrid.setPhotoRating(
+              sourceAuthority,
+              photoIndex,
+              photo.id,
+              value as number,
+            );
+      if (!patched) return;
       undo = {
         ...result.undo,
         advanced: advance && photoIndex < sourceGrid.total - 1,
@@ -2265,6 +2289,7 @@ export function mountLibraryBrowser(
     const action = undo;
     if (!action || !connected || busy) return;
     const generation = sourceGrid.generation;
+    const sourceAuthority = sourceGrid.authority;
     const photoGeneration = requestGeneration;
     const albumId = sourceGrid.albumId;
     const affectedIndex = action.snapshotIndex;
@@ -2277,9 +2302,7 @@ export function mountLibraryBrowser(
           affectedIndex,
           {
             kind: "photo",
-            authority: sourceGrid.authority,
-            generation: photoGeneration,
-            tasks: photoTasks,
+            authority: photoWindowAuthority,
           },
           true,
           "high",
@@ -2326,13 +2349,25 @@ export function mountLibraryBrowser(
         photoGeneration !== requestGeneration
       )
         return;
-      const updated = {
-        ...photo,
-        ...(action.field === "selectionState"
-          ? { selectionState: action.priorValue as SelectionState }
-          : { rating: action.priorValue as number }),
-      };
-      sourceGrid.replacePhoto(affectedIndex, updated);
+      const patched =
+        action.field === "selectionState"
+          ? sourceGrid.setPhotoSelection(
+              sourceAuthority,
+              affectedIndex,
+              action.photoId,
+              action.priorValue as SelectionState,
+            )
+          : sourceGrid.setPhotoRating(
+              sourceAuthority,
+              affectedIndex,
+              action.photoId,
+              action.priorValue as number,
+            );
+      if (
+        !patched ||
+        !sourceGrid.moveGridPosition(sourceAuthority, affectedIndex)
+      )
+        return;
       trimLoaded(affectedIndex);
       currentIndex = affectedIndex;
       currentPhotoMode = true;
@@ -2515,7 +2550,10 @@ export function mountLibraryBrowser(
     );
   });
   const onResize = () => {
+    const gridAuthority = sourceGrid.authority;
     requestAnimationFrame(() => {
+      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
+      if (gridPosition === undefined) return;
       if (gridView.hidden) return;
       const nextColumns = columns();
       const nextViewportHeight = effectiveViewportHeight();
@@ -2527,7 +2565,7 @@ export function mountLibraryBrowser(
       if (nextColumns !== renderedColumns) {
         syncGridHeight(nextColumns);
         gridViewport.scrollTop =
-          Math.floor(currentIndex / nextColumns) * GRID_CELL_HEIGHT;
+          Math.floor(gridPosition / nextColumns) * GRID_CELL_HEIGHT;
       }
       renderGrid();
     });
@@ -2598,9 +2636,7 @@ export function mountLibraryBrowser(
           start,
           {
             kind: "photo",
-            authority: sourceOwner,
-            generation,
-            tasks: photoTasks,
+            authority: photoWindowAuthority,
           },
           true,
           "high",

@@ -2454,7 +2454,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
   // The first folder-source open fails; the retry must reopen the same
   // folder source instead of silently falling back to All Photos.
   await page.route(
-    /\/api\/browse/,
+    /\/api\/browse$/,
     async (route) => {
       const request = route.request();
       const body = request.postDataBuffer();
@@ -4968,6 +4968,19 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   );
   const viewport = page.locator("[data-grid-viewport]");
   await viewport.evaluate((element) => {
+    Object.defineProperty(element, "clientWidth", {
+      configurable: true,
+      value: 320,
+    });
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await viewport.evaluate((element) => {
     element.scrollTop = 29 * 178;
   });
   await page.locator('[data-photo-index="59"]').click();
@@ -4982,6 +4995,9 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   ).toBeEnabled();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  await expect
+    .poll(() => viewport.evaluate((element) => element.scrollTop))
+    .toBe(30 * 178);
   releaseBoundary();
   await expect(page.locator('[data-photo-index="60"]')).toBeEnabled();
   // The abandoned open must not wedge the browser: a new Photo opens normally.

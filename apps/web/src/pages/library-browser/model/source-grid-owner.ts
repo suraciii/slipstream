@@ -16,6 +16,11 @@ const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
 declare const sourceAuthorityBrand: unique symbol;
 export type SourceAuthority = Readonly<{ [sourceAuthorityBrand]: true }>;
 
+declare const photoWindowAuthorityBrand: unique symbol;
+export type PhotoWindowAuthority = Readonly<{
+  [photoWindowAuthorityBrand]: true;
+}>;
+
 export type SourceGridSource =
   | Readonly<{ kind: "library" }>
   | Readonly<{
@@ -32,9 +37,7 @@ export type SourceWindowOperation =
   | Readonly<{ kind: "source" | "grid"; authority: SourceAuthority }>
   | Readonly<{
       kind: "photo";
-      authority: SourceAuthority;
-      generation: number;
-      tasks: TaskScope;
+      authority: PhotoWindowAuthority;
     }>;
 
 export type SourceWindowOwner = Readonly<{
@@ -126,6 +129,7 @@ export interface SourceGridOwner {
   readonly retainedThumbnailCount: number;
   readonly retainedThumbnailFailureCount: number;
   isCurrent(authority: SourceAuthority): boolean;
+  renewPhotoWindow(generation: number): PhotoWindowAuthority;
   open(
     source: SourceGridSource,
     options?: Readonly<{
@@ -136,7 +140,26 @@ export interface SourceGridOwner {
   establish(authority: SourceAuthority): boolean;
   updateAlbum(album: Readonly<{ id: string; name: string }>): void;
   photoAt(index: number): PhotoSummary | undefined;
-  replacePhoto(index: number, photo: PhotoSummary): boolean;
+  readGridPosition(authority: SourceAuthority): number | undefined;
+  moveGridPosition(authority: SourceAuthority, index: number): boolean;
+  setPhotoPreview(
+    authority: SourceAuthority,
+    index: number,
+    expectedPhotoId: string,
+    preview: PhotoSummary["preview"],
+  ): boolean;
+  setPhotoSelection(
+    authority: SourceAuthority,
+    index: number,
+    expectedPhotoId: string,
+    selectionState: PhotoSummary["selectionState"],
+  ): boolean;
+  setPhotoRating(
+    authority: SourceAuthority,
+    index: number,
+    expectedPhotoId: string,
+    rating: number,
+  ): boolean;
   invalidateWindow(index: number): void;
   trimFacts(anchor: number): void;
   alignedStart(index: number): number;
@@ -163,6 +186,13 @@ export interface SourceGridOwner {
 type ImageTransfer = Readonly<{
   image: GridThumbnailImage;
   finish: () => void;
+}>;
+
+type PhotoWindowRecord = Readonly<{
+  authority: PhotoWindowAuthority;
+  sourceAuthority: SourceAuthority;
+  generation: number;
+  tasks: TaskScope;
 }>;
 
 const sourceRequest = (
@@ -214,6 +244,7 @@ export function createSourceGridOwner(
   let lastSource: SourceGridSource | undefined;
   let token = "";
   let total = 0;
+  let gridPosition = 0;
   let retryRequired = false;
   let sourceTasks = new TaskScope();
   let gridTasks = new TaskScope();
@@ -224,6 +255,10 @@ export function createSourceGridOwner(
   const imageTransfers = new Map<string, ImageTransfer>();
   const knownTokens = new Set<string>();
   const releasesStarted = new Set<string>();
+  const photoWindows = new WeakMap<object, PhotoWindowRecord>();
+  let currentPhotoWindow: PhotoWindowRecord | undefined;
+  const haltedPhotoTasks = new TaskScope();
+  haltedPhotoTasks.halt();
 
   const isCurrent = (candidate: SourceAuthority) =>
     !closed && candidate === authority;
@@ -244,6 +279,25 @@ export function createSourceGridOwner(
   const renewSourceWork = () => {
     sourceTasks.halt();
     sourceTasks = new TaskScope();
+  };
+
+  const stopPhotoWindowWork = () => {
+    currentPhotoWindow?.tasks.halt();
+    currentPhotoWindow = undefined;
+  };
+
+  const renewPhotoWindow = (generation: number): PhotoWindowAuthority => {
+    stopPhotoWindowWork();
+    const photoAuthority = Object.freeze({}) as PhotoWindowAuthority;
+    const record = Object.freeze({
+      authority: photoAuthority,
+      sourceAuthority: authority,
+      generation,
+      tasks: new TaskScope(),
+    });
+    photoWindows.set(photoAuthority, record);
+    currentPhotoWindow = record;
+    return photoAuthority;
   };
 
   const stopGridWork = () => {
@@ -299,6 +353,7 @@ export function createSourceGridOwner(
     const mode = options.mode ?? "replace";
     renewSourceWork();
     stopGridWork();
+    stopPhotoWindowWork();
     generation += 1;
     authority = makeAuthority();
     const ownerAuthority = authority;
@@ -306,10 +361,11 @@ export function createSourceGridOwner(
     source = freezeSource(nextSource);
     lastSource = source;
     token = "";
-    if (mode === "reopen" && priorToken) releaseToken(priorToken);
+    if (priorToken) releaseToken(priorToken);
     retryRequired = false;
     if (mode === "replace") {
       total = 0;
+      gridPosition = 0;
       facts = new Map();
       thumbnails = new Map();
       thumbnailFailures = new Set();
@@ -335,12 +391,12 @@ export function createSourceGridOwner(
           result.value.position,
           Math.max(0, result.value.total - 1),
         );
+        gridPosition = position;
         if (mode === "reopen") {
           facts = new Map();
           thumbnails = new Map();
           thumbnailFailures = new Set();
         }
-        if (priorToken && priorToken !== token) releaseToken(priorToken);
         return {
           kind: "opened",
           authority: ownerAuthority,
@@ -352,7 +408,6 @@ export function createSourceGridOwner(
       if (!task.isCurrent() || !isCurrent(ownerAuthority))
         return detachedOpen(ownerAuthority, ownerGeneration);
       retryRequired = true;
-      if (mode === "replace" && priorToken) releaseToken(priorToken);
       if (result.status === 409 && source.kind === "folder")
         return {
           kind: "publication-conflict",
@@ -373,17 +428,41 @@ export function createSourceGridOwner(
 
   const operationOwner = (
     operation: SourceWindowOperation,
-  ): SourceWindowOwner =>
-    operation.kind === "photo"
-      ? { scope: "photo", generation: operation.generation }
+  ): SourceWindowOwner => {
+    const photoWindow =
+      operation.kind === "photo"
+        ? photoWindows.get(operation.authority)
+        : undefined;
+    return operation.kind === "photo"
+      ? { scope: "photo", generation: photoWindow?.generation ?? -1 }
       : {
           scope: "source",
           generation: authorityGenerations.get(operation.authority) ?? -1,
         };
+  };
+
+  const operationAuthority = (
+    operation: SourceWindowOperation,
+  ): SourceAuthority =>
+    operation.kind === "photo"
+      ? (photoWindows.get(operation.authority)?.sourceAuthority ?? authority)
+      : operation.authority;
+
+  const operationIsCurrent = (operation: SourceWindowOperation): boolean => {
+    if (operation.kind !== "photo") return isCurrent(operation.authority);
+    const record = photoWindows.get(operation.authority);
+    return (
+      record !== undefined &&
+      record === currentPhotoWindow &&
+      record.sourceAuthority === authority &&
+      !record.tasks.halted &&
+      !closed
+    );
+  };
 
   const operationTasks = (operation: SourceWindowOperation) =>
     operation.kind === "photo"
-      ? operation.tasks
+      ? (photoWindows.get(operation.authority)?.tasks ?? haltedPhotoTasks)
       : operation.kind === "source"
         ? sourceTasks
         : gridTasks;
@@ -393,7 +472,7 @@ export function createSourceGridOwner(
     start: number,
   ): SourceWindowOutcome => ({
     kind: "detached",
-    authority: operation.authority,
+    authority: operationAuthority(operation),
     owner: operationOwner(operation),
     start,
   });
@@ -405,13 +484,14 @@ export function createSourceGridOwner(
   ): Promise<SourceWindowOutcome> {
     const start = alignedStart(index);
     const owner = operationOwner(operation);
+    const ownerAuthority = operationAuthority(operation);
     if (
-      !isCurrent(operation.authority) ||
+      !operationIsCurrent(operation) ||
       !token ||
       total === 0 ||
       operationTasks(operation).halted
     ) {
-      if (isCurrent(operation.authority) && total === 0)
+      if (operationIsCurrent(operation) && total === 0)
         return { kind: "loaded", authority, owner, start, changed: false };
       return detachedWindow(operation, start);
     }
@@ -437,7 +517,7 @@ export function createSourceGridOwner(
           priority,
         });
         if (
-          !isCurrent(operation.authority) ||
+          !operationIsCurrent(operation) ||
           token !== capturedToken ||
           signal?.aborted
         )
@@ -447,7 +527,7 @@ export function createSourceGridOwner(
           if (result.status === 404)
             return {
               kind: "expired",
-              authority,
+              authority: ownerAuthority,
               owner,
               start,
               index,
@@ -457,7 +537,7 @@ export function createSourceGridOwner(
           if (owner.scope === "source") retryRequired = true;
           return {
             kind: "failed",
-            authority,
+            authority: ownerAuthority,
             owner,
             start,
             range,
@@ -470,7 +550,13 @@ export function createSourceGridOwner(
         for (const [offset, photo] of result.value.photos.entries())
           facts.set(result.value.start + offset, photo);
         trimFacts(index);
-        return { kind: "loaded", authority, owner, start, changed: true };
+        return {
+          kind: "loaded",
+          authority: ownerAuthority,
+          owner,
+          start,
+          changed: true,
+        };
       },
     );
     return shared.promise;
@@ -647,6 +733,7 @@ export function createSourceGridOwner(
       return thumbnailFailures.size;
     },
     isCurrent,
+    renewPhotoWindow,
     open,
     establish(candidate) {
       if (!isCurrent(candidate)) return false;
@@ -662,11 +749,41 @@ export function createSourceGridOwner(
     photoAt(index) {
       return facts.get(index);
     },
-    replacePhoto(index, photo) {
-      if (closed || index < 0 || index >= total) return false;
+    readGridPosition(candidate) {
+      return isCurrent(candidate) ? gridPosition : undefined;
+    },
+    moveGridPosition(candidate, index) {
+      if (!isCurrent(candidate) || index < 0 || index >= total) return false;
+      gridPosition = index;
+      return true;
+    },
+    setPhotoPreview(candidate, index, expectedPhotoId, preview) {
+      if (!isCurrent(candidate) || index < 0 || index >= total) return false;
       const current = facts.get(index);
-      if (current && current.id !== photo.id) return false;
-      facts.set(index, photo);
+      if (!current || current.id !== expectedPhotoId) return false;
+      facts.set(index, { ...current, preview });
+      return true;
+    },
+    setPhotoSelection(candidate, index, expectedPhotoId, selectionState) {
+      if (!isCurrent(candidate) || index < 0 || index >= total) return false;
+      const current = facts.get(index);
+      if (!current || current.id !== expectedPhotoId) return false;
+      facts.set(index, { ...current, selectionState });
+      return true;
+    },
+    setPhotoRating(candidate, index, expectedPhotoId, rating) {
+      if (
+        !isCurrent(candidate) ||
+        index < 0 ||
+        index >= total ||
+        !Number.isInteger(rating) ||
+        rating < 0 ||
+        rating > 5
+      )
+        return false;
+      const current = facts.get(index);
+      if (!current || current.id !== expectedPhotoId) return false;
+      facts.set(index, { ...current, rating });
       return true;
     },
     invalidateWindow(index) {
@@ -705,6 +822,7 @@ export function createSourceGridOwner(
       detachImages();
       sourceTasks.halt();
       gridTasks.halt();
+      stopPhotoWindowWork();
       token = "";
       for (const known of [...knownTokens]) releaseToken(known);
     },

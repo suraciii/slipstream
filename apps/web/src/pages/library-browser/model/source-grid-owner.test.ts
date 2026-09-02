@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { TaskScope } from "./async-ownership.js";
 import {
   createSourceGridOwner,
   type GridThumbnailImage,
@@ -27,14 +26,19 @@ const photo = (id: string) => ({
   preview: { state: "inspection-pending" as const },
 });
 
-const windowResponse = (start: number, total = 180, count = 60) =>
+const windowResponse = (
+  start: number,
+  total = 180,
+  count = 60,
+  prefix = "photo",
+) =>
   new Response(
     JSON.stringify({
       start,
       total,
       photos: Array.from(
         { length: Math.min(count, Math.max(0, total - start)) },
-        (_, offset) => photo(`photo-${start + offset}`),
+        (_, offset) => photo(`${prefix}-${start + offset}`),
       ),
     }),
     { status: 200 },
@@ -104,6 +108,57 @@ describe("SourceGridOwner", () => {
     owner.dispose();
     await Promise.resolve();
     expect(releases.sort()).toEqual(["current-token", "stale-token"]);
+  });
+
+  test("releases the original and every stale token across three overlapping replacements", async () => {
+    const replacements = [
+      deferred<Response>(),
+      deferred<Response>(),
+      deferred<Response>(),
+    ];
+    const releases: string[] = [];
+    let replacementIndex = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (init?.method === "DELETE") {
+        releases.push(url.pathname.split("/").at(-1)!);
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      if (url.pathname === "/api/browse" && init?.method === "POST") {
+        if (replacementIndex === 0) {
+          replacementIndex += 1;
+          return Promise.resolve(opened("original-token"));
+        }
+        return replacements[replacementIndex++ - 1]!.promise;
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    await openLibrary(owner, "original-token");
+    const first = owner.open({ kind: "library" });
+    const second = owner.open({ kind: "library" });
+    const current = owner.open({ kind: "library" });
+    expect(releases).toEqual(["original-token"]);
+
+    replacements[0]!.resolve(opened("stale-token-1"));
+    replacements[1]!.resolve(opened("stale-token-2"));
+    replacements[2]!.resolve(opened("current-token"));
+    expect((await first).kind).toBe("detached");
+    expect((await second).kind).toBe("detached");
+    expect((await current).kind).toBe("opened");
+    expect(releases.sort()).toEqual([
+      "original-token",
+      "stale-token-1",
+      "stale-token-2",
+    ]);
+
+    owner.dispose();
+    expect(releases.sort()).toEqual([
+      "current-token",
+      "original-token",
+      "stale-token-1",
+      "stale-token-2",
+    ]);
   });
 
   test("keeps the attempted source and retry state after an open failure", async () => {
@@ -217,10 +272,10 @@ describe("SourceGridOwner", () => {
     );
     await Promise.resolve();
     owner.stopGridWork();
-    const photoTasks = new TaskScope();
+    const photoAuthority = owner.renewPhotoWindow(17);
     const foreground = owner.loadWindow(
       0,
-      { kind: "photo", authority, generation: 17, tasks: photoTasks },
+      { kind: "photo", authority: photoAuthority },
       { quiet: true, priority: "high" },
     );
 
@@ -231,6 +286,53 @@ describe("SourceGridOwner", () => {
     expect(signals[0]!.aborted).toBe(true);
     expect(signals[1]!.aborted).toBe(false);
     gridWindow.resolve(windowResponse(0, 60));
+  });
+
+  test("renews opaque Photo window ownership without committing the cancelled lifetime", async () => {
+    const staleWindow = deferred<Response>();
+    let windowRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 60));
+      if (url.pathname === "/api/browse/browse-1") {
+        windowRequests += 1;
+        return windowRequests === 1
+          ? staleWindow.promise
+          : Promise.resolve(windowResponse(0, 60, 60, "current"));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    const staleAuthority = owner.renewPhotoWindow(41);
+    expect(Object.isFrozen(staleAuthority)).toBe(true);
+    const stale = owner.loadWindow(0, {
+      kind: "photo",
+      authority: staleAuthority,
+    });
+    await Promise.resolve();
+    const currentAuthority = owner.renewPhotoWindow(42);
+    expect(await stale).toMatchObject({
+      kind: "detached",
+      owner: { scope: "photo", generation: 41 },
+    });
+
+    expect(
+      await owner.loadWindow(0, {
+        kind: "photo",
+        authority: currentAuthority,
+      }),
+    ).toMatchObject({
+      kind: "loaded",
+      owner: { scope: "photo", generation: 42 },
+    });
+    expect(owner.photoAt(0)?.id).toBe("current-0");
+    staleWindow.resolve(windowResponse(0, 60, 60, "stale"));
+    await Promise.resolve();
+    expect(owner.photoAt(0)?.id).toBe("current-0");
   });
 
   test("classifies expired, answered, and transport window failures for the explicit owner", async () => {
@@ -253,13 +355,11 @@ describe("SourceGridOwner", () => {
         return Promise.resolve(new Response(null, { status: 204 }));
       throw new Error(`unexpected request ${url.pathname}`);
     });
-    const authority = await openLibrary(owner);
-    const tasks = new TaskScope();
+    await openLibrary(owner);
+    const photoAuthority = owner.renewPhotoWindow(9);
     const operation = {
       kind: "photo" as const,
-      authority,
-      generation: 9,
-      tasks,
+      authority: photoAuthority,
     };
 
     expect(await owner.loadWindow(0, operation)).toMatchObject({
@@ -316,6 +416,96 @@ describe("SourceGridOwner", () => {
       malformed: true,
       transportLost: false,
     });
+  });
+
+  test("owns the Grid position and moves its pending anchor only for the current source", async () => {
+    let openCount = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened(`browse-${++openCount}`, 60, 17));
+      if (url.pathname.startsWith("/api/browse/browse-"))
+        return Promise.resolve(windowResponse(0, 60));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const first = await owner.open({ kind: "library" });
+    if (first.kind !== "opened") throw new Error("expected first source");
+    expect(owner.readGridPosition(first.authority)).toBe(17);
+    expect(owner.photoAt(22)).toBeUndefined();
+    expect(owner.moveGridPosition(first.authority, 22)).toBe(true);
+    expect(owner.readGridPosition(first.authority)).toBe(22);
+    await owner.loadWindow(17, {
+      kind: "source",
+      authority: first.authority,
+    });
+    expect(owner.moveGridPosition(first.authority, 60)).toBe(false);
+
+    const replacement = await owner.open({ kind: "library" });
+    expect(replacement.kind).toBe("opened");
+    expect(owner.readGridPosition(replacement.authority)).toBe(17);
+    expect(owner.readGridPosition(first.authority)).toBeUndefined();
+    expect(owner.moveGridPosition(first.authority, 22)).toBe(false);
+    expect(owner.readGridPosition(replacement.authority)).toBe(17);
+  });
+
+  test("rejects stale-source and evicted Photo patches instead of injecting facts", async () => {
+    let openCount = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened(`browse-${++openCount}`, 240));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 240, 60, "old"));
+      }
+      if (url.pathname === "/api/browse/browse-2") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 240, 60, "current"));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const first = await owner.open({ kind: "library" });
+    if (first.kind !== "opened") throw new Error("expected first source");
+    await owner.loadWindow(0, {
+      kind: "source",
+      authority: first.authority,
+    });
+    const replacement = await owner.open({ kind: "library" });
+    if (replacement.kind !== "opened")
+      throw new Error("expected replacement source");
+    await owner.loadWindow(0, {
+      kind: "source",
+      authority: replacement.authority,
+    });
+
+    expect(
+      owner.setPhotoSelection(first.authority, 0, "old-0", "selected"),
+    ).toBe(false);
+    expect(
+      owner.setPhotoPreview(replacement.authority, 0, "old-0", {
+        state: "ready",
+        url: "/stale.jpg",
+      }),
+    ).toBe(false);
+    expect(owner.photoAt(0)?.id).toBe("current-0");
+    expect(owner.photoAt(0)?.selectionState).toBe("undecided");
+
+    for (const index of [60, 120, 180])
+      await owner.loadWindow(index, {
+        kind: "source",
+        authority: replacement.authority,
+      });
+    expect(owner.photoAt(0)).toBeUndefined();
+    expect(owner.setPhotoRating(replacement.authority, 0, "current-0", 5)).toBe(
+      false,
+    );
+    expect(owner.photoAt(0)).toBeUndefined();
   });
 
   test("clears an expired token before failed reopen and retries with a new snapshot", async () => {
