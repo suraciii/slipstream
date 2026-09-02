@@ -2020,6 +2020,82 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
+test("saved-position confirmation cannot be reverted by an older Overview", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["one.jpg", "two.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Resume Fence");
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let releaseOverview!: () => void;
+  const overviewGate = new Promise<void>((resolve) => {
+    releaseOverview = resolve;
+  });
+  let markOverviewCaptured!: () => void;
+  const overviewCaptured = new Promise<void>((resolve) => {
+    markOverviewCaptured = resolve;
+  });
+  let markOverviewDelivered!: () => void;
+  const overviewDelivered = new Promise<void>((resolve) => {
+    markOverviewDelivered = resolve;
+  });
+  let held = false;
+  await page.route("**/api/overview", async (route) => {
+    if (held) {
+      await route.continue();
+      return;
+    }
+    held = true;
+    const captured = await route.fetch();
+    markOverviewCaptured();
+    await overviewGate;
+    try {
+      await route.fulfill({ response: captured });
+    } finally {
+      markOverviewDelivered();
+    }
+  });
+  try {
+    await page.locator("[data-retry]").evaluate((element) => {
+      (element as HTMLButtonElement).click();
+    });
+    await overviewCaptured;
+
+    await page.getByRole("button", { name: /^Resume Fence 2 Photos$/ }).click();
+    await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+    await openPhotoAndWaitForProgress(
+      page,
+      albumId,
+      page.getByRole("button", { name: /^Photo 1 of 2/ }),
+    );
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await openSources(page);
+    await expect(
+      page.getByRole("button", {
+        name: /^Resume Fence 2 Photos · Resume$/,
+      }),
+    ).toBeVisible();
+
+    releaseOverview();
+    await overviewDelivered;
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: /^Resume Fence 2 Photos · Resume$/,
+      }),
+    ).toBeVisible();
+  } finally {
+    releaseOverview();
+    await page.unroute("**/api/overview");
+  }
+});
+
 test("an answered stale saved-position write is not a disconnection", async ({
   page,
 }) => {
