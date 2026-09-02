@@ -17,6 +17,7 @@ Slipstream is in initial product definition.
 - Grow the product in working end-to-end increments.
 - Do not preserve obsolete paths unless a specification requires compatibility.
 - Treat original photo files as irreplaceable user data. Default to read-only access and fail without modifying them.
+- When a change retires or renames an HTTP route or wire value, confirm the deployment host's operator tooling still verifies the deployment end to end before merging.
 
 ## Context Management
 
