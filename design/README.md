@@ -13,3 +13,4 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Capture-Time Library Ordering](capture-time-ordering.md): metadata authority, deterministic Library and Original Folder order, explicit Album order, persistence, rescan lifecycle, migration, and rollback
 - [Scalable Library Browsing](library-browsing.md): lightweight overview, progressively loaded Grid and Photo views, stable hidden browse snapshots, background scan status, and persistent Preview caching
 - [Preview Pipeline](preview-pipeline.md): matching-JPEG and embedded-JPEG selection, extraction, normalization, caching, and delivery
+- [Web Async Ownership](web-async-ownership.md): read scopes, write settlement, and commit-ordered convergence in the Web client

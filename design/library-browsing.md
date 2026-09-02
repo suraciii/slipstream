@@ -104,11 +104,40 @@ Conceptual protocol surfaces are:
 ```text literal
 GET    /api/overview
 GET    /api/status
+POST   /api/scan
 GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}&limit={count}
 POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
 DELETE /api/browse/{token}
 ```
+
+`POST /api/scan` takes no semantic request fields; an empty JSON object is
+accepted. A same-service request admits one application-owned Scan Cycle and
+waits for its terminal Loading Status. Concurrent accepted requests join that
+cycle within the bounded waiter capacity and each receives the one terminal
+status captured by its leader; the browser suppresses a duplicate Retry
+Library Check while its own command is in flight. Success is `200` with the
+bounded Loading Status shape used by `GET /api/status` and no Photo facts.
+Cross-origin mutation is `403`; an unavailable, saturated, or failed scan is
+`5xx`. Wrong-method handling remains the shared `405` protocol rule.
+
+### Scan Cycle Ownership
+
+The Application owns at most one Scan Cycle across background startup and
+explicit `POST /api/scan` callers. The first admission starts an
+application-owned leader task. Later admissions attach bounded waiters to that
+task rather than invoking independent publication lifecycles. The leader runs
+one physical Library scan, publishes its result exactly once, completes status
+accounting exactly once, captures the resulting terminal Loading Status, and
+fans that same result out to every remaining waiter.
+
+Dropping an HTTP request removes only that request's waiter. It does not cancel
+the admitted leader, skip publication, or leave status accounting elevated.
+Application shutdown may drain or terminate the leader through the ordinary
+server shutdown contract, but cleanup still completes status accounting.
+After the leader reaches terminal state, the next admission may create a new
+cycle. This single-flight boundary prevents one physical scan from producing
+multiple publication generations.
 
 `POST /api/browse` accepts one source:
 
