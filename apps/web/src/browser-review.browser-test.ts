@@ -3464,6 +3464,58 @@ test("application teardown halts image ownership and releases the Browse token",
   ).toBeHidden();
 });
 
+test("application teardown during File Location rebind stays silent", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot/nested"), { recursive: true });
+  await writeFile(join(root, "shoot/nested/photo.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Toggle shoot subfolders" }),
+  ).toBeVisible();
+
+  let releaseOverview!: () => void;
+  const overviewHeld = new Promise<void>((resolve) => {
+    releaseOverview = resolve;
+  });
+  let observeOverview!: () => void;
+  const overviewRequested = new Promise<void>((resolve) => {
+    observeOverview = resolve;
+  });
+  await page.route("**/api/overview", async (route) => {
+    observeOverview();
+    await overviewHeld;
+    await route.continue();
+  });
+  await page.route("**/api/file-locations*", async (route) => {
+    await route.fulfill({ status: 409 });
+  });
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+
+  await page.getByRole("button", { name: "Toggle shoot subfolders" }).click();
+  await overviewRequested;
+  await page.evaluate(() =>
+    window.dispatchEvent(new PageTransitionEvent("pagehide")),
+  );
+  const overviewResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/overview"),
+  );
+  releaseOverview();
+  await overviewResponse;
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+  );
+
+  expect(pageErrors).toEqual([]);
+});
+
 test("leaving Photo View cancels a pending review image transfer", async ({
   page,
 }) => {
