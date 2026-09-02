@@ -1312,6 +1312,7 @@ export function renderApp(
   let scanCompletionNotice: NoticeHandle | undefined;
   let scanCommandRecovery: RecoveryClaim | undefined;
   let activeScanCycle: ScanCycle | undefined;
+  let lastCompletedPublication: string | undefined;
 
   const releaseScanFailure = () => {
     if (!scanFailureNotice) return;
@@ -1356,6 +1357,8 @@ export function renderApp(
       setConnected(true);
     }
     if (!applicationAlive) return;
+    if (publication && publication === lastCompletedPublication) return;
+    if (publication) lastCompletedPublication = publication;
     if (!observePublication(publication) && !publication)
       overviewDataFloor += 1;
     releaseScanFailure();
@@ -1598,11 +1601,7 @@ export function renderApp(
           (await validationResponse.json()) as LibraryOverviewResponse["scan"];
         summaryNotices.discardBackground(validationEpoch);
         validationSettled = true;
-        if (
-          body.publication !== undefined &&
-          validation.publication !== undefined &&
-          body.publication !== validation.publication
-        ) {
+        if (body.publication !== validation.publication) {
           if (validation.publication !== observedPublication)
             overviewDataFloor += 1;
           return false;
@@ -2092,6 +2091,7 @@ export function renderApp(
     const start = alignedStart(index);
     if (windowLoaded(start)) return Promise.resolve(true);
     const browseToken = token;
+    const expectedTotal = total;
     const photoGeneration = requestGeneration;
     const scope =
       signal === sourceSignal
@@ -2153,15 +2153,10 @@ export function renderApp(
         }
         let result: BrowseWindowResponse;
         try {
-          const candidate =
-            (await response.json()) as Partial<BrowseWindowResponse>;
-          if (
-            !Number.isInteger(candidate.start) ||
-            !Number.isInteger(candidate.total) ||
-            !Array.isArray(candidate.photos)
-          )
-            throw new Error("malformed window");
-          result = candidate as BrowseWindowResponse;
+          const candidate: unknown = await response.json();
+          const decoded = decodeBrowseWindow(candidate, start, expectedTotal);
+          if (!decoded) throw new Error("malformed window");
+          result = decoded;
         } catch {
           if (!ownedSignal.aborted && generation === sourceGeneration) {
             const message = `${rangeMessage} returned an invalid response. Retry this range.`;
@@ -2685,10 +2680,18 @@ export function renderApp(
         candidate.state === "failed";
       if (!explicitState) throw new Error("malformed Preview response");
       // The protocol intentionally carries explicit non-ready Preview states
-      // with HTTP 404; only a non-success without that typed state is a
-      // transport/service failure.
-      if (!response.ok && candidate.state === "ready")
+      // with HTTP 404. Other non-success statuses are service failures even
+      // when their body happens to resemble a typed Preview response.
+      if (
+        !response.ok &&
+        !(
+          response.status === 404 &&
+          (candidate.state === "unavailable" || candidate.state === "failed")
+        )
+      )
         throw new Error(`preview HTTP ${response.status}`);
+      if (candidate.state === "ready" && !candidate.url)
+        throw new Error("ready Preview omitted URL");
       result = candidate as PreviewResponse;
     } catch {
       if (signal.aborted || generation !== requestGeneration) return false;
@@ -3339,6 +3342,80 @@ export function renderApp(
     window.removeEventListener("resize", onResize);
     if (browseToken) void closeBrowse(browseToken);
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function validOptional(
+  value: unknown,
+  predicate: (candidate: unknown) => boolean,
+): boolean {
+  return value === undefined || predicate(value);
+}
+
+function validPhotoSummary(value: unknown): value is PhotoSummary {
+  if (!isRecord(value) || !isRecord(value.preview)) return false;
+  const preview = value.preview;
+  const previewState = preview.state;
+  if (
+    previewState !== "inspection-pending" &&
+    previewState !== "ready" &&
+    previewState !== "failed" &&
+    previewState !== "unavailable"
+  )
+    return false;
+  if (
+    !Array.isArray(value.originals) ||
+    !value.originals.every(
+      (original) =>
+        isRecord(original) &&
+        (original.kind === "raw" || original.kind === "jpeg") &&
+        typeof original.available === "boolean",
+    )
+  )
+    return false;
+  return (
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    typeof value.available === "boolean" &&
+    typeof value.ambiguous === "boolean" &&
+    (value.selectionState === "undecided" ||
+      value.selectionState === "selected" ||
+      value.selectionState === "rejected") &&
+    Number.isInteger(value.rating) &&
+    Number(value.rating) >= 0 &&
+    Number(value.rating) <= 5 &&
+    validOptional(
+      preview.source,
+      (source) => source === "matching-jpeg" || source === "embedded-raw-jpeg",
+    ) &&
+    validOptional(preview.width, Number.isInteger) &&
+    validOptional(preview.height, Number.isInteger) &&
+    validOptional(preview.limitedDetail, (item) => typeof item === "boolean") &&
+    validOptional(preview.url, (item) => typeof item === "string") &&
+    validOptional(preview.thumbnailUrl, (item) => typeof item === "string") &&
+    validOptional(preview.message, (item) => typeof item === "string")
+  );
+}
+
+function decodeBrowseWindow(
+  value: unknown,
+  expectedStart: number,
+  expectedTotal: number,
+): BrowseWindowResponse | undefined {
+  if (
+    !isRecord(value) ||
+    value.start !== expectedStart ||
+    value.total !== expectedTotal ||
+    !Array.isArray(value.photos) ||
+    value.photos.length > WINDOW_SIZE ||
+    expectedStart + value.photos.length > expectedTotal ||
+    !value.photos.every(validPhotoSummary)
+  )
+    return undefined;
+  return value as BrowseWindowResponse;
 }
 
 function required<T extends Element>(root: ParentNode, selector: string): T {
