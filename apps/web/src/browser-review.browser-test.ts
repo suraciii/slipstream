@@ -4931,8 +4931,14 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
   try {
     await scrollToIndex(60);
     await expect.poll(() => attempts.get("60") ?? 0).toBeGreaterThan(0);
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Photos 61–120 could not be loaded (HTTP 503). Retry this range.",
+    );
     await scrollToIndex(120);
     await expect.poll(() => attempts.get("120") ?? 0).toBeGreaterThan(0);
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
+    );
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
 
     const initial60 = attempts.get("60")!;
@@ -4944,6 +4950,9 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect
       .poll(() => attempts.get("120") ?? 0)
       .toBeGreaterThan(initial120);
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
+    );
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(0);
