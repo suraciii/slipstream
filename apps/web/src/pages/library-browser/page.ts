@@ -1264,13 +1264,16 @@ export function mountLibraryBrowser(
       updateControls();
     }
   };
-  const renderGrid = () => {
+  const renderGrid = (position?: number) => {
     if (!applicationAlive) return;
     sourceGrid.beginGridRender();
-    view.renderGrid({
-      total: sourceGrid.total,
-      photoAt: (index) => sourceGrid.photoAt(index),
-    });
+    view.renderGrid(
+      {
+        total: sourceGrid.total,
+        photoAt: (index) => sourceGrid.photoAt(index),
+      },
+      position,
+    );
     updateControls();
   };
 
@@ -1941,8 +1944,7 @@ export function mountLibraryBrowser(
         const authority = sourceGrid.authority;
         const position = sourceGrid.readGridPosition(authority);
         if (position === undefined || !view.gridVisible()) return;
-        view.scrollToGridIndex(position);
-        if (sourceGrid.isCurrent(authority)) renderGrid();
+        if (sourceGrid.isCurrent(authority)) renderGrid(position);
         return;
       }
       case "grid-window":
