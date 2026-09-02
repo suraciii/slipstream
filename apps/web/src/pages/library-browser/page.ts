@@ -22,7 +22,6 @@ import {
 } from "./model/file-location-owner.js";
 import {
   createApplicationOwner,
-  type AlbumMutationSettlement,
   type ApplicationCoordination,
   type ApplicationEvent,
   type ApplicationPresentation,
@@ -36,6 +35,12 @@ import {
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
+import {
+  createAlbumActionOwner,
+  type AlbumActionAdmission,
+  type AlbumActionContext,
+  type AlbumFormAuthority,
+} from "./model/album-action-owner.js";
 import "./ui/library-browser.css";
 
 type SessionUndo = UndoDescription &
@@ -52,6 +57,10 @@ type BrowseRangeFailure = Readonly<{
   claim: RecoveryClaim;
   ownerScope: "source" | "photo";
   retry?: GridRangeRetry;
+}>;
+type AlbumRecoveryRecord = Readonly<{
+  claim: RecoveryClaim;
+  sourceAuthority: SourceAuthority;
 }>;
 const GRID_CELL_HEIGHT = 178;
 const GRID_CELL_WIDTH = 150;
@@ -333,6 +342,7 @@ export function mountLibraryBrowser(
   const application = createApplicationOwner(fetcher, {
     emit: handleApplicationEvent,
   });
+  const albumActions = createAlbumActionOwner(fetcher);
   let currentIndex = 0;
   let lastCurrentPhotoId: string | undefined;
   // In-progress Album management form: create, rename, or a two-step delete
@@ -344,6 +354,7 @@ export function mountLibraryBrowser(
     | {
         kind: "create";
         formId: string;
+        authority: AlbumFormAuthority;
         name: string;
         pending?: boolean;
         message?: string;
@@ -351,6 +362,7 @@ export function mountLibraryBrowser(
     | {
         kind: "rename";
         formId: string;
+        authority: AlbumFormAuthority;
         id: string;
         name: string;
         pending?: boolean;
@@ -359,6 +371,7 @@ export function mountLibraryBrowser(
     | {
         kind: "delete";
         formId: string;
+        authority: AlbumFormAuthority;
         id: string;
         name: string;
         pending?: boolean;
@@ -366,6 +379,12 @@ export function mountLibraryBrowser(
   let albumFormCounter = 0;
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
   let albumForm: AlbumFormModel | undefined;
+  const dismissAlbumForm = (model: AlbumFormModel): boolean => {
+    if (!albumActions.isFormCurrent(model.authority)) return false;
+    albumActions.closeForm(model.authority);
+    albumForm = undefined;
+    return true;
+  };
 
   const ALBUM_NAME_MAXIMUM = 120;
   const albumNameError = (name: string): string | undefined => {
@@ -382,6 +401,7 @@ export function mountLibraryBrowser(
   let openingPhoto = false;
   let currentPhotoMode = false;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
+  let albumRecovery: AlbumRecoveryRecord | undefined;
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
   let photoTasks = new TaskScope();
@@ -420,8 +440,18 @@ export function mountLibraryBrowser(
     | undefined;
 
   const currentPhoto = () => sourceGrid.photoAt(currentIndex);
+  const currentAlbumRecovery = (): AlbumRecoveryRecord | undefined => {
+    if (
+      albumRecovery &&
+      (!sourceGrid.isCurrent(albumRecovery.sourceAuthority) ||
+        !recoveryGate.isActive(albumRecovery.claim))
+    )
+      albumRecovery = undefined;
+    return albumRecovery;
+  };
   const syncConnection = (message?: string) => {
     if (!applicationAlive) return;
+    currentAlbumRecovery();
     for (const [key, failure] of browseRangeFailures)
       if (!recoveryGate.isActive(failure.claim))
         browseRangeFailures.delete(key);
@@ -571,81 +601,136 @@ export function mountLibraryBrowser(
   /// response always refreshes the bounded Album list, while notices stay
   /// owned by the initiating action, surface, generation, and epoch.
   const mutateAlbum = (
-    path: string,
-    body: unknown,
-    failure: (httpStatus: number) => string,
+    start: (context: AlbumActionContext) => AlbumActionAdmission | undefined,
     surface: "photo" | "summary",
     photoGeneration = requestGeneration,
-    admissionKey?: string,
+    form?: AlbumFormAuthority,
   ): Promise<{
     admitted: boolean;
     ok: boolean;
     announce: (text: string) => void;
+    removedFromCurrentAlbum?: Readonly<{
+      albumId: string;
+      photoId: string;
+      sourceAuthority: SourceAuthority;
+    }>;
   }> => {
     const capturedPhotoStatus = photoStatusOwner;
-    const sourceOwner = sourceGrid.generation;
+    const sourceOwner = sourceGrid.authority;
     const ownsPhotoSurface = () =>
       surface === "photo" &&
       photoGeneration === requestGeneration &&
       currentPhotoMode &&
       capturedPhotoStatus === photoStatusOwner;
-    const mutation = application.beginAlbumMutation({
-      noticeKey: admissionKey ?? path,
-      ...(admissionKey ? { admissionKey } : {}),
-      surface,
-      ownsSurface: ownsPhotoSurface,
+    const action = start({
+      sourceAuthority: sourceOwner,
+      surface:
+        surface === "photo"
+          ? { kind: "photo", isCurrent: ownsPhotoSurface }
+          : { kind: "summary" },
+      ...(form ? { form } : {}),
     });
-    if (!mutation)
+    if (!action)
       return Promise.resolve({
         admitted: false,
         ok: false,
         announce: () => {},
       });
-    const disconnect = () => {
-      const claim = recoveryGate.issue("album", path, {
-        owner: { scope: "source", generation: String(sourceOwner) },
+    const summaryPresentation = application.claimAlbumSummary(action.noticeKey);
+    const disconnect = (authority: SourceAuthority) => {
+      if (!sourceGrid.isCurrent(authority)) return;
+      const active = currentAlbumRecovery();
+      if (active?.sourceAuthority === authority) {
+        recoveryGate.fail(active.claim, { transportLost: true });
+        syncConnection();
+        return;
+      }
+      const claim = recoveryGate.issue("album", action.noticeKey, {
+        owner: {
+          scope: "source",
+          generation: String(sourceGrid.generation),
+        },
       });
-      if (!recoveryGate.fail(claim, { transportLost: true }))
-        recoveryGate.discard(claim);
+      if (recoveryGate.fail(claim, { transportLost: true }))
+        albumRecovery = Object.freeze({ claim, sourceAuthority: authority });
+      else recoveryGate.discard(claim);
       syncConnection();
     };
-    const settle = async (result: AlbumMutationSettlement) => {
-      const outcome = await application.settleAlbumMutation(mutation, result);
-      if (outcome.surfaceMessage) status.textContent = outcome.surfaceMessage;
-      if (outcome.disconnect) disconnect();
-      return outcome;
+    const recoverConnection = (authority: SourceAuthority): void => {
+      const active = currentAlbumRecovery();
+      if (active?.sourceAuthority !== authority) return;
+      if (
+        recoveryGate.recover(active.claim) ||
+        !recoveryGate.isActive(active.claim)
+      )
+        albumRecovery = undefined;
     };
     return (async () => {
       try {
-        const response = await fetcher(path, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!response.ok) {
-          await settle({
-            kind: "failed",
-            message: failure(response.status),
-            transportLost: response.status >= 500,
-          });
+        const outcome = await action.settlement;
+        if (!applicationAlive)
+          return {
+            admitted: true,
+            ok: outcome.kind === "persisted",
+            announce: () => {},
+          };
+
+        if (outcome.kind === "failed") {
+          const presentOnPhoto = albumActions.canPresent(outcome.surface);
+          if (presentOnPhoto) status.textContent = outcome.failureMessage;
+          else
+            application.presentAlbumSummary(
+              summaryPresentation,
+              outcome.failureMessage,
+            );
+          if (presentOnPhoto)
+            application.releaseAlbumSummary(summaryPresentation);
+          if (
+            outcome.connectivity === "lost-if-latest" &&
+            albumActions.isLatest(outcome.mutation)
+          )
+            disconnect(outcome.sourceAuthority);
           return { admitted: true, ok: false, announce: () => {} };
         }
-        const outcome = await settle({ kind: "persisted" });
+
+        let disconnectAfterRefresh = false;
+        if (application.advanceAlbumMutationFloor()) {
+          try {
+            const committed = await application.refreshOverview();
+            if (
+              committed &&
+              albumActions.isLatest(outcome.mutation) &&
+              sourceGrid.isCurrent(outcome.sourceAuthority)
+            ) {
+              recoverConnection(outcome.sourceAuthority);
+              setConnected(true);
+            }
+            application.resolveAlbumSummary(summaryPresentation);
+          } catch {
+            if (applicationAlive && albumActions.isLatest(outcome.mutation)) {
+              disconnectAfterRefresh = true;
+              application.presentAlbumSummary(
+                summaryPresentation,
+                "The Album was saved but the Library summary could not be refreshed.",
+              );
+            } else application.releaseAlbumSummary(summaryPresentation);
+          }
+        }
+        const presentOnSurface = albumActions.canPresent(outcome.surface);
+        if (disconnectAfterRefresh) disconnect(outcome.sourceAuthority);
         return {
           admitted: true,
           ok: true,
           announce: (text: string) => {
-            if (outcome.presentOnSurface && ownsPhotoSurface())
+            if (presentOnSurface && ownsPhotoSurface())
               status.textContent = text;
           },
+          ...(outcome.removedFromCurrentAlbum
+            ? { removedFromCurrentAlbum: outcome.removedFromCurrentAlbum }
+            : {}),
         };
-      } catch {
-        await settle({
-          kind: "failed",
-          message: failure(0),
-          transportLost: true,
-        });
-        return { admitted: true, ok: false, announce: () => {} };
+      } finally {
+        albumActions.finish(action.mutation);
       }
     })();
   };
@@ -990,19 +1075,20 @@ export function mountLibraryBrowser(
     newAlbum.className = "album-new";
     newAlbum.textContent = "New Album";
     newAlbum.addEventListener("click", () => {
-      albumForm = { kind: "create", formId: nextAlbumFormId(), name: "" };
+      const formId = nextAlbumFormId();
+      albumForm = {
+        kind: "create",
+        formId,
+        authority: albumActions.openForm(formId),
+        name: "",
+      };
       renderSources();
     });
     albumHeadingRow.append(albumHeading, newAlbum);
     sourceList.append(albumHeadingRow);
 
     if (albumForm?.kind === "create") {
-      sourceList.append(
-        albumCreateForm(() => {
-          albumForm = undefined;
-          renderSources();
-        }),
-      );
+      sourceList.append(albumCreateForm());
     }
     for (const set of application.albums) {
       const button = sourceButton(
@@ -1046,7 +1132,7 @@ export function mountLibraryBrowser(
     // the server instead of native UTF-16 code-unit maxlength.
     const draft = model;
     input.addEventListener("input", () => {
-      if (albumForm === draft) {
+      if (albumActions.isFormCurrent(draft.authority)) {
         draft.name = input.value;
         if (draft.message) delete draft.message;
       }
@@ -1062,13 +1148,8 @@ export function mountLibraryBrowser(
     return message;
   };
 
-  const albumCreateForm = (cancel: () => void) => {
-    const model: AlbumFormModel = albumForm as {
-      kind: "create";
-      formId: string;
-      name: string;
-      pending?: boolean;
-    };
+  const albumCreateForm = () => {
+    const model = albumForm as Extract<AlbumFormModel, { kind: "create" }>;
     const form = document.createElement("form");
     form.className = "album-form";
     form.setAttribute("aria-label", "Create Album");
@@ -1082,7 +1163,10 @@ export function mountLibraryBrowser(
     const abort = document.createElement("button");
     abort.type = "button";
     abort.textContent = "Cancel";
-    abort.addEventListener("click", cancel);
+    abort.addEventListener("click", () => {
+      dismissAlbumForm(model);
+      renderSources();
+    });
     form.append(input, save, abort, message);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -1101,17 +1185,13 @@ export function mountLibraryBrowser(
       renderSources();
       void (async () => {
         const { ok: created } = await mutateAlbum(
-          "/api/albums",
-          { name },
-          (httpStatus) =>
-            httpStatus === 409
-              ? "An Album with this name already exists."
-              : "The Album could not be created.",
+          (context) => albumActions.create(name, context),
           "summary",
+          requestGeneration,
+          model.authority,
         );
-        // Ownership check: a newer form opened meanwhile keeps its own state.
-        if (albumForm === model) {
-          if (created) albumForm = undefined;
+        if (albumActions.isFormCurrent(model.authority)) {
+          if (created) dismissAlbumForm(model);
           else model.pending = false;
         }
         renderSources();
@@ -1124,13 +1204,7 @@ export function mountLibraryBrowser(
     const tools = document.createElement("div");
     tools.className = "album-tools";
     if (albumForm?.kind === "rename" && albumForm.id === set.id) {
-      const model: AlbumFormModel = albumForm as {
-        kind: "rename";
-        formId: string;
-        id: string;
-        name: string;
-        pending?: boolean;
-      };
+      const model = albumForm;
       const form = document.createElement("form");
       form.className = "album-form";
       form.setAttribute("aria-label", "Rename Album");
@@ -1145,7 +1219,7 @@ export function mountLibraryBrowser(
       abort.type = "button";
       abort.textContent = "Cancel";
       abort.addEventListener("click", () => {
-        albumForm = undefined;
+        dismissAlbumForm(model);
         renderSources();
       });
       form.append(input, save, abort, message);
@@ -1153,7 +1227,7 @@ export function mountLibraryBrowser(
         event.preventDefault();
         const name = input.value.trim();
         if (!name || name === set.name) {
-          albumForm = undefined;
+          dismissAlbumForm(model);
           renderSources();
           return;
         }
@@ -1171,17 +1245,13 @@ export function mountLibraryBrowser(
         renderSources();
         void (async () => {
           const { ok: renamed } = await mutateAlbum(
-            `/api/albums/${set.id}/rename`,
-            { name },
-            (httpStatus) =>
-              httpStatus === 409
-                ? "An Album with this name already exists."
-                : "The Album could not be renamed.",
+            (context) => albumActions.rename(set.id, name, context),
             "summary",
+            requestGeneration,
+            model.authority,
           );
-          // Ownership check: a newer form opened meanwhile keeps its own state.
-          if (albumForm === model) {
-            if (renamed) albumForm = undefined;
+          if (albumActions.isFormCurrent(model.authority)) {
+            if (renamed) dismissAlbumForm(model);
             else model.pending = false;
           }
           renderSources();
@@ -1205,7 +1275,7 @@ export function mountLibraryBrowser(
       abort.type = "button";
       abort.textContent = "Cancel";
       abort.addEventListener("click", () => {
-        albumForm = undefined;
+        dismissAlbumForm(model);
         renderSources();
       });
       confirmButton.addEventListener("click", () => {
@@ -1213,14 +1283,13 @@ export function mountLibraryBrowser(
           confirmButton.disabled = true;
           model.pending = true;
           const { ok: deleted } = await mutateAlbum(
-            `/api/albums/${set.id}/delete`,
-            {},
-            () => "The Album could not be deleted.",
+            (context) => albumActions.delete(set.id, context),
             "summary",
+            requestGeneration,
+            model.authority,
           );
-          // Ownership check: a newer form opened while the deletion was
-          // pending keeps its own state and draft.
-          if (albumForm === model) albumForm = undefined;
+          if (albumActions.isFormCurrent(model.authority))
+            dismissAlbumForm(model);
           renderSources();
           if (
             deleted &&
@@ -1242,9 +1311,11 @@ export function mountLibraryBrowser(
     rename.textContent = "Rename";
     rename.setAttribute("aria-label", `Rename ${set.name}`);
     rename.addEventListener("click", () => {
+      const formId = nextAlbumFormId();
       albumForm = {
         kind: "rename",
-        formId: nextAlbumFormId(),
+        formId,
+        authority: albumActions.openForm(formId),
         id: set.id,
         name: set.name,
       };
@@ -1256,9 +1327,11 @@ export function mountLibraryBrowser(
     remove.textContent = "Delete";
     remove.setAttribute("aria-label", `Delete ${set.name}`);
     remove.addEventListener("click", () => {
+      const formId = nextAlbumFormId();
       albumForm = {
         kind: "delete",
-        formId: nextAlbumFormId(),
+        formId,
+        authority: albumActions.openForm(formId),
         id: set.id,
         name: set.name,
       };
@@ -1876,13 +1949,8 @@ export function mountLibraryBrowser(
     image.src = url;
     stage.replaceChildren(image);
   };
-  // Duplicate membership admission is owned by the Album settlement family;
-  // the open snapshot separately remembers members removed until reopen.
-  const membershipKey = (
-    verb: "add" | "remove",
-    albumId: string,
-    photoId: string,
-  ) => `${verb}:${albumId}:${photoId}`;
+  // Album action ownership suppresses duplicate membership admissions. The
+  // open snapshot separately remembers members removed until reopen.
   const removedFromCurrentAlbum = new Set<string>();
   let selectedAlbumId = "";
 
@@ -1911,14 +1979,14 @@ export function mountLibraryBrowser(
     const adding = Boolean(
       photo &&
         selectedAlbumId &&
-        application.isAlbumMutationAdmitted(
-          membershipKey("add", selectedAlbumId, photo.id),
-        ),
+        albumActions.isMembershipAdmitted("add", selectedAlbumId, photo.id),
     );
     const removing =
       Boolean(photo && sourceGrid.albumId) &&
-      application.isAlbumMutationAdmitted(
-        membershipKey("remove", sourceGrid.albumId!, photo!.id),
+      albumActions.isMembershipAdmitted(
+        "remove",
+        sourceGrid.albumId!,
+        photo!.id,
       );
     const inOpenAlbum =
       sourceGrid.kind === "album" &&
@@ -1942,22 +2010,23 @@ export function mountLibraryBrowser(
     const albumId = albumSelect.value;
     if (!photo || !albumId) return;
     const photoId = photo.id;
-    const key = membershipKey("add", albumId, photoId);
-    if (application.isAlbumMutationAdmitted(key)) return;
+    if (albumActions.isMembershipAdmitted("add", albumId, photoId)) return;
     const generation = requestGeneration;
+    const snapshotAuthority = sourceGrid.authority;
     void (async () => {
       addToAlbum.disabled = true;
       const { ok: added, announce } = await mutateAlbum(
-        `/api/albums/${albumId}/members`,
-        { photoIds: [photoId] },
-        () => "The Photo could not be added to the Album.",
+        (context) => albumActions.addMembership(albumId, photoId, context),
         "photo",
         generation,
-        key,
       );
       // Re-adding to the open Album clears the retained snapshot's removal
       // mark: the Photo is a member again and may be removed once more.
-      if (added && albumId === sourceGrid.albumId) {
+      if (
+        added &&
+        sourceGrid.isCurrent(snapshotAuthority) &&
+        albumId === sourceGrid.albumId
+      ) {
         removedFromCurrentAlbum.delete(photoId);
       }
       // Admitted persistence is never aborted by a source change; the
@@ -1983,21 +2052,25 @@ export function mountLibraryBrowser(
       return;
     const albumId = sourceGrid.albumId;
     const photoId = photo.id;
-    const key = membershipKey("remove", albumId, photoId);
-    if (application.isAlbumMutationAdmitted(key)) return;
+    if (albumActions.isMembershipAdmitted("remove", albumId, photoId)) return;
     const generation = requestGeneration;
-    const snapshotGeneration = sourceGrid.generation;
     void (async () => {
       removeFromAlbum.disabled = true;
-      const { ok: removed, announce } = await mutateAlbum(
-        `/api/albums/${albumId}/members/remove`,
-        { photoId },
-        () => "The Photo could not be removed from the Album.",
+      const {
+        ok: removed,
+        announce,
+        removedFromCurrentAlbum: removedFact,
+      } = await mutateAlbum(
+        (context) => albumActions.removeMembership(albumId, photoId, context),
         "photo",
         generation,
-        key,
       );
-      if (removed && snapshotGeneration === sourceGrid.generation) {
+      if (
+        removed &&
+        removedFact !== undefined &&
+        sourceGrid.isCurrent(removedFact.sourceAuthority) &&
+        removedFact.albumId === sourceGrid.albumId
+      ) {
         // The member is gone from the Album; within this open snapshot it
         // must not be removable again. A removal settling after the source
         // changed must not mark the Photo in a different Album's snapshot.
@@ -2854,6 +2927,8 @@ export function mountLibraryBrowser(
     requestGeneration += 1;
     cancelScheduledGridRender();
     cancelPendingImageLoads(stage, true);
+    albumRecovery = undefined;
+    albumActions.dispose();
     application.dispose();
     fileLocations.dispose();
     sourceGrid.dispose();

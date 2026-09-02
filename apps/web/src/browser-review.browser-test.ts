@@ -1086,6 +1086,56 @@ test("the current photo joins and leaves albums from the photo view", async ({
   ).toBeVisible();
 });
 
+test("a successful membership retry recovers its exact Album connection", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Picks")!.id;
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await page
+    .getByLabel("Album", { exact: true })
+    .selectOption({ label: "Picks" });
+
+  await page.route("**/api/albums/*/members", (route) => route.abort());
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await expect(
+    page.getByText("The Photo could not be added to the Album."),
+  ).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.unroute("**/api/albums/*/members");
+  const retried = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === `/api/albums/${albumId}/members` &&
+      response.status() === 200,
+  );
+  await expect(
+    page.getByRole("button", { name: "Add to Album" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Add to Album" }).click();
+  await retried;
+
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await openSources(page);
+  await expect(
+    page.getByRole("button", { name: /^Picks 1 Photos$/ }),
+  ).toBeVisible();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).members)
+    .toHaveLength(1);
+});
+
 test("different Album membership keys admit independently", async ({
   page,
 }) => {
@@ -4831,6 +4881,10 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
   await writePhotos(root, 180);
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
+  const thumbnailRoute = "**/api/photos/*/thumbnail";
+  await page.route(thumbnailRoute, (route) =>
+    route.fulfill({ status: 503, body: '{"error":"not under test"}' }),
+  );
   await openGrid(page, running.url, "All Photos");
 
   const attempts = new Map<string, number>();
@@ -4908,11 +4962,13 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(0);
 
+    await page.getByRole("button", { name: "Close" }).click();
     await scrollToIndex(0);
     await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
     expect(firstWindowReloads).toBe(0);
   } finally {
     await page.unroute(/\/api\/browse\//);
+    await page.unroute(thumbnailRoute);
   }
 });
 test("an expired Browse snapshot reopens around the current Photo", async ({

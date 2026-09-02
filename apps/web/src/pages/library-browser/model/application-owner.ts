@@ -14,7 +14,6 @@ import {
   TaskScope,
   type NoticeHandle,
   type NoticeUpdate,
-  type SettlementHandle,
 } from "./async-ownership.js";
 
 const ALBUM_NOTICE_PRIORITY = 10;
@@ -77,25 +76,9 @@ export type FileLocationPresentation = Readonly<{
   [fileLocationPresentationBrand]: true;
 }>;
 
-declare const albumMutationBrand: unique symbol;
-export type AlbumMutation = Readonly<{
-  [albumMutationBrand]: true;
-}>;
-
-export type AlbumMutationSettlement =
-  | Readonly<{ kind: "persisted" }>
-  | Readonly<{
-      kind: "failed";
-      message: string;
-      transportLost: boolean;
-    }>;
-
-export type AlbumMutationOutcome = Readonly<{
-  admitted: boolean;
-  ok: boolean;
-  presentOnSurface: boolean;
-  surfaceMessage?: string;
-  disconnect: boolean;
+declare const albumSummaryPresentationBrand: unique symbol;
+export type AlbumSummaryPresentation = Readonly<{
+  [albumSummaryPresentationBrand]: true;
 }>;
 
 export interface ApplicationOwner {
@@ -104,6 +87,7 @@ export interface ApplicationOwner {
   loadOverview(): Promise<void>;
   refreshOverview(): Promise<boolean>;
   notePublicationConflict(): void;
+  advanceAlbumMutationFloor(): boolean;
   confirmSavedPosition(albumId: string): void;
   claimFileLocation(key: string, message: string): FileLocationPresentation;
   presentFileLocation(
@@ -111,17 +95,13 @@ export interface ApplicationOwner {
     message: string,
   ): void;
   releaseFileLocation(presentation: FileLocationPresentation): void;
-  beginAlbumMutation(options: {
-    noticeKey: string;
-    admissionKey?: string;
-    surface: "photo" | "summary";
-    ownsSurface: () => boolean;
-  }): AlbumMutation | undefined;
-  isAlbumMutationAdmitted(admissionKey: string): boolean;
-  settleAlbumMutation(
-    mutation: AlbumMutation,
-    settlement: AlbumMutationSettlement,
-  ): Promise<AlbumMutationOutcome>;
+  claimAlbumSummary(key: string): AlbumSummaryPresentation;
+  presentAlbumSummary(
+    presentation: AlbumSummaryPresentation,
+    message: string,
+  ): void;
+  releaseAlbumSummary(presentation: AlbumSummaryPresentation): void;
+  resolveAlbumSummary(presentation: AlbumSummaryPresentation): void;
   activateSummaryAction(
     action: ApplicationSummaryAction,
   ): Readonly<{ kind: "refresh-current-source" }> | undefined;
@@ -132,10 +112,8 @@ type FileLocationRecord = Readonly<{
   notice: NoticeHandle;
 }>;
 
-type AlbumMutationRecord = Readonly<{
-  handle: SettlementHandle;
+type AlbumSummaryRecord = Readonly<{
   notice: NoticeHandle;
-  surface: "photo" | "summary";
 }>;
 
 type ScanCycle = {
@@ -157,14 +135,16 @@ export function createApplicationOwner(
 ): ApplicationOwner {
   let closed = false;
   const tasks = new TaskScope();
-  const albumSettlements = new SettlementFamily();
   const scanSettlements = new SettlementFamily();
   const notices = new SummaryNoticeChannel<ApplicationSummary>();
   const fileLocationRecords = new Map<
     FileLocationPresentation,
     FileLocationRecord
   >();
-  const albumRecords = new Map<AlbumMutation, AlbumMutationRecord>();
+  const albumSummaryRecords = new Map<
+    AlbumSummaryPresentation,
+    AlbumSummaryRecord
+  >();
   const schedule = options.schedule ?? defaultSchedule;
 
   let overviewDataFloor = 0;
@@ -539,6 +519,11 @@ export function createApplicationOwner(
     notePublicationConflict: () => {
       if (!closed) overviewDataFloor += 1;
     },
+    advanceAlbumMutationFloor: () => {
+      if (closed) return false;
+      overviewDataFloor += 1;
+      return true;
+    },
     confirmSavedPosition: (albumId) => {
       if (closed) return;
       const next = albums.map((album) =>
@@ -577,99 +562,33 @@ export function createApplicationOwner(
       fileLocationRecords.delete(presentation);
       applySummaryUpdate(notices.release(record.notice));
     },
-    beginAlbumMutation: (mutationOptions) => {
-      if (closed) return undefined;
-      const handle = albumSettlements.begin({
-        ...(mutationOptions.admissionKey
-          ? { admissionKey: mutationOptions.admissionKey }
-          : {}),
-        ownsSurface: mutationOptions.ownsSurface,
+    claimAlbumSummary: (key) => {
+      const presentation = Object.freeze({}) as AlbumSummaryPresentation;
+      if (closed) return presentation;
+      albumSummaryRecords.set(presentation, {
+        notice: notices.issue("album", key, ALBUM_NOTICE_PRIORITY),
       });
-      if (!handle) return undefined;
-      const mutation = Object.freeze({}) as AlbumMutation;
-      albumRecords.set(mutation, {
-        handle,
-        notice: notices.issue(
-          "album",
-          mutationOptions.noticeKey,
-          ALBUM_NOTICE_PRIORITY,
-        ),
-        surface: mutationOptions.surface,
-      });
-      return mutation;
+      return presentation;
     },
-    isAlbumMutationAdmitted: (key) => albumSettlements.isAdmitted(key),
-    settleAlbumMutation: async (mutation, result) => {
-      const record = albumRecords.get(mutation);
-      if (!record)
-        return {
-          admitted: false,
-          ok: false,
-          presentOnSurface: false,
-          disconnect: false,
-        };
-      albumRecords.delete(mutation);
-      const finish = () => record.handle.finish();
-      if (closed) {
-        finish();
-        return {
-          admitted: true,
-          ok: result.kind === "persisted",
-          presentOnSurface: false,
-          disconnect: false,
-        };
-      }
-      if (result.kind === "failed") {
-        const onSurface =
-          record.surface === "photo" && record.handle.canPresent();
-        if (!onSurface)
-          applySummaryUpdate(
-            notices.present(record.notice, summary(result.message), {
-              fallback: true,
-            }),
-          );
-        const disconnect = result.transportLost && record.handle.isNewest();
-        finish();
-        return {
-          admitted: true,
-          ok: false,
-          presentOnSurface: onSurface,
-          ...(onSurface ? { surfaceMessage: result.message } : {}),
-          disconnect,
-        };
-      }
-
-      overviewDataFloor += 1;
-      let disconnect = false;
-      try {
-        await refreshOverview({
-          markReachable: () => record.handle.isNewest(),
-        });
-        applySummaryUpdate(notices.releaseKind("album", record.notice));
-      } catch {
-        if (!closed) {
-          if (record.handle.isNewest()) {
-            disconnect = true;
-            applySummaryUpdate(
-              notices.present(
-                record.notice,
-                summary(
-                  "The Album was saved but the Library summary could not be refreshed.",
-                ),
-                { fallback: true },
-              ),
-            );
-          } else applySummaryUpdate(notices.release(record.notice));
-        }
-      }
-      const presentOnSurface = record.handle.canPresent();
-      finish();
-      return {
-        admitted: true,
-        ok: true,
-        presentOnSurface,
-        disconnect,
-      };
+    presentAlbumSummary: (presentation, message) => {
+      const record = albumSummaryRecords.get(presentation);
+      if (!record) return;
+      albumSummaryRecords.delete(presentation);
+      applySummaryUpdate(
+        notices.present(record.notice, summary(message), { fallback: true }),
+      );
+    },
+    releaseAlbumSummary: (presentation) => {
+      const record = albumSummaryRecords.get(presentation);
+      if (!record) return;
+      albumSummaryRecords.delete(presentation);
+      applySummaryUpdate(notices.release(record.notice));
+    },
+    resolveAlbumSummary: (presentation) => {
+      const record = albumSummaryRecords.get(presentation);
+      if (!record) return;
+      albumSummaryRecords.delete(presentation);
+      applySummaryUpdate(notices.releaseKind("album", record.notice));
     },
     activateSummaryAction: (action) => {
       if (closed || visibleSummary.action !== action) return undefined;
@@ -688,10 +607,10 @@ export function createApplicationOwner(
       if (closed) return;
       closed = true;
       tasks.halt();
-      albumSettlements.closePresentation();
       scanSettlements.closePresentation();
       notices.close();
       fileLocationRecords.clear();
+      albumSummaryRecords.clear();
     },
   };
   return owner;
