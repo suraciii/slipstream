@@ -2,13 +2,13 @@
 
 The Web client starts asynchronous work whose settlement may outlive the UI
 state that initiated it. A stale operation must not revert newer shared data,
-write into a newer source or Photo, erase a newer failure notice, or change
-connectivity after a newer operation proved the server reachable.
+write into a newer source or Photo, erase a newer failure notice, or release a
+recovery claim it does not own.
 
 Async ownership has two independent dimensions:
 
 1. the operation's **effect**: presentation read, shared-state read, lifecycle
-   release, or admitted persistence;
+   release, admitted persistence, or another admitted server command;
 2. its **supersession policy**: abort transport, detach continuation, commit in
    order, or always settle.
 
@@ -18,9 +18,9 @@ operations; they never acquire an implicit fifth policy.
 
 ## Design Drivers
 
-- Admitted persistence is never aborted. Once a mutation request is sent, the
-  server may commit it; aborting the fetch blinds the client without rolling
-  the server back.
+- Admitted server work is never treated as rolled back by HTTP cancellation.
+  Once a persistence mutation or scan command is sent, the server may commit
+  or continue it; aborting the fetch only blinds the client.
 - Publication and Browse snapshot coherence require one generation at a time.
   A stale Folder or Browse result is never silently reinterpreted as current.
 - Cancellation cannot replace ordering. Two successful reads may settle out
@@ -63,27 +63,53 @@ the preceding timer, loop, and in-flight continuation; transport need not be
 aborted. Application teardown does the same. A detached poll never writes
 scan status or starts an overview load.
 
-An answered non-success or transport failure is silent, does not change
-connectivity, and leaves the current loop polling. A successful response may
-write scan progress only as a background update through the Summary Notice
-Channel. Reaching `idle` starts `loadOverview` only while the poll still owns
-its key.
+An answered HTTP non-success or transport failure is silent, does not create
+or release a Recovery claim, and leaves the current loop polling. A successful
+response may write scan progress only as a background update through the
+Summary Notice Channel.
+
+A semantic `failed` scan retains the prior Published Library, stops that poll,
+and claims an actionable `scan-failure` Summary notice with a **Retry Library
+Check** action.
+
+When a current poll first observes `idle` after a non-idle scan, it advances
+the overview data floor, claims a completion notice that the prior open Browse
+Snapshot remains unchanged, and offers **Refresh Current Source**. It also
+starts `loadOverview` to refresh shared facts and File Locations, but the
+completion notice remains until explicit source refresh or a higher-priority
+notice replaces it.
+
+### Library scan retry command
+
+`POST /api/scan` is a non-abortable admitted server command owned by the
+application. Duplicate Retry Library Check admission while one command is in
+flight is a no-op. An answered `4xx` keeps the scan-failure notice without
+adding a transport Recovery claim. `5xx` or transport failure adds a
+scan-command Recovery claim and keeps the same retry action. Successful
+admission releases that exact claim and starts a new current publication poll.
+Application teardown detaches presentation from the command but cannot treat
+accepted scan work as rolled back.
 
 ### Shared overview refresh
 
 `GET /api/overview` is a shared-state read owned by the application scope,
 with the global `overview` key and **commit-in-order** policy. A newer request
-does not abort or detach an older one. Every request receives a monotonically
-increasing client sequence, and a response commits only when its sequence is
-newer than the last committed response. A newer request that fails does not
-invalidate an older successful response. Application teardown detaches every
+does not abort or detach an older one. Every request captures both a
+monotonically increasing request sequence and the current **overview data
+floor**. Successful Album mutations and observed publication replacement
+advance that floor before starting their refresh. A response may commit only
+when its captured floor still equals the current floor and its sequence is
+newer than the last response committed at that floor. Thus an older success
+may still commit after a newer request fails when no data-changing boundary
+intervened, but a response started before a committed mutation or publication
+change can never regress shared data. Application teardown detaches every
 overview continuation so no response writes into a destroyed application.
 
-Overview failure has no notice or connectivity policy of its own. Its live
-parent supplies a Summary Notice ticket and decides whether failure is a
+Overview failure has no notice or Recovery policy of its own. Its live parent
+supplies Summary and Recovery claim handles and decides whether failure is a
 foreground reload failure, a persisted-Album-but-refresh-failed notice, or a
 silent recovery probe. The owner action controls only that presentation; it
-does not replace commit ordering.
+does not replace commit ordering or the data floor.
 
 ### File Location windows and root binding
 
@@ -94,15 +120,18 @@ reset, or application teardown may detach it. Its transport may finish after
 detachment, but its response cannot render, clear retry state, or replace the
 parent's current page.
 
-An answered publication conflict (`409`) resets the File Location generation,
-refreshes overview as a silent recovery probe, rebinds the root, and claims an
-actionable summary notice only after the new root is coherent. Any other
+An answered publication conflict (`409`) advances the overview data floor,
+resets the File Location generation, refreshes overview as a silent recovery
+probe, rebinds the root, and claims an actionable summary notice only after the
+new root is coherent. Any other
 answered failure, malformed response, or transport failure for the current
 key retains loaded siblings, records the exact failed range, claims the
 actionable summary notice, exposes that range's retry control, and changes
-connectivity to disconnected. Only success for that same range clears its
-retry state and releases its notice; success for any File Location window may
-restore connectivity but cannot clear another range's notice.
+connectivity to disconnected. Only success for that same range clears its retry state, releases its Summary
+claim, and releases that range's Recovery claim. Success for another File
+Location window may prove server reachability but cannot release the failed
+range or any current Source/Photo recovery claim, and therefore cannot
+re-enable decisions by itself.
 
 The unbound root uses the distinct key
 `(fileLocationGeneration, root-binding)`. Exactly one operation owns that key;
@@ -170,7 +199,11 @@ disconnected. A superseded failure is silent.
 Adjacent Preview reads use key `(requestGeneration, photoId, adjacent)`, run
 at low priority, and are best effort. The Photo scope aborts them on Photo or
 source change. Their answered and transport failures are silent and never
-change connectivity.
+change connectivity. When that neighbor becomes current, the browser starts a
+foreground current-Preview request for the same Photo and derivative identity.
+The Preview service deduplicates that identity and raises the existing native
+job to current priority rather than running duplicate work; browser-request
+cancellation does not cancel an admitted reusable server job.
 
 ### Thumbnail reads
 
@@ -181,6 +214,16 @@ may attach a thumbnail or mark it unavailable. Answered and transport failures
 leave a stable unavailable placeholder; they present no summary or
 connectivity failure.
 
+### Browser image transfers
+
+Assigning a URL to a Grid or Review `<img src>` starts a browser-managed byte
+transfer distinct from `fetch`. Each Grid image transfer belongs to the
+source/Grid scope and each Review image transfer belongs to the Photo scope.
+Before its scope is halted or its element is replaced, the client removes the
+pending `src` and its completion/error handlers. A completion or error may
+write only while the element, URL, and captured generation still match; a
+detached image error cannot mark a replacement cell or Photo unavailable.
+
 ### Album persistence
 
 Album create, rename, delete, membership add, and membership remove are
@@ -188,8 +231,10 @@ admitted writes. They share one global settlement family key,
 `album-mutation`, because a newer Album action owns Album notices and
 connectivity presentation regardless of which Album it targets.
 
-The write always settles. Its successful shared-data refresh is a separate
-owner-tagged overview operation and therefore follows overview commit order.
+The write always settles. Immediately after success it advances the overview
+data floor. Its shared-data refresh is a separate owner-tagged overview
+operation captured at that new floor and therefore follows overview commit
+order without permitting any pre-mutation response to regress Album state.
 A current success may update its initiating form or Photo controls; a
 superseded success is locally silent and the committed overview is its
 confirmation. A current failure writes to its initiating surface. A
@@ -226,26 +271,37 @@ disconnecting; transport failure disconnects.
 ### Saved Album position
 
 Saved-position writes are admitted writes serialized by the progress queue
-and keyed by `(albumId, photoId)`. They always settle after send. Answered
-`404` and `409` are stale-position results and do not change connectivity. Any
-other answered non-success—including other `4xx` and `5xx`—and transport
-failure changes connectivity only while the same Album source generation
-remains current. A stale failure is silent; saved-position writes never
-fallback to the Library summary.
+and keyed by `(sourceGeneration, requestGeneration, albumId, photoId)`. They
+always settle after send. Their settlement handle captures both the Album
+source owner and current Photo owner. Answered `404` and `409` are
+stale-position results and do not change recovery state. Any other answered
+non-success—including other `4xx` and `5xx`—and transport failure adds a
+saved-position Recovery claim only while the same source generation, Photo
+generation, Album, and Photo remain current. A settlement from an older Photo
+is silent; saved-position writes never fallback to the Library summary.
 
 ## Composite Workflows
 
 A workflow is only composition; each child retains its assigned policy. A
-workflow captures its parent owner before starting and rechecks that owner
-after every `await` and before sending each later child. Superseded workflows
-start no further children.
+presentation workflow captures its parent owner before starting and rechecks
+that owner after every `await` and before sending each later child. Superseded
+presentation workflows start no further children. A shared overview that
+successfully commits may separately elect a bootstrap workflow as described
+below; that is a new child of the committed shared state, not continuation of
+a superseded presentation workflow.
 
-- `loadOverview` and Retry own a foreground load ticket in the application
-  scope. They start a shared overview refresh without cancelling older
-  overview work. If still current after it commits, a published Library starts
-  or awaits independent root binding and then may start a source-scoped Browse
-  open. An unpublished Library starts the keyed publication-status poll. Only
-  the newest load presents load failure or changes connectivity.
+- `loadOverview` and Retry own a foreground presentation ticket in the
+  application scope. They start a shared overview refresh without cancelling
+  older overview work. Only the newest pending load presents load failure or
+  creates a reload Recovery claim. Startup follow-up, however, belongs to the
+  newest successfully **committed overview**, not the newest request: when a
+  response commits and the application still lacks its initial source, that
+  commit elects a bootstrap owner which starts or awaits independent root
+  binding and then may start source-scoped Browse open. A newer failed request
+  cannot strand an older valid committed response. A committed unpublished
+  overview starts the keyed publication-status poll. Every follow-up rechecks
+  the elected commit sequence and application lifetime before starting its
+  next child.
 - Opening a Photo creates a new Photo scope and aborts Grid-speculative work.
   If the Photo lies outside retained facts, it starts a high-priority,
   Photo-owned Browse-window read; it never coalesces with an aborted adjacent
@@ -272,27 +328,35 @@ start no further children.
 ## Notice and Teardown Rules
 
 The Library summary has one **Summary Notice Channel** shared by Album,
-File Location, overview, status, failed-range recovery, and explicit reload.
-Every operation that may write it receives a monotonically increasing ticket
-when initiated. Persistent claims have an owner kind and ticket; within the
-same priority, only a newer ticket replaces the owner.
+File Location, overview, status, scan failure/completion, failed-range
+recovery, and explicit reload. Every operation that may write it receives an
+opaque claim handle containing a monotonically increasing ticket, owner kind,
+and exact owner key (for example a failed Folder range). Persistent claims are
+identified by that full handle; within the same priority, only a newer ticket
+replaces the visible owner.
 
-Actionable File Location and range-retry notices and explicit reload own the
-highest priority. Album failures are fallback notices. Overview and status are
-background updates and may write only while no persistent owner exists.
+Actionable scan failure/completion, File Location and range-retry notices, and
+explicit reload own the highest priority. Album failures are fallback notices.
+Ordinary overview and in-progress status are background updates and may write
+only while no persistent owner exists.
 Background writes never acquire ownership. A lower-priority settled failure
 blocked by a higher-priority owner is retained as pending and is presented
 when that owner releases, unless an explicit reload ticket invalidated all
 older pending notices. This prevents a late Album failure from erasing a newer
 File Location retry while still preserving admitted-write failure visibility.
 
-A persistent owner is released only by its own successful recovery or by a
-newer operation authorized for that owner kind. A File Location retry success
-releases only its exact failed-range owner. A newer Album success may release
-an already displayed older Album notice, but it does not predeclare an
-in-flight older write successful; if that older write later fails, it may
-claim an otherwise free channel. An explicit reload claims the channel before
-its first request and acts as a barrier against every earlier ticket.
+A persistent owner is released only by presenting its exact claim handle or by
+a newer operation authorized for that owner kind. A File Location retry
+success therefore releases only its exact failed-range owner. A newer Album
+success may release an already displayed older Album notice, but it does not
+predeclare an in-flight older write successful; if that older write later
+fails, it may claim an otherwise free channel.
+
+An explicit reload claims the channel before its first request and advances a
+persistent `reloadBarrierTicket`. Every later claim, pending fallback,
+background write, and release is rejected when its ticket is older than that
+barrier, even after the reload's visible notice is released. Application
+teardown invalidates all claim handles.
 
 If the initiating source, Photo, or form disappears after an Album write is
 sent, success stays locally silent and shared data still refreshes; failure
@@ -301,17 +365,38 @@ after a Photo-state, Undo, or saved-position write is sent, both success and
 failure are locally silent, while the write still settles. These different
 failure destinations are intentional product contracts.
 
+### Connectivity and recovery ownership
+
+Transport reachability and permission to make Photo decisions are separate.
+The application has one **Recovery Gate** containing opaque claims keyed by the
+operation and UI owner that requires revalidation (Folder range, source
+snapshot, Photo generation, write, or scan command). Every failure described
+as disconnected adds a blocking exact claim. The retry action carries that
+handle: exact-range retry for File Locations, source Retry for source/Album
+failures, Photo Retry for current-window/Preview/Photo-write failures, and
+Retry Library Check for scan admission. An unrelated successful request may
+prove that the server is reachable, but only the designated recovery under the
+same current owner releases the claim. Decision controls are enabled only when
+no blocking current claim remains and the current bounded source and Photo
+facts have been confirmed.
+Changing source or Photo retires claims from the old owner only after the new
+source window or Photo window is successfully established; independent File
+Location claims remain until their own range succeeds. Claim creation and
+release are generation-gated, so stale failure and success cannot change the
+current gate.
+
 Application teardown halts the application, File Location, source/Grid, and
-Photo scopes; cancels timers; aborts abortable transports; detaches every
-remaining read continuation and root-binding waiter; and starts best-effort
-release for a known Browse token. Admitted writes continue to settlement but
-perform no DOM, connectivity, notice, or follow-up overview work after the
-application itself is gone.
+Photo scopes; cancels timers; aborts abortable transports; removes pending
+browser image sources; detaches every remaining read continuation and
+root-binding waiter; invalidates Summary and Recovery handles; and starts
+best-effort release for a known Browse token. Admitted writes continue to
+settlement but perform no DOM, connectivity, notice, or follow-up overview
+work after the application itself is gone.
 
 ## Ownership Module Contracts
 
 The implementation provides one dependency-free ownership module containing
-three orthogonal mechanisms:
+four orthogonal mechanisms:
 
 - scoped tasks create and halt scopes; start keyed children with
   `abort-transport`, `detach-continuation`, or `commit-in-order` policy; pass an
@@ -319,9 +404,13 @@ three orthogonal mechanisms:
   and run cleanup exactly once;
 - settlement handles run admitted writes without cancellation and decide
   whether their captured surface may still present the result;
-- the Summary Notice Channel issues monotonic tickets, arbitrates persistent
-  owners by priority and ticket, and retains at most the newest eligible
-  pending fallback per owner kind.
+- the Summary Notice Channel issues opaque `(ticket, kind, key)` handles,
+  retains a reload-barrier floor, arbitrates persistent owners by priority and
+  ticket, performs exact-handle release, and retains at most the newest
+  eligible pending fallback per owner kind;
+- the Recovery Gate creates and releases exact-owner revalidation claims,
+  separately records transport reachability, and reports whether current
+  decision facts are ready.
 
 The module attaches generation metadata without defining feature-specific task
 types and owns no DOM or protocol knowledge. Source, Photo, Folder parent,
@@ -344,37 +433,53 @@ policies would remain encoded in multiple incompatible forms.
 Focused automated coverage must prove:
 
 - application teardown cancels the status timer, halts every read scope,
-  releases root-binding waiters, suppresses late DOM/connectivity writes, and
-  attempts release of a known Browse token;
-- abortable source, Browse-window, Preview, and thumbnail work cannot render
-  after owner teardown;
+  releases root-binding waiters, removes pending Grid and Review image
+  sources, suppresses late DOM/Recovery writes, and attempts release of a
+  known Browse token;
+- abortable source, Browse-window, Preview, thumbnail, and browser-image work
+  cannot render or poison replacement elements after owner teardown;
 - detached status and File Location responses may settle but cannot write
   after their key is superseded, while source and Photo changes leave the
   independent File Location scope running;
-- status non-success and transport failure remain silent and polling, and the
-  unpublished `loadOverview` branch starts only one current poll;
+- status HTTP non-success and transport failure remain silent and polling; a
+  semantic failed scan retains the prior publication and owns Retry Library
+  Check; accepted retry starts one current poll; and scan completion owns the
+  Refresh Current Source notice without changing an open snapshot;
 - every File Location, Browse open/window, current/adjacent Preview, and
-  thumbnail failure follows its specified notice, retry, and connectivity
-  route;
-- an older overview success commits when a newer request fails, while an older
-  response cannot revert a newer committed response;
+  thumbnail failure follows its specified notice, retry, and Recovery route;
+- unrelated File Location or background success cannot release a current
+  Photo/source Recovery claim or re-enable decisions before bounded current
+  facts are confirmed;
+- an older overview success commits when a newer request fails and no data
+  boundary intervened, while an overview started before an Album mutation or
+  publication replacement cannot commit after that boundary;
+- a valid older startup overview response that commits after a newer load
+  fails is elected to complete root binding and initial source opening;
 - an in-flight root bind is shared by waiters and reset releases all waiters;
 - a stale Browse-open token is released when known, with server expiry as the
   fallback when the token is unknown;
-- Summary Notice tickets prevent stale cross-family overwrite, preserve
-  actionable recovery precedence, reveal eligible pending Album failures, and
-  make explicit reload a barrier;
+- Summary claim handles prevent stale cross-family overwrite, exact-range
+  release cannot clear another owner, eligible pending Album failures surface,
+  and the persistent reload barrier rejects older claims, releases, pending
+  fallbacks, and background writes after the visible reload notice clears;
+- Recovery claims are released only by exact current-owner recovery, and stale
+  failure or success cannot alter the gate;
 - Photo opening promotes an aborted adjacent boundary window to a new
   high-priority Photo-owned request;
+- moving an adjacent prefetched Photo to current causes the shared Preview
+  service job to be deduplicated and promoted to current priority;
 - Photo Retry invalidates and reloads the current bounded window before
   Preview revalidation and position persistence;
+- a saved-position failure from Photo A is silent after Photo B becomes
+  current in the same Album;
 - superseded composite workflows start no child after losing their parent
-  owner;
-- admitted Album writes settle after source, Photo, or form teardown with the
-  notice routing defined above;
+  owner, except that a successfully committed overview may be elected as the
+  bootstrap owner after a newer request fails;
+- admitted Album writes and scan commands settle after their initiating
+  surface disappears with the routing defined above;
 - current and stale Album, Photo-state, Undo, and saved-position responses each
   retain the specified `404`, `409`, other `4xx`, `5xx`, and transport
-  connectivity behavior;
+  Recovery behavior;
 - admission keys prevent duplicate same-key writes across re-renders without
   blocking independent keys;
 - snapshot and publication coherence remain unchanged.

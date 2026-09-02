@@ -107,7 +107,7 @@ Slipstream must distinguish these user-visible states:
 
 Slipstream must show a numeric count or percentage only when it knows the corresponding total and completed amount. Otherwise it must show the current phase without inventing progress.
 
-An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. Photos discovered by that scan appear after the Photographer refreshes or reopens the source; they must not move the current open view.
+An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. If the check fails, Slipstream must retain the prior Published Library and offer **Retry Library Check**. When a replacement publishes, a completion notice must offer **Refresh Current Source**. Shared counts and File Locations may refresh immediately, but Photos discovered by that scan appear in the open source only after the Photographer refreshes or reopens it; they must not move the current open view.
 
 On a new state store with no published Library, the browser may show initialization progress until the first scan publishes the Library.
 
@@ -216,7 +216,7 @@ If an Album creation, rename, delete, or membership change cannot persist, Slips
 
 If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
 
-A disconnected browser may continue displaying already loaded thumbnails and Previews, but it must stop accepting new decisions until the server confirms the connection and current Photo state. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
+A disconnected browser may continue displaying already loaded thumbnails and Previews, but it must stop accepting new decisions until the server confirms the connection and current Photo state. Success from an unrelated request, such as another File Location range, does not confirm that state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
 
 If an ephemeral server-side browse snapshot expires or is lost after server restart, Slipstream must reopen the current source from the latest published Library and identify that newly completed scans may affect its order.
 
