@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "test:unit": "bun test src/async-ownership.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
