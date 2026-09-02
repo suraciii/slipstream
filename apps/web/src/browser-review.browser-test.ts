@@ -167,6 +167,22 @@ async function waitForGridFrame(page: Page) {
   );
 }
 
+async function evictFirstPhotoFact(page: Page) {
+  const viewport = page.locator("[data-grid-viewport]");
+  for (const [row, photoIndex] of [
+    [30, 65],
+    [60, 125],
+    [90, 185],
+  ] as const) {
+    await viewport.evaluate((element, targetRow) => {
+      element.scrollTop = targetRow * 178;
+    }, row);
+    await expect(
+      page.locator(`[data-photo-index="${photoIndex}"]`),
+    ).toBeVisible();
+  }
+}
+
 async function openPhotoAndWaitForProgress(
   page: Page,
   albumId: string,
@@ -4421,7 +4437,7 @@ test("Undo returns to the affected Photo and refreshes its Preview and facts", a
   await expect(page.locator("[data-stage] img")).toBeVisible();
 });
 
-test("Undo clears when the affected Photo leaves the loaded window", async ({
+test("Undo reloads the affected Photo after its facts leave the loaded window", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -4445,29 +4461,116 @@ test("Undo clears when the affected Photo leaves the loaded window", async ({
   await expect(page.getByText("2 / 200")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
-  const viewport = page.locator("[data-grid-viewport]");
-  await viewport.evaluate((element) => {
-    element.scrollTop = 30 * 178;
+  await evictFirstPhotoFact(page);
+
+  const reloaded = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return (
+      request.method() === "GET" &&
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "0" &&
+      url.searchParams.get("limit") === "60"
+    );
   });
-  await expect(page.locator('[data-photo-index="65"]')).toBeVisible();
-  await viewport.evaluate((element) => {
-    element.scrollTop = 60 * 178;
-  });
-  await expect(page.locator('[data-photo-index="125"]')).toBeVisible();
-  await viewport.evaluate((element) => {
-    element.scrollTop = 90 * 178;
-  });
-  await expect(page.locator('[data-photo-index="185"]')).toBeVisible();
-  await page.keyboard.press("Control+z");
-  await expect
-    .poll(
-      async () =>
-        (await state(running.url, albumId)).members[0]!.selectionState,
-    )
-    .toBe("selected");
+  await Promise.all([
+    reloaded,
+    actionWithProgress(page, albumId, () => page.keyboard.press("Control+z")),
+  ]);
+
+  await expect(page.getByText("1 / 200")).toBeVisible();
+  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.getByText("Last change undone.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
-    "selected",
+    "undecided",
   );
+});
+
+test("an evicted Undo reload cannot write into a replacement source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 200);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Wide Race");
+  await openGrid(page, running.url, "Wide Race");
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 200/ }),
+  );
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await waitForGridFrame(page);
+  await evictFirstPhotoFact(page);
+
+  const firstPhotoId = (await state(running.url, albumId)).members[0]!.photoId;
+  let release!: () => void;
+  const reloadHeld = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  let heldUrl: string | undefined;
+  let stateWrites = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === `/api/photos/${firstPhotoId}/state`
+    )
+      stateWrites += 1;
+  });
+  await page.route("**/api/browse/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      !held &&
+      request.method() === "GET" &&
+      url.searchParams.get("start") === "0"
+    ) {
+      held = true;
+      heldUrl = request.url();
+      await reloadHeld;
+      try {
+        await route.continue();
+      } catch {
+        /* the replacement source aborts the evicted Undo reload */
+      }
+      return;
+    }
+    await route.continue();
+  });
+  try {
+    await page.keyboard.press("Control+z");
+    await expect.poll(() => held).toBe(true);
+    const oldReloadCanceled = page.waitForEvent(
+      "requestfailed",
+      (request) => request.url() === heldUrl,
+    );
+
+    await openSources(page);
+    await page.getByRole("button", { name: /^All Photos 200 Photos/ }).click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    await oldReloadCanceled;
+    release();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+
+    expect(stateWrites).toBe(0);
+    await expect(page.locator("[data-undo]")).toBeDisabled();
+    expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
+      "selected",
+    );
+  } finally {
+    release();
+    await page.unroute("**/api/browse/**");
+  }
 });
 
 test("failed Browse recovery leaves the boundary range retryable", async ({

@@ -29,7 +29,8 @@ import {
 } from "./model/file-location-owner.js";
 import "./ui/library-browser.css";
 
-type SessionUndo = UndoDescription & Readonly<{ advanced: boolean }>;
+type SessionUndo = UndoDescription &
+  Readonly<{ advanced: boolean; snapshotIndex: number }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
 type SummaryMessage = Readonly<{
   text: string;
@@ -2881,7 +2882,11 @@ export function mountLibraryBrowser(
           : { rating: value as number }),
       };
       loaded.set(photoIndex, updated);
-      undo = { ...result.undo, advanced: advance && photoIndex < total - 1 };
+      undo = {
+        ...result.undo,
+        advanced: advance && photoIndex < total - 1,
+        snapshotIndex: photoIndex,
+      };
       status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
       if (undo.advanced) {
         busy = false;
@@ -2911,20 +2916,30 @@ export function mountLibraryBrowser(
     const generation = sourceGeneration;
     const photoGeneration = requestGeneration;
     const albumId = sourceSetId;
-    const affectedIndex = Array.from(loaded.entries()).find(
-      ([, photo]) => photo.id === action.photoId,
-    )?.[0];
-    if (affectedIndex === undefined) {
-      undo = undefined;
-      status.textContent =
-        "Undo is no longer available because that Photo left the loaded window.";
-      updateControls();
-      return;
-    }
-    const photo = loaded.get(affectedIndex)!;
+    const affectedIndex = action.snapshotIndex;
     busy = true;
-    undo = undefined;
+    updateControls();
     try {
+      if (!loaded.has(affectedIndex)) {
+        status.textContent = "Loading Photo for Undo…";
+        const windowReady = await loadWindow(
+          affectedIndex,
+          generation,
+          true,
+          photoSignal,
+          "high",
+        );
+        if (!windowReady) return;
+      }
+      if (
+        generation !== sourceGeneration ||
+        photoGeneration !== requestGeneration ||
+        undo !== action
+      )
+        return;
+      const photo = loaded.get(affectedIndex);
+      if (!photo || photo.id !== action.photoId) return;
+      undo = undefined;
       const response = await fetcher(`/api/photos/${action.photoId}/state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2938,8 +2953,7 @@ export function mountLibraryBrowser(
       if (!response.ok) {
         if (
           generation !== sourceGeneration ||
-          photoGeneration !== requestGeneration ||
-          loaded.get(affectedIndex)?.id !== action.photoId
+          photoGeneration !== requestGeneration
         )
           return;
         if (response.status === 409) {
@@ -2954,7 +2968,7 @@ export function mountLibraryBrowser(
       }
       if (
         generation !== sourceGeneration ||
-        loaded.get(affectedIndex)?.id !== action.photoId
+        photoGeneration !== requestGeneration
       )
         return;
       const updated = {
@@ -2964,6 +2978,7 @@ export function mountLibraryBrowser(
           : { rating: action.priorValue as number }),
       };
       loaded.set(affectedIndex, updated);
+      trimLoaded(affectedIndex);
       currentIndex = affectedIndex;
       currentPhotoMode = true;
       gridView.hidden = true;
