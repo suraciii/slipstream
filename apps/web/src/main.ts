@@ -55,33 +55,49 @@ export function renderApp(
     <main class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
       <section class="browser" data-browser aria-labelledby="browser-title">
-        <aside class="source-panel" data-library-screen aria-label="Library sources">
-          <h2 id="browser-title">Library</h2>
+        <div class="source-scrim" data-source-scrim aria-hidden="true"></div>
+        <aside class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
+          <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
           <p data-summary-status role="status">Loading Library…</p>
           <div class="source-list" data-source-list></div>
-          <button type="button" data-retry hidden>Retry connection</button>
+          <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
         </aside>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><button type="button" data-refresh>Refresh</button></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><button type="button" class="quiet" data-retry-photo hidden>Retry</button></header>
+          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
-          <dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview Source</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl>
-          <p class="status" data-status role="status" aria-live="polite"></p>
-          <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
-          <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
-          <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-          <div class="photo-controls"><button type="button" data-previous>Previous</button><button type="button" data-detail aria-pressed="false">Detail Review</button><button type="button" data-undo disabled>Undo</button><button type="button" data-next>Next</button></div>
+          <section class="review-bar" aria-label="Photo review">
+            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div>
+            <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
+          </section>
+          <section class="review-tools" aria-label="Review tools">
+            <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
+            <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
+            <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-detail aria-pressed="false">Detail Review</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
+          </section>
         </section>
       </section>
     </main>`;
 
+  const browser = required<HTMLElement>(root, "[data-browser]");
+  const sourcePanel = required<HTMLElement>(root, "#source-panel");
+  const sourceToggle = required<HTMLButtonElement>(
+    root,
+    "[data-source-toggle]",
+  );
+  const photoSourceToggle = required<HTMLButtonElement>(
+    root,
+    "[data-photo-source-toggle]",
+  );
+  const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
+  const sourceScrim = required<HTMLElement>(root, "[data-source-scrim]");
   const connection = required<HTMLElement>(root, "[data-connection]");
   const summaryStatusElement = required<HTMLElement>(
     root,
@@ -114,6 +130,7 @@ export function renderApp(
       return statusElement.textContent;
     },
     set textContent(value: string) {
+      if (statusElement.textContent === value) return;
       photoStatusOwner = {};
       statusElement.textContent = value;
     },
@@ -137,6 +154,48 @@ export function renderApp(
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
   const rejectFeedback = required<HTMLElement>(root, "[data-reject-feedback]");
 
+  const compactSources = window.matchMedia("(max-width: 760px)");
+  let sourceReturn = sourceToggle;
+  const syncSourcePanel = () => {
+    const drawerMode = compactSources.matches || !photoView.hidden;
+    const drawerOpen = drawerMode && browser.classList.contains("sources-open");
+    const concealed = drawerMode && !drawerOpen;
+    sourcePanel.inert = concealed;
+    sourcePanel.setAttribute("aria-hidden", String(concealed));
+    gridView.inert = drawerOpen;
+    photoView.inert = drawerOpen;
+  };
+  const setSourcesExpanded = (expanded: boolean) => {
+    sourceToggle.setAttribute("aria-expanded", String(expanded));
+    photoSourceToggle.setAttribute("aria-expanded", String(expanded));
+  };
+  const openSources = (returnTo: HTMLButtonElement) => {
+    sourceReturn = returnTo;
+    browser.classList.add("sources-open");
+    setSourcesExpanded(true);
+    syncSourcePanel();
+    sourceClose.focus();
+  };
+  const closeSources = (restoreFocus = true) => {
+    browser.classList.remove("sources-open");
+    setSourcesExpanded(false);
+    syncSourcePanel();
+    if (restoreFocus) sourceReturn.focus();
+  };
+  const onSourceViewportChange = () => {
+    browser.classList.remove("sources-open");
+    setSourcesExpanded(false);
+    syncSourcePanel();
+  };
+  compactSources.addEventListener("change", onSourceViewportChange);
+  sourceToggle.addEventListener("click", () => openSources(sourceToggle));
+  photoSourceToggle.addEventListener("click", () =>
+    openSources(photoSourceToggle),
+  );
+  sourceClose.addEventListener("click", () => closeSources());
+  sourceScrim.addEventListener("click", () => closeSources());
+  syncSourcePanel();
+
   for (let value = 0; value <= 5; value += 1) {
     const button = document.createElement("button");
     button.type = "button";
@@ -145,7 +204,7 @@ export function renderApp(
       "aria-label",
       value === 0 ? "Clear Rating" : `Rate ${value} stars`,
     );
-    button.textContent = value === 0 ? "0" : "★".repeat(value);
+    button.textContent = value === 0 ? "0" : `${value}★`;
     ratings.append(button);
   }
 
@@ -425,10 +484,10 @@ export function renderApp(
     for (const button of [
       select,
       reject,
-      clear,
       ...Array.from(ratings.querySelectorAll<HTMLButtonElement>("button")),
     ])
       button.disabled = !enabled;
+    clear.disabled = !enabled || photo?.selectionState === "undecided";
     back.disabled = busy;
     refresh.disabled = busy;
     previous.disabled = busy || openingPhoto || currentIndex <= 0;
@@ -1716,6 +1775,7 @@ export function renderApp(
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
   ) => {
+    const sourceDrawerWasOpen = browser.classList.contains("sources-open");
     busy = true;
     cancelScheduledGridRender();
     sourceGeneration += 1;
@@ -1743,6 +1803,8 @@ export function renderApp(
     currentPhotoMode = false;
     gridView.hidden = false;
     photoView.hidden = true;
+    closeSources(false);
+    if (sourceDrawerWasOpen) gridViewport.focus();
     sourceKind = kind;
     sourceSetId = set?.id;
     sourceFolder = folder;
@@ -2026,6 +2088,7 @@ export function renderApp(
       if (resumePhoto && photoGeneration === requestGeneration) {
         gridView.hidden = true;
         photoView.hidden = false;
+        syncSourcePanel();
         renderPhotoShell(photoGeneration);
         void showPreview(
           photoGeneration,
@@ -2271,7 +2334,9 @@ export function renderApp(
     cell.append(badge);
     const caption = document.createElement("span");
     caption.className = "cell-caption";
-    caption.textContent = `${index + 1} · ${photo.rating ? `${photo.rating}★` : ""}`;
+    caption.textContent = photo.rating
+      ? `${index + 1} · ${photo.rating}★`
+      : String(index + 1);
     cell.append(caption);
     if (photo.preview.state === "unavailable") {
       markThumbnailUnavailable(photo.id, image, generation);
@@ -2416,6 +2481,7 @@ export function renderApp(
     currentPhotoMode = true;
     gridView.hidden = true;
     photoView.hidden = false;
+    syncSourcePanel();
     photoView.focus();
     resetTransform();
     let windowReady = true;
@@ -2781,6 +2847,7 @@ export function renderApp(
     cancelPendingImageLoads(stage, true);
     photoView.hidden = true;
     gridView.hidden = false;
+    closeSources(false);
     renderGrid();
     cancelScheduledGridRender();
     scheduleGridRender(() => {
@@ -2977,6 +3044,7 @@ export function renderApp(
       currentPhotoMode = true;
       gridView.hidden = true;
       photoView.hidden = false;
+      syncSourcePanel();
       photoView.focus();
       resetTransform();
       const previewGeneration = ++requestGeneration;
@@ -3106,6 +3174,15 @@ export function renderApp(
       event.altKey
     )
       return;
+    if (
+      event.key === "Escape" &&
+      (compactSources.matches || !photoView.hidden) &&
+      browser.classList.contains("sources-open")
+    ) {
+      event.preventDefault();
+      closeSources();
+      return;
+    }
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
       event.preventDefault();
@@ -3119,7 +3196,10 @@ export function renderApp(
       void mutate("selectionState", "selected", true);
     else if (event.key.toLowerCase() === "x")
       void mutate("selectionState", "rejected", true);
-    else if (event.key.toLowerCase() === "u")
+    else if (
+      event.key.toLowerCase() === "u" &&
+      currentPhoto()?.selectionState !== "undecided"
+    )
       void mutate("selectionState", "undecided", false);
     else if (/^[0-5]$/.test(event.key))
       void mutate("rating", Number(event.key), false);
@@ -3337,6 +3417,7 @@ export function renderApp(
     summaryNotices.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
+    compactSources.removeEventListener("change", onSourceViewportChange);
     if (browseToken) void closeBrowse(browseToken);
   };
 }
