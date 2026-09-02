@@ -38,6 +38,7 @@ import {
   type AlbumFormAuthority,
 } from "./model/album-action-owner.js";
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
+import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import "./ui/library-browser.css";
 
 type GridRangeRetry = Readonly<{
@@ -192,6 +193,14 @@ export function mountLibraryBrowser(
     sourceAuthority: sourceGrid.authority,
     total: sourceGrid.total,
     index: 0,
+  });
+  const savedPositions = createSavedPositionOwner(fetcher, {
+    isSourceCurrent: (authority, albumId) =>
+      sourceGrid.isCurrent(authority) &&
+      sourceGrid.kind === "album" &&
+      sourceGrid.albumId === albumId,
+    isPhotoCurrent: (authority, photoId) =>
+      photoOwner.isCurrent(authority) && photoOwner.current?.id === photoId,
   });
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
@@ -440,7 +449,6 @@ export function mountLibraryBrowser(
     photoRecoveryKeys.set(authority, key);
     return key;
   };
-  let progressQueue: Promise<void> = Promise.resolve();
   let renderedColumns = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
@@ -553,6 +561,7 @@ export function mountLibraryBrowser(
     authority: PhotoAuthority,
     kind: string,
     transition?: RecoveryTransition,
+    transportLost = true,
   ): void => {
     if (!photoOwner.isCurrent(authority)) return;
     const generation = photoRecoveryKey(authority);
@@ -565,7 +574,7 @@ export function mountLibraryBrowser(
         });
         if (
           recoveryGate.failTransition(transition, replacement, {
-            transportLost: true,
+            transportLost,
           })
         ) {
           syncConnection();
@@ -579,7 +588,7 @@ export function mountLibraryBrowser(
     const claim = recoveryGate.issue(kind, String(generation), {
       owner: recoveryOwner,
     });
-    if (!recoveryGate.fail(claim, { transportLost: true }))
+    if (!recoveryGate.fail(claim, { transportLost }))
       recoveryGate.discard(claim);
     syncConnection();
   };
@@ -2241,42 +2250,37 @@ export function mountLibraryBrowser(
     const albumId = sourceGrid.albumId;
     const photoId = currentPhoto()!.id;
     const sourceAuthority = sourceGrid.authority;
-    const stillCurrent = () =>
-      applicationAlive &&
-      sourceGrid.isCurrent(sourceAuthority) &&
-      photoOwner.isCurrent(photoAuthority) &&
-      sourceGrid.kind === "album" &&
-      sourceGrid.albumId === albumId &&
-      currentPhoto()?.id === photoId;
-    const task = progressQueue.then(async () => {
-      if (!stillCurrent()) return false;
-      try {
-        const response = await fetcher(`/api/albums/${albumId}/progress`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ photoId }),
-        });
-        if (response.status === 404 || response.status === 409) {
-          // The saved-position member is gone or contested: an answered,
-          // expected stale write — not a connectivity loss.
-          return false;
-        }
-        if (!response.ok) throw new Error("position rejected");
-        if (!stillCurrent()) return false;
-        application.confirmSavedPosition(albumId);
-        renderSources();
-        return true;
-      } catch {
-        if (stillCurrent()) {
-          status.textContent =
-            "Album position could not be saved. Retry before making more decisions.";
-          failPhotoRecovery(photoAuthority, "saved-position");
-        }
+    const admission = savedPositions.save({
+      sourceAuthority,
+      photoAuthority,
+      albumId,
+      photoId,
+    });
+    if (!admission) return Promise.resolve(false);
+    return admission.settlement.then((outcome) => {
+      if (
+        outcome.kind === "skipped" ||
+        outcome.kind === "detached" ||
+        outcome.kind === "stale" ||
+        !applicationAlive ||
+        !savedPositions.isCurrent(outcome.target)
+      )
+        return false;
+      if (outcome.kind === "failed") {
+        status.textContent =
+          "Album position could not be saved. Retry before making more decisions.";
+        failPhotoRecovery(
+          outcome.target.photoAuthority,
+          "saved-position",
+          undefined,
+          outcome.transportLost,
+        );
         return false;
       }
+      application.confirmSavedPosition(outcome.target.albumId);
+      renderSources();
+      return true;
     });
-    progressQueue = task.then(() => undefined);
-    return task;
   };
   const moveTo = async (target: number) => {
     if (
@@ -2773,6 +2777,7 @@ export function mountLibraryBrowser(
     cancelScheduledGridRender();
     albumRecovery = undefined;
     albumActions.dispose();
+    savedPositions.dispose();
     application.dispose();
     fileLocations.dispose();
     photoOwner.dispose();
