@@ -2454,7 +2454,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
   // The first folder-source open fails; the retry must reopen the same
   // folder source instead of silently falling back to All Photos.
   await page.route(
-    /\/api\/browse/,
+    /\/api\/browse$/,
     async (route) => {
       const request = route.request();
       const body = request.postDataBuffer();
@@ -3784,8 +3784,25 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   const running = await server(base, root);
   let windowMode: "wrong-range" | "bad-photo" | "failed" | "ready" =
     "wrong-range";
+  const windowTokens: string[] = [];
+  const windowStarts: string[] = [];
+  let browseAllocations = 0;
+  let overviewRequests = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/api/browse")
+      browseAllocations += 1;
+    if (request.method() === "GET" && url.pathname === "/api/library")
+      overviewRequests += 1;
+  });
   await page.route(/\/api\/browse\//, async (route) => {
-    if (route.request().method() !== "GET" || windowMode === "ready") {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET") {
+      windowTokens.push(url.pathname.split("/").at(-1)!);
+      windowStarts.push(url.searchParams.get("start")!);
+    }
+    if (request.method() !== "GET" || windowMode === "ready") {
       await route.continue();
       return;
     }
@@ -3807,6 +3824,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByText(/returned an invalid response/)).toBeVisible();
   await expect(page.getByText(/Ready · 1 Photos/)).toBeHidden();
+  const initialOverviewRequests = overviewRequests;
 
   windowMode = "bad-photo";
   await page.getByRole("button", { name: "Retry connection" }).click();
@@ -3820,6 +3838,10 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  expect(browseAllocations).toBe(1);
+  expect(overviewRequests).toBe(initialOverviewRequests);
+  expect(new Set(windowTokens).size).toBe(1);
+  expect(new Set(windowStarts)).toEqual(new Set(["0"]));
 });
 
 test("current Preview HTTP failure disconnects until Photo Retry", async ({
@@ -4649,7 +4671,7 @@ test("an evicted Undo reload cannot write into a replacement source", async ({
   }
 });
 
-test("failed Browse recovery leaves the boundary range retryable", async ({
+test("failed Browse recovery clears the expired token before Retry opens a fresh snapshot", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -4659,21 +4681,19 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
   await openGrid(page, running.url, "All Photos");
 
   let expired = false;
-  let boundaryRequests = 0;
+  let expiredToken = "";
   let reopenAttempts = 0;
-  let releaseRetry!: () => void;
-  const retryGate = new Promise<void>((resolve) => {
-    releaseRetry = resolve;
-  });
+  let releases = 0;
+  const boundaryTokens: string[] = [];
   await page.route(/\/api\/browse/, async (route) => {
     const request = route.request();
-    if (
-      request.method() === "GET" &&
-      new URL(request.url()).searchParams.get("start") === "60"
-    ) {
-      boundaryRequests += 1;
-      if (boundaryRequests === 1) {
+    const url = new URL(request.url());
+    const pathToken = url.pathname.split("/").at(-1)!;
+    if (request.method() === "GET" && url.searchParams.get("start") === "60") {
+      boundaryTokens.push(pathToken);
+      if (!expired) {
         expired = true;
+        expiredToken = pathToken;
         await route.fulfill({
           status: 404,
           contentType: "application/json",
@@ -4681,13 +4701,9 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
         });
         return;
       }
-      await retryGate;
-      try {
-        await route.continue();
-      } catch {
-        /* the browser may cancel duplicate viewport requests */
-      }
-      return;
+    }
+    if (request.method() === "DELETE" && pathToken === expiredToken) {
+      releases += 1;
     }
     if (request.method() === "POST" && expired) {
       reopenAttempts += 1;
@@ -4698,38 +4714,207 @@ test("failed Browse recovery leaves the boundary range retryable", async ({
     }
     await route.continue();
   });
-  try {
-    const viewport = page.locator("[data-grid-viewport]");
-    await viewport.evaluate((element) => {
+  const scrollBoundary = () =>
+    page.locator("[data-grid-viewport]").evaluate((element) => {
       element.scrollTop = 30 * 178;
       element.dispatchEvent(new Event("scroll"));
     });
+  try {
+    await scrollBoundary();
     await expect.poll(() => reopenAttempts).toBe(1);
     await expect(page.locator("[data-status]")).toHaveText(
       "This source expired and could not be reopened. Retry the connection.",
     );
+    const requestsAfterFailure = boundaryTokens.length;
+    await scrollBoundary();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    expect(boundaryTokens).toHaveLength(requestsAfterFailure);
 
-    const retriedWindow = page.waitForResponse((response) => {
-      const url = new URL(response.url());
+    const freshOpen = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/browse",
+    );
+    await page.locator("[data-source-toggle]").click();
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    const freshRequest = await freshOpen;
+    const freshResponse = await freshRequest.response();
+    expect(freshResponse?.status()).toBe(200);
+    const freshToken = ((await freshResponse!.json()) as { token: string })
+      .token;
+    expect(freshToken).not.toBe(expiredToken);
+    await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+
+    const freshBoundary = page.waitForRequest((request) => {
+      const url = new URL(request.url());
       return (
-        response.request().method() === "GET" &&
-        url.pathname.includes("/api/browse/") &&
+        request.method() === "GET" &&
         url.searchParams.get("start") === "60" &&
-        response.status() === 200
+        url.pathname.endsWith(`/${freshToken}`)
       );
     });
-    await viewport.evaluate((element) => {
-      element.dispatchEvent(new Event("scroll"));
-    });
-    await expect.poll(() => boundaryRequests).toBeGreaterThan(1);
-    releaseRetry();
-    await retriedWindow;
+    await scrollBoundary();
+    await freshBoundary;
+    expect(boundaryTokens.slice(1)).not.toContain(expiredToken);
+    expect(releases).toBe(1);
+    expect(reopenAttempts).toBe(2);
   } finally {
-    releaseRetry();
     await page.unroute(/\/api\/browse/);
   }
 });
 
+test("repeated failure of one source range keeps one exact Recovery owner", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGrid(page, running.url, "All Photos");
+
+  let attempts = 0;
+  let failing = true;
+  await page.route(/\/api\/browse\//, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.searchParams.get("start") === "60") {
+      attempts += 1;
+      if (failing) {
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+    }
+    await route.continue();
+  });
+  const scrollBoundary = () =>
+    page.locator("[data-grid-viewport]").evaluate((element) => {
+      element.scrollTop = 30 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+  try {
+    await scrollBoundary();
+    await expect.poll(() => attempts).toBeGreaterThanOrEqual(1);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    const afterFirst = attempts;
+    await scrollBoundary();
+    await expect.poll(() => attempts).toBeGreaterThan(afterFirst);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    failing = false;
+    const recovered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "GET" &&
+        url.searchParams.get("start") === "60" &&
+        response.status() === 200
+      );
+    });
+    await scrollBoundary();
+    await recovered;
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
+  } finally {
+    await page.unroute(/\/api\/browse\//);
+  }
+});
+
+test("Grid Retry reloads only exact failed ranges on the current Browse token", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 180);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGrid(page, running.url, "All Photos");
+
+  const attempts = new Map<string, number>();
+  const tokens: string[] = [];
+  let phase: "initial" | "first-retry" | "final-retry" = "initial";
+  let browseAllocations = 0;
+  let overviewRequests = 0;
+  let firstWindowReloads = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/api/browse")
+      browseAllocations += 1;
+    if (request.method() === "GET" && url.pathname === "/api/library")
+      overviewRequests += 1;
+    if (
+      request.method() === "GET" &&
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "0"
+    )
+      firstWindowReloads += 1;
+  });
+  await page.route(/\/api\/browse\//, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const start = url.searchParams.get("start");
+    if (request.method() !== "GET" || (start !== "60" && start !== "120")) {
+      await route.continue();
+      return;
+    }
+    tokens.push(url.pathname.split("/").at(-1)!);
+    const attempt = (attempts.get(start) ?? 0) + 1;
+    attempts.set(start, attempt);
+    if (phase === "initial" || (phase === "first-retry" && start === "120")) {
+      await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+      return;
+    }
+    await route.continue();
+  });
+  const scrollToIndex = (index: number) =>
+    page.locator("[data-grid-viewport]").evaluate((element, target) => {
+      element.scrollTop = target === 0 ? 0 : (target / 2 + 2) * 178;
+      element.dispatchEvent(new Event("scroll"));
+    }, index);
+  try {
+    await scrollToIndex(60);
+    await expect.poll(() => attempts.get("60") ?? 0).toBeGreaterThan(0);
+    await scrollToIndex(120);
+    await expect.poll(() => attempts.get("120") ?? 0).toBeGreaterThan(0);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    const initial60 = attempts.get("60")!;
+    const initial120 = attempts.get("120")!;
+    phase = "first-retry";
+    await page.locator("[data-source-toggle]").click();
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    await expect.poll(() => attempts.get("60") ?? 0).toBeGreaterThan(initial60);
+    await expect
+      .poll(() => attempts.get("120") ?? 0)
+      .toBeGreaterThan(initial120);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    expect(browseAllocations).toBe(0);
+    expect(overviewRequests).toBe(0);
+    expect(firstWindowReloads).toBe(0);
+    expect(new Set(tokens).size).toBe(1);
+
+    const recovered60 = attempts.get("60")!;
+    const failed120 = attempts.get("120")!;
+    phase = "final-retry";
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    await expect
+      .poll(() => attempts.get("120") ?? 0)
+      .toBeGreaterThan(failed120);
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    expect(attempts.get("60")).toBe(recovered60);
+    expect(browseAllocations).toBe(0);
+    expect(overviewRequests).toBe(0);
+
+    await scrollToIndex(0);
+    await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+    expect(firstWindowReloads).toBe(0);
+  } finally {
+    await page.unroute(/\/api\/browse\//);
+  }
+});
 test("an expired Browse snapshot reopens around the current Photo", async ({
   page,
 }) => {
@@ -4788,6 +4973,160 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
   await expect(
     page.getByRole("button", { name: /^Photo 1 of 130/ }),
   ).toBeVisible();
+});
+
+test("Photo Retry recovers the exact source range after an expired reopen window fails", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    Object.defineProperty(element, "clientWidth", {
+      configurable: true,
+      value: 900,
+    });
+    Object.defineProperty(element, "clientHeight", {
+      configurable: true,
+      value: 900,
+    });
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await viewport.evaluate((element) => {
+    element.scrollTop = 3 * 178;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.locator('[data-photo-index="59"]')).toHaveCount(1);
+  await expect(page.locator('[data-photo-index="60"]')).toHaveCount(0);
+
+  let releaseAdjacent: () => void = () => undefined;
+  const adjacentGate = new Promise<void>((resolve) => {
+    releaseAdjacent = resolve;
+  });
+  let boundaryRequests = 0;
+  let originalToken = "";
+  let reopenedToken = "";
+  let reopenWindowFailed = false;
+  let browseAllocations = 0;
+  let overviewRequests = 0;
+  let reopenPhotoId = "";
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/api/browse") {
+      browseAllocations += 1;
+      const body = request.postDataJSON() as { photoId?: string };
+      reopenPhotoId = body.photoId ?? "";
+    }
+    if (request.method() === "GET" && url.pathname === "/api/library")
+      overviewRequests += 1;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
+      boundaryRequests += 1;
+      if (boundaryRequests === 1) {
+        await adjacentGate;
+        try {
+          await route.continue();
+        } catch {
+          /* current navigation supersedes this adjacent Photo prefetch */
+        }
+        return;
+      }
+      if (!originalToken) {
+        originalToken = token;
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: '{"error":"Browse source expired or not found"}',
+        });
+        return;
+      }
+      if (token !== originalToken && !reopenWindowFailed) {
+        reopenedToken = token;
+        reopenWindowFailed = true;
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+      await route.continue();
+    },
+  );
+  try {
+    await page.locator('[data-photo-index="59"]').click();
+    await expect(page.getByText("60 / 70")).toBeVisible();
+    await expect.poll(() => boundaryRequests).toBe(1);
+
+    // The first request is the held adjacent prefetch. Navigating across the
+    // boundary promotes that work into a new Photo-owned GET; its 404 reopens
+    // around Photo 60, then the new token's source-owned first window fails.
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect.poll(() => reopenWindowFailed).toBe(true);
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-retry-photo]")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    expect(reopenedToken).not.toBe("");
+    expect(reopenedToken).not.toBe(originalToken);
+    expect(browseAllocations).toBe(1);
+    expect(overviewRequests).toBe(0);
+    expect(reopenPhotoId).not.toBe("");
+
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    const allocationsBeforeRetry = browseAllocations;
+    const overviewsBeforeRetry = overviewRequests;
+    const exactSourceRetry = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname.endsWith(`/${reopenedToken}`) &&
+        url.searchParams.get("start") === "10"
+      );
+    });
+    const refreshedPreview = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/photos/${reopenPhotoId}/preview`
+      );
+    });
+    await page.locator("[data-retry-photo]").click();
+    const retried = await exactSourceRetry;
+    await refreshedPreview;
+
+    expect(new URL(retried.url()).pathname).toBe(
+      `/api/browse/${reopenedToken}`,
+    );
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText("60 / 70")).toBeVisible();
+    expect(browseAllocations).toBe(allocationsBeforeRetry);
+    expect(overviewRequests).toBe(overviewsBeforeRetry);
+  } finally {
+    releaseAdjacent();
+  }
 });
 
 test("navigation promotes an aborted adjacent window to current priority", async ({
@@ -4865,7 +5204,7 @@ test("navigation promotes an aborted adjacent window to current priority", async
   }
 });
 
-test("a throttled boundary window cannot wedge Photo View or Back to Grid", async ({
+test("stale opaque Photo windows cannot claim Recovery after Back to Grid", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -4881,27 +5220,45 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
     releaseBoundary = resolve;
   });
   let boundaryRequests = 0;
+  let staleBoundaryRequests = 0;
   await page.route(
     (url) =>
       url.pathname.startsWith("/api/browse/") &&
       url.searchParams.get("start") === "10",
     async (route) => {
-      boundaryRequests += 1;
+      const requestNumber = (boundaryRequests += 1);
       await boundaryGate;
       try {
-        await route.continue();
+        if (requestNumber <= staleBoundaryRequests)
+          await route.fulfill({ status: 503, body: '{"error":"stale"}' });
+        else await route.continue();
       } catch {
-        /* Back to Grid aborts the Photo-owned boundary request */
+        /* Back to Grid may abort transport before the stale response lands. */
       }
     },
   );
   const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    Object.defineProperty(element, "clientWidth", {
+      configurable: true,
+      value: 320,
+    });
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
   await viewport.evaluate((element) => {
     element.scrollTop = 29 * 178;
   });
   await page.locator('[data-photo-index="59"]').click();
   await expect(page.getByText("60 / 70")).toBeVisible();
   await page.keyboard.press("ArrowRight");
+  await expect.poll(() => boundaryRequests).toBeGreaterThanOrEqual(2);
+  staleBoundaryRequests = boundaryRequests;
   // The boundary Photo waits for its shared facts; Back to Grid must remain
   // available instead of claiming the unavailable Photo is already open.
   await expect(page.getByText("60 / 70")).toBeVisible();
@@ -4911,8 +5268,20 @@ test("a throttled boundary window cannot wedge Photo View or Back to Grid", asyn
   ).toBeEnabled();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  await expect
+    .poll(() => viewport.evaluate((element) => element.scrollTop))
+    .toBe(30 * 178);
   releaseBoundary();
-  await expect(page.locator('[data-photo-index="60"]')).toBeEnabled();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry connection" }),
+  ).toBeHidden();
   // The abandoned open must not wedge the browser: a new Photo opens normally.
   await page.locator('[data-photo-index="57"]').click();
   await expect(page.getByText("58 / 70")).toBeVisible();

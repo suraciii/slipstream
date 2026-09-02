@@ -6,8 +6,6 @@ import {
 } from "./model/async-ownership.js";
 import type {
   AlbumSummary,
-  BrowseOpenResponse,
-  BrowseWindowResponse,
   FolderChild,
   PhotoSummary,
   PreviewResponse,
@@ -31,14 +29,30 @@ import {
   type ApplicationRecovery,
   type FileLocationPresentation,
 } from "./model/application-owner.js";
+import {
+  createSourceGridOwner,
+  type PhotoWindowAuthority,
+  type SourceAuthority,
+  type SourceGridSource,
+  type SourceWindowOperation,
+} from "./model/source-grid-owner.js";
 import "./ui/library-browser.css";
 
 type SessionUndo = UndoDescription &
   Readonly<{ advanced: boolean; snapshotIndex: number }>;
 type MutationResponse = Readonly<{ undo: UndoDescription }>;
-const WINDOW_SIZE = 60;
-const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
-const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
+type GridRangeRetry = Readonly<{
+  sourceAuthority: SourceAuthority;
+  operationKind: "source" | "grid";
+  start: number;
+  quiet: boolean;
+  priority: "high" | "low";
+}>;
+type BrowseRangeFailure = Readonly<{
+  claim: RecoveryClaim;
+  ownerScope: "source" | "photo";
+  retry?: GridRangeRetry;
+}>;
 const GRID_CELL_HEIGHT = 178;
 const GRID_CELL_WIDTH = 150;
 const swipePendingPixels = 24;
@@ -51,6 +65,7 @@ export function mountLibraryBrowser(
 ): () => void {
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
+  const sourceGrid = createSourceGridOwner(fetcher);
 
   root.innerHTML = `
     <main class="app-shell">
@@ -233,16 +248,14 @@ export function mountLibraryBrowser(
       summaryStatusElement.append(" ", action);
       return;
     }
-    if (sourceKind === "album" && sourceSetId) {
+    if (sourceGrid.kind === "album" && sourceGrid.albumId) {
       const open = presentation.albums.find(
-        (candidate) => candidate.id === sourceSetId,
+        (candidate) => candidate.id === sourceGrid.albumId,
       );
       if (open) {
-        sourceSetName = open.name;
-        gridTitle.textContent = sourceSetName;
-        photoTitle.textContent = sourceSetName;
-        if (lastSource?.kind === "album" && lastSource.set?.id === open.id)
-          lastSource = { ...lastSource, set: open };
+        sourceGrid.updateAlbum(open);
+        gridTitle.textContent = sourceGrid.name;
+        photoTitle.textContent = sourceGrid.name;
       }
     }
     renderMembershipControls();
@@ -288,7 +301,7 @@ export function mountLibraryBrowser(
     }
 
     if (!fileLocations.publication && coordination.overview.published) {
-      if (lastSource?.kind === "folder" && !token) {
+      if (sourceGrid.lastSource?.kind === "folder" && !sourceGrid.token) {
         await awaitRootBinding();
         if (!coordination.isCurrent()) return;
       } else {
@@ -296,21 +309,13 @@ export function mountLibraryBrowser(
       }
     }
     if (!coordination.isCurrent()) return;
-    if (!token && coordination.overview.published) {
-      const remembered = lastSource ?? {
-        kind: "library" as const,
-        set: undefined,
-        folder: undefined,
-      };
+    if (!sourceGrid.token && coordination.overview.published) {
+      const remembered =
+        sourceGrid.lastSource ?? ({ kind: "library" } as const);
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSource(
-          remembered.kind,
-          remembered.set,
-          undefined,
-          remembered.folder,
-        );
+        await openSourceDescriptor(remembered);
       } else if (coordination.isCurrent()) {
         gridStatus.textContent =
           "Could not load this source. Retry to continue.";
@@ -328,13 +333,8 @@ export function mountLibraryBrowser(
   const application = createApplicationOwner(fetcher, {
     emit: handleApplicationEvent,
   });
-  let token = "";
-  let total = 0;
   let currentIndex = 0;
-  let sourceKind: "library" | "album" | "folder" = "library";
-  let sourceSetId: string | undefined;
-  let sourceSetName = "All Photos";
-  let sourceFolder: { location: string; name: string } | undefined;
+  let lastCurrentPhotoId: string | undefined;
   // In-progress Album management form: create, rename, or a two-step delete
   // confirmation. Only one form exists at a time and it lives in the Albums
   // section of the source list. The current model object is the operation's
@@ -376,68 +376,32 @@ export function mountLibraryBrowser(
     return undefined;
   };
 
-  // The most recently attempted source, retained for truthful reconnection
-  // instead of silently falling back to All Photos.
-  let lastSource:
-    | {
-        kind: "library" | "album" | "folder";
-        set: AlbumSummary | undefined;
-        folder: { location: string; name: string } | undefined;
-      }
-    | undefined;
-  let loaded = new Map<number, PhotoSummary>();
-  let thumbnailUrls = new Map<string, string>();
-  let thumbnailFailures = new Set<string>();
-  let renderedThumbnailImages = new Map<string, HTMLImageElement>();
-  let lastCurrentPhotoId: string | undefined;
-  let renderedColumns = 0;
-  let renderedViewportHeight = 0;
   let connected = false;
   let connectionEstablished = false;
   let busy = false;
   let openingPhoto = false;
   let currentPhotoMode = false;
-  let retrySourceRequired = false;
-  const browseRangeFailures = new Map<string, RecoveryClaim>();
+  const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let undo: SessionUndo | undefined;
   let requestGeneration = 0;
-  let sourceGeneration = 0;
-  let sourceTasks = new TaskScope();
-  let gridTasks = new TaskScope();
   let photoTasks = new TaskScope();
-  let sourceSignal = sourceTasks.beginLatest("lifetime", {
-    abortTransport: true,
-  }).signal!;
-  let gridSignal = gridTasks.beginLatest("lifetime", {
-    abortTransport: true,
-  }).signal!;
+  let photoWindowAuthority: PhotoWindowAuthority =
+    sourceGrid.renewPhotoWindow();
   let photoSignal = photoTasks.beginLatest("lifetime", {
     abortTransport: true,
   }).signal!;
-  const renewSourceTasks = () => {
-    sourceTasks.halt();
-    sourceTasks = new TaskScope();
-    sourceSignal = sourceTasks.beginLatest("lifetime", {
-      abortTransport: true,
-    }).signal!;
-  };
-  const renewGridTasks = () => {
-    gridTasks.halt();
-    gridTasks = new TaskScope();
-    gridSignal = gridTasks.beginLatest("lifetime", {
-      abortTransport: true,
-    }).signal!;
-  };
   const renewPhotoTasks = () => {
     photoTasks.halt();
     photoTasks = new TaskScope();
+    photoWindowAuthority = sourceGrid.renewPhotoWindow();
     photoSignal = photoTasks.beginLatest("lifetime", {
       abortTransport: true,
     }).signal!;
   };
-  let browseTokenGeneration = 0;
-  let gridRenderFrame: number | undefined;
   let progressQueue: Promise<void> = Promise.resolve();
+  let renderedColumns = 0;
+  let renderedViewportHeight = 0;
+  let gridRenderFrame: number | undefined;
   let zoomed = false;
   let panX = 0;
   let panY = 0;
@@ -455,11 +419,12 @@ export function mountLibraryBrowser(
       }
     | undefined;
 
-  const currentPhoto = () => loaded.get(currentIndex);
+  const currentPhoto = () => sourceGrid.photoAt(currentIndex);
   const syncConnection = (message?: string) => {
     if (!applicationAlive) return;
-    for (const [key, claim] of browseRangeFailures)
-      if (!recoveryGate.isActive(claim)) browseRangeFailures.delete(key);
+    for (const [key, failure] of browseRangeFailures)
+      if (!recoveryGate.isActive(failure.claim))
+        browseRangeFailures.delete(key);
     connected = connectionEstablished && recoveryGate.decisionReady;
     if (!connected) clearPointer();
     connection.textContent = connected ? "Connected" : "Disconnected";
@@ -480,9 +445,16 @@ export function mountLibraryBrowser(
     generation: number,
     start: number,
     transportLost: boolean,
+    retryRange?: GridRangeRetry,
     transition?: RecoveryTransition,
   ): void => {
     const key = `${ownerScope}:${generation}:${start}`;
+    const active = browseRangeFailures.get(key);
+    if (active && recoveryGate.isActive(active.claim)) {
+      syncConnection();
+      return;
+    }
+    if (active) browseRangeFailures.delete(key);
     const owner = { scope: ownerScope, generation: String(generation) };
     let claim: RecoveryClaim | undefined;
     if (transition) {
@@ -506,8 +478,12 @@ export function mountLibraryBrowser(
       if (recoveryGate.fail(candidate, { transportLost })) claim = candidate;
       else recoveryGate.discard(candidate);
     }
-    if (claim) browseRangeFailures.set(key, claim);
-    if (ownerScope === "source") retrySourceRequired = true;
+    if (claim)
+      browseRangeFailures.set(key, {
+        claim,
+        ownerScope,
+        ...(retryRange ? { retry: retryRange } : {}),
+      });
     syncConnection();
   };
   const recoverBrowseRange = (
@@ -516,10 +492,10 @@ export function mountLibraryBrowser(
     start: number,
   ): void => {
     const key = `${ownerScope}:${generation}:${start}`;
-    const claim = browseRangeFailures.get(key);
-    if (!claim) return;
+    const failure = browseRangeFailures.get(key);
+    if (!failure) return;
     browseRangeFailures.delete(key);
-    if (recoveryGate.recover(claim)) setConnected(true);
+    if (recoveryGate.recover(failure.claim)) setConnected(true);
   };
   const failPhotoRecovery = (
     generation: number,
@@ -566,7 +542,10 @@ export function mountLibraryBrowser(
     refresh.disabled = busy;
     previous.disabled = busy || openingPhoto || currentIndex <= 0;
     next.disabled =
-      busy || openingPhoto || total === 0 || currentIndex >= total - 1;
+      busy ||
+      openingPhoto ||
+      sourceGrid.total === 0 ||
+      currentIndex >= sourceGrid.total - 1;
     undoButton.disabled = !connected || busy || openingPhoto || !undo;
     detail.disabled = !stage.querySelector("img");
   };
@@ -604,7 +583,7 @@ export function mountLibraryBrowser(
     announce: (text: string) => void;
   }> => {
     const capturedPhotoStatus = photoStatusOwner;
-    const sourceOwner = sourceGeneration;
+    const sourceOwner = sourceGrid.generation;
     const ownsPhotoSurface = () =>
       surface === "photo" &&
       photoGeneration === requestGeneration &&
@@ -893,7 +872,8 @@ export function mountLibraryBrowser(
     const button = sourceButton(
       `${child.name}${child.hasDescendantFolders ? " · Subfolders" : ""}`,
       child.photoCount,
-      sourceKind === "folder" && sourceFolder?.location === child.location,
+      sourceGrid.kind === "folder" &&
+        sourceGrid.folder?.location === child.location,
       false,
       false,
     );
@@ -943,7 +923,7 @@ export function mountLibraryBrowser(
     const libraryButton = sourceButton(
       "All Photos",
       application.overview?.photoCount ?? 0,
-      sourceKind === "library",
+      sourceGrid.kind === "library",
     );
     libraryButton.addEventListener("click", () => void openSource("library"));
     sourceList.append(libraryButton);
@@ -966,7 +946,7 @@ export function mountLibraryBrowser(
     const rootCard = sourceButton(
       "Library Folder",
       application.overview?.photoCount ?? 0,
-      sourceKind === "folder" && sourceFolder?.location === "",
+      sourceGrid.kind === "folder" && sourceGrid.folder?.location === "",
       false,
       false,
     );
@@ -1028,7 +1008,7 @@ export function mountLibraryBrowser(
       const button = sourceButton(
         set.name,
         set.photoCount,
-        sourceKind === "album" && sourceSetId === set.id,
+        sourceGrid.kind === "album" && sourceGrid.albumId === set.id,
         set.hasSavedPosition,
         false,
       );
@@ -1242,7 +1222,11 @@ export function mountLibraryBrowser(
           // pending keeps its own state and draft.
           if (albumForm === model) albumForm = undefined;
           renderSources();
-          if (deleted && sourceKind === "album" && sourceSetId === set.id) {
+          if (
+            deleted &&
+            sourceGrid.kind === "album" &&
+            sourceGrid.albumId === set.id
+          ) {
             // The open source object is gone; return to the system source.
             await openSource("library");
           }
@@ -1325,12 +1309,39 @@ export function mountLibraryBrowser(
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
   ) => {
+    const descriptor: SourceGridSource =
+      kind === "library"
+        ? { kind: "library" }
+        : kind === "album"
+          ? {
+              kind: "album",
+              album: { id: set!.id, name: set!.name },
+            }
+          : {
+              kind: "folder",
+              folder: folder!,
+              publication: fileLocations.publication!,
+            };
+    return openSourceDescriptor(descriptor, preferredPhotoId);
+  };
+
+  async function openSourceDescriptor(
+    requested: SourceGridSource,
+    preferredPhotoId?: string,
+  ): Promise<void> {
+    const descriptor: SourceGridSource =
+      requested.kind === "folder" && fileLocations.publication
+        ? { ...requested, publication: fileLocations.publication }
+        : requested;
     const sourceDrawerWasOpen = browser.classList.contains("sources-open");
     busy = true;
     cancelScheduledGridRender();
-    sourceGeneration += 1;
     requestGeneration += 1;
-    const generation = sourceGeneration;
+    const pendingOpen = sourceGrid.open(descriptor, {
+      ...(preferredPhotoId ? { preferredPhotoId } : {}),
+    });
+    const authority = sourceGrid.authority;
+    const generation = sourceGrid.generation;
     const sourceTransition = recoveryGate.beginTransition(
       "source",
       String(generation),
@@ -1342,70 +1353,31 @@ export function mountLibraryBrowser(
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
     openingPhoto = false;
-    cancelPendingImageLoads(gridLayer, true);
     gridLayer.replaceChildren();
     cancelPendingImageLoads(stage, true);
     stage.replaceChildren();
-    renewSourceTasks();
-    renewGridTasks();
     renewPhotoTasks();
-    const signal = sourceSignal;
     currentPhotoMode = false;
     gridView.hidden = false;
     photoView.hidden = true;
     closeSources(false);
     if (sourceDrawerWasOpen) gridViewport.focus();
-    sourceKind = kind;
-    sourceSetId = set?.id;
-    sourceFolder = folder;
     // A new open snapshot ends the previous source's removal memory.
     removedFromCurrentAlbum.clear();
-    sourceSetName =
-      set?.name ?? (folder ? `${folder.name} · Folder` : "All Photos");
-    gridTitle.textContent = sourceSetName;
+    gridTitle.textContent = sourceGrid.name;
     gridStatus.textContent = "Preparing Library order…";
     undo = undefined;
-    loaded = new Map();
-    thumbnailUrls = new Map();
-    thumbnailFailures = new Set();
     lastCurrentPhotoId = preferredPhotoId;
-    const priorToken = token;
-    lastSource = { kind, set, folder };
     try {
-      const response = await fetcher("/api/browse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          kind === "library"
-            ? {
-                source: "library",
-                ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
-              }
-            : kind === "folder"
-              ? {
-                  source: "folder",
-                  folderPath: folder!.location,
-                  ...(fileLocations.publication
-                    ? { publication: fileLocations.publication }
-                    : {}),
-                  ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
-                }
-              : {
-                  source: "album",
-                  albumId: set!.id,
-                  ...(preferredPhotoId ? { photoId: preferredPhotoId } : {}),
-                },
-        ),
-        signal,
-        priority: "high",
-      });
-      if (response.status === 409 && kind === "folder") {
+      const opened = await pendingOpen;
+      if (opened.kind === "detached") return;
+      if (opened.kind === "publication-conflict") {
         // Only the current source's handler may reset and reload File
         // Locations: a superseded open doing the same would discard the
         // newer recovery and leave the tree unbound.
-        if (generation !== sourceGeneration) return;
+        if (!sourceGrid.isCurrent(authority)) return;
         const reboundAuthority = await rebindFileLocations();
-        if (generation !== sourceGeneration) return;
+        if (!sourceGrid.isCurrent(authority)) return;
         if (
           fileLocations.isCurrent(reboundAuthority) &&
           fileLocations.publication
@@ -1414,45 +1386,34 @@ export function mountLibraryBrowser(
             `publication:${fileLocations.publication}`,
             "Scan results changed File Locations. Reopen the current Folder.",
           );
-        throw new Error("file locations expired");
+        throw new Error("source open failed");
       }
-      if (!response.ok) throw new Error("browse open failed");
-      const opened = (await response.json()) as BrowseOpenResponse;
-      if (generation !== sourceGeneration) {
-        void closeBrowse(opened.token);
-        return;
-      }
-      token = opened.token;
-      browseTokenGeneration = generation;
-      if (priorToken && priorToken !== token) void closeBrowse(priorToken);
-      total = opened.total;
-      currentIndex = Math.min(opened.position, Math.max(0, total - 1));
+      if (opened.kind === "failed") throw new Error("source open failed");
+      const gridPosition = sourceGrid.readGridPosition(authority);
+      if (gridPosition === undefined) return;
+      currentIndex = gridPosition;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderSources();
       const windowReady = await loadWindow(
-        currentIndex,
-        generation,
+        gridPosition,
+        { kind: "source", authority },
         false,
-        sourceSignal,
         "high",
         sourceTransition,
       );
-      if (generation !== sourceGeneration || !windowReady) return;
-      if (kind === "folder") releasePublicationLocationRecovery();
+      if (!sourceGrid.isCurrent(authority) || !windowReady) return;
+      if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
-      retrySourceRequired = false;
+      sourceGrid.establish(authority);
       setConnected(true);
       renderGrid();
-      gridStatus.textContent = total
-        ? `Ready · ${total.toLocaleString()} Photos`
+      gridStatus.textContent = sourceGrid.total
+        ? `Ready · ${sourceGrid.total.toLocaleString()} Photos`
         : "No Photos in this source";
     } catch {
-      if (generation !== sourceGeneration) return;
-      token = "";
-      if (priorToken) void closeBrowse(priorToken);
+      if (!sourceGrid.isCurrent(authority)) return;
       gridStatus.textContent = "Could not load this source. Retry to continue.";
-      retrySourceRequired = true;
       const claim = recoveryGate.issue("source-open", String(generation), {
         owner: { scope: "source", generation: String(generation) },
         transition: sourceTransition,
@@ -1462,12 +1423,12 @@ export function mountLibraryBrowser(
       });
       syncConnection();
     } finally {
-      if (generation === sourceGeneration) {
+      if (sourceGrid.isCurrent(authority)) {
         busy = false;
         updateControls();
       }
     }
-  };
+  }
 
   const columns = () =>
     Math.max(
@@ -1476,29 +1437,11 @@ export function mountLibraryBrowser(
     );
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
-  const alignedStart = (index: number) =>
-    Math.max(
-      0,
-      Math.min(
-        Math.floor(index / WINDOW_SIZE) * WINDOW_SIZE,
-        Math.max(0, total - WINDOW_SIZE),
-      ),
-    );
-  const closeBrowse = async (browseToken: string) => {
-    try {
-      await fetcher(`/api/browse/${encodeURIComponent(browseToken)}`, {
-        method: "DELETE",
-        keepalive: true,
-      });
-    } catch {
-      /* bounded server expiry remains the fallback */
-    }
-  };
   const reopenExpired = async (
     anchorIndex: number,
-    expectedGeneration = sourceGeneration,
+    expectedGeneration = sourceGrid.generation,
   ) => {
-    if (expectedGeneration !== sourceGeneration) return;
+    if (expectedGeneration !== sourceGrid.generation) return;
     busy = true;
     const resumePhoto = currentPhotoMode;
     const photoGeneration = ++requestGeneration;
@@ -1517,82 +1460,73 @@ export function mountLibraryBrowser(
     const currentPhotoSignal = photoSignal;
     cancelPendingImageLoads(stage);
     openingPhoto = false;
-    const oldToken = token;
     const anchorId =
-      loaded.get(anchorIndex)?.id ?? lastCurrentPhotoId ?? currentPhoto()?.id;
-    renewSourceTasks();
-    renewGridTasks();
+      sourceGrid.photoAt(anchorIndex)?.id ??
+      lastCurrentPhotoId ??
+      currentPhoto()?.id;
     cancelScheduledGridRender();
-    const generation = ++sourceGeneration;
-    const sourceTransition = recoveryGate.beginTransition(
-      "source",
-      String(generation),
-    );
-    syncConnection();
-    cancelPendingImageLoads(gridLayer);
-    const signal = sourceSignal;
+    sourceGrid.clearRenderedThumbnails();
     let boundPublication = fileLocations.publication;
-    if (sourceKind === "folder" && !boundPublication) {
+    if (sourceGrid.kind === "folder" && !boundPublication) {
       // A Folder source must never be reopened publicationless; wait for
       // the root binding and fail truthfully if it cannot be established.
       boundPublication = (await awaitRootBinding())
         ? fileLocations.publication
         : undefined;
-      if (generation !== sourceGeneration) return;
+      if (expectedGeneration !== sourceGrid.generation) return;
       if (!boundPublication) {
         // Fail truthfully instead of sending a publicationless request.
         gridStatus.textContent =
           "Could not load this source. Retry to continue.";
-        retrySourceRequired = true;
-        const claim = recoveryGate.issue("source-reopen", String(generation), {
-          owner: { scope: "source", generation: String(generation) },
-          transition: sourceTransition,
-        });
-        recoveryGate.failTransition(sourceTransition, claim, {
-          transportLost: true,
-        });
+        const claim = recoveryGate.issue(
+          "source-reopen",
+          String(expectedGeneration),
+          {
+            owner: {
+              scope: "source",
+              generation: String(expectedGeneration),
+            },
+          },
+        );
+        recoveryGate.fail(claim, { transportLost: true });
         syncConnection();
         busy = false;
         updateControls();
         return;
       }
     }
+    const descriptor: SourceGridSource =
+      sourceGrid.source.kind === "folder"
+        ? {
+            ...sourceGrid.source,
+            publication: boundPublication!,
+          }
+        : sourceGrid.source;
+    const pendingOpen = sourceGrid.open(descriptor, {
+      mode: "reopen",
+      ...(anchorId ? { preferredPhotoId: anchorId } : {}),
+    });
+    const authority = sourceGrid.authority;
+    const generation = sourceGrid.generation;
+    const sourceTransition = recoveryGate.beginTransition(
+      "source",
+      String(generation),
+    );
+    syncConnection();
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
     gridStatus.textContent = notice;
     status.textContent = notice;
     try {
-      const response = await fetcher("/api/browse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          sourceKind === "library"
-            ? { source: "library", ...(anchorId ? { photoId: anchorId } : {}) }
-            : sourceKind === "folder"
-              ? {
-                  source: "folder",
-                  folderPath: sourceFolder?.location ?? "",
-                  ...(boundPublication
-                    ? { publication: boundPublication }
-                    : {}),
-                  ...(anchorId ? { photoId: anchorId } : {}),
-                }
-              : {
-                  source: "album",
-                  albumId: sourceSetId,
-                  ...(anchorId ? { photoId: anchorId } : {}),
-                },
-        ),
-        signal,
-        priority: "high",
-      });
-      if (response.status === 409 && sourceKind === "folder") {
+      const opened = await pendingOpen;
+      if (opened.kind === "detached") return;
+      if (opened.kind === "publication-conflict") {
         // Generation-gated exactly like openSource: only the current
         // source's recovery may reset and rebind File Locations.
-        if (generation === sourceGeneration) {
+        if (sourceGrid.isCurrent(authority)) {
           const reboundAuthority = await rebindFileLocations();
           if (
-            generation === sourceGeneration &&
+            sourceGrid.isCurrent(authority) &&
             fileLocations.isCurrent(reboundAuthority) &&
             fileLocations.publication
           )
@@ -1601,40 +1535,34 @@ export function mountLibraryBrowser(
               "Scan results changed File Locations. Reopen the current Folder.",
             );
         }
+        throw new Error("browse reopen failed");
       }
-      if (!response.ok) throw new Error("browse reopen failed");
-      const opened = (await response.json()) as BrowseOpenResponse;
-      if (generation !== sourceGeneration) {
-        void closeBrowse(opened.token);
-        return;
-      }
-      token = opened.token;
-      browseTokenGeneration = generation;
-      total = opened.total;
-      currentIndex = Math.min(opened.position, Math.max(0, total - 1));
-      loaded = new Map();
-      thumbnailUrls = new Map();
-      thumbnailFailures = new Set();
-      if (oldToken && oldToken !== token) void closeBrowse(oldToken);
+      if (opened.kind === "failed") throw new Error("browse reopen failed");
+      const gridPosition = sourceGrid.readGridPosition(authority);
+      if (gridPosition === undefined) return;
+      currentIndex = gridPosition;
       const windowReady = await loadWindow(
-        currentIndex,
-        generation,
+        gridPosition,
+        { kind: "source", authority },
         false,
-        sourceSignal,
         "high",
         sourceTransition,
       );
-      if (generation !== sourceGeneration || !windowReady) return;
+      if (!sourceGrid.isCurrent(authority) || !windowReady) return;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
       gridStatus.textContent =
         "Source reopened using the latest published Library order.";
-      if (sourceKind === "folder") releasePublicationLocationRecovery();
+      if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
-      retrySourceRequired = false;
+      sourceGrid.establish(authority);
       setConnected(true);
       if (resumePhoto && photoGeneration === requestGeneration) {
+        // The reopen invalidated the pre-reopen SourceGrid window lifetime.
+        // Reissue only that opaque capability; the page-owned Preview signal
+        // remains the same Photo operation.
+        photoWindowAuthority = sourceGrid.renewPhotoWindow();
         gridView.hidden = true;
         photoView.hidden = false;
         syncSourcePanel();
@@ -1657,13 +1585,11 @@ export function mountLibraryBrowser(
         });
       }
     } catch {
-      if (generation !== sourceGeneration) return;
-      browseTokenGeneration = generation;
+      if (!sourceGrid.isCurrent(authority)) return;
       const failure =
         "This source expired and could not be reopened. Retry the connection.";
       gridStatus.textContent = failure;
       status.textContent = failure;
-      retrySourceRequired = true;
       const claim = recoveryGate.issue("source-reopen", String(generation), {
         owner: { scope: "source", generation: String(generation) },
         transition: sourceTransition,
@@ -1673,169 +1599,117 @@ export function mountLibraryBrowser(
       });
       syncConnection();
     } finally {
-      if (generation === sourceGeneration) {
+      if (sourceGrid.isCurrent(authority)) {
         busy = false;
         updateControls();
       }
     }
   };
-  const windowLoaded = (start: number) => {
-    const end = Math.min(total, start + WINDOW_SIZE);
-    for (let index = start; index < end; index += 1)
-      if (!loaded.has(index)) return false;
-    return start < end;
-  };
-  const loadWindow = (
+  const loadWindow = async (
     index: number,
-    generation = sourceGeneration,
+    operation: SourceWindowOperation = {
+      kind: "grid",
+      authority: sourceGrid.authority,
+    },
     quiet = false,
-    signal = gridSignal,
     priority: "high" | "low" = quiet ? "low" : "high",
     transition?: RecoveryTransition,
   ): Promise<boolean> => {
-    if (
-      generation !== sourceGeneration ||
-      !token ||
-      browseTokenGeneration !== sourceGeneration
-    )
-      return Promise.resolve(false);
-    if (total === 0) return Promise.resolve(true);
-    const start = alignedStart(index);
-    if (windowLoaded(start)) return Promise.resolve(true);
-    const browseToken = token;
-    const expectedTotal = total;
-    const photoGeneration = requestGeneration;
-    const scope =
-      signal === sourceSignal
-        ? sourceTasks
-        : signal === photoSignal
-          ? photoTasks
-          : gridTasks;
-    const ownerScope = scope === photoTasks ? "photo" : "source";
+    if (sourceGrid.total === 0) return true;
+    const sourceAuthority =
+      operation.kind === "photo" ? sourceGrid.authority : operation.authority;
+    const photoAuthority =
+      operation.kind === "photo" ? operation.authority : undefined;
+    const ownerScope = operation.kind === "photo" ? "photo" : "source";
     const ownerGeneration =
-      ownerScope === "photo" ? photoGeneration : generation;
-    const rangeMessage = `Photos ${start + 1}–${Math.min(total, start + WINDOW_SIZE)}`;
+      operation.kind === "photo" ? requestGeneration : sourceGrid.generation;
+    const { range } = sourceGrid.describeWindow(index);
     if (!quiet)
-      gridStatus.textContent = `Loading ${rangeMessage} of ${total.toLocaleString()}…`;
-    const shared = scope.joinOrStart(
-      `window:${start}`,
-      { abortTransport: true, onCancel: () => false },
-      async (requestSignal) => {
-        const ownedSignal = requestSignal!;
-        let response: Response;
-        try {
-          response = await fetcher(
-            `/api/browse/${encodeURIComponent(browseToken)}?start=${start}&limit=${WINDOW_SIZE}`,
-            { signal: ownedSignal, priority },
-          );
-        } catch {
-          if (!ownedSignal.aborted && generation === sourceGeneration) {
-            const message = `Connection lost while loading ${rangeMessage}. Retry this range.`;
-            if (ownerScope === "photo") status.textContent = message;
-            else gridStatus.textContent = message;
-            failBrowseRange(
-              ownerScope,
-              ownerGeneration,
-              start,
-              true,
-              transition,
-            );
-          }
-          return false;
-        }
-        if (response.status === 404) {
-          if (!ownedSignal.aborted && generation === sourceGeneration)
-            await reopenExpired(index, generation);
-          return false;
-        }
-        if (!response.ok) {
-          if (!ownedSignal.aborted && generation === sourceGeneration) {
-            const message = `${rangeMessage} could not be loaded (HTTP ${response.status}). Retry this range.`;
-            if (ownerScope === "photo") status.textContent = message;
-            else gridStatus.textContent = message;
-            failBrowseRange(
-              ownerScope,
-              ownerGeneration,
-              start,
-              false,
-              transition,
-            );
-          }
-          return false;
-        }
-        let result: BrowseWindowResponse;
-        try {
-          const candidate: unknown = await response.json();
-          const decoded = decodeBrowseWindow(candidate, start, expectedTotal);
-          if (!decoded) throw new Error("malformed window");
-          result = decoded;
-        } catch {
-          if (!ownedSignal.aborted && generation === sourceGeneration) {
-            const message = `${rangeMessage} returned an invalid response. Retry this range.`;
-            if (ownerScope === "photo") status.textContent = message;
-            else gridStatus.textContent = message;
-            failBrowseRange(
-              ownerScope,
-              ownerGeneration,
-              start,
-              false,
-              transition,
-            );
-          }
-          return false;
-        }
-        if (generation !== sourceGeneration || ownedSignal.aborted)
-          return false;
-        for (const [offset, photo] of result.photos.entries())
-          loaded.set(result.start + offset, photo);
-        recoverBrowseRange(ownerScope, ownerGeneration, start);
-        trimLoaded(index);
-        renderGrid();
-        if (!quiet)
-          gridStatus.textContent = `Ready · ${total.toLocaleString()} Photos`;
-        return true;
-      },
-    );
-    return shared.promise.finally(() => {
+      gridStatus.textContent = `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`;
+    const outcome = await sourceGrid.loadWindow(index, operation, {
+      quiet,
+      priority,
+    });
+    try {
+      const exactOwner =
+        outcome.authority === sourceAuthority &&
+        sourceGrid.isCurrent(sourceAuthority) &&
+        (operation.kind === "photo"
+          ? outcome.owner.scope === "photo" &&
+            outcome.owner.authority === photoAuthority &&
+            photoAuthority === photoWindowAuthority
+          : outcome.owner.scope === "source" &&
+            outcome.owner.generation === ownerGeneration);
+      if (!exactOwner) return false;
+      if (outcome.kind === "detached") return false;
+      if (outcome.kind === "expired") {
+        await reopenExpired(outcome.index, sourceGrid.generation);
+        return false;
+      }
+      if (outcome.kind === "failed") {
+        const message =
+          outcome.malformed === true
+            ? `${outcome.range} returned an invalid response. Retry this range.`
+            : outcome.transportLost
+              ? `Connection lost while loading ${outcome.range}. Retry this range.`
+              : `${outcome.range} could not be loaded (HTTP ${outcome.status}). Retry this range.`;
+        if (ownerScope === "photo") status.textContent = message;
+        else gridStatus.textContent = message;
+        failBrowseRange(
+          ownerScope,
+          ownerGeneration,
+          outcome.start,
+          outcome.transportLost,
+          operation.kind === "photo"
+            ? undefined
+            : {
+                sourceAuthority,
+                operationKind: operation.kind,
+                start: outcome.start,
+                quiet,
+                priority,
+              },
+          transition,
+        );
+        return false;
+      }
+      recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
+      if (outcome.changed) renderGrid();
+      if (!quiet)
+        gridStatus.textContent = `Ready · ${sourceGrid.total.toLocaleString()} Photos`;
+      return true;
+    } finally {
       if (
-        shared.signal?.aborted &&
-        generation === sourceGeneration &&
+        outcome.kind === "detached" &&
+        operation.kind === "grid" &&
+        sourceGrid.isCurrent(operation.authority) &&
         !gridView.hidden
       )
         scheduleGridRender();
       updateControls();
-    });
+    }
   };
-  const trimLoaded = (anchor: number) => {
-    if (loaded.size <= MAX_RETAINED_FACTS) return;
-    for (const index of Array.from(loaded.keys()))
-      if (
-        Math.abs(index - anchor) > WINDOW_SIZE &&
-        loaded.size > MAX_RETAINED_FACTS
-      )
-        loaded.delete(index);
-  };
+  const trimLoaded = (anchor: number) => sourceGrid.trimFacts(anchor);
   const syncGridHeight = (count: number) => {
-    const height = `${Math.ceil(total / count) * GRID_CELL_HEIGHT}px`;
+    const height = `${Math.ceil(sourceGrid.total / count) * GRID_CELL_HEIGHT}px`;
     gridCanvas.style.height = height;
     gridLayer.style.height = height;
   };
   const renderGrid = () => {
     if (!applicationAlive) return;
     const count = columns();
+    const viewportHeight = effectiveViewportHeight();
     renderedColumns = count;
-    renderedViewportHeight = effectiveViewportHeight();
+    renderedViewportHeight = viewportHeight;
     syncGridHeight(count);
     const firstRow = Math.max(
       0,
       Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
     );
-    const visibleRows =
-      Math.ceil(renderedViewportHeight / GRID_CELL_HEIGHT) + 4;
+    const visibleRows = Math.ceil(viewportHeight / GRID_CELL_HEIGHT) + 4;
     const start = firstRow * count;
-    const end = Math.min(total, start + visibleRows * count);
-    renderedThumbnailImages = new Map();
-    cancelPendingImageLoads(gridLayer);
+    const end = Math.min(sourceGrid.total, start + visibleRows * count);
+    sourceGrid.beginGridRender();
     gridLayer.replaceChildren();
     for (let index = start; index < end; index += 1) {
       const cell = document.createElement("button");
@@ -1843,7 +1717,7 @@ export function mountLibraryBrowser(
       cell.className = "photo-cell";
       cell.style.left = `${(index % count) * GRID_CELL_WIDTH}px`;
       cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
-      const photo = loaded.get(index);
+      const photo = sourceGrid.photoAt(index);
       if (!photo) {
         cell.disabled = true;
         cell.textContent = "Loading…";
@@ -1862,15 +1736,13 @@ export function mountLibraryBrowser(
     photo: PhotoSummary,
     index: number,
   ) => {
-    const generation = sourceGeneration;
     const image = document.createElement("img");
-    image.alt = `Photo ${index + 1} of ${total}`;
+    image.alt = `Photo ${index + 1} of ${sourceGrid.total}`;
     image.loading = "lazy";
     image.fetchPriority = "low";
     image.decoding = "async";
     image.draggable = false;
     image.className = "thumbnail";
-    renderedThumbnailImages.set(photo.id, image);
     cell.append(image);
     const badge = document.createElement("span");
     badge.className = `cell-state ${photo.selectionState}`;
@@ -1888,134 +1760,28 @@ export function mountLibraryBrowser(
       : String(index + 1);
     cell.append(caption);
     if (photo.preview.state === "unavailable") {
-      markThumbnailUnavailable(photo.id, image, generation);
+      sourceGrid.markThumbnailUnavailable(photo.id, image);
     } else if (photo.preview.thumbnailUrl) {
-      attachThumbnail(
+      sourceGrid.presentThumbnail(
         photo.id,
         image,
         photo.preview.thumbnailUrl,
         true,
-        generation,
       );
     } else {
-      void loadThumbnail(photo.id, image, generation);
+      void sourceGrid.loadThumbnail(photo.id, image);
     }
   };
-  const rememberThumbnail = (photoId: string, url: string) => {
-    thumbnailUrls.delete(photoId);
-    thumbnailUrls.set(photoId, url);
-    while (thumbnailUrls.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnailUrls.keys().next().value;
-      if (oldest === undefined) break;
-      thumbnailUrls.delete(oldest);
-    }
-  };
-  const markThumbnailUnavailable = (
-    photoId: string,
-    image: HTMLImageElement,
-    generation: number,
-  ) => {
-    if (
-      generation !== sourceGeneration ||
-      renderedThumbnailImages.get(photoId) !== image
-    )
-      return;
-    thumbnailFailures.add(photoId);
-    image.removeAttribute("src");
-    if (!image.alt.includes("Thumbnail unavailable"))
-      image.alt = `${image.alt} — Thumbnail unavailable`;
-  };
-  const attachThumbnail = (
-    photoId: string,
-    image: HTMLImageElement,
-    url?: string,
-    attachDisconnected = false,
-    generation = sourceGeneration,
-  ) => {
-    if (
-      !url ||
-      generation !== sourceGeneration ||
-      renderedThumbnailImages.get(photoId) !== image
-    )
-      return;
-    if (thumbnailFailures.has(photoId)) {
-      if (!image.alt.includes("Thumbnail unavailable"))
-        image.alt = `${image.alt} — Thumbnail unavailable`;
-      return;
-    }
-    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
-      abortTransport: false,
-    });
-    const expectedUrl = new URL(url, window.location.href).href;
-    transfer.onCleanup(() => {
-      image.onload = null;
-      image.onerror = null;
-      if (!image.complete && image.src === expectedUrl)
-        image.removeAttribute("src");
-    });
-    image.onload = () => transfer.finish();
-    image.onerror = () => {
-      if (!transfer.isCurrent()) return;
-      markThumbnailUnavailable(photoId, image, generation);
-      transfer.finish();
-    };
-    if (attachDisconnected || image.isConnected) image.src = url;
-  };
-  const loadThumbnail = (
-    photoId: string,
-    image: HTMLImageElement,
-    generation = sourceGeneration,
-  ) => {
-    if (
-      generation !== sourceGeneration ||
-      renderedThumbnailImages.get(photoId) !== image
-    )
-      return;
-    const cached = thumbnailUrls.get(photoId);
-    if (cached) {
-      attachThumbnail(photoId, image, cached, true, generation);
-      return;
-    }
-    if (thumbnailFailures.has(photoId)) {
-      if (!image.alt.includes("Thumbnail unavailable"))
-        image.alt = `${image.alt} — Thumbnail unavailable`;
-      return;
-    }
-    const scope = gridTasks;
-    const request = scope.joinOrStart(
-      `thumbnail:${photoId}`,
-      { abortTransport: true, onCancel: () => undefined },
-      async (signal) => {
-        try {
-          const response = await fetcher(`/api/photos/${photoId}/thumbnail`, {
-            ...(signal ? { signal } : {}),
-            priority: "low",
-          });
-          if (!response.ok) return undefined;
-          const result = (await response.json()) as PreviewResponse;
-          return result.url ?? undefined;
-        } catch {
-          return undefined;
-        }
-      },
-    );
-    void request.promise.then((url) => {
-      if (generation !== sourceGeneration || scope !== gridTasks) return;
-      if (url) {
-        rememberThumbnail(photoId, url);
-        thumbnailFailures.delete(photoId);
-        attachThumbnail(photoId, image, url, false, generation);
-      } else {
-        markThumbnailUnavailable(photoId, image, generation);
-      }
-    });
-  };
-
   const openPhoto = async (index: number) => {
-    if (busy || openingPhoto || index < 0 || index >= total) return;
+    if (busy || openingPhoto || index < 0 || index >= sourceGrid.total) return;
     openingPhoto = true;
-    currentIndex = index;
     const generation = ++requestGeneration;
+    const sourceAuthority = sourceGrid.authority;
+    if (!sourceGrid.moveGridPosition(sourceAuthority, index)) {
+      openingPhoto = false;
+      return;
+    }
+    currentIndex = index;
     const photoTransition = recoveryGate.beginTransition(
       "photo",
       String(generation),
@@ -2024,9 +1790,7 @@ export function mountLibraryBrowser(
     renewPhotoTasks();
     const signal = photoSignal;
     cancelPendingImageLoads(stage, true);
-    renderedThumbnailImages = new Map();
-    renewGridTasks();
-    cancelPendingImageLoads(gridLayer);
+    sourceGrid.stopGridWork();
     currentPhotoMode = true;
     gridView.hidden = true;
     photoView.hidden = false;
@@ -2035,12 +1799,14 @@ export function mountLibraryBrowser(
     resetTransform();
     let windowReady = true;
     try {
-      if (!loaded.has(index))
+      if (!sourceGrid.photoAt(index))
         windowReady = await loadWindow(
           index,
-          sourceGeneration,
+          {
+            kind: "photo",
+            authority: photoWindowAuthority,
+          },
           true,
-          signal,
           "high",
           photoTransition,
         );
@@ -2052,8 +1818,9 @@ export function mountLibraryBrowser(
       updateControls();
     }
     if (generation !== requestGeneration || !windowReady) return;
-    const current = loaded.get(index);
-    if (current) lastCurrentPhotoId = current.id;
+    const current = sourceGrid.photoAt(index);
+    if (!current) return;
+    lastCurrentPhotoId = current.id;
     const hasKnownPreview = renderPhotoShell(generation);
     updateControls();
     const previewRequest = showPreview(generation, signal, photoTransition);
@@ -2070,7 +1837,7 @@ export function mountLibraryBrowser(
   };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();
-    position.textContent = `${currentIndex + 1} / ${total}`;
+    position.textContent = `${currentIndex + 1} / ${sourceGrid.total}`;
     selection.textContent = selectionLabel(photo?.selectionState);
     rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
     updateControls();
@@ -2082,7 +1849,7 @@ export function mountLibraryBrowser(
       abortTransport: false,
     });
     const image = document.createElement("img");
-    image.alt = `Photo ${currentIndex + 1} of ${total}`;
+    image.alt = `Photo ${currentIndex + 1} of ${sourceGrid.total}`;
     image.draggable = false;
     image.fetchPriority = "high";
     image.decoding = "async";
@@ -2149,13 +1916,13 @@ export function mountLibraryBrowser(
         ),
     );
     const removing =
-      Boolean(photo && sourceSetId) &&
+      Boolean(photo && sourceGrid.albumId) &&
       application.isAlbumMutationAdmitted(
-        membershipKey("remove", sourceSetId!, photo!.id),
+        membershipKey("remove", sourceGrid.albumId!, photo!.id),
       );
     const inOpenAlbum =
-      sourceKind === "album" &&
-      Boolean(sourceSetId) &&
+      sourceGrid.kind === "album" &&
+      Boolean(sourceGrid.albumId) &&
       Boolean(photo) &&
       !removedFromCurrentAlbum.has(photo!.id);
     albumSelect.disabled = !application.albums.length;
@@ -2190,7 +1957,7 @@ export function mountLibraryBrowser(
       );
       // Re-adding to the open Album clears the retained snapshot's removal
       // mark: the Photo is a member again and may be removed once more.
-      if (added && albumId === sourceSetId) {
+      if (added && albumId === sourceGrid.albumId) {
         removedFromCurrentAlbum.delete(photoId);
       }
       // Admitted persistence is never aborted by a source change; the
@@ -2209,17 +1976,17 @@ export function mountLibraryBrowser(
     const photo = currentPhoto();
     if (
       !photo ||
-      sourceKind !== "album" ||
-      !sourceSetId ||
+      sourceGrid.kind !== "album" ||
+      !sourceGrid.albumId ||
       removedFromCurrentAlbum.has(photo.id)
     )
       return;
-    const albumId = sourceSetId;
+    const albumId = sourceGrid.albumId;
     const photoId = photo.id;
     const key = membershipKey("remove", albumId, photoId);
     if (application.isAlbumMutationAdmitted(key)) return;
     const generation = requestGeneration;
-    const snapshotGeneration = sourceGeneration;
+    const snapshotGeneration = sourceGrid.generation;
     void (async () => {
       removeFromAlbum.disabled = true;
       const { ok: removed, announce } = await mutateAlbum(
@@ -2230,7 +1997,7 @@ export function mountLibraryBrowser(
         generation,
         key,
       );
-      if (removed && snapshotGeneration === sourceGeneration) {
+      if (removed && snapshotGeneration === sourceGrid.generation) {
         // The member is gone from the Album; within this open snapshot it
         // must not be removable again. A removal settling after the source
         // changed must not mark the Photo in a different Album's snapshot.
@@ -2252,7 +2019,7 @@ export function mountLibraryBrowser(
 
   const renderPhotoShell = (generation = requestGeneration): boolean => {
     const photo = currentPhoto();
-    photoTitle.textContent = sourceSetName;
+    photoTitle.textContent = sourceGrid.name;
     renderMembershipControls();
     renderPhotoFacts();
     source.textContent = photo?.preview.source
@@ -2282,6 +2049,8 @@ export function mountLibraryBrowser(
     if (generation !== requestGeneration || signal.aborted) return false;
     const photo = currentPhoto();
     if (!photo) return false;
+    const factAuthority = sourceGrid.authority;
+    const photoIndex = currentIndex;
     const capturedStatus = photoStatusOwner;
     let result: PreviewResponse;
     try {
@@ -2342,19 +2111,16 @@ export function mountLibraryBrowser(
     if (!result.stale) {
       const latest = currentPhoto();
       if (latest && latest.id === photo.id) {
-        loaded.set(currentIndex, {
-          ...latest,
-          preview: {
-            ...latest.preview,
-            state: "ready",
-            ...(result.source ? { source: result.source } : {}),
-            ...(result.width !== undefined ? { width: result.width } : {}),
-            ...(result.height !== undefined ? { height: result.height } : {}),
-            ...(result.limitedDetail !== undefined
-              ? { limitedDetail: result.limitedDetail }
-              : {}),
-            url: result.url,
-          },
+        sourceGrid.setPhotoPreview(factAuthority, photoIndex, photo.id, {
+          ...latest.preview,
+          state: "ready",
+          ...(result.source ? { source: result.source } : {}),
+          ...(result.width !== undefined ? { width: result.width } : {}),
+          ...(result.height !== undefined ? { height: result.height } : {}),
+          ...(result.limitedDetail !== undefined
+            ? { limitedDetail: result.limitedDetail }
+            : {}),
+          url: result.url,
         });
       }
     }
@@ -2369,12 +2135,20 @@ export function mountLibraryBrowser(
     signal: AbortSignal,
   ) => {
     if (generation !== requestGeneration) return;
-    if (index < 0 || index >= total) return;
-    let photo = loaded.get(index);
+    if (index < 0 || index >= sourceGrid.total) return;
+    let photo = sourceGrid.photoAt(index);
     if (!photo) {
-      await loadWindow(index, sourceGeneration, true, signal);
+      await loadWindow(
+        index,
+        {
+          kind: "photo",
+          authority: photoWindowAuthority,
+        },
+        true,
+        "low",
+      );
       if (generation !== requestGeneration || signal.aborted) return;
-      photo = loaded.get(index);
+      photo = sourceGrid.photoAt(index);
     }
     if (!photo || !photo.available) return;
     try {
@@ -2403,26 +2177,29 @@ export function mountLibraryBrowser(
     closeSources(false);
     renderGrid();
     cancelScheduledGridRender();
+    const gridAuthority = sourceGrid.authority;
     scheduleGridRender(() => {
+      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
+      if (gridPosition === undefined) return;
       gridViewport.scrollTop =
-        Math.floor(currentIndex / columns()) * GRID_CELL_HEIGHT;
+        Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderGrid();
     });
     updateControls();
   };
   const persistPosition = (): Promise<boolean> => {
-    if (sourceKind !== "album" || !sourceSetId || !currentPhoto())
+    if (sourceGrid.kind !== "album" || !sourceGrid.albumId || !currentPhoto())
       return Promise.resolve(true);
-    const albumId = sourceSetId;
+    const albumId = sourceGrid.albumId;
     const photoId = currentPhoto()!.id;
-    const generation = sourceGeneration;
+    const generation = sourceGrid.generation;
     const photoGeneration = requestGeneration;
     const stillCurrent = () =>
       applicationAlive &&
-      generation === sourceGeneration &&
+      generation === sourceGrid.generation &&
       photoGeneration === requestGeneration &&
-      sourceKind === "album" &&
-      sourceSetId === albumId &&
+      sourceGrid.kind === "album" &&
+      sourceGrid.albumId === albumId &&
       currentPhoto()?.id === photoId;
     const task = progressQueue.then(async () => {
       if (!stillCurrent()) return false;
@@ -2455,7 +2232,8 @@ export function mountLibraryBrowser(
     return task;
   };
   const moveTo = async (target: number) => {
-    if (busy || openingPhoto || target < 0 || target >= total) return;
+    if (busy || openingPhoto || target < 0 || target >= sourceGrid.total)
+      return;
     await openPhoto(target);
   };
   const mutate = async (
@@ -2465,10 +2243,11 @@ export function mountLibraryBrowser(
   ) => {
     const photo = currentPhoto();
     if (!photo || !connected || busy) return;
-    const generation = sourceGeneration;
+    const generation = sourceGrid.generation;
+    const sourceAuthority = sourceGrid.authority;
     const photoGeneration = requestGeneration;
     const photoIndex = currentIndex;
-    const albumId = sourceSetId;
+    const albumId = sourceGrid.albumId;
     const prior = undo;
     undo = undefined;
     busy = true;
@@ -2485,7 +2264,7 @@ export function mountLibraryBrowser(
         }),
       });
       if (!response.ok) {
-        if (generation !== sourceGeneration) return;
+        if (generation !== sourceGrid.generation) return;
         undo = prior;
         status.textContent =
           response.status === 409
@@ -2501,20 +2280,28 @@ export function mountLibraryBrowser(
       }
       const result = (await response.json()) as MutationResponse;
       if (
-        generation !== sourceGeneration ||
-        loaded.get(photoIndex)?.id !== photo.id
+        generation !== sourceGrid.generation ||
+        sourceGrid.photoAt(photoIndex)?.id !== photo.id
       )
         return;
-      const updated = {
-        ...photo,
-        ...(field === "selectionState"
-          ? { selectionState: value as SelectionState }
-          : { rating: value as number }),
-      };
-      loaded.set(photoIndex, updated);
+      const patched =
+        field === "selectionState"
+          ? sourceGrid.setPhotoSelection(
+              sourceAuthority,
+              photoIndex,
+              photo.id,
+              value as SelectionState,
+            )
+          : sourceGrid.setPhotoRating(
+              sourceAuthority,
+              photoIndex,
+              photo.id,
+              value as number,
+            );
+      if (!patched) return;
       undo = {
         ...result.undo,
-        advanced: advance && photoIndex < total - 1,
+        advanced: advance && photoIndex < sourceGrid.total - 1,
         snapshotIndex: photoIndex,
       };
       status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
@@ -2524,7 +2311,7 @@ export function mountLibraryBrowser(
       } else renderPhotoFacts();
     } catch {
       if (
-        generation !== sourceGeneration ||
+        generation !== sourceGrid.generation ||
         photoGeneration !== requestGeneration ||
         currentPhoto()?.id !== photo.id
       )
@@ -2534,7 +2321,7 @@ export function mountLibraryBrowser(
         "Connection lost before the change was confirmed. Retry to refresh.";
       failPhotoRecovery(photoGeneration, "photo-write");
     } finally {
-      if (generation === sourceGeneration) {
+      if (generation === sourceGrid.generation) {
         busy = false;
         updateControls();
       }
@@ -2543,31 +2330,34 @@ export function mountLibraryBrowser(
   const performUndo = async () => {
     const action = undo;
     if (!action || !connected || busy) return;
-    const generation = sourceGeneration;
+    const generation = sourceGrid.generation;
+    const sourceAuthority = sourceGrid.authority;
     const photoGeneration = requestGeneration;
-    const albumId = sourceSetId;
+    const albumId = sourceGrid.albumId;
     const affectedIndex = action.snapshotIndex;
     busy = true;
     updateControls();
     try {
-      if (!loaded.has(affectedIndex)) {
+      if (!sourceGrid.photoAt(affectedIndex)) {
         status.textContent = "Loading Photo for Undo…";
         const windowReady = await loadWindow(
           affectedIndex,
-          generation,
+          {
+            kind: "photo",
+            authority: photoWindowAuthority,
+          },
           true,
-          photoSignal,
           "high",
         );
         if (!windowReady) return;
       }
       if (
-        generation !== sourceGeneration ||
+        generation !== sourceGrid.generation ||
         photoGeneration !== requestGeneration ||
         undo !== action
       )
         return;
-      const photo = loaded.get(affectedIndex);
+      const photo = sourceGrid.photoAt(affectedIndex);
       if (!photo || photo.id !== action.photoId) return;
       undo = undefined;
       const response = await fetcher(`/api/photos/${action.photoId}/state`, {
@@ -2582,7 +2372,7 @@ export function mountLibraryBrowser(
       });
       if (!response.ok) {
         if (
-          generation !== sourceGeneration ||
+          generation !== sourceGrid.generation ||
           photoGeneration !== requestGeneration
         )
           return;
@@ -2597,17 +2387,29 @@ export function mountLibraryBrowser(
         return;
       }
       if (
-        generation !== sourceGeneration ||
+        generation !== sourceGrid.generation ||
         photoGeneration !== requestGeneration
       )
         return;
-      const updated = {
-        ...photo,
-        ...(action.field === "selectionState"
-          ? { selectionState: action.priorValue as SelectionState }
-          : { rating: action.priorValue as number }),
-      };
-      loaded.set(affectedIndex, updated);
+      const patched =
+        action.field === "selectionState"
+          ? sourceGrid.setPhotoSelection(
+              sourceAuthority,
+              affectedIndex,
+              action.photoId,
+              action.priorValue as SelectionState,
+            )
+          : sourceGrid.setPhotoRating(
+              sourceAuthority,
+              affectedIndex,
+              action.photoId,
+              action.priorValue as number,
+            );
+      if (
+        !patched ||
+        !sourceGrid.moveGridPosition(sourceAuthority, affectedIndex)
+      )
+        return;
       trimLoaded(affectedIndex);
       currentIndex = affectedIndex;
       currentPhotoMode = true;
@@ -2630,7 +2432,7 @@ export function mountLibraryBrowser(
       updateControls();
       await showPreview(previewGeneration, signal, photoTransition);
       if (
-        generation !== sourceGeneration ||
+        generation !== sourceGrid.generation ||
         previewGeneration !== requestGeneration ||
         currentPhoto()?.id !== action.photoId
       )
@@ -2638,7 +2440,7 @@ export function mountLibraryBrowser(
       const persisted = await persistPosition();
       if (
         persisted &&
-        generation === sourceGeneration &&
+        generation === sourceGrid.generation &&
         previewGeneration === requestGeneration &&
         currentPhoto()?.id === action.photoId
       ) {
@@ -2648,14 +2450,14 @@ export function mountLibraryBrowser(
       }
     } catch {
       if (
-        generation === sourceGeneration &&
+        generation === sourceGrid.generation &&
         photoGeneration === requestGeneration
       ) {
         status.textContent = "Connection lost before Undo was confirmed.";
         failPhotoRecovery(photoGeneration, "undo");
       }
     } finally {
-      if (generation === sourceGeneration) {
+      if (generation === sourceGrid.generation) {
         busy = false;
         updateControls();
       }
@@ -2776,11 +2578,10 @@ export function mountLibraryBrowser(
 
   const scheduleGridRender = (render = renderGrid) => {
     if (gridRenderFrame !== undefined) return;
-    const generation = sourceGeneration;
+    const authority = sourceGrid.authority;
     gridRenderFrame = requestAnimationFrame(() => {
       gridRenderFrame = undefined;
-      if (generation !== sourceGeneration) return;
-      render();
+      if (sourceGrid.isCurrent(authority)) render();
     });
   };
   gridViewport.addEventListener("scroll", () => {
@@ -2791,7 +2592,10 @@ export function mountLibraryBrowser(
     );
   });
   const onResize = () => {
+    const gridAuthority = sourceGrid.authority;
     requestAnimationFrame(() => {
+      const gridPosition = sourceGrid.readGridPosition(gridAuthority);
+      if (gridPosition === undefined) return;
       if (gridView.hidden) return;
       const nextColumns = columns();
       const nextViewportHeight = effectiveViewportHeight();
@@ -2803,7 +2607,7 @@ export function mountLibraryBrowser(
       if (nextColumns !== renderedColumns) {
         syncGridHeight(nextColumns);
         gridViewport.scrollTop =
-          Math.floor(currentIndex / nextColumns) * GRID_CELL_HEIGHT;
+          Math.floor(gridPosition / nextColumns) * GRID_CELL_HEIGHT;
       }
       renderGrid();
     });
@@ -2814,7 +2618,7 @@ export function mountLibraryBrowser(
     void (async () => {
       // A Folder reopen needs the File Location binding: never send a
       // publicationless browse (it can only fail as expired/invalid).
-      if (sourceKind === "folder" && !fileLocations.publication) {
+      if (sourceGrid.kind === "folder" && !fileLocations.publication) {
         await awaitRootBinding();
         if (!fileLocations.publication) {
           gridStatus.textContent =
@@ -2822,26 +2626,85 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSource(
-        sourceKind,
-        sourceKind === "album"
-          ? application.albums.find((set) => set.id === sourceSetId)
-          : undefined,
-        undefined,
-        sourceKind === "folder" ? sourceFolder : undefined,
-      );
+      if (sourceGrid.kind === "album") {
+        const album = application.albums.find(
+          (set) => set.id === sourceGrid.albumId,
+        );
+        if (album) await openSource("album", album);
+        return;
+      }
+      await openSourceDescriptor(sourceGrid.source);
     })();
   });
+  const currentSourceRangeRetries = (
+    alignedStart?: number,
+  ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> => {
+    const retries: Array<
+      Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
+    > = [];
+    for (const failure of browseRangeFailures.values()) {
+      if (
+        failure.ownerScope !== "source" ||
+        !failure.retry ||
+        !recoveryGate.isActive(failure.claim) ||
+        !sourceGrid.isCurrent(failure.retry.sourceAuthority) ||
+        (alignedStart !== undefined && failure.retry.start !== alignedStart)
+      )
+        continue;
+      retries.push({ claim: failure.claim, retry: failure.retry });
+    }
+    return retries;
+  };
+  const retryCurrentSourceRanges = async (
+    rangeRetries: ReadonlyArray<
+      Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>
+    >,
+  ): Promise<boolean> => {
+    let recovered = true;
+    for (const { claim, retry: range } of rangeRetries) {
+      if (
+        !sourceGrid.isCurrent(range.sourceAuthority) ||
+        !recoveryGate.isActive(claim)
+      ) {
+        recovered = false;
+        continue;
+      }
+      const loaded = await loadWindow(
+        range.start,
+        {
+          kind: range.operationKind,
+          authority: range.sourceAuthority,
+        },
+        range.quiet,
+        range.priority,
+      );
+      if (!loaded || recoveryGate.isActive(claim)) recovered = false;
+    }
+    return recovered;
+  };
   retry.addEventListener("click", () => {
-    if (!retrySourceRequired) {
+    const rangeRetries = currentSourceRangeRetries();
+    if (rangeRetries.length > 0) {
+      const retryAuthority = sourceGrid.authority;
+      void (async () => {
+        busy = true;
+        updateControls();
+        try {
+          await retryCurrentSourceRanges(rangeRetries);
+        } finally {
+          if (sourceGrid.isCurrent(retryAuthority)) {
+            busy = false;
+            updateControls();
+          }
+        }
+      })();
+      return;
+    }
+    if (!sourceGrid.retryRequired) {
       void application.loadOverview();
       return;
     }
-    const remembered = lastSource ?? {
-      kind: "library" as const,
-      set: undefined,
-      folder: undefined,
-    };
+    const remembered = sourceGrid.lastSource ?? ({ kind: "library" } as const);
     void (async () => {
       if (remembered.kind === "folder") {
         resetFileLocations();
@@ -2852,20 +2715,15 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSource(
-        remembered.kind,
-        remembered.set,
-        undefined,
-        remembered.folder,
-      );
+      await openSourceDescriptor(remembered);
     })();
   });
   retryPhoto.addEventListener("click", () => {
     void (async () => {
       busy = true;
       status.textContent = "Reconnecting…";
-      const sourceOwner = sourceGeneration;
-      const photoId = currentPhoto()?.id;
+      const sourceOwner = sourceGrid.authority;
+      const expectedPhotoId = currentPhoto()?.id ?? lastCurrentPhotoId;
       const generation = ++requestGeneration;
       const photoTransition = recoveryGate.beginTransition(
         "photo",
@@ -2877,20 +2735,45 @@ export function mountLibraryBrowser(
       cancelPendingImageLoads(stage, true);
       updateControls();
       try {
-        const start = alignedStart(currentIndex);
-        const end = Math.min(total, start + WINDOW_SIZE);
-        for (let index = start; index < end; index += 1) loaded.delete(index);
+        const start = sourceGrid.alignedStart(currentIndex);
+        const sourceRangeRetries = currentSourceRangeRetries(start);
+        const sourceRangeRecovered = sourceRangeRetries.length > 0;
+        if (
+          sourceRangeRecovered &&
+          !(await retryCurrentSourceRanges(sourceRangeRetries))
+        )
+          return;
+        if (
+          !sourceGrid.isCurrent(sourceOwner) ||
+          generation !== requestGeneration
+        )
+          return;
+        const recoveredPhoto = currentPhoto();
+        if (
+          !recoveredPhoto ||
+          !expectedPhotoId ||
+          recoveredPhoto.id !== expectedPhotoId
+        )
+          return;
+        const photoId = recoveredPhoto.id;
+        lastCurrentPhotoId = photoId;
+        // An exact Source retry just refreshed these facts. Other Photo
+        // failures still invalidate and reload the current window before
+        // trusting Preview or saved-position recovery.
+        if (!sourceRangeRecovered) sourceGrid.invalidateWindow(currentIndex);
         const windowReady = await loadWindow(
           start,
-          sourceOwner,
+          {
+            kind: "photo",
+            authority: photoWindowAuthority,
+          },
           true,
-          signal,
           "high",
           photoTransition,
         );
         if (
           !windowReady ||
-          sourceOwner !== sourceGeneration ||
+          !sourceGrid.isCurrent(sourceOwner) ||
           generation !== requestGeneration ||
           currentPhoto()?.id !== photoId
         )
@@ -2904,7 +2787,7 @@ export function mountLibraryBrowser(
         if (
           refreshed &&
           persisted &&
-          sourceOwner === sourceGeneration &&
+          sourceGrid.isCurrent(sourceOwner) &&
           generation === requestGeneration
         ) {
           recoveryGate.succeedTransition(photoTransition);
@@ -2913,7 +2796,7 @@ export function mountLibraryBrowser(
         }
       } finally {
         if (
-          sourceOwner === sourceGeneration &&
+          sourceGrid.isCurrent(sourceOwner) &&
           generation === requestGeneration
         ) {
           busy = false;
@@ -2968,98 +2851,18 @@ export function mountLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
-    sourceGeneration += 1;
     requestGeneration += 1;
-    const browseToken = token;
-    token = "";
     cancelScheduledGridRender();
-    cancelPendingImageLoads(gridLayer, true);
     cancelPendingImageLoads(stage, true);
     application.dispose();
     fileLocations.dispose();
-    sourceTasks.halt();
-    gridTasks.halt();
+    sourceGrid.dispose();
     photoTasks.halt();
     recoveryGate.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
     compactSources.removeEventListener("change", onSourceViewportChange);
-    if (browseToken) void closeBrowse(browseToken);
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function validOptional(
-  value: unknown,
-  predicate: (candidate: unknown) => boolean,
-): boolean {
-  return value === undefined || predicate(value);
-}
-
-function validPhotoSummary(value: unknown): value is PhotoSummary {
-  if (!isRecord(value) || !isRecord(value.preview)) return false;
-  const preview = value.preview;
-  const previewState = preview.state;
-  if (
-    previewState !== "inspection-pending" &&
-    previewState !== "ready" &&
-    previewState !== "failed" &&
-    previewState !== "unavailable"
-  )
-    return false;
-  if (
-    !Array.isArray(value.originals) ||
-    !value.originals.every(
-      (original) =>
-        isRecord(original) &&
-        (original.kind === "raw" || original.kind === "jpeg") &&
-        typeof original.available === "boolean",
-    )
-  )
-    return false;
-  return (
-    typeof value.id === "string" &&
-    value.id.length > 0 &&
-    typeof value.available === "boolean" &&
-    typeof value.ambiguous === "boolean" &&
-    (value.selectionState === "undecided" ||
-      value.selectionState === "selected" ||
-      value.selectionState === "rejected") &&
-    Number.isInteger(value.rating) &&
-    Number(value.rating) >= 0 &&
-    Number(value.rating) <= 5 &&
-    validOptional(
-      preview.source,
-      (source) => source === "matching-jpeg" || source === "embedded-raw-jpeg",
-    ) &&
-    validOptional(preview.width, Number.isInteger) &&
-    validOptional(preview.height, Number.isInteger) &&
-    validOptional(preview.limitedDetail, (item) => typeof item === "boolean") &&
-    validOptional(preview.url, (item) => typeof item === "string") &&
-    validOptional(preview.thumbnailUrl, (item) => typeof item === "string") &&
-    validOptional(preview.message, (item) => typeof item === "string")
-  );
-}
-
-function decodeBrowseWindow(
-  value: unknown,
-  expectedStart: number,
-  expectedTotal: number,
-): BrowseWindowResponse | undefined {
-  if (
-    !isRecord(value) ||
-    value.start !== expectedStart ||
-    value.total !== expectedTotal ||
-    !Array.isArray(value.photos) ||
-    value.photos.length > WINDOW_SIZE ||
-    expectedStart + value.photos.length > expectedTotal ||
-    !value.photos.every(validPhotoSummary)
-  )
-    return undefined;
-  return value as BrowseWindowResponse;
 }
 
 function required<T extends Element>(root: ParentNode, selector: string): T {
