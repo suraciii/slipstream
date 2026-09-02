@@ -1,6 +1,5 @@
 import {
   RecoveryGate,
-  TaskScope,
   type RecoveryClaim,
   type RecoveryTransition,
 } from "./model/async-ownership.js";
@@ -8,10 +7,8 @@ import type {
   AlbumSummary,
   FolderChild,
   PhotoSummary,
-  PreviewResponse,
   PreviewSource,
   SelectionState,
-  UndoDescription,
 } from "./api/contracts.js";
 import {
   createFileLocationOwner,
@@ -30,7 +27,6 @@ import {
 } from "./model/application-owner.js";
 import {
   createSourceGridOwner,
-  type PhotoWindowAuthority,
   type SourceAuthority,
   type SourceGridSource,
   type SourceWindowOperation,
@@ -41,11 +37,9 @@ import {
   type AlbumActionContext,
   type AlbumFormAuthority,
 } from "./model/album-action-owner.js";
+import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import "./ui/library-browser.css";
 
-type SessionUndo = UndoDescription &
-  Readonly<{ advanced: boolean; snapshotIndex: number }>;
-type MutationResponse = Readonly<{ undo: UndoDescription }>;
 type GridRangeRetry = Readonly<{
   sourceAuthority: SourceAuthority;
   operationKind: "source" | "grid";
@@ -160,6 +154,45 @@ export function mountLibraryBrowser(
       statusElement.textContent = value;
     },
   };
+  const photoOwner = createPhotoOwner(
+    fetcher,
+    {
+      isSourceCurrent: (authority) => sourceGrid.isCurrent(authority),
+      renewPhotoWindow: (authority) =>
+        sourceGrid.isCurrent(authority)
+          ? sourceGrid.renewPhotoWindow()
+          : undefined,
+      photoAt: (authority, index) =>
+        sourceGrid.isCurrent(authority) ? sourceGrid.photoAt(index) : undefined,
+      movePosition: (authority, index) =>
+        sourceGrid.moveGridPosition(authority, index),
+      patchPreview: (authority, index, photoId, preview) =>
+        sourceGrid.setPhotoPreview(authority, index, photoId, preview),
+      patchSelection: (authority, index, photoId, selectionState) =>
+        sourceGrid.setPhotoSelection(authority, index, photoId, selectionState),
+      patchRating: (authority, index, photoId, rating) =>
+        sourceGrid.setPhotoRating(authority, index, photoId, rating),
+      trimFacts: (authority, anchor) => {
+        if (sourceGrid.isCurrent(authority)) sourceGrid.trimFacts(anchor);
+      },
+    },
+    {
+      emit: (event) => {
+        if (
+          !photoOwner.isCurrent(event.authority) ||
+          event.surface !== photoStatusOwner
+        )
+          return;
+        status.textContent =
+          "Preview could not be loaded. You can continue browsing.";
+      },
+    },
+  );
+  photoOwner.bindSource({
+    sourceAuthority: sourceGrid.authority,
+    total: sourceGrid.total,
+    index: 0,
+  });
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
   const previous = required<HTMLButtonElement>(root, "[data-previous]");
@@ -343,8 +376,6 @@ export function mountLibraryBrowser(
     emit: handleApplicationEvent,
   });
   const albumActions = createAlbumActionOwner(fetcher);
-  let currentIndex = 0;
-  let lastCurrentPhotoId: string | undefined;
   // In-progress Album management form: create, rename, or a two-step delete
   // confirmation. Only one form exists at a time and it lives in the Albums
   // section of the source list. The current model object is the operation's
@@ -397,26 +428,17 @@ export function mountLibraryBrowser(
 
   let connected = false;
   let connectionEstablished = false;
-  let busy = false;
-  let openingPhoto = false;
-  let currentPhotoMode = false;
+  let pageBusy = false;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let albumRecovery: AlbumRecoveryRecord | undefined;
-  let undo: SessionUndo | undefined;
-  let requestGeneration = 0;
-  let photoTasks = new TaskScope();
-  let photoWindowAuthority: PhotoWindowAuthority =
-    sourceGrid.renewPhotoWindow();
-  let photoSignal = photoTasks.beginLatest("lifetime", {
-    abortTransport: true,
-  }).signal!;
-  const renewPhotoTasks = () => {
-    photoTasks.halt();
-    photoTasks = new TaskScope();
-    photoWindowAuthority = sourceGrid.renewPhotoWindow();
-    photoSignal = photoTasks.beginLatest("lifetime", {
-      abortTransport: true,
-    }).signal!;
+  const photoRecoveryKeys = new WeakMap<object, string>();
+  let nextPhotoRecoveryKey = 0;
+  const photoRecoveryKey = (authority: PhotoAuthority): string => {
+    const known = photoRecoveryKeys.get(authority);
+    if (known) return known;
+    const key = String(++nextPhotoRecoveryKey);
+    photoRecoveryKeys.set(authority, key);
+    return key;
   };
   let progressQueue: Promise<void> = Promise.resolve();
   let renderedColumns = 0;
@@ -434,12 +456,12 @@ export function mountLibraryBrowser(
         lastY: number;
         startedAt: number;
         vertical: boolean;
-        generation: number;
+        authority: PhotoAuthority;
         photoId: string;
       }
     | undefined;
 
-  const currentPhoto = () => sourceGrid.photoAt(currentIndex);
+  const currentPhoto = () => photoOwner.current;
   const currentAlbumRecovery = (): AlbumRecoveryRecord | undefined => {
     if (
       albumRecovery &&
@@ -459,8 +481,8 @@ export function mountLibraryBrowser(
     if (!connected) clearPointer();
     connection.textContent = connected ? "Connected" : "Disconnected";
     connection.classList.toggle("offline", !connected);
-    retry.hidden = connected || currentPhotoMode;
-    retryPhoto.hidden = connected || !currentPhotoMode;
+    retry.hidden = connected || photoOwner.active;
+    retryPhoto.hidden = connected || !photoOwner.active;
     if (message) status.textContent = message;
     updateControls();
   };
@@ -472,7 +494,7 @@ export function mountLibraryBrowser(
   };
   const failBrowseRange = (
     ownerScope: "source" | "photo",
-    generation: number,
+    generation: string,
     start: number,
     transportLost: boolean,
     retryRange?: GridRangeRetry,
@@ -485,7 +507,7 @@ export function mountLibraryBrowser(
       return;
     }
     if (active) browseRangeFailures.delete(key);
-    const owner = { scope: ownerScope, generation: String(generation) };
+    const owner = { scope: ownerScope, generation };
     let claim: RecoveryClaim | undefined;
     if (transition) {
       try {
@@ -518,7 +540,7 @@ export function mountLibraryBrowser(
   };
   const recoverBrowseRange = (
     ownerScope: "source" | "photo",
-    generation: number,
+    generation: string,
     start: number,
   ): void => {
     const key = `${ownerScope}:${generation}:${start}`;
@@ -528,15 +550,17 @@ export function mountLibraryBrowser(
     if (recoveryGate.recover(failure.claim)) setConnected(true);
   };
   const failPhotoRecovery = (
-    generation: number,
+    authority: PhotoAuthority,
     kind: string,
     transition?: RecoveryTransition,
   ): void => {
-    const owner = { scope: "photo" as const, generation: String(generation) };
+    if (!photoOwner.isCurrent(authority)) return;
+    const generation = photoRecoveryKey(authority);
+    const recoveryOwner = { scope: "photo" as const, generation };
     if (transition) {
       try {
         const replacement = recoveryGate.issue(kind, String(generation), {
-          owner,
+          owner: recoveryOwner,
           transition,
         });
         if (
@@ -552,7 +576,9 @@ export function mountLibraryBrowser(
         /* the transition was already superseded or settled */
       }
     }
-    const claim = recoveryGate.issue(kind, String(generation), { owner });
+    const claim = recoveryGate.issue(kind, String(generation), {
+      owner: recoveryOwner,
+    });
     if (!recoveryGate.fail(claim, { transportLost: true }))
       recoveryGate.discard(claim);
     syncConnection();
@@ -560,7 +586,8 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
-    const enabled = Boolean(photo) && connected && !busy;
+    const interactionBusy = pageBusy || photoOwner.busy;
+    const enabled = Boolean(photo) && connected && !interactionBusy;
     for (const button of [
       select,
       reject,
@@ -568,15 +595,20 @@ export function mountLibraryBrowser(
     ])
       button.disabled = !enabled;
     clear.disabled = !enabled || photo?.selectionState === "undecided";
-    back.disabled = busy;
-    refresh.disabled = busy;
-    previous.disabled = busy || openingPhoto || currentIndex <= 0;
+    back.disabled = interactionBusy;
+    refresh.disabled = interactionBusy;
+    previous.disabled =
+      interactionBusy || photoOwner.opening || photoOwner.currentIndex <= 0;
     next.disabled =
-      busy ||
-      openingPhoto ||
+      interactionBusy ||
+      photoOwner.opening ||
       sourceGrid.total === 0 ||
-      currentIndex >= sourceGrid.total - 1;
-    undoButton.disabled = !connected || busy || openingPhoto || !undo;
+      photoOwner.currentIndex >= sourceGrid.total - 1;
+    undoButton.disabled =
+      !connected ||
+      interactionBusy ||
+      photoOwner.opening ||
+      !photoOwner.canUndo;
     detail.disabled = !stage.querySelector("img");
   };
   const resetTransform = () => {
@@ -603,7 +635,7 @@ export function mountLibraryBrowser(
   const mutateAlbum = (
     start: (context: AlbumActionContext) => AlbumActionAdmission | undefined,
     surface: "photo" | "summary",
-    photoGeneration = requestGeneration,
+    photoOwnerAuthority = photoOwner.authority,
     form?: AlbumFormAuthority,
   ): Promise<{
     admitted: boolean;
@@ -619,8 +651,8 @@ export function mountLibraryBrowser(
     const sourceOwner = sourceGrid.authority;
     const ownsPhotoSurface = () =>
       surface === "photo" &&
-      photoGeneration === requestGeneration &&
-      currentPhotoMode &&
+      photoOwner.isCurrent(photoOwnerAuthority) &&
+      photoOwner.active &&
       capturedPhotoStatus === photoStatusOwner;
     const action = start({
       sourceAuthority: sourceOwner,
@@ -1187,7 +1219,7 @@ export function mountLibraryBrowser(
         const { ok: created } = await mutateAlbum(
           (context) => albumActions.create(name, context),
           "summary",
-          requestGeneration,
+          photoOwner.authority,
           model.authority,
         );
         if (albumActions.isFormCurrent(model.authority)) {
@@ -1247,7 +1279,7 @@ export function mountLibraryBrowser(
           const { ok: renamed } = await mutateAlbum(
             (context) => albumActions.rename(set.id, name, context),
             "summary",
-            requestGeneration,
+            photoOwner.authority,
             model.authority,
           );
           if (albumActions.isFormCurrent(model.authority)) {
@@ -1285,7 +1317,7 @@ export function mountLibraryBrowser(
           const { ok: deleted } = await mutateAlbum(
             (context) => albumActions.delete(set.id, context),
             "summary",
-            requestGeneration,
+            photoOwner.authority,
             model.authority,
           );
           if (albumActions.isFormCurrent(model.authority))
@@ -1363,18 +1395,6 @@ export function mountLibraryBrowser(
     cancelAnimationFrame(gridRenderFrame);
     gridRenderFrame = undefined;
   };
-  const cancelPendingImageLoads = (
-    container: ParentNode,
-    removeCompleted = false,
-  ) => {
-    for (const image of Array.from(
-      container.querySelectorAll<HTMLImageElement>("img"),
-    )) {
-      if (!removeCompleted && image.complete) continue;
-      image.onerror = null;
-      image.removeAttribute("src");
-    }
-  };
 
   const openSource = async (
     kind: "library" | "album" | "folder",
@@ -1407,30 +1427,32 @@ export function mountLibraryBrowser(
         ? { ...requested, publication: fileLocations.publication }
         : requested;
     const sourceDrawerWasOpen = browser.classList.contains("sources-open");
-    busy = true;
+    pageBusy = true;
     cancelScheduledGridRender();
-    requestGeneration += 1;
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
+    const photoAuthority = photoOwner.bindSource({
+      sourceAuthority: authority,
+      total: sourceGrid.total,
+      index: 0,
+      ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
+      ...(preferredPhotoId ? { preferredPhotoId } : {}),
+    });
     const sourceTransition = recoveryGate.beginTransition(
       "source",
       String(generation),
     );
     const photoTransition = recoveryGate.beginTransition(
       "photo",
-      String(requestGeneration),
+      photoRecoveryKey(photoAuthority),
     );
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
-    openingPhoto = false;
     gridLayer.replaceChildren();
-    cancelPendingImageLoads(stage, true);
     stage.replaceChildren();
-    renewPhotoTasks();
-    currentPhotoMode = false;
     gridView.hidden = false;
     photoView.hidden = true;
     closeSources(false);
@@ -1439,8 +1461,6 @@ export function mountLibraryBrowser(
     removedFromCurrentAlbum.clear();
     gridTitle.textContent = sourceGrid.name;
     gridStatus.textContent = "Preparing Library order…";
-    undo = undefined;
-    lastCurrentPhotoId = preferredPhotoId;
     try {
       const opened = await pendingOpen;
       if (opened.kind === "detached") return;
@@ -1464,7 +1484,13 @@ export function mountLibraryBrowser(
       if (opened.kind === "failed") throw new Error("source open failed");
       const gridPosition = sourceGrid.readGridPosition(authority);
       if (gridPosition === undefined) return;
-      currentIndex = gridPosition;
+      photoOwner.updateSource({
+        sourceAuthority: authority,
+        total: sourceGrid.total,
+        index: gridPosition,
+        ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
+        ...(preferredPhotoId ? { preferredPhotoId } : {}),
+      });
       gridViewport.scrollTop =
         Math.floor(gridPosition / columns()) * GRID_CELL_HEIGHT;
       renderSources();
@@ -1497,7 +1523,7 @@ export function mountLibraryBrowser(
       syncConnection();
     } finally {
       if (sourceGrid.isCurrent(authority)) {
-        busy = false;
+        pageBusy = false;
         updateControls();
       }
     }
@@ -1515,27 +1541,23 @@ export function mountLibraryBrowser(
     expectedGeneration = sourceGrid.generation,
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
-    busy = true;
-    const resumePhoto = currentPhotoMode;
-    const photoGeneration = ++requestGeneration;
-    const photoTransition = resumePhoto
-      ? recoveryGate.beginTransition("photo", String(photoGeneration))
-      : undefined;
-    if (!photoTransition) {
-      const gridTransition = recoveryGate.beginTransition(
-        "photo",
-        String(photoGeneration),
-      );
-      recoveryGate.succeedTransition(gridTransition);
-    }
-    syncConnection();
-    renewPhotoTasks();
-    const currentPhotoSignal = photoSignal;
-    cancelPendingImageLoads(stage);
-    openingPhoto = false;
+    pageBusy = true;
+    const resumePhoto = photoOwner.active;
+    const resumeIndex = photoOwner.currentIndex;
+    const currentSourceAuthority = photoOwner.sourceAuthority;
+    if (currentSourceAuthority)
+      photoOwner.rebindSource({
+        sourceAuthority: currentSourceAuthority,
+        total: photoOwner.total,
+        index: resumeIndex,
+        ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
+        ...(photoOwner.lastCurrentPhotoId
+          ? { preferredPhotoId: photoOwner.lastCurrentPhotoId }
+          : {}),
+      });
     const anchorId =
       sourceGrid.photoAt(anchorIndex)?.id ??
-      lastCurrentPhotoId ??
+      photoOwner.lastCurrentPhotoId ??
       currentPhoto()?.id;
     cancelScheduledGridRender();
     sourceGrid.clearRenderedThumbnails();
@@ -1563,7 +1585,7 @@ export function mountLibraryBrowser(
         );
         recoveryGate.fail(claim, { transportLost: true });
         syncConnection();
-        busy = false;
+        pageBusy = false;
         updateControls();
         return;
       }
@@ -1581,6 +1603,18 @@ export function mountLibraryBrowser(
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
+    const photoAuthority = photoOwner.rebindSource({
+      sourceAuthority: authority,
+      total: sourceGrid.total,
+      index: resumeIndex,
+      ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
+      ...(anchorId ? { preferredPhotoId: anchorId } : {}),
+    });
+    const photoTransition = recoveryGate.beginTransition(
+      "photo",
+      photoRecoveryKey(photoAuthority),
+    );
+    if (!resumePhoto) recoveryGate.succeedTransition(photoTransition);
     const sourceTransition = recoveryGate.beginTransition(
       "source",
       String(generation),
@@ -1613,7 +1647,13 @@ export function mountLibraryBrowser(
       if (opened.kind === "failed") throw new Error("browse reopen failed");
       const gridPosition = sourceGrid.readGridPosition(authority);
       if (gridPosition === undefined) return;
-      currentIndex = gridPosition;
+      photoOwner.updateSource({
+        sourceAuthority: authority,
+        total: sourceGrid.total,
+        index: gridPosition,
+        ...(sourceGrid.albumId ? { albumId: sourceGrid.albumId } : {}),
+        ...(anchorId ? { preferredPhotoId: anchorId } : {}),
+      });
       const windowReady = await loadWindow(
         gridPosition,
         { kind: "source", authority },
@@ -1631,31 +1671,21 @@ export function mountLibraryBrowser(
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
       setConnected(true);
-      if (resumePhoto && photoGeneration === requestGeneration) {
-        // The reopen invalidated the pre-reopen SourceGrid window lifetime.
-        // Reissue only that opaque capability; the page-owned Preview signal
-        // remains the same Photo operation.
-        photoWindowAuthority = sourceGrid.renewPhotoWindow();
+      if (resumePhoto && photoOwner.isCurrent(photoAuthority)) {
         gridView.hidden = true;
         photoView.hidden = false;
         syncSourcePanel();
-        renderPhotoShell(photoGeneration);
-        void showPreview(
-          photoGeneration,
-          currentPhotoSignal,
-          photoTransition,
-        ).then(async (refreshed) => {
-          if (!refreshed || photoGeneration !== requestGeneration) return;
-          const persisted = await persistPosition();
-          if (
-            persisted &&
-            photoGeneration === requestGeneration &&
-            photoTransition
-          ) {
-            recoveryGate.succeedTransition(photoTransition);
-            setConnected(true);
-          }
-        });
+        renderPhotoShell(photoAuthority);
+        void showPreview(photoAuthority, photoTransition).then(
+          async (refreshed) => {
+            if (!refreshed || !photoOwner.isCurrent(photoAuthority)) return;
+            const persisted = await persistPosition(photoAuthority);
+            if (persisted && photoOwner.isCurrent(photoAuthority)) {
+              recoveryGate.succeedTransition(photoTransition);
+              setConnected(true);
+            }
+          },
+        );
       }
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
@@ -1673,7 +1703,7 @@ export function mountLibraryBrowser(
       syncConnection();
     } finally {
       if (sourceGrid.isCurrent(authority)) {
-        busy = false;
+        pageBusy = false;
         updateControls();
       }
     }
@@ -1687,15 +1717,18 @@ export function mountLibraryBrowser(
     quiet = false,
     priority: "high" | "low" = quiet ? "low" : "high",
     transition?: RecoveryTransition,
+    photoOwnerAuthority = photoOwner.authority,
   ): Promise<boolean> => {
     if (sourceGrid.total === 0) return true;
     const sourceAuthority =
       operation.kind === "photo" ? sourceGrid.authority : operation.authority;
-    const photoAuthority =
+    const windowAuthority =
       operation.kind === "photo" ? operation.authority : undefined;
     const ownerScope = operation.kind === "photo" ? "photo" : "source";
     const ownerGeneration =
-      operation.kind === "photo" ? requestGeneration : sourceGrid.generation;
+      operation.kind === "photo"
+        ? photoRecoveryKey(photoOwnerAuthority)
+        : String(sourceGrid.generation);
     const { range } = sourceGrid.describeWindow(index);
     if (!quiet)
       gridStatus.textContent = `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`;
@@ -1709,10 +1742,10 @@ export function mountLibraryBrowser(
         sourceGrid.isCurrent(sourceAuthority) &&
         (operation.kind === "photo"
           ? outcome.owner.scope === "photo" &&
-            outcome.owner.authority === photoAuthority &&
-            photoAuthority === photoWindowAuthority
+            outcome.owner.authority === windowAuthority &&
+            photoOwner.ownsWindow(photoOwnerAuthority, outcome.owner.authority)
           : outcome.owner.scope === "source" &&
-            outcome.owner.generation === ownerGeneration);
+            String(outcome.owner.generation) === ownerGeneration);
       if (!exactOwner) return false;
       if (outcome.kind === "detached") return false;
       if (outcome.kind === "expired") {
@@ -1762,7 +1795,6 @@ export function mountLibraryBrowser(
       updateControls();
     }
   };
-  const trimLoaded = (anchor: number) => sourceGrid.trimFacts(anchor);
   const syncGridHeight = (count: number) => {
     const height = `${Math.ceil(sourceGrid.total / count) * GRID_CELL_HEIGHT}px`;
     gridCanvas.style.height = height;
@@ -1846,25 +1878,15 @@ export function mountLibraryBrowser(
     }
   };
   const openPhoto = async (index: number) => {
-    if (busy || openingPhoto || index < 0 || index >= sourceGrid.total) return;
-    openingPhoto = true;
-    const generation = ++requestGeneration;
-    const sourceAuthority = sourceGrid.authority;
-    if (!sourceGrid.moveGridPosition(sourceAuthority, index)) {
-      openingPhoto = false;
-      return;
-    }
-    currentIndex = index;
+    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
+    const navigation = photoOwner.beginOpen(index);
+    if (!navigation) return;
     const photoTransition = recoveryGate.beginTransition(
       "photo",
-      String(generation),
+      photoRecoveryKey(navigation.authority),
     );
     syncConnection();
-    renewPhotoTasks();
-    const signal = photoSignal;
-    cancelPendingImageLoads(stage, true);
     sourceGrid.stopGridWork();
-    currentPhotoMode = true;
     gridView.hidden = true;
     photoView.hidden = false;
     syncSourcePanel();
@@ -1877,32 +1899,36 @@ export function mountLibraryBrowser(
           index,
           {
             kind: "photo",
-            authority: photoWindowAuthority,
+            authority: navigation.windowAuthority,
           },
           true,
           "high",
           photoTransition,
+          navigation.authority,
         );
     } finally {
       // Back to Grid or a superseding view may end this request while an
       // unloaded boundary window is still loading. Release the open gate so
       // the interface can never remain wedged by an abandoned load.
-      openingPhoto = false;
+      photoOwner.finishOpen(navigation.authority);
       updateControls();
     }
-    if (generation !== requestGeneration || !windowReady) return;
-    const current = sourceGrid.photoAt(index);
+    if (!photoOwner.isCurrent(navigation.authority) || !windowReady) return;
+    const current = currentPhoto();
     if (!current) return;
-    lastCurrentPhotoId = current.id;
-    const hasKnownPreview = renderPhotoShell(generation);
+    const hasKnownPreview = renderPhotoShell(navigation.authority);
     updateControls();
-    const previewRequest = showPreview(generation, signal, photoTransition);
+    const previewRequest = showPreview(navigation.authority, photoTransition);
     const previewReady = hasKnownPreview || (await previewRequest);
     // A superseded open must not persist or touch controls afterwards: the
     // newer navigation persists its own position.
-    if (generation !== requestGeneration) return;
-    const positionReady = await persistPosition();
-    if (previewReady && positionReady && generation === requestGeneration) {
+    if (!photoOwner.isCurrent(navigation.authority)) return;
+    const positionReady = await persistPosition(navigation.authority);
+    if (
+      previewReady &&
+      positionReady &&
+      photoOwner.isCurrent(navigation.authority)
+    ) {
       recoveryGate.succeedTransition(photoTransition);
       setConnected(true);
     }
@@ -1910,44 +1936,47 @@ export function mountLibraryBrowser(
   };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();
-    position.textContent = `${currentIndex + 1} / ${sourceGrid.total}`;
+    position.textContent = `${photoOwner.currentIndex + 1} / ${sourceGrid.total}`;
     selection.textContent = selectionLabel(photo?.selectionState);
     rating.textContent = `${photo?.rating ?? 0} ${(photo?.rating ?? 0) === 1 ? "star" : "stars"}`;
     updateControls();
   };
-  const renderReviewImage = (url: string, generation = requestGeneration) => {
-    cancelPendingImageLoads(stage, true);
+  const renderReviewImage = (url: string, authority = photoOwner.authority) => {
     const capturedStatus = photoStatusOwner;
-    const transfer = photoTasks.beginLatest("review-image", {
-      abortTransport: false,
-    });
     const image = document.createElement("img");
-    image.alt = `Photo ${currentIndex + 1} of ${sourceGrid.total}`;
+    image.alt = `Photo ${photoOwner.currentIndex + 1} of ${sourceGrid.total}`;
     image.draggable = false;
     image.fetchPriority = "high";
     image.decoding = "async";
-    const expectedUrl = new URL(url, window.location.href).href;
-    transfer.onCleanup(() => {
-      image.onload = null;
-      image.onerror = null;
-      if (!image.complete && image.src === expectedUrl)
-        image.removeAttribute("src");
-    });
-    image.onload = () => transfer.finish();
-    image.onerror = () => {
-      if (!transfer.isCurrent()) return;
-      if (
-        generation === requestGeneration &&
-        image.isConnected &&
-        capturedStatus === photoStatusOwner
-      )
-        status.textContent =
-          "Preview could not be loaded. You can continue browsing.";
-      image.removeAttribute("src");
-      transfer.finish();
-    };
-    image.src = url;
     stage.replaceChildren(image);
+    const resolvedUrl = new URL(url, window.location.href).href;
+    photoOwner.attachReviewImage(
+      authority,
+      {
+        get connected() {
+          return image.isConnected;
+        },
+        get source() {
+          return image.src;
+        },
+        setHandlers(onLoad, onError) {
+          image.onload = onLoad;
+          image.onerror = onError;
+        },
+        clearHandlers() {
+          image.onload = null;
+          image.onerror = null;
+        },
+        setSource(next) {
+          image.src = next;
+        },
+        clearSource() {
+          image.removeAttribute("src");
+        },
+      },
+      resolvedUrl,
+      capturedStatus,
+    );
   };
   // Album action ownership suppresses duplicate membership admissions. The
   // open snapshot separately remembers members removed until reopen.
@@ -2011,14 +2040,14 @@ export function mountLibraryBrowser(
     if (!photo || !albumId) return;
     const photoId = photo.id;
     if (albumActions.isMembershipAdmitted("add", albumId, photoId)) return;
-    const generation = requestGeneration;
+    const photoAuthority = photoOwner.authority;
     const snapshotAuthority = sourceGrid.authority;
     void (async () => {
       addToAlbum.disabled = true;
       const { ok: added, announce } = await mutateAlbum(
         (context) => albumActions.addMembership(albumId, photoId, context),
         "photo",
-        generation,
+        photoAuthority,
       );
       // Re-adding to the open Album clears the retained snapshot's removal
       // mark: the Photo is a member again and may be removed once more.
@@ -2032,7 +2061,10 @@ export function mountLibraryBrowser(
       // Admitted persistence is never aborted by a source change; the
       // continuation only touches this Photo's controls while it is still
       // the current Photo of the initiating generation.
-      if (generation === requestGeneration && currentPhoto()?.id === photoId) {
+      if (
+        photoOwner.isCurrent(photoAuthority) &&
+        currentPhoto()?.id === photoId
+      ) {
         renderMembershipControls();
         if (added) announce("Added to the Album.");
       } else {
@@ -2053,7 +2085,7 @@ export function mountLibraryBrowser(
     const albumId = sourceGrid.albumId;
     const photoId = photo.id;
     if (albumActions.isMembershipAdmitted("remove", albumId, photoId)) return;
-    const generation = requestGeneration;
+    const photoAuthority = photoOwner.authority;
     void (async () => {
       removeFromAlbum.disabled = true;
       const {
@@ -2063,7 +2095,7 @@ export function mountLibraryBrowser(
       } = await mutateAlbum(
         (context) => albumActions.removeMembership(albumId, photoId, context),
         "photo",
-        generation,
+        photoAuthority,
       );
       if (
         removed &&
@@ -2078,7 +2110,10 @@ export function mountLibraryBrowser(
       }
       // Recomputing the controls re-enables removal after a failure so the
       // failed action stays retryable.
-      if (generation === requestGeneration && currentPhoto()?.id === photoId) {
+      if (
+        photoOwner.isCurrent(photoAuthority) &&
+        currentPhoto()?.id === photoId
+      ) {
         renderMembershipControls();
         if (removed)
           announce(
@@ -2090,7 +2125,7 @@ export function mountLibraryBrowser(
     })();
   });
 
-  const renderPhotoShell = (generation = requestGeneration): boolean => {
+  const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
     photoTitle.textContent = sourceGrid.name;
     renderMembershipControls();
@@ -2101,7 +2136,7 @@ export function mountLibraryBrowser(
     limited.hidden = !photo?.preview.limitedDetail;
     const knownUrl = photo?.preview.url;
     if (knownUrl) {
-      renderReviewImage(knownUrl, generation);
+      renderReviewImage(knownUrl, authority);
     } else {
       stage.replaceChildren(
         paragraph(photo ? "Loading Preview…" : "Photo unavailable"),
@@ -2115,136 +2150,74 @@ export function mountLibraryBrowser(
     return Boolean(knownUrl);
   };
   const showPreview = async (
-    generation: number,
-    signal: AbortSignal,
+    authority: PhotoAuthority,
     transition?: RecoveryTransition,
   ): Promise<boolean> => {
-    if (generation !== requestGeneration || signal.aborted) return false;
-    const photo = currentPhoto();
-    if (!photo) return false;
-    const factAuthority = sourceGrid.authority;
-    const photoIndex = currentIndex;
     const capturedStatus = photoStatusOwner;
-    let result: PreviewResponse;
-    try {
-      // Always contact the server, even for an unavailable Photo: a restored
-      // Original must surface its Preview without a full reload, and Retry
-      // must prove the server is reachable before reporting Connected.
-      const response = await fetcher(`/api/photos/${photo.id}/preview`, {
-        signal,
-        priority: "high",
-      });
-      const candidate = (await response.json()) as Partial<PreviewResponse>;
-      const explicitState =
-        candidate.state === "ready" ||
-        candidate.state === "unavailable" ||
-        candidate.state === "failed";
-      if (!explicitState) throw new Error("malformed Preview response");
-      // The protocol intentionally carries explicit non-ready Preview states
-      // with HTTP 404. Other non-success statuses are service failures even
-      // when their body happens to resemble a typed Preview response.
-      const readyResponse =
-        response.ok && candidate.state === "ready" && Boolean(candidate.url);
-      const nonReadyResponse =
-        response.status === 404 &&
-        (candidate.state === "unavailable" || candidate.state === "failed");
-      if (!readyResponse && !nonReadyResponse)
-        throw new Error(`invalid Preview HTTP/state ${response.status}`);
-      result = candidate as PreviewResponse;
-    } catch {
-      if (signal.aborted || generation !== requestGeneration) return false;
+    const outcome = await photoOwner.loadCurrentPreview(authority);
+    if (outcome.kind === "detached") return false;
+    if (outcome.kind === "failed") {
       if (capturedStatus === photoStatusOwner)
         status.textContent = "Connection lost. Retry to refresh this Photo.";
-      failPhotoRecovery(generation, "preview", transition);
+      failPhotoRecovery(authority, "preview", transition);
       return false;
     }
-    if (
-      generation !== requestGeneration ||
-      !currentPhoto() ||
-      currentPhoto()!.id !== photo.id
-    )
-      return false;
+    if (!photoOwner.isCurrent(authority)) return false;
     const existingImage = stage.querySelector<HTMLImageElement>("img");
-    if (result.state !== "ready" || !result.url) {
+    if (outcome.kind === "not-ready") {
       if (capturedStatus === photoStatusOwner)
-        status.textContent = result.message ?? "Preview unavailable";
+        status.textContent = outcome.preview.message ?? "Preview unavailable";
       if (!existingImage)
         stage.replaceChildren(paragraph("Preview unavailable"));
       return true;
     }
+    const result = outcome.preview;
     const resolvedUrl = new URL(result.url, window.location.href).href;
     if (!existingImage || existingImage.src !== resolvedUrl)
-      renderReviewImage(result.url, generation);
+      renderReviewImage(result.url, authority);
     source.textContent = sourceLabel(result.source);
     limited.hidden = !result.limitedDetail;
     if (capturedStatus === photoStatusOwner)
       status.textContent = result.stale
         ? (result.message ?? "Showing a stale Preview.")
         : "";
-    if (!result.stale) {
-      const latest = currentPhoto();
-      if (latest && latest.id === photo.id) {
-        sourceGrid.setPhotoPreview(factAuthority, photoIndex, photo.id, {
-          ...latest.preview,
-          state: "ready",
-          ...(result.source ? { source: result.source } : {}),
-          ...(result.width !== undefined ? { width: result.width } : {}),
-          ...(result.height !== undefined ? { height: result.height } : {}),
-          ...(result.limitedDetail !== undefined
-            ? { limitedDetail: result.limitedDetail }
-            : {}),
-          url: result.url,
-        });
-      }
-    }
     updateControls();
-    void prefetchAdjacent(currentIndex - 1, generation, signal);
-    void prefetchAdjacent(currentIndex + 1, generation, signal);
+    void prefetchAdjacent(photoOwner.currentIndex - 1, authority);
+    void prefetchAdjacent(photoOwner.currentIndex + 1, authority);
     return true;
   };
-  const prefetchAdjacent = async (
-    index: number,
-    generation: number,
-    signal: AbortSignal,
-  ) => {
-    if (generation !== requestGeneration) return;
+  const prefetchAdjacent = async (index: number, authority: PhotoAuthority) => {
+    if (!photoOwner.isCurrent(authority)) return;
     if (index < 0 || index >= sourceGrid.total) return;
     let photo = sourceGrid.photoAt(index);
     if (!photo) {
+      const windowAuthority = photoOwner.windowAuthority;
+      if (!windowAuthority) return;
       await loadWindow(
         index,
         {
           kind: "photo",
-          authority: photoWindowAuthority,
+          authority: windowAuthority,
         },
         true,
         "low",
+        undefined,
+        authority,
       );
-      if (generation !== requestGeneration || signal.aborted) return;
+      if (!photoOwner.isCurrent(authority)) return;
       photo = sourceGrid.photoAt(index);
     }
     if (!photo || !photo.available) return;
-    try {
-      await fetcher(`/api/photos/${photo.id}/preview?priority=adjacent`, {
-        signal,
-        priority: "low",
-      });
-    } catch {
-      /* adjacent work is best effort */
-    }
+    await photoOwner.prefetchAdjacent(authority, index);
   };
   const showGrid = () => {
-    currentPhotoMode = false;
-    openingPhoto = false;
-    requestGeneration += 1;
+    const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
       "photo",
-      String(requestGeneration),
+      photoRecoveryKey(authority),
     );
     recoveryGate.succeedTransition(photoTransition);
     setConnected(true);
-    renewPhotoTasks();
-    cancelPendingImageLoads(stage, true);
     photoView.hidden = true;
     gridView.hidden = false;
     closeSources(false);
@@ -2260,17 +2233,18 @@ export function mountLibraryBrowser(
     });
     updateControls();
   };
-  const persistPosition = (): Promise<boolean> => {
+  const persistPosition = (
+    photoAuthority = photoOwner.authority,
+  ): Promise<boolean> => {
     if (sourceGrid.kind !== "album" || !sourceGrid.albumId || !currentPhoto())
       return Promise.resolve(true);
     const albumId = sourceGrid.albumId;
     const photoId = currentPhoto()!.id;
-    const generation = sourceGrid.generation;
-    const photoGeneration = requestGeneration;
+    const sourceAuthority = sourceGrid.authority;
     const stillCurrent = () =>
       applicationAlive &&
-      generation === sourceGrid.generation &&
-      photoGeneration === requestGeneration &&
+      sourceGrid.isCurrent(sourceAuthority) &&
+      photoOwner.isCurrent(photoAuthority) &&
       sourceGrid.kind === "album" &&
       sourceGrid.albumId === albumId &&
       currentPhoto()?.id === photoId;
@@ -2296,7 +2270,7 @@ export function mountLibraryBrowser(
         if (stillCurrent()) {
           status.textContent =
             "Album position could not be saved. Retry before making more decisions.";
-          failPhotoRecovery(photoGeneration, "saved-position");
+          failPhotoRecovery(photoAuthority, "saved-position");
         }
         return false;
       }
@@ -2305,7 +2279,13 @@ export function mountLibraryBrowser(
     return task;
   };
   const moveTo = async (target: number) => {
-    if (busy || openingPhoto || target < 0 || target >= sourceGrid.total)
+    if (
+      pageBusy ||
+      photoOwner.busy ||
+      photoOwner.opening ||
+      target < 0 ||
+      target >= sourceGrid.total
+    )
       return;
     await openPhoto(target);
   };
@@ -2314,232 +2294,114 @@ export function mountLibraryBrowser(
     value: SelectionState | number,
     advance: boolean,
   ) => {
-    const photo = currentPhoto();
-    if (!photo || !connected || busy) return;
-    const generation = sourceGrid.generation;
-    const sourceAuthority = sourceGrid.authority;
-    const photoGeneration = requestGeneration;
-    const photoIndex = currentIndex;
-    const albumId = sourceGrid.albumId;
-    const prior = undo;
-    undo = undefined;
-    busy = true;
+    if (!connected || pageBusy) return;
+    const admission = photoOwner.mutate(field, value, advance);
+    if (!admission) return;
     status.textContent = `Saving ${field === "rating" ? "Rating" : "Selection State"}…`;
     updateControls();
-    try {
-      const response = await fetcher(`/api/photos/${photo.id}/state`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          field,
-          value,
-          ...(albumId ? { albumId } : {}),
-        }),
-      });
-      if (!response.ok) {
-        if (generation !== sourceGrid.generation) return;
-        undo = prior;
+    const outcome = await admission.settlement;
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      if (outcome.failure === "answered") {
         status.textContent =
-          response.status === 409
+          outcome.status === 409
             ? "The Photo changed elsewhere. Retry to refresh its current state."
             : "The change could not be saved.";
-        if (
-          response.status === 409 &&
-          photoGeneration === requestGeneration &&
-          currentPhoto()?.id === photo.id
-        )
-          failPhotoRecovery(photoGeneration, "photo-write");
-        return;
+      } else {
+        status.textContent =
+          "Connection lost before the change was confirmed. Retry to refresh.";
       }
-      const result = (await response.json()) as MutationResponse;
-      if (
-        generation !== sourceGrid.generation ||
-        sourceGrid.photoAt(photoIndex)?.id !== photo.id
-      )
-        return;
-      const patched =
-        field === "selectionState"
-          ? sourceGrid.setPhotoSelection(
-              sourceAuthority,
-              photoIndex,
-              photo.id,
-              value as SelectionState,
-            )
-          : sourceGrid.setPhotoRating(
-              sourceAuthority,
-              photoIndex,
-              photo.id,
-              value as number,
-            );
-      if (!patched) return;
-      undo = {
-        ...result.undo,
-        advanced: advance && photoIndex < sourceGrid.total - 1,
-        snapshotIndex: photoIndex,
-      };
-      status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
-      if (undo.advanced) {
-        busy = false;
-        await moveTo(currentIndex + 1);
-      } else renderPhotoFacts();
-    } catch {
-      if (
-        generation !== sourceGrid.generation ||
-        photoGeneration !== requestGeneration ||
-        currentPhoto()?.id !== photo.id
-      )
-        return;
-      undo = undefined;
-      status.textContent =
-        "Connection lost before the change was confirmed. Retry to refresh.";
-      failPhotoRecovery(photoGeneration, "photo-write");
-    } finally {
-      if (generation === sourceGrid.generation) {
-        busy = false;
-        updateControls();
-      }
+      if (outcome.connectivity === "lost")
+        failPhotoRecovery(outcome.authority, "photo-write");
+      updateControls();
+      return;
     }
+    if (!outcome.applied) return;
+    status.textContent = `${field === "rating" ? "Rating" : "Selection"} saved.`;
+    if (outcome.advance) await moveTo(outcome.index + 1);
+    else renderPhotoFacts();
+    updateControls();
   };
   const performUndo = async () => {
-    const action = undo;
-    if (!action || !connected || busy) return;
-    const generation = sourceGrid.generation;
-    const sourceAuthority = sourceGrid.authority;
-    const photoGeneration = requestGeneration;
-    const albumId = sourceGrid.albumId;
-    const affectedIndex = action.snapshotIndex;
-    busy = true;
+    if (!connected || pageBusy) return;
+    const preparation = photoOwner.prepareUndo();
+    if (!preparation) return;
     updateControls();
-    try {
-      if (!sourceGrid.photoAt(affectedIndex)) {
-        status.textContent = "Loading Photo for Undo…";
-        const windowReady = await loadWindow(
-          affectedIndex,
-          {
-            kind: "photo",
-            authority: photoWindowAuthority,
-          },
-          true,
-          "high",
-        );
-        if (!windowReady) return;
-      }
-      if (
-        generation !== sourceGrid.generation ||
-        photoGeneration !== requestGeneration ||
-        undo !== action
-      )
-        return;
-      const photo = sourceGrid.photoAt(affectedIndex);
-      if (!photo || photo.id !== action.photoId) return;
-      undo = undefined;
-      const response = await fetcher(`/api/photos/${action.photoId}/state`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          field: action.field,
-          value: action.priorValue,
-          expectedCurrent: action.expectedCurrent,
-          ...(albumId ? { albumId } : {}),
-        }),
-      });
-      if (!response.ok) {
-        if (
-          generation !== sourceGrid.generation ||
-          photoGeneration !== requestGeneration
-        )
-          return;
-        if (response.status === 409) {
-          status.textContent =
-            "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
-          failPhotoRecovery(photoGeneration, "undo");
-        } else {
-          undo = action;
-          status.textContent = "Undo could not be saved. Try Undo again.";
-        }
-        return;
-      }
-      if (
-        generation !== sourceGrid.generation ||
-        photoGeneration !== requestGeneration
-      )
-        return;
-      const patched =
-        action.field === "selectionState"
-          ? sourceGrid.setPhotoSelection(
-              sourceAuthority,
-              affectedIndex,
-              action.photoId,
-              action.priorValue as SelectionState,
-            )
-          : sourceGrid.setPhotoRating(
-              sourceAuthority,
-              affectedIndex,
-              action.photoId,
-              action.priorValue as number,
-            );
-      if (
-        !patched ||
-        !sourceGrid.moveGridPosition(sourceAuthority, affectedIndex)
-      )
-        return;
-      trimLoaded(affectedIndex);
-      currentIndex = affectedIndex;
-      currentPhotoMode = true;
-      gridView.hidden = true;
-      photoView.hidden = false;
-      syncSourcePanel();
-      photoView.focus();
-      resetTransform();
-      const previewGeneration = ++requestGeneration;
-      const photoTransition = recoveryGate.beginTransition(
-        "photo",
-        String(previewGeneration),
+    if (preparation.needsWindow) {
+      status.textContent = "Loading Photo for Undo…";
+      const windowReady = await loadWindow(
+        preparation.index,
+        { kind: "photo", authority: preparation.windowAuthority },
+        true,
+        "high",
+        undefined,
+        preparation.authority,
       );
-      syncConnection();
-      renewPhotoTasks();
-      const signal = photoSignal;
-      cancelPendingImageLoads(stage, true);
-      renderPhotoShell(previewGeneration);
-      busy = false;
-      updateControls();
-      await showPreview(previewGeneration, signal, photoTransition);
-      if (
-        generation !== sourceGrid.generation ||
-        previewGeneration !== requestGeneration ||
-        currentPhoto()?.id !== action.photoId
-      )
-        return;
-      const persisted = await persistPosition();
-      if (
-        persisted &&
-        generation === sourceGrid.generation &&
-        previewGeneration === requestGeneration &&
-        currentPhoto()?.id === action.photoId
-      ) {
-        recoveryGate.succeedTransition(photoTransition);
-        setConnected(true);
-        status.textContent = "Last change undone.";
-      }
-    } catch {
-      if (
-        generation === sourceGrid.generation &&
-        photoGeneration === requestGeneration
-      ) {
-        status.textContent = "Connection lost before Undo was confirmed.";
-        failPhotoRecovery(photoGeneration, "undo");
-      }
-    } finally {
-      if (generation === sourceGrid.generation) {
-        busy = false;
+      if (!windowReady) {
+        photoOwner.cancelUndo(preparation);
         updateControls();
+        return;
       }
     }
+    const outcome = await photoOwner.performUndo(preparation);
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      if (outcome.failure === "transport") {
+        status.textContent = "Connection lost before Undo was confirmed.";
+      } else if (outcome.status === 409) {
+        status.textContent =
+          "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
+      } else {
+        status.textContent = "Undo could not be saved. Try Undo again.";
+      }
+      if (outcome.connectivity === "lost")
+        failPhotoRecovery(outcome.authority, "undo");
+      updateControls();
+      return;
+    }
+    gridView.hidden = true;
+    photoView.hidden = false;
+    syncSourcePanel();
+    photoView.focus();
+    resetTransform();
+    const photoTransition = recoveryGate.beginTransition(
+      "photo",
+      photoRecoveryKey(outcome.authority),
+    );
+    syncConnection();
+    renderPhotoShell(outcome.authority);
+    updateControls();
+    const refreshed = await showPreview(outcome.authority, photoTransition);
+    if (
+      !refreshed ||
+      !photoOwner.isCurrent(outcome.authority) ||
+      currentPhoto()?.id !== outcome.photoId
+    )
+      return;
+    const persisted = await persistPosition(outcome.authority);
+    if (
+      persisted &&
+      photoOwner.isCurrent(outcome.authority) &&
+      currentPhoto()?.id === outcome.photoId
+    ) {
+      recoveryGate.succeedTransition(photoTransition);
+      setConnected(true);
+      status.textContent = "Last change undone.";
+    }
+    updateControls();
   };
 
   const pointerDown = (event: PointerEvent) => {
     const photo = currentPhoto();
-    if (pointer || !event.isPrimary || busy || !connected || !photo) return;
+    if (
+      pointer ||
+      !event.isPrimary ||
+      pageBusy ||
+      photoOwner.busy ||
+      !connected ||
+      !photo
+    )
+      return;
     pointer = {
       id: event.pointerId,
       startX: event.clientX,
@@ -2548,7 +2410,7 @@ export function mountLibraryBrowser(
       lastY: event.clientY,
       startedAt: event.timeStamp,
       vertical: false,
-      generation: requestGeneration,
+      authority: photoOwner.authority,
       photoId: photo.id,
     };
     preview.setPointerCapture(event.pointerId);
@@ -2596,7 +2458,7 @@ export function mountLibraryBrowser(
       cancelled ||
       active.vertical ||
       !connected ||
-      active.generation !== requestGeneration ||
+      !photoOwner.isCurrent(active.authority) ||
       currentPhoto()?.id !== active.photoId
     )
       return;
@@ -2633,9 +2495,10 @@ export function mountLibraryBrowser(
       void performUndo();
       return;
     }
-    if (modifier || event.shiftKey || !currentPhotoMode) return;
-    if (event.key === "ArrowLeft") void moveTo(currentIndex - 1);
-    else if (event.key === "ArrowRight") void moveTo(currentIndex + 1);
+    if (modifier || event.shiftKey || !photoOwner.active) return;
+    if (event.key === "ArrowLeft") void moveTo(photoOwner.currentIndex - 1);
+    else if (event.key === "ArrowRight")
+      void moveTo(photoOwner.currentIndex + 1);
     else if (event.key.toLowerCase() === "p")
       void mutate("selectionState", "selected", true);
     else if (event.key.toLowerCase() === "x")
@@ -2760,13 +2623,13 @@ export function mountLibraryBrowser(
     if (rangeRetries.length > 0) {
       const retryAuthority = sourceGrid.authority;
       void (async () => {
-        busy = true;
+        pageBusy = true;
         updateControls();
         try {
           await retryCurrentSourceRanges(rangeRetries);
         } finally {
           if (sourceGrid.isCurrent(retryAuthority)) {
-            busy = false;
+            pageBusy = false;
             updateControls();
           }
         }
@@ -2793,22 +2656,17 @@ export function mountLibraryBrowser(
   });
   retryPhoto.addEventListener("click", () => {
     void (async () => {
-      busy = true;
+      const retry = photoOwner.beginRetry();
+      if (!retry) return;
       status.textContent = "Reconnecting…";
-      const sourceOwner = sourceGrid.authority;
-      const expectedPhotoId = currentPhoto()?.id ?? lastCurrentPhotoId;
-      const generation = ++requestGeneration;
       const photoTransition = recoveryGate.beginTransition(
         "photo",
-        String(generation),
+        photoRecoveryKey(retry.authority),
       );
       syncConnection();
-      renewPhotoTasks();
-      const signal = photoSignal;
-      cancelPendingImageLoads(stage, true);
       updateControls();
       try {
-        const start = sourceGrid.alignedStart(currentIndex);
+        const start = sourceGrid.alignedStart(retry.index);
         const sourceRangeRetries = currentSourceRangeRetries(start);
         const sourceRangeRecovered = sourceRangeRetries.length > 0;
         if (
@@ -2817,69 +2675,57 @@ export function mountLibraryBrowser(
         )
           return;
         if (
-          !sourceGrid.isCurrent(sourceOwner) ||
-          generation !== requestGeneration
+          !sourceGrid.isCurrent(retry.sourceAuthority) ||
+          !photoOwner.retryPhotoIsCurrent(retry)
         )
           return;
-        const recoveredPhoto = currentPhoto();
-        if (
-          !recoveredPhoto ||
-          !expectedPhotoId ||
-          recoveredPhoto.id !== expectedPhotoId
-        )
-          return;
-        const photoId = recoveredPhoto.id;
-        lastCurrentPhotoId = photoId;
         // An exact Source retry just refreshed these facts. Other Photo
         // failures still invalidate and reload the current window before
         // trusting Preview or saved-position recovery.
-        if (!sourceRangeRecovered) sourceGrid.invalidateWindow(currentIndex);
+        if (!sourceRangeRecovered) sourceGrid.invalidateWindow(retry.index);
         const windowReady = await loadWindow(
           start,
           {
             kind: "photo",
-            authority: photoWindowAuthority,
+            authority: retry.windowAuthority,
           },
           true,
           "high",
           photoTransition,
+          retry.authority,
         );
         if (
           !windowReady ||
-          !sourceGrid.isCurrent(sourceOwner) ||
-          generation !== requestGeneration ||
-          currentPhoto()?.id !== photoId
+          !sourceGrid.isCurrent(retry.sourceAuthority) ||
+          !photoOwner.retryPhotoIsCurrent(retry)
         )
           return;
-        const refreshed = await showPreview(
-          generation,
-          signal,
-          photoTransition,
-        );
-        const persisted = refreshed && (await persistPosition());
+        const refreshed = await showPreview(retry.authority, photoTransition);
+        const persisted = refreshed && (await persistPosition(retry.authority));
         if (
           refreshed &&
           persisted &&
-          sourceGrid.isCurrent(sourceOwner) &&
-          generation === requestGeneration
+          sourceGrid.isCurrent(retry.sourceAuthority) &&
+          photoOwner.retryPhotoIsCurrent(retry)
         ) {
           recoveryGate.succeedTransition(photoTransition);
           setConnected(true);
           status.textContent = "Connected. Current state refreshed.";
         }
       } finally {
-        if (
-          sourceGrid.isCurrent(sourceOwner) &&
-          generation === requestGeneration
-        ) {
-          busy = false;
-          updateControls();
-        }
+        photoOwner.finishRetry(retry);
+        updateControls();
       }
     })();
   });
-  previous.addEventListener("click", () => void moveTo(currentIndex - 1));
-  next.addEventListener("click", () => void moveTo(currentIndex + 1));
+  previous.addEventListener(
+    "click",
+    () => void moveTo(photoOwner.currentIndex - 1),
+  );
+  next.addEventListener(
+    "click",
+    () => void moveTo(photoOwner.currentIndex + 1),
+  );
   undoButton.addEventListener("click", () => void performUndo());
   detail.addEventListener("click", () => {
     if (!stage.querySelector("img")) return;
@@ -2924,15 +2770,13 @@ export function mountLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
-    requestGeneration += 1;
     cancelScheduledGridRender();
-    cancelPendingImageLoads(stage, true);
     albumRecovery = undefined;
     albumActions.dispose();
     application.dispose();
     fileLocations.dispose();
+    photoOwner.dispose();
     sourceGrid.dispose();
-    photoTasks.halt();
     recoveryGate.close();
     window.removeEventListener("keydown", keydown);
     window.removeEventListener("resize", onResize);
