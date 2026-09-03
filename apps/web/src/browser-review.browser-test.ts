@@ -12,7 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Request,
+} from "@playwright/test";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 
@@ -5966,6 +5972,11 @@ test("Photo Retry recovers the exact source range after an expired reopen window
   const sourceRetryGate = new Promise<void>((resolve) => {
     releaseSourceRetry = resolve;
   });
+  let markSourceRetryStarted!: (request: Request) => void;
+  const sourceRetryStarted = new Promise<Request>((resolve) => {
+    markSourceRetryStarted = resolve;
+  });
+  let sourceRetryObserved = false;
   let holdSourceRetry = false;
   let boundaryRequests = 0;
   let originalToken = "";
@@ -6012,10 +6023,19 @@ test("Photo Retry recovers the exact source range after an expired reopen window
       if (token !== originalToken && !reopenWindowFailed) {
         reopenedToken = token;
         reopenWindowFailed = true;
+        // Close the gate before exposing the failed response so no successor
+        // request can pass between the failure UI and Retry admission.
+        holdSourceRetry = true;
         await route.fulfill({ status: 503, body: '{"error":"failed"}' });
         return;
       }
-      if (token === reopenedToken && holdSourceRetry) await sourceRetryGate;
+      if (token === reopenedToken && holdSourceRetry) {
+        if (!sourceRetryObserved) {
+          sourceRetryObserved = true;
+          markSourceRetryStarted(route.request());
+        }
+        await sourceRetryGate;
+      }
       await route.continue();
     },
   );
@@ -6044,14 +6064,6 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
-    const exactSourceRetry = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return (
-        request.method() === "GET" &&
-        url.pathname.endsWith(`/${reopenedToken}`) &&
-        url.searchParams.get("start") === "10"
-      );
-    });
     const refreshedPreview = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return (
@@ -6059,7 +6071,6 @@ test("Photo Retry recovers the exact source range after an expired reopen window
         url.pathname === `/api/photos/${reopenPhotoId}/preview`
       );
     });
-    holdSourceRetry = true;
     const photoRetryAdmitted = await photoRetry.evaluate((button) => {
       (button as HTMLButtonElement).click();
       return (button as HTMLButtonElement).disabled;
@@ -6067,15 +6078,16 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     expect(photoRetryAdmitted).toBe(true);
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
-    const retried = await exactSourceRetry;
+    const retried = await sourceRetryStarted;
     releaseSourceRetry();
     await refreshedPreview;
     await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
 
-    expect(new URL(retried.url()).pathname).toBe(
-      `/api/browse/${reopenedToken}`,
-    );
+    expect(retried.method()).toBe("GET");
+    const retriedRequest = new URL(retried.url());
+    expect(retriedRequest.pathname).toBe(`/api/browse/${reopenedToken}`);
+    expect(retriedRequest.searchParams.get("start")).toBe("10");
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     await expect(page.getByText("60 / 70")).toBeVisible();
     expect(browseAllocations).toBe(allocationsBeforeRetry);
