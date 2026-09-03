@@ -50,6 +50,7 @@ import {
 type GridRangeRetry = Readonly<{
   sourceAuthority: SourceAuthority;
   operationKind: "source" | "grid";
+  anchorIndex: number;
   start: number;
   quiet: boolean;
   priority: "high" | "low";
@@ -1286,6 +1287,7 @@ export function mountLibraryBrowser(
             : {
                 sourceAuthority,
                 operationKind: operation.kind,
+                anchorIndex: index,
                 start: outcome.start,
                 quiet,
                 priority,
@@ -1830,7 +1832,7 @@ export function mountLibraryBrowser(
         continue;
       }
       const loaded = await loadWindow(
-        range.start,
+        range.anchorIndex,
         {
           kind: range.operationKind,
           authority: range.sourceAuthority,
@@ -1908,7 +1910,7 @@ export function mountLibraryBrowser(
           return;
         if (!sourceRangeRecovered) sourceGrid.invalidateWindow(retry.index);
         const windowReady = await loadWindow(
-          start,
+          retry.index,
           { kind: "photo", authority: retry.windowAuthority },
           true,
           "high",
