@@ -6828,6 +6828,10 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   const adjacentGate = new Promise<void>((resolve) => {
     releaseAdjacent = resolve;
   });
+  let settleAdjacent: () => void = () => undefined;
+  const adjacentSettled = new Promise<void>((resolve) => {
+    settleAdjacent = resolve;
+  });
   let releaseAdjacentSuccessor: () => void = () => undefined;
   const adjacentSuccessorGate = new Promise<void>((resolve) => {
     releaseAdjacentSuccessor = resolve;
@@ -6870,11 +6874,15 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
       boundaryRequests += 1;
       if (boundaryRequests === 1) {
-        await adjacentGate;
         try {
-          await route.continue();
-        } catch {
-          /* current navigation supersedes this adjacent Photo prefetch */
+          await adjacentGate;
+          try {
+            await route.continue();
+          } catch {
+            /* current navigation supersedes this adjacent Photo prefetch */
+          }
+        } finally {
+          settleAdjacent();
         }
         return;
       }
@@ -6933,6 +6941,11 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
 
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    // The original-token adjacent request has already been superseded by the
+    // reopen. Release its stale route now; the successor gate remains held so
+    // the retry still proves Preview completion before adjacent work settles.
+    releaseAdjacent();
+    await adjacentSettled;
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
     await page.evaluate(() => {
