@@ -105,6 +105,9 @@ defined by Web Async Ownership:
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
+  It yields fit-mode vertical touch panning to native Photo View scrolling,
+  retains horizontal decision gestures, and takes full Preview drag ownership
+  only during Detail Review.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.

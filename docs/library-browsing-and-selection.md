@@ -40,7 +40,7 @@ The Library Browser must expose exactly one main landmark while it loads and aft
 
 The first product uses one neutral dark appearance. Color must communicate keyboard focus, Selection State, Rating, failure, or connectivity rather than decorate unrelated containers. The interface must not depend on color alone to communicate a Photo decision or control state.
 
-Required information must meet WCAG AA text contrast against its rendered background. Controls intended for touch must provide at least a 44 by 44 CSS-pixel target on narrow viewports. Focused controls must remain visibly distinguishable.
+Required information must meet WCAG AA text contrast against its rendered background. Every visible interactive target must provide at least a 44 by 44 CSS-pixel target at supported narrow and short-landscape viewports. Focused controls must remain visibly distinguishable.
 
 Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards.
 
@@ -191,7 +191,7 @@ When the Preview fits within Photo View:
 
 A committed swipe advances to the next Photo after the decision is accepted.
 
-Vertical swipe meanings are not part of the first product. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
+Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, when the Preview fits within Photo View, a vertical gesture that begins on the Preview must scroll Photo View naturally. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
 
 ## Detail Review
 

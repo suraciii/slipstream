@@ -317,6 +317,65 @@ async function swipe(page: Page, from: number, to: number, y = 320) {
   });
 }
 
+async function touchDrag(
+  page: Page,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [from],
+    });
+    for (let step = 1; step <= 4; step += 1)
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [
+          {
+            x: from.x + ((to.x - from.x) * step) / 4,
+            y: from.y + ((to.y - from.y) * step) / 4,
+          },
+        ],
+      });
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+  } finally {
+    await session.detach();
+  }
+}
+
+async function interactiveGeometry(container: Locator) {
+  return container.evaluate((root) => {
+    const rootBox = root.getBoundingClientRect();
+    return Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'button:not([hidden]), input:not([hidden]), select:not([hidden]), [role="button"]:not([hidden]), [tabindex]:not([tabindex="-1"]):not([hidden]), [data-preview]',
+      ),
+    )
+      .filter(
+        (target) =>
+          target.offsetParent !== null &&
+          !target.closest<HTMLElement>("[inert]"),
+      )
+      .map((target) => {
+        const box = target.getBoundingClientRect();
+        return {
+          name:
+            target.getAttribute("aria-label") ??
+            target.textContent?.trim() ??
+            target.tagName,
+          width: box.width,
+          height: box.height,
+          contained:
+            box.left >= rootBox.left - 0.5 && box.right <= rootBox.right + 0.5,
+        };
+      });
+  });
+}
+
 test("uses singular and plural Photo counts in Grid status and source cards", async ({
   page,
 }) => {
@@ -642,6 +701,8 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       return {
         clientHeight: view.clientHeight,
         scrollHeight: view.scrollHeight,
+        clientWidth: view.clientWidth,
+        scrollWidth: view.scrollWidth,
         previewHeight: preview.height,
         tallestControlGroup: Math.max(...controlGroups),
       };
@@ -649,6 +710,24 @@ test("short mobile viewports keep every Photo action reachable and operable", as
     if (viewport.height < 400)
       expect(layout.scrollHeight).toBeGreaterThan(layout.clientHeight);
     expect(layout.previewHeight).toBeGreaterThan(layout.tallestControlGroup);
+    expect(layout.scrollWidth).toBe(layout.clientWidth);
+    const photoTargets = await interactiveGeometry(photoView);
+    expect(
+      photoTargets.filter(({ width, height }) => width < 44 || height < 44),
+    ).toEqual([]);
+    expect(photoTargets.filter(({ contained }) => !contained)).toEqual([]);
+
+    await openSources(page);
+    const sourcePanel = page.locator("#source-panel");
+    await expect(sourcePanel).toHaveAttribute("aria-hidden", "false");
+    await page.getByRole("button", { name: "New Album" }).click();
+    const sourceTargets = await interactiveGeometry(sourcePanel);
+    expect(
+      sourceTargets.filter(({ width, height }) => width < 44 || height < 44),
+    ).toEqual([]);
+    expect(sourceTargets.filter(({ contained }) => !contained)).toEqual([]);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
 
     const controls = [
       page.getByRole("button", { name: "Back to Grid" }),
@@ -706,6 +785,13 @@ test("short mobile viewports keep every Photo action reachable and operable", as
     await expect(page.getByText("1 / 3")).toBeVisible();
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.locator("[data-grid-view]")).toBeVisible();
+    const gridTargets = await interactiveGeometry(
+      page.locator("[data-grid-view]"),
+    );
+    expect(
+      gridTargets.filter(({ width, height }) => width < 44 || height < 44),
+    ).toEqual([]);
+    expect(gridTargets.filter(({ contained }) => !contained)).toEqual([]);
 
     if (index < viewports.length - 1) {
       await page.locator('[data-photo-index="0"]').click();
@@ -714,6 +800,174 @@ test("short mobile viewports keep every Photo action reachable and operable", as
         .poll(() => photoView.evaluate((view) => view.scrollTop))
         .toBe(0);
     }
+  }
+});
+
+test("wide desktop Preview retains fit gesture ownership", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  await expect(page.locator("[data-preview]")).toHaveCSS(
+    "touch-action",
+    "none",
+  );
+});
+
+function touchQualification(viewport: { width: number; height: number }) {
+  return async ({ page }: { page: Page }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await startReview(page, running.url, "All Photos");
+    await page.setViewportSize(viewport);
+
+    const photoView = page.locator("[data-photo-view]");
+    const preview = page.locator("[data-preview]");
+    let stateRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/state")
+      )
+        stateRequests += 1;
+    });
+    await photoView.evaluate((view) => {
+      view.scrollTop = 0;
+    });
+    await preview.evaluate((surface) => {
+      surface.addEventListener(
+        "pointerdown",
+        (event) => {
+          const pointerEvent = event as PointerEvent;
+          surface.setAttribute(
+            "data-observed-pointer",
+            `${pointerEvent.pointerType}:${pointerEvent.isTrusted}`,
+          );
+        },
+        { once: true },
+      );
+    });
+    await expect(preview).toHaveCSS("touch-action", "pan-y");
+    const gesture = await preview.evaluate((surface) => {
+      const previewBox = surface.getBoundingClientRect();
+      const viewBox = surface
+        .closest("[data-photo-view]")!
+        .getBoundingClientRect();
+      const top = Math.max(previewBox.top, viewBox.top) + 24;
+      const bottom = Math.min(previewBox.bottom, viewBox.bottom) - 24;
+      return {
+        x: previewBox.left + previewBox.width / 2,
+        top,
+        bottom,
+      };
+    });
+    expect(gesture.bottom - gesture.top).toBeGreaterThan(80);
+    await touchDrag(
+      page,
+      { x: gesture.x, y: gesture.bottom },
+      { x: gesture.x, y: gesture.top },
+    );
+    await expect
+      .poll(() => photoView.evaluate((view) => view.scrollTop))
+      .toBeGreaterThan(0);
+    await expect(preview).toHaveAttribute(
+      "data-observed-pointer",
+      "touch:true",
+    );
+    await expect(page.getByText("1 / 3")).toBeVisible();
+    expect(stateRequests).toBe(0);
+
+    await photoView.evaluate((view) => {
+      view.scrollTop = 0;
+    });
+    const horizontal = await preview.evaluate((surface) => {
+      const box = surface.getBoundingClientRect();
+      return {
+        left: box.left + box.width / 2 - 60,
+        right: box.left + box.width / 2 + 60,
+        y: box.top + box.height / 2,
+      };
+    });
+    let mutation = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/state") &&
+        response.status() === 200,
+    );
+    await touchDrag(
+      page,
+      { x: horizontal.left, y: horizontal.y },
+      { x: horizontal.right, y: horizontal.y },
+    );
+    await mutation;
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    expect(stateRequests).toBe(1);
+
+    mutation = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/state") &&
+        response.status() === 200,
+    );
+    await touchDrag(
+      page,
+      { x: horizontal.right, y: horizontal.y },
+      { x: horizontal.left, y: horizontal.y },
+    );
+    await mutation;
+    await expect(page.getByText("3 / 3")).toBeVisible();
+    expect(stateRequests).toBe(2);
+    await page.getByRole("button", { name: "Previous" }).click();
+    await expect(page.getByText("Rejected", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Previous" }).click();
+    await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Detail Review" }).click();
+    await expect(preview).toHaveCSS("touch-action", "none");
+    await photoView.evaluate((view) => {
+      view.scrollTop = 0;
+    });
+    const image = page.locator("[data-stage] img");
+    const before = await image.evaluate((element) => element.style.transform);
+    const detailGesture = await preview.evaluate((surface) => {
+      const box = surface.getBoundingClientRect();
+      return {
+        from: {
+          x: box.left + box.width / 2 - 60,
+          y: box.top + box.height / 2,
+        },
+        to: {
+          x: box.left + box.width / 2 + 60,
+          y: box.top + box.height / 2 + 36,
+        },
+      };
+    });
+    const stateRequestsBeforeDetail = stateRequests;
+    await touchDrag(page, detailGesture.from, detailGesture.to);
+    await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 120, 36\)/);
+    expect(await image.evaluate((element) => element.style.transform)).not.toBe(
+      before,
+    );
+    expect(stateRequests).toBe(stateRequestsBeforeDetail);
+    expect(await photoView.evaluate((view) => view.scrollTop)).toBe(0);
+    await expect(page.getByText("1 / 3")).toBeVisible();
+  };
+}
+
+test.describe("touch qualification", () => {
+  test.use({ hasTouch: true });
+
+  for (const viewport of [
+    { width: 844, height: 390 },
+    { width: 667, height: 375 },
+  ]) {
+    test(
+      `fit Preview at ${viewport.width}x${viewport.height} yields real vertical touch scrolling while horizontal decisions and Detail pan remain owned`,
+      touchQualification(viewport),
+    );
   }
 });
 
