@@ -1,5 +1,7 @@
 import "./library-browser.css";
 
+import { formatPhotoCount } from "./photo-count.js";
+
 type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
 
@@ -487,7 +489,7 @@ export function createLibraryBrowserView(
     button.innerHTML = "<strong></strong><span></span>";
     required<HTMLElement>(button, "strong").textContent = name;
     required<HTMLElement>(button, "span").textContent =
-      `${count} Photos${saved ? " · Resume" : ""}`;
+      `${formatPhotoCount(count)}${saved ? " · Resume" : ""}`;
     return button;
   };
 

@@ -13,6 +13,8 @@ The Library Browser is Slipstream's primary screen. It must open directly to the
 - current Library loading or scan status; and
 - whether an Album has a saved position.
 
+The active Grid status and every source card must use `1 Photo` for one and `N Photos` for every other count in both visible and accessible text.
+
 A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
 The current source must be visually and programmatically identifiable. Source state must not depend on color alone.

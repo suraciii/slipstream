@@ -46,6 +46,7 @@ import {
   type LibraryBrowserView,
   type SourceListViewModel,
 } from "./ui/library-browser-view.js";
+import { formatPhotoCount } from "./ui/photo-count.js";
 
 type GridRangeRetry = Readonly<{
   sourceAuthority: SourceAuthority;
@@ -1020,11 +1021,9 @@ export function mountLibraryBrowser(
       setConnected(true);
       renderGrid();
       if (sourceGrid.total) {
-        view.setGridStatus(
-          `Ready · ${sourceGrid.total.toLocaleString()} Photos`,
-        );
+        view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
       } else {
-        view.setGridStatus("0 Photos");
+        view.setGridStatus(formatPhotoCount(0));
         view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
       }
     } catch {
@@ -1298,9 +1297,7 @@ export function mountLibraryBrowser(
       recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
       if (outcome.changed) renderGrid();
       if (!quiet)
-        view.setGridStatus(
-          `Ready · ${sourceGrid.total.toLocaleString()} Photos`,
-        );
+        view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
       return true;
     } finally {
       if (

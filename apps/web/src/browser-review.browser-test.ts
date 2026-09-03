@@ -256,7 +256,7 @@ async function openGrid(page: Page, url: string, name: string) {
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
-  await page.getByText(/^Ready · \d[\d,]* Photos$/).waitFor();
+  await page.getByText(/^Ready · \d[\d,]* Photos?$/).waitFor();
   await waitForGridFrame(page);
 }
 async function openSources(page: Page) {
@@ -316,6 +316,65 @@ async function swipe(page: Page, from: number, to: number, y = 320) {
     pointerType: "touch",
   });
 }
+
+test("uses singular and plural Photo counts in Grid status and source cards", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "Single Folder"));
+  const data = await jpeg();
+  await writeFile(join(root, "root.jpg"), data);
+  await writeFile(join(root, "Single Folder", "nested.jpg"), data);
+  const running = await server(base, root);
+  const [firstPhotoId] = await browseIds(running.url);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Single Album" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find(
+    (album) => album.name === "Single Album",
+  )!.id;
+  await post(running.url, `/api/albums/${albumId}/members`, {
+    photoIds: [firstPhotoId],
+  });
+  await post(running.url, "/api/albums", { name: "Empty Album" });
+
+  await page.goto(running.url);
+  await expect(
+    page.getByText("Ready · 2 Photos", { exact: true }),
+  ).toBeVisible();
+
+  const expectSourceCount = async (name: string, count: string) => {
+    const button = page.getByRole("button", {
+      name: `${name} ${count}`,
+      exact: true,
+    });
+    await expect(button).toBeVisible();
+    await expect(button).toHaveAccessibleName(`${name} ${count}`);
+    await expect(button.locator("span")).toHaveText(count);
+    return button;
+  };
+
+  await expectSourceCount("All Photos", "2 Photos");
+  await expectSourceCount("Library Folder", "2 Photos");
+  await expectSourceCount("Single Album", "1 Photo");
+  await expectSourceCount("Empty Album", "0 Photos");
+
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  const folder = await expectSourceCount("Single Folder", "1 Photo");
+  await folder.click();
+  await expect(
+    page.getByText("Ready · 1 Photo", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "Single Album 1 Photo", exact: true })
+    .click();
+  await expect(
+    page.getByText("Ready · 1 Photo", { exact: true }),
+  ).toBeVisible();
+});
 
 test("starts from a Album, shows facts, accessible controls, and resumes persisted progress after restart", async ({
   page,
@@ -452,7 +511,7 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   await page.getByRole("button", { name: /^All Photos(?: |$)/ }).click();
   await expect(panel).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator("[data-grid-viewport]")).toBeFocused();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("narrow Grid uses its width and keeps Library Folder understandable", async ({
@@ -764,7 +823,7 @@ test("Album names and management actions do not overlap", async ({ page }) => {
       await page.locator("[data-source-toggle]").click();
 
     const row = page.locator(".album-row").filter({
-      has: page.getByRole("button", { name: /^26春节 1 Photos/ }),
+      has: page.getByRole("button", { name: /^26春节 1 Photo/ }),
     });
     const card = row.locator(".source-card");
     const tools = row.locator(".album-tools");
@@ -1309,7 +1368,7 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
 
   // Create through the inline form.
@@ -1348,9 +1407,9 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   ).toBeHidden();
   // Originals are untouched: All Photos keeps its count.
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("creating an Album opens that exact empty Album on desktop and narrow layouts", async ({
@@ -1532,7 +1591,7 @@ test("deleting the open album returns to the All Photos source", async ({
   await page.getByRole("button", { name: "Delete Session" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
   await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("the current photo joins and leaves albums from the photo view", async ({
@@ -1565,7 +1624,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /Picks 1 Photos/ }),
+    page.getByRole("button", { name: /Picks 1 Photo/ }),
   ).toBeVisible();
 
   // Adding an existing member is idempotent.
@@ -1584,13 +1643,13 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /Picks 1 Photos/ }),
+    page.getByRole("button", { name: /Picks 1 Photo/ }),
   ).toBeVisible();
 
   // Removing from the open Album source updates the count while the open
   // snapshot keeps its copied order.
-  await page.getByRole("button", { name: /Picks 1 Photos/ }).click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /Picks 1 Photo/ }).click();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -1608,7 +1667,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
     page.getByRole("button", { name: /^Picks 0 Photos$/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -1640,8 +1699,8 @@ test("an older saved-position response cannot supersede a newer Album removal", 
   });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Picks 1 Photos$/ }).click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /^Picks 1 Photo$/ }).click();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   let markProgressPersisted!: () => void;
   const progressPersisted = new Promise<void>((resolve) => {
@@ -1720,7 +1779,7 @@ test("an older saved-position response cannot supersede a newer Album removal", 
       page.getByRole("button", { name: /^Picks 0 Photos$/ }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /All Photos 1 Photos/ }),
+      page.getByRole("button", { name: /All Photos 1 Photo/ }),
     ).toBeVisible();
     expect((await state(running.url, albumId)).members).toHaveLength(0);
   } finally {
@@ -1774,7 +1833,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await openSources(page);
   await expect(
-    page.getByRole("button", { name: /^Picks 1 Photos$/ }),
+    page.getByRole("button", { name: /^Picks 1 Photo$/ }),
   ).toBeVisible();
   await expect
     .poll(async () => (await state(running.url, albumId)).members)
@@ -1931,7 +1990,7 @@ test("creating an album from the photo view opens it and makes it available for 
   ).toBeVisible();
 
   await openSources(page);
-  await page.getByRole("button", { name: /^All Photos 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
   await page
@@ -1941,7 +2000,7 @@ test("creating an album from the photo view opens it and makes it available for 
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /^Fresh 1 Photos/ }),
+    page.getByRole("button", { name: /^Fresh 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -1954,7 +2013,7 @@ test("a failed removal stays retryable from the photo view", async ({
   const { albumId } = await createAlbum(running.url, "Retry");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Retry 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Retry 1 Photo/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -1992,14 +2051,14 @@ test("renaming the open album updates every heading in place", async ({
   await createAlbum(running.url, "Before");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Before 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Before 1 Photo/ }).click();
   await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
 
   await page.getByRole("button", { name: "Rename Before" }).click();
   await page.getByLabel("Album name").fill("After");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
-    page.getByRole("button", { name: /^After 1 Photos/ }),
+    page.getByRole("button", { name: /^After 1 Photo/ }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -2055,7 +2114,7 @@ test("a late album success cannot overwrite a newer removal notice", async ({
   await post(running.url, "/api/albums", { name: "Other" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Hold 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Hold 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
 
   // Hold the membership add while a removal settles first.
@@ -2081,7 +2140,7 @@ test("a late album success cannot overwrite a newer removal notice", async ({
   // overwrite the newer removal notice.
   await openSources(page);
   await expect(
-    page.getByRole("button", { name: /^Other 1 Photos/ }),
+    page.getByRole("button", { name: /^Other 1 Photo/ }),
   ).toBeVisible();
   await expect(removedNotice).toBeVisible();
 });
@@ -2096,7 +2155,7 @@ test("a superseded album failure surfaces in the library summary", async ({
   await post(running.url, "/api/albums", { name: "Other" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Hold 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Hold 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
 
   let fail = false;
@@ -2183,7 +2242,7 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   await post(running.url, "/api/albums", { name: "Sibling" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Before 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Before 1 Photo/ }).click();
   await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
 
   await page.getByRole("button", { name: "Rename Before" }).click();
@@ -2203,7 +2262,7 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /^After 1 Photos/ }),
+    page.getByRole("button", { name: /^After 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -2248,7 +2307,7 @@ test("an older overview success still bootstraps after a newer reload fails", as
   releaseOlder();
   // The valid shared response elects bootstrap, but it cannot release the
   // newer foreground reload's exact failure owner.
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await expect(page.getByText("Disconnected")).toBeVisible();
   await expect(
     page.getByText("Could not reach Slipstream. Check the server and retry."),
@@ -2377,7 +2436,7 @@ test("the application status monitor owns scan failure, retry, and completion", 
     page.getByRole("button", { name: "Refresh Current Source" }),
   ).toBeHidden();
   await expect(page.locator("[data-grid-summary]")).toHaveText("");
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await expect(page.getByText(/Library check complete/)).toBeHidden();
 });
 
@@ -2647,7 +2706,7 @@ test("publication validation rejects an overview body captured before replacemen
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
 
   let captured!: () => void;
@@ -2705,7 +2764,7 @@ test("an unpublished Overview cannot replace an already published generation", a
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
   await page.route("**/api/overview", async (route) => {
     await route.fulfill({
@@ -2730,7 +2789,7 @@ test("an unpublished Overview cannot replace an already published generation", a
     page.getByRole("button", { name: /^All Photos 0 Photos/ }),
   ).toBeHidden();
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photos/ }),
+    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -2851,7 +2910,7 @@ test("in-flight membership and delete operations stay disabled across re-renders
     { timeout: 15000 },
   );
   await expect(
-    page.getByRole("button", { name: /^Slow 1 Photos/ }),
+    page.getByRole("button", { name: /^Slow 1 Photo/ }),
   ).toBeVisible();
   expect(calls).toBe(1);
   // The removed member is no longer removable within the open snapshot.
@@ -2866,7 +2925,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const running = await server(base, root);
   const { albumId } = await createAlbum(running.url, "Position Retry");
   await page.goto(running.url);
-  await page.getByRole("button", { name: /^Position Retry 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Position Retry 1 Photo/ }).click();
 
   await page.route("**/api/albums/*/progress", async (route) => {
     await route.fulfill({ status: 503, body: '{"error":"failed"}' });
@@ -3181,7 +3240,7 @@ test("an admitted album add completes after switching sources", async ({
   release!();
   // The admitted mutation still updates the bounded Album list.
   await expect(
-    page.getByRole("button", { name: /Picks 1 Photos/ }),
+    page.getByRole("button", { name: /Picks 1 Photo/ }),
   ).toBeVisible();
   await expect(
     page.getByText("The Photo could not be added to the Album."),
@@ -3230,7 +3289,7 @@ test("file locations show a bounded tree and open recursive folder sources", asy
     page.getByRole("button", { name: /Trip · Subfolders/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Trip-extra 1 Photos" }),
+    page.getByRole("button", { name: "Trip-extra 1 Photo" }),
   ).toBeVisible();
   // The same-name Album remains present in its own section.
   await expect(
@@ -3240,7 +3299,7 @@ test("file locations show a bounded tree and open recursive folder sources", asy
   // Expanding a child loads its own direct-child window.
   await page.getByRole("button", { name: "Toggle Trip subfolders" }).click();
   await expect(
-    page.getByRole("button", { name: /day2 1 Photos/ }),
+    page.getByRole("button", { name: /day2 1 Photo/ }),
   ).toBeVisible();
 
   // Opening the folder source shows the recursive subtree count.
@@ -3251,12 +3310,12 @@ test("file locations show a bounded tree and open recursive folder sources", asy
   ).toBeVisible();
 
   // The component-aware rule keeps the same-prefix sibling separate.
-  await page.getByRole("button", { name: /Trip-extra 1 Photos/ }).click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /Trip-extra 1 Photo/ }).click();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   // A Folder name containing a space opens through decoded query values.
-  await page.getByRole("button", { name: /My Photos 1 Photos/ }).click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await page.getByRole("button", { name: /My Photos 1 Photo/ }).click();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   // The Library Folder root source covers the whole Published Library.
   await page.getByRole("button", { name: /^Library Folder/ }).click();
@@ -3322,7 +3381,7 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   });
   await expect(refreshCurrent).toBeInViewport();
   await refreshCurrent.click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("file location publication values stay unique across server restarts", async () => {
@@ -3360,7 +3419,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
     })
     .click();
   await expect(
-    page.getByRole("button", { name: /shoot 1 Photos/ }),
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
   ).toBeVisible();
 
   // The first folder-source open fails; the retry must reopen the same
@@ -3380,7 +3439,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
     },
     { times: 1 },
   );
-  await page.getByRole("button", { name: /shoot 1 Photos/ }).click();
+  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
@@ -3390,7 +3449,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("a remembered folder source waits for the File Location binding before reopening", async ({
@@ -3410,9 +3469,9 @@ test("a remembered folder source waits for the File Location binding before reop
     })
     .click();
   await expect(
-    page.getByRole("button", { name: /shoot 1 Photos/ }),
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
   ).toBeVisible();
-  await page.getByRole("button", { name: /shoot 1 Photos/ }).click();
+  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
@@ -3456,7 +3515,7 @@ test("a remembered folder source waits for the File Location binding before reop
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
 test("delayed File Location responses from a superseded publication are discarded", async ({
@@ -3593,7 +3652,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   // Retrying loads only the failed range: the sibling child appears while
   // the already loaded root navigation stays intact.
   await expect(
-    page.getByRole("button", { name: /nested 1 Photos/ }),
+    page.getByRole("button", { name: /nested 1 Photo/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /shoot · Subfolders/ }),
@@ -3650,7 +3709,7 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   failing.delete("a");
   await retryA.click();
   await expect(
-    page.getByRole("button", { name: /nested 1 Photos/ }).first(),
+    page.getByRole("button", { name: /nested 1 Photo/ }).first(),
   ).toBeVisible();
   await expect(retryA).toBeHidden();
   await expect(retryB).toBeVisible();
@@ -3676,7 +3735,7 @@ test("file locations reload coherently when a scan replaces the publication", as
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
   await expect(
-    page.getByRole("button", { name: /shoot 1 Photos/ }),
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
   ).toBeVisible();
 
   // A rescan that adds a Folder supersedes the retained publication.
@@ -3701,7 +3760,7 @@ test("file locations reload coherently when a scan replaces the publication", as
     ),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /later 1 Photos/ }),
+    page.getByRole("button", { name: /later 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -3731,7 +3790,7 @@ test("shows empty and no-album start states and only uses same-service requests"
   await createAlbum(running.url, "Ready");
   await page.reload();
   await expect(
-    page.getByRole("button", { name: /^Ready \d+ Photos/ }),
+    page.getByRole("button", { name: "Ready 1 Photo", exact: true }),
   ).toBeEnabled();
   expect(
     methods.every(
@@ -4550,7 +4609,7 @@ test("application teardown halts image ownership and releases the Browse token",
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
   await page.goto(running.url);
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   let releaseStatus!: () => void;
   const statusReleased = new Promise<void>((resolve) => {
     releaseStatus = resolve;
@@ -4683,7 +4742,7 @@ test("leaving Photo View cancels a pending review image transfer", async ({
     expect(pendingReviewImage).not.toBeNull();
 
     await page.getByRole("button", { name: "Back to Grid" }).click();
-    await expect(page.getByText(/^Ready · 1 Photos$/)).toBeVisible();
+    await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
     expect(
       await pendingReviewImage!.evaluate((image) => image.hasAttribute("src")),
     ).toBe(false);
@@ -4740,7 +4799,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   await page.goto(running.url);
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByText(/returned an invalid response/)).toBeVisible();
-  await expect(page.getByText(/Ready · 1 Photos/)).toBeHidden();
+  await expect(page.getByText(/Ready · 1 Photo/)).toBeHidden();
   await expect.poll(() => overviewRequests).toBeGreaterThan(0);
   const initialOverviewRequests = overviewRequests;
 
@@ -4754,7 +4813,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   ).toBeVisible();
   windowMode = "ready";
   await page.getByRole("button", { name: "Retry connection" }).click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   expect(browseAllocations).toBe(1);
   expect(overviewRequests).toBe(initialOverviewRequests);
@@ -4769,7 +4828,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
   await page.goto(running.url);
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   let previewMode:
     | "typed-200"
     | "typed-503"
@@ -6744,7 +6803,7 @@ test("file locations stay bounded on a 40,000-Photo Library with a large folder 
 
   // Opening a Folder from the current page stays bounded end to end.
   await page.locator(".folder-child .source-card").first().click();
-  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   const metrics = await page.evaluate(() => ({
     domCount: document.querySelectorAll("*").length,
@@ -6836,7 +6895,7 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   await page.goto(running.url);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "All Photos 40000 Photos" }),
+    page.getByRole("button", { name: "All Photos 40,000 Photos" }),
   ).toBeVisible();
   const overviewBytes = await page.evaluate(
     async () => (await (await fetch("/api/overview")).text()).length,
