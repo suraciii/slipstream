@@ -1622,6 +1622,102 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   ).toHaveAttribute("aria-pressed", "false");
 });
 
+test("Photo View recovery status wraps without hiding Retry or lower controls", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Status Layout");
+  await startReview(page, running.url, "Status Layout", albumId);
+
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Undo" }).click(),
+  );
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await actionWithProgress(page, albumId, () =>
+    page.getByRole("button", { name: "Select" }).click(),
+  );
+  const firstId = (await state(running.url, albumId)).members[0]!.photoId;
+  await post(running.url, `/api/photos/${firstId}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.getByRole("button", { name: "Undo" }).click();
+
+  const message =
+    "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.";
+  const status = page.locator("[data-status]");
+  await expect(status).toHaveText(message);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  const photoView = page.locator("[data-photo-view]");
+  const photoControls = page.locator(".photo-controls");
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+    { width: 1280, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await photoView.evaluate((view) => {
+      view.scrollTop = 0;
+    });
+    const metrics = await status.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return {
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        height: box.height,
+      };
+    });
+    expect(metrics.clientWidth).toBeGreaterThan(0);
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
+    expect(metrics.height).toBeGreaterThan(0);
+    await expect(retry).toBeEnabled();
+    await expect(retry).toBeInViewport();
+
+    await photoControls.scrollIntoViewIfNeeded();
+    const controls = await photoControls.evaluate((controls) => {
+      const view = controls.closest<HTMLElement>("[data-photo-view]");
+      if (!view) throw new Error("Photo View is missing");
+      const viewBox = view.getBoundingClientRect();
+      const controlsBox = controls.getBoundingClientRect();
+      return {
+        contained:
+          controlsBox.left >= viewBox.left &&
+          controlsBox.right <= viewBox.right &&
+          controlsBox.top >= viewBox.top &&
+          controlsBox.bottom <= viewBox.bottom,
+        buttons: Array.from(controls.querySelectorAll("button"), (button) => {
+          const box = button.getBoundingClientRect();
+          return (
+            box.width >= 44 &&
+            box.height >= 44 &&
+            box.left >= viewBox.left &&
+            box.right <= viewBox.right &&
+            box.top >= viewBox.top &&
+            box.bottom <= viewBox.bottom
+          );
+        }),
+      };
+    });
+    expect(controls.contained).toBe(true);
+    expect(controls.buttons).toEqual([true, true, true, true]);
+  }
+
+  await retry.click();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(status).toHaveText("Connected. Current state refreshed.");
+  const steadyStatus = await status.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  expect(steadyStatus.height).toBeLessThan(steadyStatus.lineHeight * 1.5);
+});
+
 test("keeps unavailable Photos ordered and allows their decisions without a Preview", async ({
   page,
 }) => {
