@@ -684,6 +684,46 @@ describe("SourceGridOwner", () => {
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
   });
 
+  test("retains the same failed hydrated URL across Grid replacement and accepts a changed URL", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    const failed = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", failed, "/hydrated.jpg", true);
+    failed.onerror?.call(
+      failed,
+      new Event("error"),
+      "",
+      0,
+      0,
+      new Error("failed"),
+    );
+    expect(failed.deliveryFailed).toBe(true);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+
+    const sameUrl = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", sameUrl, "/hydrated.jpg", true);
+    expect(sameUrl.deliveryFailed).toBe(true);
+    expect(sameUrl.src).toBe("");
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+
+    const changedUrl = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", changedUrl, "/replacement.jpg", true);
+    expect(changedUrl.deliveryFailed).toBe(false);
+    expect(changedUrl.src).toBe("/replacement.jpg");
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
+  });
+
   test("bounds the rebuildable Thumbnail cache independently of Library size", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

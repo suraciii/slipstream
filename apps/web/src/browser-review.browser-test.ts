@@ -5216,6 +5216,18 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   );
   expect(response.ok).toBe(true);
 
+  let thumbnailApiRequests = 0;
+  let derivativeRequests = 0;
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (/^\/api\/photos\/[^/]+\/thumbnail$/.test(pathname))
+      thumbnailApiRequests += 1;
+    if (
+      pathname.includes("/api/derivatives/") &&
+      pathname.includes("/thumbnail/")
+    )
+      derivativeRequests += 1;
+  });
   await page.route("**/*", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
     if (
@@ -5247,11 +5259,6 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
     }
     await route.continue();
   });
-  const thumbnailRequests: string[] = [];
-  page.on("request", (request) => {
-    if (new URL(request.url()).pathname.endsWith("/thumbnail"))
-      thumbnailRequests.push(request.url());
-  });
   await page.goto(running.url);
   const image = page.locator(".photo-cell img").first();
   await image.scrollIntoViewIfNeeded();
@@ -5265,7 +5272,25 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await expect(cell).toHaveAccessibleName(
     /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
   );
-  expect(thumbnailRequests).toHaveLength(0);
+  expect(thumbnailApiRequests).toBe(0);
+  expect(derivativeRequests).toBe(1);
+
+  const failedCell = await cell.elementHandle();
+  expect(failedCell).not.toBeNull();
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await expect
+    .poll(() => failedCell!.evaluate((node) => node.isConnected))
+    .toBe(false);
+  await expect(facts).toHaveText(
+    "Ambiguous pairing · Thumbnail delivery failed",
+  );
+  await expect(cell).toHaveAccessibleName(
+    /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
+  );
+  expect(thumbnailApiRequests).toBe(0);
+  expect(derivativeRequests).toBe(1);
 });
 
 test("Grid presents independent Photo, pairing, and Preview facts without removing actions", async ({

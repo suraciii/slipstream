@@ -247,7 +247,8 @@ export function createSourceGridOwner(
   let gridTasks = new TaskScope();
   let facts = new Map<number, PhotoSummary>();
   let thumbnails = new Map<string, string>();
-  let thumbnailDeliveryFailures = new Set<string>();
+  // null means the endpoint failed before it supplied a Thumbnail URL.
+  let thumbnailDeliveryFailures = new Map<string, string | null>();
   const renderedImages = new Map<string, GridThumbnailImage>();
   const imageTransfers = new Map<string, ImageTransfer>();
   const knownTokens = new Set<string>();
@@ -364,7 +365,7 @@ export function createSourceGridOwner(
       gridPosition = 0;
       facts = new Map();
       thumbnails = new Map();
-      thumbnailDeliveryFailures = new Set();
+      thumbnailDeliveryFailures = new Map();
     }
     const task = sourceTasks.beginLatest("browse-open", {
       abortTransport: true,
@@ -391,7 +392,7 @@ export function createSourceGridOwner(
         if (mode === "reopen") {
           facts = new Map();
           thumbnails = new Map();
-          thumbnailDeliveryFailures = new Set();
+          thumbnailDeliveryFailures = new Map();
         }
         return {
           kind: "opened",
@@ -571,12 +572,16 @@ export function createSourceGridOwner(
     renderedImages.set(photoId, image);
   };
 
-  const markDeliveryFailed = (photoId: string, image: GridThumbnailImage) => {
+  const markDeliveryFailed = (
+    photoId: string,
+    image: GridThumbnailImage,
+    failedUrl: string | null,
+  ) => {
     if (renderedImages.get(photoId) !== image || closed) return;
     thumbnailDeliveryFailures.delete(photoId);
-    thumbnailDeliveryFailures.add(photoId);
+    thumbnailDeliveryFailures.set(photoId, failedUrl);
     while (thumbnailDeliveryFailures.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnailDeliveryFailures.values().next().value;
+      const oldest = thumbnailDeliveryFailures.keys().next().value;
       if (oldest === undefined) break;
       thumbnailDeliveryFailures.delete(oldest);
     }
@@ -592,18 +597,20 @@ export function createSourceGridOwner(
   ) => {
     if (!url || closed || renderedImages.get(photoId) !== image) return;
     registerImage(photoId, image);
-    if (thumbnailDeliveryFailures.has(photoId)) {
-      image.setDeliveryFailed(true);
-      return;
-    }
-    image.setDeliveryFailed(false);
-    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
-      abortTransport: false,
-    });
     const expectedUrl = new URL(
       url,
       globalThis.location?.href ?? "http://slipstream.test/",
     ).href;
+    const failedUrl = thumbnailDeliveryFailures.get(photoId);
+    if (failedUrl === expectedUrl) {
+      image.setDeliveryFailed(true);
+      return;
+    }
+    if (failedUrl !== undefined) thumbnailDeliveryFailures.delete(photoId);
+    image.setDeliveryFailed(false);
+    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
+      abortTransport: false,
+    });
     const finish = () => {
       transfer.finish();
       finishImage(photoId, image);
@@ -620,7 +627,7 @@ export function createSourceGridOwner(
     image.onload = finish;
     image.onerror = () => {
       if (!transfer.isCurrent()) return;
-      markDeliveryFailed(photoId, image);
+      markDeliveryFailed(photoId, image, expectedUrl);
       finish();
     };
     if (attachDisconnected || image.isConnected) image.src = url;
@@ -670,10 +677,9 @@ export function createSourceGridOwner(
     if (renderedImages.get(photoId) !== image) return;
     if (url) {
       rememberThumbnail(photoId, url);
-      thumbnailDeliveryFailures.delete(photoId);
       attachThumbnail(photoId, image, url);
     } else {
-      markDeliveryFailed(photoId, image);
+      markDeliveryFailed(photoId, image, null);
     }
   }
 
@@ -801,7 +807,6 @@ export function createSourceGridOwner(
     beginGridRender,
     loadThumbnail,
     presentThumbnail(photoId, image, url, attachDisconnected) {
-      if (url) thumbnailDeliveryFailures.delete(photoId);
       registerImage(photoId, image);
       attachThumbnail(photoId, image, url, attachDisconnected);
     },
