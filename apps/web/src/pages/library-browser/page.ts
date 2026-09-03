@@ -530,15 +530,28 @@ export function mountLibraryBrowser(
             );
           if (presentOnPhoto)
             application.releaseAlbumSummary(summaryPresentation);
-          if (
-            outcome.connectivity === "lost-if-latest" &&
-            albumActions.isLatest(outcome.mutation)
-          )
-            disconnect(outcome.sourceAuthority);
+          if (outcome.connectivity === "lost-if-latest") {
+            // Persistence is ambiguous even when a newer, unrelated Album
+            // action owns presentation, so always invalidate the exact
+            // position authority. Only the latest action may fence its
+            // successor Overview or change connectivity.
+            if (action.invalidatesSavedPositionFor)
+              application.invalidateSavedPositionAuthority(
+                action.invalidatesSavedPositionFor,
+              );
+            if (albumActions.isLatest(outcome.mutation)) {
+              application.advanceAlbumMutationFloor();
+              disconnect(outcome.sourceAuthority);
+            }
+          }
           return { admitted: true, ok: false, announce: () => {} };
         }
 
         let disconnectAfterRefresh = false;
+        if (action.invalidatesSavedPositionFor)
+          application.invalidateSavedPositionAuthority(
+            action.invalidatesSavedPositionFor,
+          );
         if (application.advanceAlbumMutationFloor()) {
           try {
             const committed = await application.refreshOverview();
@@ -1602,6 +1615,7 @@ export function mountLibraryBrowser(
     if (sourceGrid.kind !== "album" || !sourceGrid.albumId || !currentPhoto())
       return Promise.resolve(true);
     const albumId = sourceGrid.albumId;
+    const albumSummaryAuthority = application.albumSummaryAuthority(albumId);
     const photoId = currentPhoto()!.id;
     const sourceAuthority = sourceGrid.authority;
     const admission = savedPositions.save({
@@ -1632,8 +1646,13 @@ export function mountLibraryBrowser(
         );
         return false;
       }
-      application.confirmSavedPosition(outcome.target.albumId);
-      renderSources();
+      if (
+        application.confirmSavedPosition(
+          outcome.target.albumId,
+          albumSummaryAuthority,
+        )
+      )
+        renderSources();
       return true;
     });
   };

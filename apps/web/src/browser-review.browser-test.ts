@@ -1535,7 +1535,10 @@ test("the current photo joins and leaves albums from the photo view", async ({
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
-  await post(running.url, "/api/albums", { name: "Picks" });
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Picks")!.id;
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -1582,7 +1585,11 @@ test("the current photo joins and leaves albums from the photo view", async ({
   // snapshot keeps its copied order.
   await page.getByRole("button", { name: /Picks 1 Photos/ }).click();
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
-  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  );
   await page.getByRole("button", { name: "Remove from this Album" }).click();
   await expect(
     page.getByText(
@@ -1592,11 +1599,130 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("1 / 1")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /Picks 0 Photos/ }),
+    page.getByRole("button", { name: /^Picks 0 Photos$/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /All Photos 1 Photos/ }),
   ).toBeVisible();
+});
+
+test("an older saved-position response cannot supersede a newer Album removal", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Picks");
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    const instrumentedFetch = async (
+      input: Parameters<typeof window.fetch>[0],
+      init?: Parameters<typeof window.fetch>[1],
+    ) => {
+      const response = await nativeFetch(input, init);
+      if (
+        typeof input === "string" &&
+        input.endsWith("/progress") &&
+        init?.method === "POST"
+      )
+        setTimeout(() => {
+          document.documentElement.dataset.savedPositionSettled = "true";
+        }, 0);
+      return response;
+    };
+    window.fetch = instrumentedFetch as typeof window.fetch;
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Picks 1 Photos$/ }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+
+  let markProgressPersisted!: () => void;
+  const progressPersisted = new Promise<void>((resolve) => {
+    markProgressPersisted = resolve;
+  });
+  let releaseProgress!: () => void;
+  const progressHeld = new Promise<void>((resolve) => {
+    releaseProgress = resolve;
+  });
+  let markOverviewCaptured!: () => void;
+  const overviewCaptured = new Promise<void>((resolve) => {
+    markOverviewCaptured = resolve;
+  });
+  let releaseOverview!: () => void;
+  const overviewHeld = new Promise<void>((resolve) => {
+    releaseOverview = resolve;
+  });
+  let markOverviewDelivered!: () => void;
+  const overviewDelivered = new Promise<void>((resolve) => {
+    markOverviewDelivered = resolve;
+  });
+  await page.route("**/api/albums/*/progress", async (route) => {
+    const response = await route.fetch();
+    markProgressPersisted();
+    await progressHeld;
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/overview", async (route) => {
+    const response = await route.fetch();
+    const body = await response.body();
+    const parsed = JSON.parse(body.toString()) as {
+      albums: Array<{
+        id: string;
+        photoCount: number;
+        hasSavedPosition: boolean;
+      }>;
+    };
+    expect(parsed.albums.find((album) => album.id === albumId)).toMatchObject({
+      photoCount: 0,
+      hasSavedPosition: false,
+    });
+    markOverviewCaptured();
+    await overviewHeld;
+    try {
+      await route.fulfill({ response, body });
+    } finally {
+      markOverviewDelivered();
+    }
+  });
+  try {
+    const savedPositionResponse = progressResponse(page, albumId);
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await progressPersisted;
+    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await overviewCaptured;
+    releaseProgress();
+    const deliveredProgress = await savedPositionResponse;
+    await deliveredProgress.finished();
+    // The sentinel's next event-loop task runs only after the complete fetch
+    // continuation, including the stale Album summary confirmation attempt.
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-saved-position-settled",
+      "true",
+    );
+    releaseOverview();
+    await overviewDelivered;
+
+    await expect(
+      page.getByText(
+        "Removed from the Album. It stays in this open view until reopened.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByText("1 / 1")).toBeVisible();
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(
+      page.getByRole("button", { name: /^Picks 0 Photos$/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /All Photos 1 Photos/ }),
+    ).toBeVisible();
+    expect((await state(running.url, albumId)).members).toHaveLength(0);
+  } finally {
+    releaseProgress();
+    releaseOverview();
+    await page.unroute("**/api/albums/*/progress");
+    await page.unroute("**/api/overview");
+  }
 });
 
 test("a successful membership retry recovers its exact Album connection", async ({

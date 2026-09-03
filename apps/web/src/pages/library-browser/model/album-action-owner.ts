@@ -76,6 +76,7 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
 export type AlbumActionAdmission = Readonly<{
   mutation: AlbumMutation;
   noticeKey: string;
+  invalidatesSavedPositionFor?: string;
   settlement: Promise<AlbumActionOutcome>;
 }>;
 
@@ -157,6 +158,7 @@ export function createAlbumActionOwner(
         albumId: string;
         photoId: string;
       }>;
+      invalidatesSavedPositionFor?: string;
     } = {},
   ): AlbumActionAdmission | undefined => {
     if (closed) return undefined;
@@ -227,7 +229,16 @@ export function createAlbumActionOwner(
           });
     })();
 
-    return Object.freeze({ mutation, noticeKey, settlement });
+    return Object.freeze({
+      mutation,
+      noticeKey,
+      ...(options.invalidatesSavedPositionFor
+        ? {
+            invalidatesSavedPositionFor: options.invalidatesSavedPositionFor,
+          }
+        : {}),
+      settlement,
+    });
   };
 
   return {
@@ -267,6 +278,7 @@ export function createAlbumActionOwner(
         context,
         () => deleteAlbum(fetcher, albumId),
         () => "The Album could not be deleted.",
+        { invalidatesSavedPositionFor: albumId },
       ),
     addMembership: (albumId, photoId, context) =>
       start(
@@ -285,6 +297,7 @@ export function createAlbumActionOwner(
         {
           admissionKey: membershipKey("remove", albumId, photoId),
           removedFromCurrentAlbum: { albumId, photoId },
+          invalidatesSavedPositionFor: albumId,
         },
       ),
     isMembershipAdmitted: (verb, albumId, photoId) =>

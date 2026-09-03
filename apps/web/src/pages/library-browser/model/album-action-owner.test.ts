@@ -106,6 +106,9 @@ describe("AlbumActionOwner", () => {
       true,
     );
     expect(
+      actions.map((action) => action?.invalidatesSavedPositionFor),
+    ).toEqual([undefined, undefined, "album-1", undefined, "album-1"]);
+    expect(
       outcomes.every((outcome) => outcome.settlement.kind === "persisted"),
     ).toBe(true);
     for (const outcome of outcomes) owner.finish(outcome.mutation);
