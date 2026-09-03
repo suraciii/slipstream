@@ -1346,12 +1346,14 @@ fn revision_of(original: &OriginalRecord) -> Result<String, PreviewServiceError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LibraryConfig, ScanLimits};
+    use crate::{
+        LibraryConfig, ScanLimits,
+        test_support::{original_snapshot, raw_sample},
+    };
     use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
     use std::{
         fs,
         num::NonZeroUsize,
-        path::Path,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -1877,11 +1879,7 @@ mod tests {
     #[test]
     #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
     fn corrupt_matching_jpeg_falls_back_to_raw_and_recovers_after_replacement() {
-        let Ok(sample) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
-            return;
-        };
-        let sample = Path::new(&sample);
-        let before = fs::read(sample).unwrap();
+        let (sample, source_before) = raw_sample();
         let raw_name = format!(
             "one.{}",
             sample
@@ -1895,7 +1893,9 @@ mod tests {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(base.join("originals")).unwrap();
-        fs::copy(sample, base.join("originals").join(&raw_name)).unwrap();
+        let copied_raw = base.join("originals").join(&raw_name);
+        fs::copy(&sample, &copied_raw).unwrap();
+        let copied_before = original_snapshot(&copied_raw);
         fs::write(base.join("originals/one.JPG"), b"not jpeg").unwrap();
         let config = || LibraryConfig {
             library_root: base.join("originals"),
@@ -2002,25 +2002,27 @@ mod tests {
         );
         reopened_service.shutdown().unwrap();
         reopened.shutdown().unwrap();
-        assert_eq!(fs::read(sample).unwrap(), before);
+        assert_eq!(original_snapshot(&copied_raw), copied_before);
+        assert_eq!(original_snapshot(&sample), source_before);
         let _ = fs::remove_dir_all(base);
     }
 
     #[test]
+    #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
     fn sony_opt_in_service_uses_largest_embedded_candidate_without_mutating_original() {
-        let Ok(sample) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
-            return;
-        };
-        let sample = Path::new(&sample);
-        let before = fs::read(sample).unwrap();
+        let (sample, source_before) = raw_sample();
         let base = std::env::temp_dir().join(format!(
             "slipstream-preview-sony-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&base).unwrap();
+        let originals = base.join("originals");
+        fs::create_dir_all(&originals).unwrap();
+        let copied_raw = originals.join(sample.file_name().unwrap());
+        fs::copy(&sample, &copied_raw).unwrap();
+        let copied_before = original_snapshot(&copied_raw);
         let config = LibraryConfig {
-            library_root: sample.parent().unwrap().to_owned(),
+            library_root: originals,
             state_directory: base.join("state"),
             database_basename: "library.sqlite".to_owned(),
             limits: ScanLimits::default(),
@@ -2050,7 +2052,8 @@ mod tests {
         assert_eq!((ready.width, ready.height), (2560, 1707));
         service.shutdown().unwrap();
         library.shutdown().unwrap();
-        assert_eq!(fs::read(sample).unwrap(), before);
+        assert_eq!(original_snapshot(&copied_raw), copied_before);
+        assert_eq!(original_snapshot(&sample), source_before);
         let _ = fs::remove_dir_all(base);
     }
 }

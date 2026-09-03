@@ -304,13 +304,14 @@ pub fn inspect_preview_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LibraryRoot, RelativeOriginalPath};
+    use crate::{
+        LibraryRoot, RelativeOriginalPath,
+        test_support::{original_snapshot, raw_sample},
+    };
     use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
-    use sha2::{Digest, Sha256};
     use std::{
         fs,
         io::Cursor,
-        path::Path,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -392,16 +393,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
     fn sony_embedded_preview_is_largest_usable_candidate_and_original_is_unchanged() {
-        let Ok(path) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
-            return;
-        };
-        let path = Path::new(&path);
-        let before = fs::read(path).unwrap();
-        assert_eq!(
-            format!("{:x}", Sha256::digest(&before)),
-            "d577d59901a4aff3ad6f35a1121fe1f3c0345890a1cadc2d33fe7ddaadd3fa74"
-        );
+        let (path, before) = raw_sample();
         let root = LibraryRoot::open(path.parent().unwrap()).unwrap();
         let relative = RelativeOriginalPath::parse(
             path.file_name()
@@ -414,7 +408,7 @@ mod tests {
         let preview = extract_embedded_jpeg(&capability).unwrap();
         assert_eq!(preview.candidate_index, Some(2));
         assert_eq!((preview.width, preview.height), (9504, 6336));
-        assert_eq!(fs::read(path).unwrap(), before);
+        assert_eq!(original_snapshot(&path), before);
         let mut decoder = image::ImageReader::new(Cursor::new(preview.jpeg));
         decoder.set_format(image::ImageFormat::Jpeg);
         assert_eq!(decoder.into_dimensions().unwrap(), (9504, 6336));

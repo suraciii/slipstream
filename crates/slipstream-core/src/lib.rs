@@ -15,6 +15,9 @@ pub mod persistence;
 pub mod preview;
 pub mod reconcile;
 
+#[cfg(test)]
+mod test_support;
+
 pub use cache::{
     CacheDirectory, CacheError, CachedDerivative, DEFAULT_QUEUE_CAPACITY, DEFAULT_WAITER_CAPACITY,
     DEFAULT_WORKERS, DERIVATIVE_ALGORITHM_VERSION, DerivativeFailure, DerivativeFailureKind,
