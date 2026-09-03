@@ -129,6 +129,14 @@ An existing published Library must remain browsable while an ordinary background
 
 On a new state store with no published Library, the browser may show initialization progress until the first scan publishes the Library.
 
+## Empty Sources
+
+An empty source must identify what is empty and must not imply that Photos or Original Files were removed.
+
+When the Photo Library contains no Photos, the `All Photos` source and Library Folder source must say that no supported Photos were found. They must direct the operator to check the configured Library Folder or add supported files, then offer **Check Library** through the existing rescan workflow. A completed check follows the normal **Refresh Current Source** contract above.
+
+An empty Album must remain openable and manageable. Its Grid must say that the Album contains no Photos and that the Photographer can add Photos from another source's Photo View. Rename and delete remain available through source navigation.
+
 ## Saved Position
 
 Slipstream must remember the last Photo shown in Photo View for each Album. Grid scrolling alone does not change durable saved position. Opening that Album must return to the saved Photo when it is still a member and available.

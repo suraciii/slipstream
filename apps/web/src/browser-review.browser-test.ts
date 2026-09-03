@@ -2741,8 +2741,10 @@ test("an empty Library still shows and opens the Library Folder root", async ({
 }) => {
   const { base, root } = await fixture();
   const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
   await expect(
     page.getByRole("button", { name: /^Library Folder 0 Photos/ }),
   ).toBeVisible();
@@ -2753,7 +2755,24 @@ test("an empty Library still shows and opens the Library Folder root", async ({
     .click();
   await expect(page.getByRole("button", { name: "More Folders" })).toBeHidden();
   await page.getByRole("button", { name: /^Library Folder 0 Photos/ }).click();
-  await expect(page.getByText("No Photos in this source")).toBeVisible();
+  const emptyLibrary = page.getByText(
+    "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.",
+  );
+  await expect(emptyLibrary).toBeVisible();
+  await expect(emptyLibrary).toBeInViewport();
+  await writeFile(join(root, "added.jpg"), await jpeg());
+  const check = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/scan" &&
+      response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Check Library" }).click();
+  await check;
+  await expect(page.getByText(/Library check complete/)).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
 test("file location publication values stay unique across server restarts", async () => {
@@ -3154,6 +3173,11 @@ test("shows empty and no-album start states and only uses same-service requests"
   await expect(empty).toBeEnabled();
   await empty.click();
   await expect(empty).toHaveClass(/active/);
+  await expect(
+    page.getByText(
+      "This Album contains no Photos. Add Photos from another source's Photo View.",
+    ),
+  ).toBeVisible();
   await createAlbum(running.url, "Ready");
   await page.reload();
   await expect(

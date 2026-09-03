@@ -86,6 +86,7 @@ export interface ApplicationOwner {
   readonly albums: ReadonlyArray<AlbumSummary>;
   loadOverview(): Promise<void>;
   refreshOverview(): Promise<boolean>;
+  requestLibraryCheck(): void;
   notePublicationConflict(): void;
   advanceAlbumMutationFloor(): boolean;
   confirmSavedPosition(albumId: string): void;
@@ -628,6 +629,7 @@ export function createApplicationOwner(
       }
       return { kind: "refresh-current-source" };
     },
+    requestLibraryCheck: () => void retryLibraryCheck(),
     dispose: () => {
       if (closed) return;
       closed = true;

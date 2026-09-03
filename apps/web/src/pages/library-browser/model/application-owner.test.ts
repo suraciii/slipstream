@@ -694,6 +694,7 @@ describe("ApplicationOwner", () => {
     expect(owner.advanceAlbumMutationFloor()).toBe(false);
     owner.confirmSavedPosition("album-1");
     owner.notePublicationConflict();
+    owner.requestLibraryCheck();
 
     expect(requests).toBe(0);
     expect(events).toHaveLength(0);
