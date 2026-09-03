@@ -85,6 +85,14 @@ describe("AlbumActionOwner", () => {
     if (actions.some((action) => !action))
       throw new Error("expected all Album actions to be admitted");
 
+    expect(actions.map((action) => action!.noticeKey)).toEqual([
+      "create",
+      "rename:album-1",
+      "delete:album-1",
+      "add:album-1:photo-1",
+      "remove:album-1:photo-1",
+    ]);
+
     const outcomes = await Promise.all(
       actions.map((action) => action!.settlement),
     );
