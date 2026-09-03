@@ -188,6 +188,7 @@ export interface PhotoOwner {
   cancelUndo(preparation: PhotoUndoPreparation): void;
   performUndo(preparation: PhotoUndoPreparation): Promise<PhotoUndoOutcome>;
   beginRetry(): PhotoRetry | undefined;
+  retryIsCurrent(retry: PhotoRetry): boolean;
   retryPhotoIsCurrent(retry: PhotoRetry): boolean;
   finishRetry(retry: PhotoRetry): void;
   dispose(): void;
@@ -782,8 +783,13 @@ export function createPhotoOwner(
         expectedPhotoId,
       });
     },
+    retryIsCurrent: (retry) =>
+      isCurrent(retry.authority) &&
+      binding?.sourceAuthority === retry.sourceAuthority &&
+      binding.index === retry.index,
     retryPhotoIsCurrent: (retry) =>
-      isCurrent(retry.authority) && owner.current?.id === retry.expectedPhotoId,
+      owner.retryIsCurrent(retry) &&
+      owner.current?.id === retry.expectedPhotoId,
     finishRetry: (retry) => {
       if (busyAuthority === retry.authority) busyAuthority = undefined;
     },

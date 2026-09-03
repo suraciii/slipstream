@@ -1884,6 +1884,7 @@ export function mountLibraryBrowser(
       if (!retry) return;
       photoRetryPending = true;
       view.setPhotoStatus("Reconnecting…");
+      let retryStatusSurface = view.photoStatusSurface;
       const photoTransition = recoveryGate.beginTransition(
         "photo",
         photoRecoveryKey(retry.authority),
@@ -1901,7 +1902,7 @@ export function mountLibraryBrowser(
           return;
         if (
           !sourceGrid.isCurrent(retry.sourceAuthority) ||
-          !photoOwner.retryPhotoIsCurrent(retry)
+          !photoOwner.retryIsCurrent(retry)
         )
           return;
         if (!sourceRangeRecovered) sourceGrid.invalidateWindow(retry.index);
@@ -1920,6 +1921,8 @@ export function mountLibraryBrowser(
         )
           return;
         const refreshed = await showPreview(retry.authority, photoTransition);
+        if (refreshed && view.photoStatusEmpty)
+          retryStatusSurface = view.photoStatusSurface;
         const persisted = refreshed && (await persistPosition(retry.authority));
         if (
           refreshed &&
@@ -1932,8 +1935,16 @@ export function mountLibraryBrowser(
           view.setPhotoStatus("Connected. Current state refreshed.");
         }
       } finally {
+        const retryIsCurrent = photoOwner.retryIsCurrent(retry);
         photoOwner.finishRetry(retry);
         photoRetryPending = false;
+        if (
+          retryIsCurrent &&
+          view.isPhotoStatusSurfaceCurrent(retryStatusSurface)
+        )
+          view.setPhotoStatus(
+            "Could not refresh this Photo. Retry to continue.",
+          );
         updateControls();
       }
     })();
