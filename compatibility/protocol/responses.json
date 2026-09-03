@@ -54,7 +54,7 @@
     "width": 2560,
     "height": 1707,
     "limitedDetail": false,
-    "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg"
+    "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/review/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg"
   },
   {
     "state": "ready",
@@ -63,7 +63,7 @@
     "width": 512,
     "height": 341,
     "limitedDetail": true,
-    "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg",
+    "url": "/api/derivatives/22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255/review/e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105.jpg",
     "message": "Showing a stale Preview because current generation failed"
   },
   { "state": "failed", "message": "RAW embedded JPEG is unavailable" },

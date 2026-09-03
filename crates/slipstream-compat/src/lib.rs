@@ -500,6 +500,32 @@ mod tests {
             }),
             "browse photo summaries document the hydrated current thumbnail URL"
         );
+        let direct_previews: Vec<&Value> = values
+            .iter()
+            .filter(|value| value["state"] == "ready" && value["source"].is_string())
+            .collect();
+        assert!(
+            direct_previews.iter().any(|value| value["stale"] == false),
+            "direct Preview responses include a current ready example"
+        );
+        assert!(
+            direct_previews.iter().any(|value| value["stale"] == true),
+            "direct Preview responses include a stale ready example"
+        );
+        for preview in direct_previews {
+            let url = preview["url"]
+                .as_str()
+                .expect("direct ready Preview response has a URL");
+            assert!(
+                is_review_derivative_url(url),
+                "direct ready/stale Preview response uses the target-qualified review URL"
+            );
+            let retired_url = url.replacen("/review/", "/", 1);
+            assert!(
+                !is_review_derivative_url(&retired_url),
+                "the retired no-target direct Preview URL stays rejected"
+            );
+        }
         assert!(
             values
                 .iter()
@@ -507,6 +533,29 @@ mod tests {
         );
         assert!(values.iter().any(|v| v["state"] == "failed"));
         assert!(values.iter().any(|v| v["undo"]["field"] == "rating"));
+    }
+
+    fn is_review_derivative_url(url: &str) -> bool {
+        let Some(path) = url.strip_prefix("/api/derivatives/") else {
+            return false;
+        };
+        let mut segments = path.split('/');
+        let (Some(photo_id), Some("review"), Some(filename), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
+            return false;
+        };
+        let Some(cache_key) = filename.strip_suffix(".jpg") else {
+            return false;
+        };
+        is_sha256(photo_id) && is_sha256(cache_key)
+    }
+
+    fn is_sha256(value: &str) -> bool {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 
     fn contains_null(value: &Value) -> bool {
