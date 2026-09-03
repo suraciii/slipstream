@@ -157,6 +157,7 @@ export function mountLibraryBrowser(
         presentation.summary.action
           ? { kind: presentation.summary.action.kind, presentationId }
           : undefined,
+        presentation.summary.libraryCheckState,
       );
       return;
     }

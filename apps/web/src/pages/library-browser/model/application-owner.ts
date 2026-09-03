@@ -33,6 +33,7 @@ export type ApplicationSummaryAction = Readonly<{
 export type ApplicationSummary = Readonly<{
   text: string;
   action?: ApplicationSummaryAction;
+  libraryCheckState?: "idle" | "active" | "failed" | "complete";
 }>;
 
 export type ApplicationPresentation =
@@ -160,6 +161,7 @@ export function createApplicationOwner(
   let observedPublication: string | undefined;
   let publicationBaselineEstablished = false;
   let scanFailureNotice: NoticeHandle | undefined;
+  let scanActiveNotice: NoticeHandle | undefined;
   let scanCompletionNotice: NoticeHandle | undefined;
   let activeScanCycle: ScanCycle | undefined;
   let lastCompletedPublication: string | undefined;
@@ -175,8 +177,33 @@ export function createApplicationOwner(
   const summary = (
     text: string,
     action?: ApplicationSummaryAction,
+    libraryCheckState?: ApplicationSummary["libraryCheckState"],
   ): ApplicationSummary =>
-    Object.freeze({ text, ...(action ? { action } : {}) });
+    Object.freeze({
+      text,
+      ...(action ? { action } : {}),
+      ...(libraryCheckState ? { libraryCheckState } : {}),
+    });
+
+  const scanSummary = (
+    scan: LibraryOverviewResponse["scan"],
+  ): ApplicationSummary =>
+    summary(
+      scanLabel(scan),
+      undefined,
+      scan.state === "failed"
+        ? "failed"
+        : scan.state === "idle"
+          ? "idle"
+          : "active",
+    );
+
+  const foregroundSummary = (text: string): ApplicationSummary =>
+    summary(
+      text,
+      undefined,
+      activeScanCycle && !activeScanCycle.consumed ? "active" : undefined,
+    );
 
   const emit = (event: ApplicationEvent): Promise<void> => {
     if (closed) return Promise.resolve();
@@ -202,7 +229,7 @@ export function createApplicationOwner(
       applySummaryUpdate(
         notices.presentBackground(
           epoch,
-          summary(overview ? scanLabel(overview.scan) : "Loading Library…"),
+          overview ? scanSummary(overview.scan) : summary("Loading Library…"),
         ),
       );
       return;
@@ -294,7 +321,7 @@ export function createApplicationOwner(
       albums = Object.freeze([...body.albums]);
       ensureStatusMonitor(body.scan);
       applySummaryUpdate(
-        notices.presentBackground(background, summary(scanLabel(body.scan))),
+        notices.presentBackground(background, scanSummary(body.scan)),
       );
       backgroundSettled = true;
       publishOverview();
@@ -316,7 +343,33 @@ export function createApplicationOwner(
     scanFailureNotice = undefined;
   };
 
+  const releaseScanActive = (): void => {
+    if (!scanActiveNotice) return;
+    applySummaryUpdate(notices.release(scanActiveNotice));
+    scanActiveNotice = undefined;
+  };
+
+  const presentScanActive = (value: ApplicationSummary): void => {
+    if (!scanActiveNotice)
+      scanActiveNotice = notices.issue(
+        "scan-active",
+        "library",
+        ACTIONABLE_NOTICE_PRIORITY,
+      );
+    let update = notices.present(scanActiveNotice, value);
+    if (update.result === "stale") {
+      scanActiveNotice = notices.issue(
+        "scan-active",
+        "library",
+        ACTIONABLE_NOTICE_PRIORITY,
+      );
+      update = notices.present(scanActiveNotice, value);
+    }
+    applySummaryUpdate(update);
+  };
+
   const claimScanFailure = (): void => {
+    releaseScanActive();
     if (!scanFailureNotice)
       scanFailureNotice = notices.issue(
         "scan-failure",
@@ -329,6 +382,7 @@ export function createApplicationOwner(
         summary(
           "Library check failed; the last complete Library remains available.",
           summaryAction("retry-library-check"),
+          "failed",
         ),
       ),
     );
@@ -349,6 +403,7 @@ export function createApplicationOwner(
     if (!observePublication(publication) && !publication)
       overviewDataFloor += 1;
     releaseScanFailure();
+    releaseScanActive();
     if (scanCompletionNotice)
       applySummaryUpdate(notices.release(scanCompletionNotice));
     const notice = notices.issue(
@@ -363,6 +418,7 @@ export function createApplicationOwner(
         summary(
           "Library check complete. Open Browse Snapshots remain unchanged.",
           summaryAction("refresh-current-source"),
+          "complete",
         ),
       ),
     );
@@ -400,9 +456,22 @@ export function createApplicationOwner(
           try {
             const scan = await fetchLibraryStatus(fetcher);
             if (!monitor.isCurrent()) return;
-            applySummaryUpdate(
-              notices.presentBackground(background, summary(scanLabel(scan))),
-            );
+            const active = scan.state !== "idle" && scan.state !== "failed";
+            if (active) {
+              releaseScanFailure();
+              if (activeScanCycle) {
+                notices.discardBackground(background);
+                presentScanActive(scanSummary(scan));
+              } else {
+                applySummaryUpdate(
+                  notices.presentBackground(background, scanSummary(scan)),
+                );
+              }
+            } else {
+              applySummaryUpdate(
+                notices.presentBackground(background, scanSummary(scan)),
+              );
+            }
             settled = true;
             const prior = observedScanState;
             const publicationChanged =
@@ -451,12 +520,15 @@ export function createApplicationOwner(
     if (!settlement) return;
     const cycle: ScanCycle = { consumed: false, admission: "pending" };
     activeScanCycle = cycle;
+    releaseScanFailure();
+    presentScanActive(summary("Starting Library check…", undefined, "active"));
     ensureStatusMonitor();
     try {
       const result = await requestLibraryScan(fetcher);
-      if (closed) return;
+      if (closed || cycle.consumed || activeScanCycle !== cycle) return;
       if (result.kind === "rejected") {
         if (activeScanCycle === cycle) activeScanCycle = undefined;
+        claimScanFailure();
         if (result.status >= 500) {
           scanCommandRecovery ??= recovery();
           failApplicationRecovery(scanCommandRecovery, "scan-command");
@@ -473,8 +545,10 @@ export function createApplicationOwner(
       if (result.scan.state === "idle")
         completeScan(cycle, result.scan.publication);
       else if (result.scan.state === "failed") claimScanFailure();
+      else presentScanActive(scanSummary(result.scan));
     } catch {
-      if (!closed) {
+      if (!closed && !cycle.consumed && activeScanCycle === cycle) {
+        claimScanFailure();
         scanCommandRecovery ??= recovery();
         failApplicationRecovery(scanCommandRecovery, "scan-command");
       }
@@ -490,7 +564,7 @@ export function createApplicationOwner(
       "reload",
       "overview",
       ACTIONABLE_NOTICE_PRIORITY,
-      summary("Loading Library summary…"),
+      foregroundSummary("Loading Library summary…"),
     );
     applySummaryUpdate(barrier.update);
     try {
@@ -504,7 +578,9 @@ export function createApplicationOwner(
         applySummaryUpdate(
           notices.present(
             barrier.handle,
-            summary("Could not reach Slipstream. Check the server and retry."),
+            foregroundSummary(
+              "Could not reach Slipstream. Check the server and retry.",
+            ),
           ),
         );
         retainOverviewFailure();
@@ -524,7 +600,9 @@ export function createApplicationOwner(
       applySummaryUpdate(
         notices.present(
           barrier.handle,
-          summary("Could not reach Slipstream. Check the server and retry."),
+          foregroundSummary(
+            "Could not reach Slipstream. Check the server and retry.",
+          ),
         ),
       );
       retainOverviewFailure();

@@ -448,8 +448,23 @@ describe("ApplicationOwner", () => {
     await flush();
     owner.activateSummaryAction(retry);
     expect(scanRequests).toBe(1);
+    expect(latestSummary(events)).toEqual({
+      text: "Starting Library check…",
+      libraryCheckState: "active",
+    });
+    await owner.loadOverview();
+    expect(latestSummary(events)).toEqual({
+      text: "Could not reach Slipstream. Check the server and retry.",
+      libraryCheckState: "active",
+    });
+    const albumNotice = owner.claimAlbumSummary("pending-album");
+    owner.presentAlbumSummary(albumNotice, "The Album could not be created.");
 
     await nextScheduled().run();
+    expect(latestSummary(events)).toEqual({
+      text: "Applying Library updates…",
+      libraryCheckState: "active",
+    });
     await nextScheduled().run();
     expect(
       events.filter((event) => event.kind === "reset-file-locations"),
@@ -461,7 +476,7 @@ describe("ApplicationOwner", () => {
           "Library check complete. Open Browse Snapshots remain unchanged.",
       ),
     ).toHaveLength(1);
-    expect(overviewRequests).toBe(3);
+    expect(overviewRequests).toBe(4);
 
     terminalScan.resolve(response(scan("idle")));
     await flush();
@@ -475,7 +490,17 @@ describe("ApplicationOwner", () => {
           "Library check complete. Open Browse Snapshots remain unchanged.",
       ),
     ).toHaveLength(1);
-    expect(overviewRequests).toBe(3);
+    expect(latestSummary(events)?.action?.kind).toBe("refresh-current-source");
+    expect(overviewRequests).toBe(4);
+
+    const completion = latestSummary(events)?.action;
+    if (!completion) throw new Error("expected current completion action");
+    expect(owner.activateSummaryAction(completion)).toEqual({
+      kind: "refresh-current-source",
+    });
+    expect(latestSummary(events)).toEqual({
+      text: "The Album could not be created.",
+    });
 
     oldOverview.resolve(response(overview("publication-1", "Stale Album")));
     expect(await capturedBeforeCompletion).toBe(false);

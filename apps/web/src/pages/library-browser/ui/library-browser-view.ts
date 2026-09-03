@@ -185,6 +185,7 @@ export interface LibraryBrowserView {
       kind: "retry-library-check" | "refresh-current-source";
       presentationId: number;
     }>,
+    libraryCheckState?: "idle" | "active" | "failed" | "complete",
   ): void;
   setConnection(
     connected: boolean,
@@ -258,7 +259,7 @@ export function createLibraryBrowserView(
           <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
         </aside>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -301,6 +302,7 @@ export function createLibraryBrowserView(
   const gridView = required<HTMLElement>(root, "[data-grid-view]");
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
   const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
+  const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
@@ -1326,24 +1328,31 @@ export function createLibraryBrowserView(
     isPhotoStatusSurfaceCurrent: (surface) =>
       alive && surface === photoStatusSurface,
     setPhotoStatus,
-    presentSummary(text, action) {
+    presentSummary(text, action, libraryCheckState) {
       if (!alive) return;
-      summaryStatus.replaceChildren(document.createTextNode(text));
-      if (!action) return;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "summary-action";
-      button.textContent =
-        action.kind === "retry-library-check"
-          ? "Retry Library Check"
-          : "Refresh Current Source";
-      button.addEventListener("click", () =>
-        send({
-          kind: "summary-action",
-          presentationId: action.presentationId,
-        }),
-      );
-      summaryStatus.append(" ", button);
+      const render = (surface: HTMLElement) => {
+        surface.replaceChildren(document.createTextNode(text));
+        if (!action) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "summary-action";
+        button.textContent =
+          action.kind === "retry-library-check"
+            ? "Retry Library Check"
+            : "Refresh Current Source";
+        button.addEventListener("click", () =>
+          send({
+            kind: "summary-action",
+            presentationId: action.presentationId,
+          }),
+        );
+        surface.append(" ", button);
+      };
+      render(summaryStatus);
+      gridSummary.replaceChildren();
+      if (libraryCheckState && libraryCheckState !== "idle")
+        render(gridSummary);
+      gridEmptyAction.disabled = libraryCheckState === "active";
     },
     setConnection(isConnected, sourceRetryVisible, photoRetryVisible) {
       if (!alive) return;
