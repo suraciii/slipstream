@@ -812,7 +812,7 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha256};
+    use crate::test_support::{original_snapshot, raw_sample};
     use std::{
         fs,
         os::unix::{
@@ -1317,13 +1317,7 @@ mod tests {
     #[test]
     #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
     fn sony_original_remains_unchanged() {
-        let Ok(path) = std::env::var("SLIPSTREAM_RAW_SAMPLE") else {
-            return;
-        };
-        let path = PathBuf::from(path);
-        let before = fs::read(&path).unwrap();
-        let expected = "d577d59901a4aff3ad6f35a1121fe1f3c0345890a1cadc2d33fe7ddaadd3fa74";
-        assert_eq!(format!("{:x}", Sha256::digest(&before)), expected);
+        let (path, before) = raw_sample();
         let root = LibraryRoot::open(path.parent().unwrap()).unwrap();
         let relative = RelativeOriginalPath::parse(
             path.file_name()
@@ -1333,8 +1327,8 @@ mod tests {
         )
         .unwrap();
         let original = root.original(relative).unwrap();
-        assert_eq!(original.facts().unwrap().size, before.len() as u64);
+        assert_eq!(original.facts().unwrap().size, before.length);
         let _ = original.read_range(0, 1024).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(original_snapshot(&path), before);
     }
 }

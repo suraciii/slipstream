@@ -58,13 +58,13 @@ The Rust workspace contains the production Library/Preview core and HTTP server 
 
 Do not commit real photographs, RAW files, generated Previews, SQLite databases, or Slipstream runtime state. Tests that require a real camera file must accept an explicit local path and skip with a clear reason when the file is unavailable. Repository fixtures must be generated, minimal, redistributable, and contain no private photography.
 
-Run the opt-in LibRaw integration tests with an explicit local Original File path:
+Ordinary `test:rust` and `verify` runs report the real-camera tests as ignored. Run the opt-in RAW safety gate with the configured Sony Original File path:
 
 ```sh
-SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW cargo test --workspace --locked -- --ignored
+SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 ```
 
-The test hashes the Original before and after extraction and fails if its bytes change.
+`test:raw` runs every real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
 
 ## Server startup
 
