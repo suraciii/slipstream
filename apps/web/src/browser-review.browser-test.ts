@@ -5264,11 +5264,12 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await image.scrollIntoViewIfNeeded();
   const cell = page.locator('[data-photo-index="0"]');
   const facts = cell.locator(".cell-facts");
+  const factsText = "Ambiguous pairing · Thumbnail delivery failed";
+  const accessibleName =
+    "Photo 1 of 1 — Undecided — 0 stars — Ambiguous pairing — Thumbnail delivery failed";
   await expect(image).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(facts).toBeVisible();
-  await expect(facts).toHaveText(
-    "Ambiguous pairing · Thumbnail delivery failed",
-  );
+  await expect(facts).toHaveText(factsText);
   await expect(cell).toHaveAccessibleName(
     /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
   );
@@ -5283,12 +5284,53 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await expect
     .poll(() => failedCell!.evaluate((node) => node.isConnected))
     .toBe(false);
-  await expect(facts).toHaveText(
-    "Ambiguous pairing · Thumbnail delivery failed",
-  );
-  await expect(cell).toHaveAccessibleName(
-    /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
-  );
+  await expect(facts).toHaveText(factsText);
+  await expect(cell).toHaveAccessibleName(accessibleName);
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await waitForGridFrame(page);
+    await cell.scrollIntoViewIfNeeded();
+    await expect(cell).toBeVisible();
+    await expect(cell).toBeEnabled();
+    await expect(facts).toBeVisible();
+    await expect(facts).toHaveText(factsText);
+    await expect(cell).toHaveAccessibleName(accessibleName);
+
+    const geometry = await facts.evaluate((label) => {
+      const cell = label.closest<HTMLElement>(".photo-cell");
+      const viewport = label.closest<HTMLElement>("[data-grid-viewport]");
+      if (!cell || !viewport) throw new Error("Grid geometry is missing");
+      const factsBox = label.getBoundingClientRect();
+      const cellBox = cell.getBoundingClientRect();
+      const viewportBox = viewport.getBoundingClientRect();
+      const inside = (inner: DOMRect, outer: DOMRect) =>
+        inner.left >= outer.left - 1 &&
+        inner.right <= outer.right + 1 &&
+        inner.top >= outer.top - 1 &&
+        inner.bottom <= outer.bottom + 1;
+      return {
+        factsInsideCell: inside(factsBox, cellBox),
+        cellInsideViewport: inside(cellBox, viewportBox),
+        factsNotInternallyClipped:
+          label.scrollWidth <= label.clientWidth &&
+          label.scrollHeight <= label.clientHeight,
+      };
+    });
+    expect(geometry).toEqual({
+      factsInsideCell: true,
+      cellInsideViewport: true,
+      factsNotInternallyClipped: true,
+    });
+
+    await cell.click();
+    await expect(page.getByText("1 / 1")).toBeVisible();
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await waitForGridFrame(page);
+  }
   expect(thumbnailApiRequests).toBe(0);
   expect(derivativeRequests).toBe(1);
 });
