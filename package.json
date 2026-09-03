@@ -23,8 +23,9 @@
     "test:browser": "bun run build:rust && bun run --cwd apps/web build && bun x playwright test",
     "test:raw": "cargo test --workspace --locked -- --ignored --test-threads=1",
     "test:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=1",
-    "test:fast": "bun run check:album-language && bun run test:license && bun run test:rust && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser",
+    "test:fast": "bun run check:album-language && bun run test:license && bun run test:workflow && bun run test:rust && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser",
     "test:license": "bun test tools/license-contract.test.ts",
+    "test:workflow": "bun test tools/workflow-contract.test.ts",
     "typecheck": "bun run --workspaces --if-present typecheck",
     "verify": "bun run format:check && bun run test:fast && bun run build"
   },
