@@ -144,6 +144,28 @@ describe("AlbumActionOwner", () => {
     owner.finish(outcome.mutation);
     owner.dispose();
 
+    const asciiOnlyOwner = createAlbumActionOwner(() =>
+      Promise.resolve(
+        albumResponse([
+          { ...created, id: "album-accent-upper", name: "Éclair" },
+          { ...created, id: "album-accent-lower", name: "éclair" },
+        ]),
+      ),
+    );
+    const asciiOnlyForm = asciiOnlyOwner.openForm("album-form-ascii-only");
+    const asciiOnlyAction = asciiOnlyOwner.create(
+      "Éclair",
+      context({ form: asciiOnlyForm }),
+    );
+    if (!asciiOnlyAction)
+      throw new Error("expected ASCII-only create admission");
+    const asciiOnlyOutcome = await asciiOnlyAction.settlement;
+    if (asciiOnlyOutcome.kind !== "persisted")
+      throw new Error("expected ASCII-only persistence");
+    expect(asciiOnlyOutcome.createdAlbum?.name).toBe("Éclair");
+    asciiOnlyOwner.finish(asciiOnlyOutcome.mutation);
+    asciiOnlyOwner.dispose();
+
     const malformedCases: ReadonlyArray<
       readonly [description: string, body: unknown]
     > = [
@@ -177,6 +199,10 @@ describe("AlbumActionOwner", () => {
             },
           ],
         },
+      ],
+      [
+        "a sole case-variant instead of the exact created name",
+        { albums: [{ ...created, name: "created" }] },
       ],
       [
         "an ID duplicated by another Album",
