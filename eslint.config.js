@@ -17,7 +17,12 @@ export default tseslint.config(
   ...tseslint.configs.recommendedTypeChecked,
   prettier,
   {
-    files: ["apps/**/*.ts", "scripts/**/*.ts", "playwright.config.ts"],
+    files: [
+      "apps/**/*.ts",
+      "scripts/**/*.ts",
+      "tools/**/*.ts",
+      "playwright.config.ts",
+    ],
     languageOptions: {
       globals: globals.node,
       parserOptions: {

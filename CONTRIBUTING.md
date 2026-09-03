@@ -93,7 +93,7 @@ The offline command rejects a running database, sidecars, non-v5 state, an unrel
 
 ## Container verification
 
-The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and a Debian runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Build an image before an operator-controlled deployment:
+The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and an Ubuntu runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Build an image before an operator-controlled deployment:
 
 ```sh
 commit=$(git rev-parse HEAD)

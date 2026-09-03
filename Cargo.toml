@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.97.1"
-license = "GPL-3.0-only"
+license = "MIT"
 
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
