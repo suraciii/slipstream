@@ -913,6 +913,61 @@ test("visible controls and keyboard share mutation, advance, rating independence
   await expect(page.getByText("2 / 3")).toBeVisible();
 });
 
+test("Sources owns the keyboard while the Photo View is inert", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+
+  await page.keyboard.press("5");
+  await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
+  const before = await state(running.url, albumId);
+  let mutationRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      mutationRequests += 1;
+  });
+
+  await openSources(page);
+  await expect(
+    page.getByRole("button", { name: "Close", exact: true }),
+  ).toBeFocused();
+  for (const key of [
+    "ArrowLeft",
+    "ArrowRight",
+    "p",
+    "x",
+    "u",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "Control+z",
+  ])
+    await page.keyboard.press(key);
+
+  expect(mutationRequests).toBe(0);
+  expect(await state(running.url, albumId)).toEqual(before);
+
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("button", { name: "Sources", exact: true }).last(),
+  ).toBeFocused();
+  await expect(page.getByText("1 / 3")).toBeVisible();
+  await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
+  await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
+  await expect(page.getByText("2 / 3")).toBeVisible();
+});
+
 test("fit-mode Pointer Events show pending feedback, ignore below threshold, and commit right/left only on release", async ({
   page,
 }) => {
