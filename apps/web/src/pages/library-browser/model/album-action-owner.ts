@@ -254,7 +254,7 @@ export function createAlbumActionOwner(
     isFormCurrent: (form) => !closed && currentForm?.authority === form,
     create: (name, context) =>
       start(
-        "/api/albums",
+        "create",
         context,
         () => createAlbum(fetcher, name),
         (status) =>
@@ -264,7 +264,7 @@ export function createAlbumActionOwner(
       ),
     rename: (albumId, name, context) =>
       start(
-        `/api/albums/${albumId}/rename`,
+        `rename:${albumId}`,
         context,
         () => renameAlbum(fetcher, albumId, name),
         (status) =>
@@ -274,7 +274,7 @@ export function createAlbumActionOwner(
       ),
     delete: (albumId, context) =>
       start(
-        `/api/albums/${albumId}/delete`,
+        `delete:${albumId}`,
         context,
         () => deleteAlbum(fetcher, albumId),
         () => "The Album could not be deleted.",
