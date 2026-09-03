@@ -253,7 +253,7 @@ export function createLibraryBrowserView(
 ): LibraryBrowserView {
   let alive = true;
   root.innerHTML = `
-    <main class="app-shell">
+    <div class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
       <section class="browser" data-browser aria-labelledby="browser-title">
         <div class="source-scrim" data-source-scrim aria-hidden="true"></div>
@@ -285,7 +285,7 @@ export function createLibraryBrowserView(
           </section>
         </section>
       </section>
-    </main>`;
+    </div>`;
 
   const browser = required<HTMLElement>(root, "[data-browser]");
   const sourcePanel = required<HTMLElement>(root, "#source-panel");
