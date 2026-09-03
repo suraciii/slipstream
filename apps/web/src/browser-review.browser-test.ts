@@ -2125,6 +2125,17 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
 
   const checkLibrary = page.getByRole("button", { name: "Check Library" });
   await expect(checkLibrary).toBeVisible();
+  const checkLibraryElement = await checkLibrary.elementHandle();
+  expect(checkLibraryElement).not.toBeNull();
+  const expectSameCheckLibraryDisabled = async (): Promise<void> => {
+    expect(
+      await checkLibraryElement!.evaluate((button) => ({
+        connected: button.isConnected,
+        current: button === document.querySelector("[data-grid-empty-action]"),
+        disabled: (button as HTMLButtonElement).disabled,
+      })),
+    ).toEqual({ connected: true, current: true, disabled: true });
+  };
   await checkLibrary.click();
   const retryCheck = page.getByRole("button", {
     name: "Retry Library Check",
@@ -2138,9 +2149,9 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
   await expect(
     page.locator("[data-grid-summary]").getByText("Inspecting Capture Time…"),
   ).toBeVisible();
-  await expect(checkLibrary).toBeDisabled();
+  await expectSameCheckLibraryDisabled();
   await openSources(page);
-  await expect(checkLibrary).toBeDisabled();
+  await expectSameCheckLibraryDisabled();
   await expect(
     page.getByRole("button", { name: "Retry connection" }),
   ).toBeVisible();
@@ -2163,7 +2174,7 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
       .locator("[data-grid-summary]")
       .getByText("Could not reach Slipstream. Check the server and retry."),
   ).toBeVisible();
-  await expect(checkLibrary).toBeDisabled();
+  await expectSameCheckLibraryDisabled();
   expect(scanCalls).toBe(2);
 
   releaseHeldStatus();
