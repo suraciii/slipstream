@@ -36,6 +36,8 @@ Slipstream follows this familiar Library-browser shape without adding desktop ed
 
 The Library Browser must use the current Photo and Photo Grid as its dominant surfaces. Source navigation, status, and controls must support those surfaces without competing with them for attention or space.
 
+The Library Browser must expose exactly one main landmark while it loads and after it becomes usable, so assistive technology identifies one primary screen.
+
 The first product uses one neutral dark appearance. Color must communicate keyboard focus, Selection State, Rating, failure, or connectivity rather than decorate unrelated containers. The interface must not depend on color alone to communicate a Photo decision or control state.
 
 Required information must meet WCAG AA text contrast against its rendered background. Controls intended for touch must provide at least a 44 by 44 CSS-pixel target on narrow viewports. Focused controls must remain visibly distinguishable.

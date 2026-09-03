@@ -376,6 +376,60 @@ test("uses singular and plural Photo counts in Grid status and source cards", as
   ).toBeVisible();
 });
 
+test("exposes one main landmark while loading and after rendering", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "photo.jpg"), await jpeg());
+  const running = await server(base, root);
+
+  let releaseOverview!: () => void;
+  const overviewHeld = new Promise<void>((resolve) => {
+    releaseOverview = resolve;
+  });
+  let observeOverview!: () => void;
+  const overviewRequested = new Promise<void>((resolve) => {
+    observeOverview = resolve;
+  });
+  let observeOverviewDelivered!: () => void;
+  const overviewDelivered = new Promise<void>((resolve) => {
+    observeOverviewDelivered = resolve;
+  });
+  let overviewCaptured = false;
+  await page.route("**/api/overview", async (route) => {
+    const response = await route.fetch();
+    overviewCaptured = true;
+    observeOverview();
+    try {
+      await overviewHeld;
+      await route.fulfill({ response });
+    } finally {
+      observeOverviewDelivered();
+    }
+  });
+
+  try {
+    await page.goto(running.url);
+    await overviewRequested;
+    const mainLandmark = page.getByRole("main");
+    const htmlMain = page.locator("main");
+    await expect(page.getByText("Loading Library summary…")).toBeVisible();
+    await expect(htmlMain).toHaveCount(1);
+    await expect(mainLandmark).toHaveCount(1);
+    await expect(mainLandmark).toHaveAttribute("id", "app");
+
+    releaseOverview();
+    await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+    await expect(htmlMain).toHaveCount(1);
+    await expect(mainLandmark).toHaveCount(1);
+    await expect(mainLandmark).toHaveAttribute("id", "app");
+  } finally {
+    releaseOverview();
+    if (overviewCaptured) await overviewDelivered;
+    await page.unroute("**/api/overview");
+  }
+});
+
 test("starts from a Album, shows facts, accessible controls, and resumes persisted progress after restart", async ({
   page,
 }) => {
