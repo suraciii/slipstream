@@ -75,12 +75,7 @@ export function mountLibraryBrowser(
     root,
     handleViewIntent,
     (binding) => {
-      if (
-        binding.preview.state === "unavailable" ||
-        binding.preview.state === "failed"
-      ) {
-        return;
-      }
+      if (binding.preview.state === "unavailable") return;
       if (binding.preview.thumbnailUrl) {
         sourceGrid.presentThumbnail(
           binding.photoId,

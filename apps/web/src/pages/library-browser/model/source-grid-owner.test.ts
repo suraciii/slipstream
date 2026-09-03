@@ -671,6 +671,7 @@ describe("SourceGridOwner", () => {
     expect(replacement.src).toBe("/thumb.jpg");
     staleError?.call(first, new Event("error"));
     expect(replacement.deliveryFailed).toBe(false);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
     replacement.onerror?.call(
       replacement,
       new Event("error"),
@@ -680,6 +681,7 @@ describe("SourceGridOwner", () => {
       new Error("failed"),
     );
     expect(replacement.deliveryFailed).toBe(true);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
   });
 
   test("bounds the rebuildable Thumbnail cache independently of Library size", async () => {

@@ -5275,6 +5275,8 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
   await writePhotos(root, 4);
   const running = await server(base, root);
   const ids = await browseIds(running.url);
+  const hydrated = await fetch(`${running.url}/api/photos/${ids[3]}/thumbnail`);
+  expect(hydrated.ok).toBe(true);
   const thumbnailRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.endsWith("/thumbnail"))
@@ -5317,7 +5319,10 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
         };
       if (position === 2)
         return { ...photo, preview: { state: "unavailable" } };
-      return { ...photo, preview: { state: "failed" } };
+      return {
+        ...photo,
+        preview: { ...photo.preview, state: "failed" },
+      };
     });
     await route.fulfill({ response, json: { ...body, photos } });
   });
@@ -5347,6 +5352,7 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
   );
   await expect(third).toHaveAccessibleName(/Photo 3 of 4.*Preview unavailable/);
   await expect(fourth).toHaveAccessibleName(/Photo 4 of 4.*Preview failed/);
+  await expect(fourth.locator("img")).toHaveAttribute("src", /\/thumbnail\//);
   for (const cell of [first, second, third, fourth])
     await expect(cell).toBeEnabled();
   expect(thumbnailRequests).toHaveLength(0);
@@ -5367,7 +5373,8 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   expect(response.ok).toBe(true);
 
   await page.goto(running.url);
-  const currentImage = page.locator(".photo-cell img").first();
+  const currentCell = page.locator('[data-photo-index="0"]');
+  const currentImage = currentCell.locator("img");
   await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
   const detachedImage = await currentImage.elementHandle();
   expect(detachedImage).not.toBeNull();
@@ -5390,6 +5397,7 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
 
   await expect(currentImage).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
+  await expect(currentCell.locator(".cell-facts")).toBeHidden();
 });
 
 test("a completed mutation cannot reopen or advance a superseding source", async ({
