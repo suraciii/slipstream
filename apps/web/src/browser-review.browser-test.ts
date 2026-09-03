@@ -6071,11 +6071,7 @@ test("Photo Retry recovers the exact source range after an expired reopen window
         url.pathname === `/api/photos/${reopenPhotoId}/preview`
       );
     });
-    const photoRetryAdmitted = await photoRetry.evaluate((button) => {
-      (button as HTMLButtonElement).click();
-      return (button as HTMLButtonElement).disabled;
-    });
-    expect(photoRetryAdmitted).toBe(true);
+    await photoRetry.click();
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
     const retried = await sourceRetryStarted;
