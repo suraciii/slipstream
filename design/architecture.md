@@ -97,7 +97,7 @@ At minimum, SQLite stores:
 - Preview source, dimensions, cache revision, and failure state;
 - Album identity, name, order, and membership;
 - Photo Selection State and Rating;
-- per-Photo-Set saved position.
+- per-Album saved position.
 
 Original bytes, matching JPEG bytes, and embedded RAW JPEG bytes do not belong in SQLite.
 

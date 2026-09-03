@@ -880,7 +880,7 @@ export function mountLibraryBrowser(
 
   const openSource = async (
     kind: "library" | "album" | "folder",
-    set?: AlbumSummary,
+    album?: AlbumSummary,
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
   ) => {
@@ -890,7 +890,7 @@ export function mountLibraryBrowser(
         : kind === "album"
           ? {
               kind: "album",
-              album: { id: set!.id, name: set!.name },
+              album: { id: album!.id, name: album!.name },
             }
           : {
               kind: "folder",
@@ -1734,7 +1734,7 @@ export function mountLibraryBrowser(
     }
     if (sourceGrid.kind === "album") {
       const album = application.albums.find(
-        (set) => set.id === sourceGrid.albumId,
+        (candidate) => candidate.id === sourceGrid.albumId,
       );
       if (album) await openSource("album", album);
       return;

@@ -81,7 +81,7 @@ SLIPSTREAM_PORT=3000 \
 cargo run --locked -p slipstream-server
 ```
 
-`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST` to whatever address you deploy on. `GET /healthz` reports readiness after the initial scan, Preview startup, and HTTP bind.
+`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST` to whatever address you deploy on. `GET /healthz` reports service readiness after storage admission, Preview startup, and HTTP bind. `GET /api/status` separately reports Library initialization, scan, and publication state.
 
 To expand a stopped schema-v5 Library to an ancestor Folder, first create and record a verified consistent backup with the service stopped (see [`docs/deployment.md`](docs/deployment.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
 

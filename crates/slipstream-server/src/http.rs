@@ -140,7 +140,7 @@ pub(crate) fn create_router_with_web_root(
         )
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
-        // The complete-membership list is retired; the path only creates sets.
+        // The complete-membership list is retired; the path only creates Albums.
         .route("/api/albums", get(retired_album_list).post(create_album))
         .route(
             "/api/albums/{id}/rename",
