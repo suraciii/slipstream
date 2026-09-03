@@ -500,25 +500,34 @@ mod tests {
             }),
             "browse photo summaries document the hydrated current thumbnail URL"
         );
-        let direct_previews: Vec<&Value> = values
+        let ready_previews: Vec<&Value> = values
             .iter()
-            .filter(|value| value["state"] == "ready" && value["source"].is_string())
+            .filter(|value| value["state"] == "ready")
             .collect();
+        assert_eq!(
+            ready_previews.len(),
+            2,
+            "the current top-level ready Preview response set is exact"
+        );
         assert!(
-            direct_previews.iter().any(|value| value["stale"] == false),
+            ready_previews.iter().any(|value| value["stale"] == false),
             "direct Preview responses include a current ready example"
         );
         assert!(
-            direct_previews.iter().any(|value| value["stale"] == true),
+            ready_previews.iter().any(|value| value["stale"] == true),
             "direct Preview responses include a stale ready example"
         );
-        for preview in direct_previews {
+        for preview in ready_previews {
+            assert!(
+                preview["source"].is_string(),
+                "top-level ready Preview response has a source"
+            );
             let url = preview["url"]
                 .as_str()
-                .expect("direct ready Preview response has a URL");
+                .expect("top-level ready Preview response has a URL");
             assert!(
                 is_review_derivative_url(url),
-                "direct ready/stale Preview response uses the target-qualified review URL"
+                "top-level ready Preview response uses the target-qualified review URL"
             );
             let retired_url = url.replacen("/review/", "/", 1);
             assert!(
@@ -533,6 +542,46 @@ mod tests {
         );
         assert!(values.iter().any(|v| v["state"] == "failed"));
         assert!(values.iter().any(|v| v["undo"]["field"] == "rating"));
+    }
+
+    #[test]
+    fn review_derivative_url_validator_matches_server_identifier_grammar() {
+        let uuid_photo_id = "a0000000-0000-4000-8000-000000000020";
+        let hash_photo_id = "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255";
+        let cache_key = "e58bdfea56e2b8808ee7ff77350635351d084ec8a10f657e2512360751396105";
+        let invalid_photo_id = format!("{}g", &hash_photo_id[..63]);
+        let invalid_cache_key = format!("{}g", &cache_key[..63]);
+
+        for url in [
+            format!("/api/derivatives/{uuid_photo_id}/review/{cache_key}.jpg"),
+            format!("/api/derivatives/{hash_photo_id}/review/{cache_key}.jpg"),
+        ] {
+            assert!(is_review_derivative_url(&url), "accepted URL: {url}");
+        }
+
+        for url in [
+            format!(
+                "/api/derivatives/{}/review/{cache_key}.jpg",
+                uuid_photo_id.to_ascii_uppercase()
+            ),
+            format!(
+                "/api/derivatives/{uuid_photo_id}/review/{}.jpg",
+                cache_key.to_ascii_uppercase()
+            ),
+            format!("/api/derivatives/{}/review/{cache_key}.jpg", "a".repeat(35)),
+            format!("/api/derivatives/{}/review/{cache_key}.jpg", "a".repeat(65)),
+            format!("/api/derivatives/{invalid_photo_id}/review/{cache_key}.jpg"),
+            format!(
+                "/api/derivatives/{uuid_photo_id}/review/{}.jpg",
+                "a".repeat(63)
+            ),
+            format!("/api/derivatives/{uuid_photo_id}/review/{invalid_cache_key}.jpg"),
+            format!("/api/derivatives/{uuid_photo_id}/{cache_key}.jpg"),
+            format!("/api/derivatives/{uuid_photo_id}/review/{cache_key}.jpg/extra"),
+            format!("/api/derivatives/{uuid_photo_id}/review/{cache_key}.jpeg"),
+        ] {
+            assert!(!is_review_derivative_url(&url), "rejected URL: {url}");
+        }
     }
 
     fn is_review_derivative_url(url: &str) -> bool {
@@ -551,11 +600,22 @@ mod tests {
         let Some(cache_key) = filename.strip_suffix(".jpg") else {
             return false;
         };
-        is_sha256(photo_id) && is_sha256(cache_key)
+        is_valid_photo_id(photo_id) && is_valid_cache_key(cache_key)
     }
 
-    fn is_sha256(value: &str) -> bool {
-        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    fn is_valid_photo_id(value: &str) -> bool {
+        value.len() >= 36
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+    }
+
+    fn is_valid_cache_key(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     }
 
     fn contains_null(value: &Value) -> bool {
