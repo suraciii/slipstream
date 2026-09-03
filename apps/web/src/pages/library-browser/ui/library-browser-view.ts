@@ -349,6 +349,7 @@ export function createLibraryBrowserView(
   let albumFormCounter = 0;
   let albumForm: AlbumFormState | undefined;
   let renderedColumns = 0;
+  let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   let selectedAlbumId = "";
@@ -414,6 +415,8 @@ export function createLibraryBrowserView(
       1,
       Math.floor(Math.max(320, gridViewport.clientWidth) / GRID_CELL_WIDTH),
     );
+  const columnStride = (count = columns()) =>
+    compactSources.matches ? gridViewport.clientWidth / count : GRID_CELL_WIDTH;
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
 
@@ -799,8 +802,10 @@ export function createLibraryBrowserView(
   const renderGrid = (model: GridViewModel, position?: number) => {
     if (!alive) return;
     const count = columns();
+    const stride = columnStride(count);
     const viewportHeight = effectiveViewportHeight();
     renderedColumns = count;
+    renderedColumnStride = stride;
     renderedViewportHeight = viewportHeight;
     const height = `${Math.ceil(model.total / count) * GRID_CELL_HEIGHT}px`;
     gridCanvas.style.height = height;
@@ -819,8 +824,9 @@ export function createLibraryBrowserView(
       const cell = document.createElement("button");
       cell.type = "button";
       cell.className = "photo-cell";
-      cell.style.left = `${(index % count) * GRID_CELL_WIDTH}px`;
+      cell.style.left = `${(index % count) * stride}px`;
       cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
+      if (compactSources.matches) cell.style.width = `${stride - 10}px`;
       const photo = model.photoAt(index);
       if (!photo) {
         cell.disabled = true;
@@ -1090,6 +1096,7 @@ export function createLibraryBrowserView(
       if (!alive || gridView.hidden) return;
       if (
         columns() === renderedColumns &&
+        columnStride() === renderedColumnStride &&
         effectiveViewportHeight() === renderedViewportHeight
       )
         return;
@@ -1310,6 +1317,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       gridView.hidden = true;
       photoView.hidden = false;
+      photoView.scrollTop = 0;
       syncSourcePanel();
       photoView.focus();
       resetTransform();

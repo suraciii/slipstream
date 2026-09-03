@@ -40,6 +40,8 @@ Grid View must keep its current source name, truthful loading status, and Librar
 
 Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Detail Review, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
 
+When a short viewport cannot show a usable Preview and every control at once, Photo View must preserve a usable Preview and provide a vertical path to every existing control. It must not clip controls without a way to reach them. At supported narrow widths, Grid cells must divide each complete row evenly across the available Grid width, leaving no more than the ordinary inter-cell gap at the trailing edge. The `Library Folder` source label must remain fully readable.
+
 Clear must be unavailable while the current Photo is already `undecided`. Undo must be unavailable until the current source has an undoable Selection State or Rating change.
 
 ## Source Order
