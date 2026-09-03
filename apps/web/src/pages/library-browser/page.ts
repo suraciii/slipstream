@@ -75,18 +75,22 @@ export function mountLibraryBrowser(
     root,
     handleViewIntent,
     (binding) => {
-      if (binding.preview.state === "unavailable") {
-        sourceGrid.markThumbnailUnavailable(binding.photoId, binding.target);
-      } else if (binding.preview.thumbnailUrl) {
+      if (
+        binding.preview.state === "unavailable" ||
+        binding.preview.state === "failed"
+      ) {
+        return;
+      }
+      if (binding.preview.thumbnailUrl) {
         sourceGrid.presentThumbnail(
           binding.photoId,
           binding.target,
           binding.preview.thumbnailUrl,
           true,
         );
-      } else {
-        void sourceGrid.loadThumbnail(binding.photoId, binding.target);
+        return;
       }
+      void sourceGrid.loadThumbnail(binding.photoId, binding.target);
     },
   );
   const photoOwner = createPhotoOwner(

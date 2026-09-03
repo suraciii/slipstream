@@ -86,8 +86,9 @@ A Grid cell must show, when available:
 - a cached or progressively generated thumbnail;
 - Selection State;
 - Rating;
-- unavailable state; and
-- Preview failure without removing the Photo from its position.
+- Photo unavailability and pairing ambiguity as distinct facts;
+- Preview unavailability or failure without removing the Photo from its position; and
+- thumbnail delivery failure without replacing the Photo or Preview facts above.
 
 Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
 

@@ -256,7 +256,7 @@ A failed File Location request does not clear successfully loaded Folder nodes. 
 
 A failed Browse Window request does not clear successfully loaded windows. The browser identifies the failed range and retries that range.
 
-A per-Photo thumbnail or Preview failure remains attached to that Photo and does not block sibling cells, navigation, Selection State, or Rating.
+A bounded Grid Photo fact retains the server-supplied Photo availability, pairing ambiguity, and Preview state independently. A browser-owned thumbnail delivery failure remains bounded and attached to that Photo without replacing those server facts. None of these outcomes blocks sibling cells, navigation, Selection State, or Rating.
 
 A background rescan failure retains the prior Published Library and reports an actionable failed status. It must not publish a partial order. Root binding mismatch, schema rejection, sidecar admission failure, and invalid storage layout remain hard failures rather than background warnings.
 
