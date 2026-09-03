@@ -598,6 +598,150 @@ test("short mobile viewports keep every Photo action reachable and operable", as
   }
 });
 
+test("current source and Rating are programmatic states and Back to Grid restores Photo focus", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Accessible Review");
+  await startReview(page, running.url, "Accessible Review", albumId);
+
+  await openSources(page);
+  const currentSource = page.getByRole("button", {
+    name: /^Accessible Review 2 Photos/,
+  });
+  await expect(currentSource).toHaveAttribute("aria-current", "true");
+  await expect(
+    page.getByRole("button", { name: /^All Photos 2 Photos/ }),
+  ).not.toHaveAttribute("aria-current");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+
+  const zero = page.getByRole("button", { name: "Clear Rating" });
+  await expect(
+    page.getByRole("button", { name: "Clear Rating", pressed: true }),
+  ).toBeVisible();
+  await page.keyboard.press("5");
+  await expect(
+    page.getByRole("button", { name: "Rate 5 stars", pressed: true }),
+  ).toBeVisible();
+  await expect(zero).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
+
+  const back = page.getByRole("button", { name: "Back to Grid" });
+  await back.focus();
+  expect(
+    await back.evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      return (
+        document.activeElement ===
+        document.querySelector("[data-grid-viewport]")
+      );
+    }),
+  ).toBe(true);
+  await waitForGridFrame(page);
+  await expect(page.locator('[data-photo-index="0"]')).toBeFocused();
+});
+
+test("Album forms focus their task and restore a stable initiating action", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Keep" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  const newAlbum = page.getByRole("button", { name: "New Album" });
+  await newAlbum.click();
+  let albumName = page.getByLabel("Album name");
+  await expect(albumName).toBeFocused();
+  expect(
+    await albumName.evaluate((input: HTMLInputElement) => [
+      input.selectionStart,
+      input.selectionEnd,
+    ]),
+  ).toEqual([0, 0]);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(newAlbum).toBeFocused();
+
+  await newAlbum.click();
+  albumName = page.getByLabel("Album name");
+  await albumName.fill("Created");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(
+    page.getByRole("button", { name: /^Created 0 Photos/ }),
+  ).toBeVisible();
+  await expect(newAlbum).toBeFocused();
+
+  await page.getByRole("button", { name: "Rename Keep" }).click();
+  albumName = page.getByLabel("Album name");
+  await expect(albumName).toBeFocused();
+  expect(
+    await albumName.evaluate((input: HTMLInputElement) => [
+      input.selectionStart,
+      input.selectionEnd,
+    ]),
+  ).toEqual([0, 4]);
+
+  await page.route("**/api/albums/*/rename", (route) => route.abort());
+  await albumName.fill("Lost");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(page.getByText("The Album could not be renamed.")).toBeVisible();
+  await expect(albumName).toBeFocused();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Rename Keep" })).toBeFocused();
+  await page.unroute("**/api/albums/*/rename");
+
+  await page.getByRole("button", { name: "Rename Keep" }).click();
+  albumName = page.getByLabel("Album name");
+  await albumName.fill("Kept");
+  await page.getByRole("button", { name: "Save Name" }).click();
+  await expect(page.getByRole("button", { name: "Rename Kept" })).toBeFocused();
+
+  await page.getByRole("button", { name: "Delete Kept" }).click();
+  const confirmDelete = page.getByRole("button", { name: "Delete Album" });
+  await expect(confirmDelete).toBeFocused();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Delete Kept" })).toBeFocused();
+
+  let deleteStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    deleteStarted = resolve;
+  });
+  let releaseDelete!: () => void;
+  const heldDelete = new Promise<void>((resolve) => {
+    releaseDelete = resolve;
+  });
+  await page.route("**/api/albums/*/delete", async (route) => {
+    deleteStarted();
+    await heldDelete;
+    await route.abort();
+  });
+  await page.getByRole("button", { name: "Delete Kept" }).click();
+  await confirmDelete.click();
+  await started;
+  await expect(
+    page.getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeFocused();
+  expect(
+    await page.evaluate(() => document.activeElement !== document.body),
+  ).toBe(true);
+  releaseDelete();
+  await expect(page.getByText("The Album could not be deleted.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete Kept" })).toBeFocused();
+  await page.unroute("**/api/albums/*/delete");
+
+  await page.getByRole("button", { name: "Delete Kept" }).click();
+  await confirmDelete.click();
+  await expect(
+    page.getByRole("button", { name: /^Kept 0 Photos/ }),
+  ).toBeHidden();
+  await expect(newAlbum).toBeFocused();
+});
+
 test("Album names and management actions do not overlap", async ({ page }) => {
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
@@ -5485,6 +5629,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   await expect
     .poll(() => viewport.evaluate((element) => element.scrollTop))
     .toBe(30 * 178);
+  await expect(viewport).toBeFocused();
   releaseBoundary();
   await page.evaluate(
     () =>
