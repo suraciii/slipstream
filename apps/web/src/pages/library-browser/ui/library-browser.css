@@ -628,12 +628,13 @@
 
 .status {
   min-height: 1.1rem;
-  overflow: hidden;
   color: var(--warning);
   font-size: 0.72rem;
   line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .decision-controls,
