@@ -160,6 +160,11 @@
   flex: 1;
 }
 
+.folder-root .source-card {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.1rem;
+}
+
 .folder-child {
   padding-left: 0.45rem;
 }
@@ -434,6 +439,7 @@
   grid-column: 1 / -1;
   display: grid;
   grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto;
+  overflow-y: auto;
   background: var(--canvas);
 }
 
@@ -817,10 +823,6 @@
 
   .source-toggle {
     flex: none;
-  }
-
-  .photo-cell {
-    width: 132px;
   }
 
   .grid-layer {

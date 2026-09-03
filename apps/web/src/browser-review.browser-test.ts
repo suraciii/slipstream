@@ -449,6 +449,155 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
+test("narrow Grid uses its width and keeps Library Folder understandable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+  await waitForGridFrame(page);
+
+  const grid = await page
+    .locator("[data-grid-viewport]")
+    .evaluate((viewport) => {
+      const viewportBox = viewport.getBoundingClientRect();
+      const cells = Array.from(
+        viewport.querySelectorAll<HTMLElement>(".photo-cell"),
+        (cell) => cell.getBoundingClientRect(),
+      );
+      const firstRow = cells.filter(
+        (cell) => Math.abs(cell.top - cells[0]!.top) < 1,
+      );
+      return {
+        columns: firstRow.length,
+        cellWidth: firstRow[0]!.width,
+        trailingSpace: viewportBox.right - firstRow.at(-1)!.right,
+      };
+    });
+  expect(grid.columns).toBe(2);
+  expect(grid.cellWidth).toBeGreaterThan(170);
+  expect(grid.trailingSpace).toBeGreaterThanOrEqual(0);
+  expect(grid.trailingSpace).toBeLessThanOrEqual(12);
+
+  await openSources(page);
+  const label = page.locator(".folder-root .source-card strong");
+  await expect(label).toHaveText("Library Folder");
+  expect(
+    await label.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+});
+
+test("short mobile viewports keep every Photo action reachable and operable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Destination" });
+  await startReview(page, running.url, "All Photos");
+
+  const viewports = [
+    { width: 844, height: 390 },
+    { width: 667, height: 375 },
+    { width: 390, height: 844 },
+  ];
+  for (const [index, viewport] of viewports.entries()) {
+    await page.setViewportSize(viewport);
+    const photoView = page.locator("[data-photo-view]");
+    await expect(photoView).toBeVisible();
+    const layout = await photoView.evaluate((view) => {
+      const bounds = (selector: string) =>
+        (view.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      const preview = bounds("[data-preview]");
+      const controlGroups = [
+        ".decision-controls",
+        ".rating-controls",
+        ".membership-controls",
+        ".photo-controls",
+      ].map((selector) => bounds(selector).height);
+      return {
+        clientHeight: view.clientHeight,
+        scrollHeight: view.scrollHeight,
+        previewHeight: preview.height,
+        tallestControlGroup: Math.max(...controlGroups),
+      };
+    });
+    if (viewport.height < 400)
+      expect(layout.scrollHeight).toBeGreaterThan(layout.clientHeight);
+    expect(layout.previewHeight).toBeGreaterThan(layout.tallestControlGroup);
+
+    const controls = [
+      page.getByRole("button", { name: "Back to Grid" }),
+      page.getByRole("button", { name: `Rate ${index + 3} stars` }),
+      page.getByLabel("Album", { exact: true }),
+      page.getByRole("button", { name: "Add to Album" }),
+      page.getByRole("button", { name: "Previous" }),
+      page.getByRole("button", { name: "Next" }),
+    ];
+    for (const control of controls) {
+      await control.scrollIntoViewIfNeeded();
+      const contained = await control.evaluate((element) => {
+        const target = element.getBoundingClientRect();
+        const view = element
+          .closest("[data-photo-view]")!
+          .getBoundingClientRect();
+        return (
+          target.left >= view.left &&
+          target.right <= view.right &&
+          target.top >= view.top &&
+          target.bottom <= view.bottom
+        );
+      });
+      expect(contained).toBe(true);
+    }
+
+    const ratingSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/state") &&
+        response.status() === 200,
+    );
+    await page.getByRole("button", { name: `Rate ${index + 3} stars` }).click();
+    await ratingSaved;
+    await expect(
+      page.getByText(`${index + 3} stars`, { exact: true }),
+    ).toBeVisible();
+
+    await page
+      .getByLabel("Album", { exact: true })
+      .selectOption({ label: "Destination" });
+    const membershipSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/members") &&
+        response.status() === 200,
+    );
+    await page.getByRole("button", { name: "Add to Album" }).click();
+    await membershipSaved;
+    await expect(page.getByText("Added to the Album.")).toBeVisible();
+
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    await page.getByRole("button", { name: "Previous" }).click();
+    await expect(page.getByText("1 / 3")).toBeVisible();
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.locator("[data-grid-view]")).toBeVisible();
+
+    if (index < viewports.length - 1) {
+      await page.locator('[data-photo-index="0"]').click();
+      await expect(photoView).toBeVisible();
+      await expect
+        .poll(() => photoView.evaluate((view) => view.scrollTop))
+        .toBe(0);
+    }
+  }
+});
+
 test("Album names and management actions do not overlap", async ({ page }) => {
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
