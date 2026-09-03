@@ -20,7 +20,9 @@ ENV PATH=/usr/local/cargo/bin:$PATH \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo
 
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
     && apt-get install --no-install-recommends --yes \
         build-essential \
         ca-certificates \
@@ -28,20 +30,19 @@ RUN apt-get update \
         liblcms2-dev \
         libraw-dev \
         libvips-dev \
-        pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+        pkg-config
 
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY compatibility compatibility
-RUN cargo build --release --locked -p slipstream-server
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    cargo build --release --locked -p slipstream-server
 
-FROM ubuntu:26.04 AS runtime
+FROM ubuntu:26.04 AS runtime-rootfs
 
-ARG SLIPSTREAM_VCS_REF=unknown
-LABEL org.opencontainers.image.revision=$SLIPSTREAM_VCS_REF
-
-RUN apt-get update \
+RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update \
     && apt-get install --no-install-recommends --yes \
         ca-certificates \
         curl \
@@ -49,16 +50,28 @@ RUN apt-get update \
         liblcms2-2 \
         libraw23t64 \
         libvips42t64 \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm --force /usr/bin/pebble \
+    && rm --recursive --force /var/lib/pebble \
     && existing_group=$(getent group 1000 | cut -d: -f1) \
     && if [ -z "$existing_group" ]; then groupadd --gid 1000 slipstream; existing_group=slipstream; fi \
     && existing_user=$(getent passwd 1000 | cut -d: -f1) \
     && if [ -z "$existing_user" ]; then useradd --uid 1000 --gid 1000 --create-home --home-dir /home/slipstream --shell /usr/sbin/nologin slipstream; fi \
-    && install -d -o 1000 -g 1000 -m 0700 /state /cache /tmp/slipstream
+    && install -d -o 1000 -g 1000 -m 0700 /home/slipstream /state /cache /tmp/slipstream
 
 COPY --from=rust-build /src/target/release/slipstream-server /usr/local/bin/slipstream-server
 COPY --from=web-build /src/apps/web/dist /app/web
-RUN chown -R 1000:1000 /app /usr/local/bin/slipstream-server
+COPY LICENSE THIRD-PARTY-NOTICES.md RUST-LICENSES.html /usr/share/doc/slipstream/
+RUN chown -R 1000:1000 /app /usr/local/bin/slipstream-server \
+    && chmod 0444 /usr/share/doc/slipstream/*
+
+FROM scratch AS runtime
+
+ARG SLIPSTREAM_VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$SLIPSTREAM_VCS_REF
+
+# Copy the prepared filesystem as one layer so the final image neither inherits
+# Ubuntu's Pebble layer nor distributes a whiteout for the removed binary.
+COPY --from=runtime-rootfs / /
 
 ENV SLIPSTREAM_LIBRARY_ROOT=/originals \
     SLIPSTREAM_STATE_DIRECTORY=/state \
