@@ -429,7 +429,7 @@ test("uses singular and plural Photo counts in Grid status and source cards", as
   ).toBeVisible();
 });
 
-test("exposes one main landmark while loading and after rendering", async ({
+test("exposes one main and named sources navigation landmarks while loading and after rendering", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -466,16 +466,33 @@ test("exposes one main landmark while loading and after rendering", async ({
     await overviewRequested;
     const mainLandmark = page.getByRole("main");
     const htmlMain = page.locator("main");
+    const sourcesNavigation = page.getByRole("navigation", {
+      name: "Library sources",
+      exact: true,
+    });
+    const htmlNavigation = page.locator("nav");
     await expect(page.getByText("Loading Library summary…")).toBeVisible();
     await expect(htmlMain).toHaveCount(1);
     await expect(mainLandmark).toHaveCount(1);
     await expect(mainLandmark).toHaveAttribute("id", "app");
+    await expect(htmlNavigation).toHaveCount(1);
+    await expect(sourcesNavigation).toHaveCount(1);
+    await expect(sourcesNavigation).toHaveAttribute(
+      "aria-label",
+      "Library sources",
+    );
 
     releaseOverview();
     await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
     await expect(htmlMain).toHaveCount(1);
     await expect(mainLandmark).toHaveCount(1);
     await expect(mainLandmark).toHaveAttribute("id", "app");
+    await expect(htmlNavigation).toHaveCount(1);
+    await expect(sourcesNavigation).toHaveCount(1);
+    await expect(sourcesNavigation).toHaveAttribute(
+      "aria-label",
+      "Library sources",
+    );
   } finally {
     releaseOverview();
     if (overviewCaptured) await overviewDelivered;

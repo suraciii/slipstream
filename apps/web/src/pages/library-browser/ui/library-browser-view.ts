@@ -258,12 +258,12 @@ export function createLibraryBrowserView(
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
       <section class="browser" data-browser aria-labelledby="browser-title">
         <div class="source-scrim" data-source-scrim aria-hidden="true"></div>
-        <aside class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
+        <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
           <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
           <p data-summary-status role="status">Loading Library…</p>
           <div class="source-list" data-source-list></div>
           <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
-        </aside>
+        </nav>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
           <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
