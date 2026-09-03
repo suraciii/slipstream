@@ -1961,12 +1961,19 @@ test("the application status monitor owns scan failure, retry, and completion", 
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Keep" });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
 
-  let command: "rejected" | "lost" = "rejected";
-  let statusMode: "failed" | "idle" | "cycle" = "failed";
+  let command: "rejected" | "held" | "lost" = "rejected";
+  let statusMode: "failed" | "idle" | "inspecting" | "cycle" = "failed";
   let cycleStatusCalls = 0;
+  let scanCalls = 0;
+  let releaseHeldScan!: () => void;
+  const heldScan = new Promise<void>((resolve) => {
+    releaseHeldScan = resolve;
+  });
   await page.route("**/api/status", async (route) => {
     const state =
       statusMode === "cycle"
@@ -1977,12 +1984,24 @@ test("the application status monitor owns scan failure, retry, and completion", 
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ state }),
+      body: JSON.stringify(
+        state === "inspecting" ? { state, completed: 3, total: 10 } : { state },
+      ),
     });
   });
   await page.route("**/api/scan", async (route) => {
+    scanCalls += 1;
     if (command === "rejected") {
       await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    if (command === "held") {
+      await heldScan;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "inspecting", completed: 3, total: 10 }),
+      });
       return;
     }
     await route.abort();
@@ -1992,11 +2011,43 @@ test("the application status monitor owns scan failure, retry, and completion", 
     name: "Retry Library Check",
   });
   await expect(retryCheck).toBeVisible();
+  await expect(retryCheck).toBeInViewport();
+  await openSources(page);
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Keep");
+  const duplicateAlbum = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/albums" &&
+      response.status() === 409,
+  );
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await duplicateAlbum;
+  await expect(page.getByLabel("Album name")).toHaveValue("Keep");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
   statusMode = "idle";
   await retryCheck.click();
   await expect(page.getByText("Disconnected")).toBeVisible();
   await expect(retryCheck).toBeVisible();
   await expect(page.getByText(/Library check complete/)).toBeHidden();
+
+  command = "held";
+  statusMode = "inspecting";
+  await retryCheck.click();
+  await expect(
+    page.locator("[data-grid-summary]").getByText("Starting Library check…"),
+  ).toBeInViewport();
+  await expect(retryCheck).toBeHidden();
+  await expect.poll(() => scanCalls).toBe(2);
+  await expect(
+    page
+      .locator("[data-grid-summary]")
+      .getByText("Inspecting Capture Time… 3 / 10"),
+  ).toBeInViewport();
+  expect(scanCalls).toBe(2);
+  releaseHeldScan();
+  statusMode = "failed";
+  await expect(retryCheck).toBeVisible();
 
   // A lost HTTP response remains ambiguous until the monitor observes a real
   // non-idle→idle cycle. That monitor completion consumes the command once
@@ -2006,14 +2057,117 @@ test("the application status monitor owns scan failure, retry, and completion", 
   cycleStatusCalls = 0;
   await retryCheck.click();
   await expect(
-    page.getByText(
-      "Library check complete. Open Browse Snapshots remain unchanged.",
-    ),
+    page
+      .locator("[data-grid-summary]")
+      .getByText(
+        "Library check complete. Open Browse Snapshots remain unchanged.",
+      ),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Refresh Current Source" }),
+  ).toBeInViewport();
   await expect(page.getByText("Connected")).toBeVisible();
   await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh Current Source" }),
+  ).toBeHidden();
+  await expect(page.locator("[data-grid-summary]")).toHaveText("");
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
   await expect(page.getByText(/Library check complete/)).toBeHidden();
+});
+
+test("an Overview failure cannot re-enable an admitted empty-Library check", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let command: "rejected" | "held" = "rejected";
+  let statusState = "failed";
+  let scanCalls = 0;
+  let overviewCalls = 0;
+  let releaseHeldScan!: () => void;
+  const heldScan = new Promise<void>((resolve) => {
+    releaseHeldScan = resolve;
+  });
+  let releaseHeldStatus!: () => void;
+  const heldStatus = new Promise<void>((resolve) => {
+    releaseHeldStatus = resolve;
+  });
+  await page.route("**/api/status", async (route) => {
+    if (statusState === "held") {
+      await heldStatus;
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: statusState }),
+    });
+  });
+  await page.route("**/api/scan", async (route) => {
+    scanCalls += 1;
+    if (command === "rejected") {
+      await route.fulfill({ status: 503, body: "unavailable" });
+      return;
+    }
+    await heldScan;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ state: "inspecting", completed: 0, total: 1 }),
+    });
+  });
+
+  const checkLibrary = page.getByRole("button", { name: "Check Library" });
+  await expect(checkLibrary).toBeVisible();
+  await checkLibrary.click();
+  const retryCheck = page.getByRole("button", {
+    name: "Retry Library Check",
+  });
+  await expect(retryCheck).toBeVisible();
+
+  command = "held";
+  statusState = "inspecting";
+  await retryCheck.click();
+  await expect.poll(() => scanCalls).toBe(2);
+  await expect(
+    page.locator("[data-grid-summary]").getByText("Inspecting Capture Time…"),
+  ).toBeVisible();
+  await expect(checkLibrary).toBeDisabled();
+  await openSources(page);
+  await expect(checkLibrary).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Retry connection" }),
+  ).toBeVisible();
+
+  statusState = "held";
+  await page.route("**/api/overview", async (route) => {
+    overviewCalls += 1;
+    await route.fulfill({ status: 503, body: "unavailable" });
+  });
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect.poll(() => overviewCalls).toBe(1);
+  await expect(
+    page
+      .locator("[data-summary-status]")
+      .getByText("Could not reach Slipstream. Check the server and retry."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(
+    page
+      .locator("[data-grid-summary]")
+      .getByText("Could not reach Slipstream. Check the server and retry."),
+  ).toBeVisible();
+  await expect(checkLibrary).toBeDisabled();
+  expect(scanCalls).toBe(2);
+
+  releaseHeldStatus();
+  releaseHeldScan();
 });
 
 test("terminal scan completion fences a delayed applying-to-idle status pair", async ({
@@ -2100,7 +2254,9 @@ test("terminal scan completion fences a delayed applying-to-idle status pair", a
   await expect(retryCheck).toBeVisible();
   race = true;
   await retryCheck.click();
-  await expect(page.getByText(/Library check complete/)).toBeVisible();
+  await expect(
+    page.locator("[data-summary-status]").getByText(/Library check complete/),
+  ).toBeVisible();
   await expect.poll(() => overviewCalls).toBe(1);
   releaseApplying();
   await expect.poll(() => statusCalls).toBeGreaterThanOrEqual(3);
@@ -2816,17 +2972,40 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   await expect(emptyLibrary).toBeVisible();
   await expect(emptyLibrary).toBeInViewport();
   await writeFile(join(root, "added.jpg"), await jpeg());
+  let scanCalls = 0;
+  let releaseScan!: () => void;
+  const scanHeld = new Promise<void>((resolve) => {
+    releaseScan = resolve;
+  });
+  await page.route("**/api/scan", async (route) => {
+    scanCalls += 1;
+    const response = await route.fetch();
+    await scanHeld;
+    await route.fulfill({ response });
+  });
   const check = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname === "/api/scan" &&
       response.status() === 200,
   );
-  await page.getByRole("button", { name: "Check Library" }).click();
+  const checkLibrary = page.getByRole("button", { name: "Check Library" });
+  await checkLibrary.click();
+  await expect(checkLibrary).toBeDisabled();
+  await expect(
+    page.locator("[data-grid-summary]").getByText("Starting Library check…"),
+  ).toBeInViewport();
+  expect(scanCalls).toBe(1);
+  releaseScan();
   await check;
-  await expect(page.getByText(/Library check complete/)).toBeVisible();
-  await openSources(page);
-  await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expect(
+    page.locator("[data-grid-summary]").getByText(/Library check complete/),
+  ).toBeVisible();
+  const refreshCurrent = page.getByRole("button", {
+    name: "Refresh Current Source",
+  });
+  await expect(refreshCurrent).toBeInViewport();
+  await refreshCurrent.click();
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
