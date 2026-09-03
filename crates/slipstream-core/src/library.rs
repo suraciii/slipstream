@@ -1195,9 +1195,9 @@ mod tests {
             .unwrap();
         assert_ne!(sibling_photo.id, legacy_photo);
         assert_eq!(sibling_photo.id.len(), 36);
-        let sets = library.list_albums().await.unwrap();
+        let albums = library.list_albums().await.unwrap();
         assert_eq!(
-            sets[0]
+            albums[0]
                 .members
                 .iter()
                 .map(|member| (member.photo_id.as_str(), member.position))
@@ -1205,7 +1205,7 @@ mod tests {
             [(legacy_photo.as_str(), 0), ("legacy-missing-photo", 1)]
         );
         assert_eq!(
-            sets[0].last_reviewed_photo_id.as_deref(),
+            albums[0].last_reviewed_photo_id.as_deref(),
             Some("legacy-missing-photo")
         );
         library.shutdown().unwrap();

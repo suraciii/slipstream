@@ -859,6 +859,7 @@ fn migrate_v0(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     migrate_v1(transaction)
 }
 
+// album-language-legacy:start migrate-v1
 fn migrate_v1(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     // Creates schema v2 state: the legacy photo-set table names are part of
     // the immutable v2-v4 contracts and are renamed to albums by migrate_v4.
@@ -888,6 +889,7 @@ fn migrate_v1(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)
 }
+// album-language-legacy:end migrate-v1
 
 fn migrate_v2(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     transaction
@@ -916,8 +918,9 @@ fn migrate_v3(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::Storage)
 }
 
+// album-language-legacy:start migrate-v4
 fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
-    // Issue #95: rename the active photo-set storage to canonical albums in
+    // Issue #95: rename the legacy v4 photo-set storage to canonical albums in
     // one transaction. The new tables use DDL text identical to
     // compatibility/sqlite/schema-v5.sql so the migrated database satisfies
     // the exact schema-v5 manifest. Every album id, name, creation order,
@@ -953,6 +956,7 @@ fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)
 }
+// album-language-legacy:end migrate-v4
 
 fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
     let tables = names(connection, "table")?;
@@ -1997,7 +2001,7 @@ fn unix_millis() -> i64 {
 }
 
 fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceError> {
-    let sets = connection
+    let albums = connection
         .prepare("SELECT id,name FROM albums ORDER BY created_at,id")
         .map_err(|_| PersistenceError::Storage)?
         .query_map([], |row| {
@@ -2006,8 +2010,8 @@ fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceE
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
-    let mut result = Vec::with_capacity(sets.len());
-    for (id, name) in sets {
+    let mut result = Vec::with_capacity(albums.len());
+    for (id, name) in albums {
         let members = connection
             .prepare(
                 "SELECT m.photo_id,m.position,p.available,p.selection_state,p.rating
@@ -2583,6 +2587,7 @@ mod tests {
         validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
     }
 
+    // album-language-legacy:start v4-migration-test
     #[tokio::test]
     async fn v4_migration_to_v5_preserves_album_state_in_one_step() {
         let (_base, library, state, name, path) = fixture();
@@ -2690,6 +2695,7 @@ mod tests {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
         }
     }
+    // album-language-legacy:end v4-migration-test
 
     #[test]
     fn newer_v6_database_is_rejected_without_changes() {
@@ -2809,6 +2815,7 @@ mod tests {
         }
     }
 
+    // album-language-legacy:start v3-migration-test
     #[tokio::test]
     async fn v3_migration_preserves_every_row_identity_and_user_owned_state() {
         let (_base, library, state, name, path) = fixture();
@@ -2818,7 +2825,7 @@ mod tests {
         );
         let original_id = original_id("shoot/A.JPG");
         let photo_id = "photo-preserved";
-        let set_id = "00000000-0000-4000-8000-000000000027";
+        let legacy_album_id = "00000000-0000-4000-8000-000000000027";
         let connection = Connection::open(&path).unwrap();
         connection
             .execute(
@@ -2849,19 +2856,19 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO photo_sets(id,name,created_at) VALUES(?,?,?)",
-                params![set_id, "Preserved", 1_i64],
+                params![legacy_album_id, "Preserved", 1_i64],
             )
             .unwrap();
         connection
             .execute(
                 "INSERT INTO photo_set_members(photo_set_id,photo_id,position) VALUES(?,?,?)",
-                params![set_id, photo_id, 0_i64],
+                params![legacy_album_id, photo_id, 0_i64],
             )
             .unwrap();
         connection
             .execute(
                 "INSERT INTO review_progress(photo_set_id,photo_id) VALUES(?,?)",
-                params![set_id, photo_id],
+                params![legacy_album_id, photo_id],
             )
             .unwrap();
         drop(connection);
@@ -2916,20 +2923,21 @@ mod tests {
                 source_revision: Some("capture-revision".to_owned()),
             }
         );
-        let set = persistence.list_albums().await.unwrap().remove(0);
-        assert_eq!(set.id, set_id);
-        assert_eq!(set.name, "Preserved");
-        assert_eq!(set.members.len(), 1);
-        assert_eq!(set.members[0].photo_id, photo_id);
-        assert_eq!(set.members[0].position, 0);
-        assert!(set.members[0].available);
-        assert_eq!(set.members[0].selection_state, SelectionState::Selected);
-        assert_eq!(set.members[0].rating, 5);
-        assert_eq!(set.last_reviewed_photo_id.as_deref(), Some(photo_id));
+        let album = persistence.list_albums().await.unwrap().remove(0);
+        assert_eq!(album.id, legacy_album_id);
+        assert_eq!(album.name, "Preserved");
+        assert_eq!(album.members.len(), 1);
+        assert_eq!(album.members[0].photo_id, photo_id);
+        assert_eq!(album.members[0].position, 0);
+        assert!(album.members[0].available);
+        assert_eq!(album.members[0].selection_state, SelectionState::Selected);
+        assert_eq!(album.members[0].rating, 5);
+        assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
         validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
     }
+    // album-language-legacy:end v3-migration-test
 
     #[tokio::test]
     async fn every_present_sidecar_rejects_startup_before_creating_database() {
@@ -3410,6 +3418,7 @@ mod tests {
         persistence.shutdown().unwrap();
     }
 
+    // album-language-legacy:start v2-reconciliation-test
     #[tokio::test]
     async fn preserves_decisions_and_memberships_while_reconciling_rows() {
         let (_base, library, state, name, path) = fixture();
@@ -3517,6 +3526,7 @@ mod tests {
             1
         );
     }
+    // album-language-legacy:end v2-reconciliation-test
 
     #[tokio::test]
     async fn preserves_preview_facts_only_for_unchanged_selected_source_and_uses_cas() {
@@ -4024,10 +4034,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let set_id = created.album_id;
+        let album_id = created.album_id;
         persistence
             .mutate_album(AlbumMutation::AddMembers {
-                album_id: set_id.clone(),
+                album_id: album_id.clone(),
                 photo_ids: vec![photo_id.clone()],
             })
             .await
@@ -4042,13 +4052,13 @@ mod tests {
         );
         persistence
             .mutate_album(AlbumMutation::Rename {
-                album_id: set_id.clone(),
+                album_id: album_id.clone(),
                 name: " Renamed ".to_owned(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_albums().await.unwrap();
-        assert_eq!(sets[0].name, "Renamed");
+        let albums = persistence.list_albums().await.unwrap();
+        assert_eq!(albums[0].name, "Renamed");
         persistence.shutdown().unwrap();
 
         let state = StateDirectory::open_or_create(&library, path.parent().unwrap()).unwrap();
@@ -4058,11 +4068,11 @@ mod tests {
             library.canonical_path().to_string_lossy().into_owned(),
         )
         .unwrap();
-        let sets = persistence.list_albums().await.unwrap();
-        assert_eq!(sets[0].id, set_id);
-        assert_eq!(sets[0].members[0].photo_id, photo_id);
+        let albums = persistence.list_albums().await.unwrap();
+        assert_eq!(albums[0].id, album_id);
+        assert_eq!(albums[0].members[0].photo_id, photo_id);
         persistence
-            .mutate_album(AlbumMutation::Delete { album_id: set_id })
+            .mutate_album(AlbumMutation::Delete { album_id })
             .await
             .unwrap();
         assert!(persistence.list_albums().await.unwrap().is_empty());
@@ -4099,7 +4109,7 @@ mod tests {
             .await
             .unwrap();
         let ids = photo_ids(&snapshot);
-        let set_id = persistence
+        let album_id = persistence
             .mutate_album(AlbumMutation::Create {
                 name: "Order".to_owned(),
             })
@@ -4109,7 +4119,7 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::AddMembers {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: vec![ids[0].clone(), ids[0].clone()],
                 })
                 .await,
@@ -4119,7 +4129,7 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::AddMembers {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: vec![ids[0].clone(), "unknown".to_owned()],
                 })
                 .await,
@@ -4129,7 +4139,7 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::AddMembers {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: (0..=100).map(|index| format!("unknown-{index}")).collect(),
                 })
                 .await,
@@ -4137,7 +4147,7 @@ mod tests {
         );
         persistence
             .mutate_album(AlbumMutation::AddMembers {
-                album_id: set_id.clone(),
+                album_id: album_id.clone(),
                 photo_ids: ids.clone(),
             })
             .await
@@ -4145,13 +4155,13 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::Reorder {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: vec![ids[2].clone(), ids[0].clone(), ids[1].clone()],
                 })
                 .await
                 .unwrap()
                 .album_id,
-            set_id
+            album_id
         );
         assert_eq!(
             persistence.list_albums().await.unwrap()[0]
@@ -4164,7 +4174,7 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::Reorder {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: vec![ids[0].clone(), ids[0].clone(), ids[1].clone()],
                 })
                 .await,
@@ -4172,7 +4182,7 @@ mod tests {
         );
         persistence
             .mutate_album(AlbumMutation::RemoveMember {
-                album_id: set_id.clone(),
+                album_id: album_id.clone(),
                 photo_id: ids[0].clone(),
             })
             .await
@@ -4191,7 +4201,7 @@ mod tests {
         connection
             .execute(
                 "UPDATE album_members SET position=9 WHERE album_id=? AND photo_id=?",
-                params![set_id, ids[1]],
+                params![album_id, ids[1]],
             )
             .unwrap();
         drop(connection);
@@ -4205,7 +4215,7 @@ mod tests {
         assert_eq!(
             persistence
                 .mutate_album(AlbumMutation::Reorder {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: vec![ids[1].clone(), ids[2].clone()],
                 })
                 .await,
@@ -4234,24 +4244,24 @@ mod tests {
             .await
             .unwrap();
         let ids = photo_ids(&snapshot);
-        let set_a = persistence
+        let album_a = persistence
             .mutate_album(AlbumMutation::Create {
                 name: "A".to_owned(),
             })
             .await
             .unwrap()
             .album_id;
-        let set_b = persistence
+        let album_b = persistence
             .mutate_album(AlbumMutation::Create {
                 name: "B".to_owned(),
             })
             .await
             .unwrap()
             .album_id;
-        for set_id in [&set_a, &set_b] {
+        for album_id in [&album_a, &album_b] {
             persistence
                 .mutate_album(AlbumMutation::AddMembers {
-                    album_id: set_id.clone(),
+                    album_id: album_id.clone(),
                     photo_ids: ids.clone(),
                 })
                 .await
@@ -4259,15 +4269,16 @@ mod tests {
         }
         persistence
             .mutate_album(AlbumMutation::SetProgress {
-                album_id: set_a.clone(),
+                album_id: album_a.clone(),
                 photo_id: ids[0].clone(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_albums().await.unwrap();
+        let albums = persistence.list_albums().await.unwrap();
         assert_eq!(
-            sets.iter()
-                .find(|set| set.id == set_a)
+            albums
+                .iter()
+                .find(|album| album.id == album_a)
                 .unwrap()
                 .last_reviewed_photo_id
                 .as_deref(),
@@ -4279,7 +4290,7 @@ mod tests {
                 field: PhotoStateField::SelectionState,
                 value: PhotoStateValue::Selection(SelectionState::Selected),
                 expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
-                album_id: Some(set_b.clone()),
+                album_id: Some(album_b.clone()),
             })
             .await
             .unwrap();
@@ -4287,9 +4298,9 @@ mod tests {
             result.undo.prior_value,
             PhotoStateValue::Selection(SelectionState::Undecided)
         );
-        let sets = persistence.list_albums().await.unwrap();
-        let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
-        let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
+        let albums = persistence.list_albums().await.unwrap();
+        let current_a = albums.iter().find(|album| album.id == album_a).unwrap();
+        let current_b = albums.iter().find(|album| album.id == album_b).unwrap();
         assert_eq!(
             current_a.members[0].selection_state,
             SelectionState::Selected
@@ -4330,13 +4341,13 @@ mod tests {
                 field: PhotoStateField::Rating,
                 value: PhotoStateValue::Rating(5),
                 expected_current: Some(PhotoStateValue::Rating(0)),
-                album_id: Some(set_a.clone()),
+                album_id: Some(album_a.clone()),
             })
             .await
             .unwrap();
-        let sets = persistence.list_albums().await.unwrap();
-        let current_a = sets.iter().find(|set| set.id == set_a).unwrap();
-        let current_b = sets.iter().find(|set| set.id == set_b).unwrap();
+        let albums = persistence.list_albums().await.unwrap();
+        let current_a = albums.iter().find(|album| album.id == album_a).unwrap();
+        let current_b = albums.iter().find(|album| album.id == album_b).unwrap();
         assert_eq!(current_a.members[1].rating, 5);
         assert_eq!(current_b.members[1].rating, 5);
         assert_eq!(
@@ -4345,15 +4356,16 @@ mod tests {
         );
         persistence
             .mutate_album(AlbumMutation::RemoveMember {
-                album_id: set_a.clone(),
+                album_id: album_a.clone(),
                 photo_id: ids[1].clone(),
             })
             .await
             .unwrap();
-        let sets = persistence.list_albums().await.unwrap();
+        let albums = persistence.list_albums().await.unwrap();
         assert_eq!(
-            sets.iter()
-                .find(|set| set.id == set_a)
+            albums
+                .iter()
+                .find(|album| album.id == album_a)
                 .unwrap()
                 .last_reviewed_photo_id,
             None
@@ -4388,7 +4400,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let set_id = persistence
+        let album_id = persistence
             .mutate_album(AlbumMutation::Create {
                 name: "Keep".to_owned(),
             })
@@ -4397,7 +4409,7 @@ mod tests {
             .album_id;
         persistence
             .mutate_album(AlbumMutation::AddMembers {
-                album_id: set_id.clone(),
+                album_id: album_id.clone(),
                 photo_ids: vec![photo_id.clone()],
             })
             .await

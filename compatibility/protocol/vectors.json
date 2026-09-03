@@ -76,7 +76,7 @@
         "content-type": "application/json"
       },
       "body": {
-        "name": "Compat Set"
+        "name": "Compat Album"
       }
     },
     "expected": {
@@ -84,8 +84,8 @@
       "body": {
         "albums": [
           {
-            "id": "$setId",
-            "name": "Compat Set",
+            "id": "$albumId",
+            "name": "Compat Album",
             "photoCount": 0,
             "hasSavedPosition": false
           }

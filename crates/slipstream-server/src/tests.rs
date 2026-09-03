@@ -373,18 +373,18 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
 
 fn substitute_protocol_captures(
     value: &serde_json::Value,
-    set_id: &str,
+    album_id: &str,
     publication: &str,
 ) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) => serde_json::Value::String(
-            text.replace("$setId", set_id)
+            text.replace("$albumId", album_id)
                 .replace("$publication", publication),
         ),
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
                 .iter()
-                .map(|item| substitute_protocol_captures(item, set_id, publication))
+                .map(|item| substitute_protocol_captures(item, album_id, publication))
                 .collect(),
         ),
         serde_json::Value::Object(entries) => serde_json::Value::Object(
@@ -393,7 +393,7 @@ fn substitute_protocol_captures(
                 .map(|(name, item)| {
                     (
                         name.clone(),
-                        substitute_protocol_captures(item, set_id, publication),
+                        substitute_protocol_captures(item, album_id, publication),
                     )
                 })
                 .collect(),
@@ -415,7 +415,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         .unwrap(),
     )
     .unwrap();
-    let mut captured_set_id = String::new();
+    let mut captured_album_id = String::new();
     let mut captured_publication = String::new();
     for vector in vectors {
         let request_definition = &vector["request"];
@@ -459,10 +459,10 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             .unwrap();
         if let Some(expected) = vector["expected"]["body"].as_object() {
             let actual: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            if captured_set_id.is_empty()
+            if captured_album_id.is_empty()
                 && let Some(id) = actual["albums"][0]["id"].as_str()
             {
-                captured_set_id = id.to_owned();
+                captured_album_id = id.to_owned();
             }
             if captured_publication.is_empty()
                 && let Some(publication) = actual
@@ -474,7 +474,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
             }
             let expected = substitute_protocol_captures(
                 &serde_json::to_value(expected).unwrap(),
-                &captured_set_id,
+                &captured_album_id,
                 &captured_publication,
             );
             assert_eq!(
@@ -970,31 +970,31 @@ async fn album_browse_open_resolves_saved_position_without_members_response() {
         })
         .await
         .unwrap();
-    let set_id = application
+    let album_id = application
         .albums()
         .await
         .unwrap()
         .albums
         .into_iter()
-        .find(|set| set.name == "Picks")
+        .find(|album| album.name == "Picks")
         .unwrap()
         .id;
     application
         .mutate_album(slipstream_core::AlbumMutation::AddMembers {
-            album_id: set_id.clone(),
+            album_id: album_id.clone(),
             photo_ids: ids.clone(),
         })
         .await
         .unwrap();
     application
         .mutate_album(slipstream_core::AlbumMutation::SetProgress {
-            album_id: set_id.clone(),
+            album_id: album_id.clone(),
             photo_id: ids[1].clone(),
         })
         .await
         .unwrap();
     let opened = application
-        .browse_open(BrowseSourceRequest::Album(set_id), None)
+        .browse_open(BrowseSourceRequest::Album(album_id), None)
         .await
         .unwrap();
     assert_eq!(opened.total, 3);
@@ -1552,31 +1552,31 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
         })
         .await
         .unwrap();
-    let set_id = application
+    let album_id = application
         .albums()
         .await
         .unwrap()
         .albums
         .into_iter()
-        .find(|set| set.name == "Picks")
+        .find(|album| album.name == "Picks")
         .unwrap()
         .id;
     application
         .mutate_album(slipstream_core::AlbumMutation::AddMembers {
-            album_id: set_id.clone(),
+            album_id: album_id.clone(),
             photo_ids: ids.clone(),
         })
         .await
         .unwrap();
     application
         .mutate_album(slipstream_core::AlbumMutation::SetProgress {
-            album_id: set_id.clone(),
+            album_id: album_id.clone(),
             photo_id: ids[0].clone(),
         })
         .await
         .unwrap();
     let preferred = application
-        .browse_open(BrowseSourceRequest::Album(set_id), Some(&ids[2]))
+        .browse_open(BrowseSourceRequest::Album(album_id), Some(&ids[2]))
         .await
         .unwrap();
     assert_eq!(preferred.position, 2);
@@ -1779,7 +1779,7 @@ async fn publication_keeps_scan_owned_invalidation_availability_and_user_state()
 }
 
 #[tokio::test]
-async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publication() {
+async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_published_idle() {
     let (base, config) = prepare_fixture();
     let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel();
     let application =
@@ -1787,6 +1787,16 @@ async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publi
             .await
             .unwrap();
     let router = create_router(Arc::clone(&application), config.web_root());
+
+    let health = send(
+        &router,
+        Request::builder()
+            .uri("http://camera.local/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health.status(), StatusCode::OK);
 
     let overview: serde_json::Value = response_json(
         send(
@@ -1854,6 +1864,19 @@ async fn fresh_library_reports_initializing_and_rejects_browse_until_first_publi
     .await;
     assert_eq!(overview["published"], true);
     assert_eq!(overview["scan"]["state"], "idle");
+    let status: serde_json::Value = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["state"], "idle");
+    assert!(status["publication"].is_string());
     let opened = post_json(
         &router,
         "/api/browse",
@@ -2388,13 +2411,13 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(created["albums"][0]["hasSavedPosition"], false);
     assert!(created["albums"][0]["members"].is_null());
     assert!(created["albums"][0]["lastReviewedPhotoId"].is_null());
-    let set_a = created["albums"][0]["id"].as_str().unwrap().to_owned();
+    let album_a = created["albums"][0]["id"].as_str().unwrap().to_owned();
     assert_eq!(
         send(
             &router,
             Request::builder()
                 .method("POST")
-                .uri(format!("http://camera.local/api/albums/{set_a}/members"))
+                .uri(format!("http://camera.local/api/albums/{album_a}/members"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::ORIGIN, "http://camera.local")
                 .body(Body::from(serde_json::json!({"photoIds": ids}).to_string()))
@@ -2407,7 +2430,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{set_a}/order"),
+            &format!("http://camera.local/api/albums/{album_a}/order"),
             serde_json::json!({"photoIds": [&ids[2], &ids[0], &ids[1]]}),
             Some("http://camera.local"),
         )
@@ -2418,7 +2441,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{set_a}/progress"),
+            &format!("http://camera.local/api/albums/{album_a}/progress"),
             serde_json::json!({"photoId": ids[0]}),
             Some("http://camera.local"),
         )
@@ -2436,11 +2459,11 @@ async fn album_and_state_protocol_persists_across_reopen() {
         .await,
     )
     .await;
-    let set_b = created_b["albums"]
+    let album_b = created_b["albums"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|set| set["name"] == "Other")
+        .find(|album| album["name"] == "Other")
         .unwrap()["id"]
         .as_str()
         .unwrap()
@@ -2448,7 +2471,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{set_b}/members"),
+            &format!("http://camera.local/api/albums/{album_b}/members"),
             serde_json::json!({"photoIds": [&ids[0]]}),
             Some("http://camera.local"),
         )
@@ -2461,7 +2484,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
         post_json(
             &router,
             &format!("http://camera.local/api/photos/{}/state", ids[0]),
-            serde_json::json!({"field": "selectionState", "value": "selected", "albumId": set_a}),
+            serde_json::json!({"field": "selectionState", "value": "selected", "albumId": album_a}),
             Some("http://camera.local"),
         )
         .await,
@@ -2482,14 +2505,14 @@ async fn album_and_state_protocol_persists_across_reopen() {
     );
     // Membership order is observable only through a fresh Album
     // Browse Snapshot; the mutation responses stay summary-only.
-    let ordered = browse_photo_ids(&application, BrowseSourceRequest::Album(set_a.clone())).await;
+    let ordered = browse_photo_ids(&application, BrowseSourceRequest::Album(album_a.clone())).await;
     assert_eq!(
         ordered,
         vec![ids[2].clone(), ids[0].clone(), ids[1].clone()]
     );
-    let set_b_photos =
-        browse_summaries(&application, BrowseSourceRequest::Album(set_b.clone())).await;
-    let shared = set_b_photos
+    let album_b_photos =
+        browse_summaries(&application, BrowseSourceRequest::Album(album_b.clone())).await;
+    let shared = album_b_photos
         .iter()
         .find(|photo| photo.id == ids[0])
         .unwrap();
@@ -2539,7 +2562,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{set_a}/members/remove"),
+            &format!("http://camera.local/api/albums/{album_a}/members/remove"),
             serde_json::json!({"photoId": ids[0]}),
             None,
         )
@@ -2549,20 +2572,20 @@ async fn album_and_state_protocol_persists_across_reopen() {
     );
     // Removing the saved-position Photo clears the persisted progress;
     // the summary-only mutation response proves the cleared flag.
-    let set_a_summary = application
+    let album_a_summary = application
         .albums()
         .await
         .unwrap()
         .albums
         .into_iter()
-        .find(|set| set.id == set_a)
+        .find(|album| album.id == album_a)
         .unwrap();
-    assert!(!set_a_summary.has_saved_position);
+    assert!(!album_a_summary.has_saved_position);
     let before_original = fs::read(config.library_root.join("b.jpg")).unwrap();
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{set_a}/delete"),
+            &format!("http://camera.local/api/albums/{album_a}/delete"),
             serde_json::json!({}),
             None,
         )
@@ -2594,7 +2617,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             .unwrap()
             .albums
             .iter()
-            .all(|set| set.id != set_a)
+            .all(|album| album.id != album_a)
     );
     reopened.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
