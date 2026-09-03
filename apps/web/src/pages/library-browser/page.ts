@@ -454,6 +454,7 @@ export function mountLibraryBrowser(
       photoId: string;
       sourceAuthority: SourceAuthority;
     }>;
+    createdAlbum?: AlbumSummary;
   }> => {
     const capturedPhotoStatus = view.photoStatusSurface;
     const sourceOwner = sourceGrid.authority;
@@ -567,6 +568,9 @@ export function mountLibraryBrowser(
           },
           ...(outcome.removedFromCurrentAlbum
             ? { removedFromCurrentAlbum: outcome.removedFromCurrentAlbum }
+            : {}),
+          ...(outcome.createdAlbum
+            ? { createdAlbum: outcome.createdAlbum }
             : {}),
         };
       } finally {
@@ -862,7 +866,7 @@ export function mountLibraryBrowser(
       return;
     }
     view.setAlbumFormPending(formId, true, name);
-    const { ok } = await mutateAlbum(
+    const result = await mutateAlbum(
       (context) =>
         record.kind === "create"
           ? albumActions.create(name, context)
@@ -871,11 +875,17 @@ export function mountLibraryBrowser(
       photoOwner.authority,
       record.authority,
     );
-    if (albumActions.isFormCurrent(record.authority)) {
-      if (ok) dismissAlbumForm(record);
+    const formIsCurrent = albumActions.isFormCurrent(record.authority);
+    const createdAlbum =
+      record.kind === "create" ? result.createdAlbum : undefined;
+    if (formIsCurrent) {
+      if (result.ok && (record.kind === "rename" || createdAlbum))
+        dismissAlbumForm(record);
       else view.setAlbumFormPending(formId, false);
     }
     renderSources();
+    if (formIsCurrent && result.ok && createdAlbum)
+      await openSource("album", createdAlbum);
   };
 
   const cancelScheduledGridRender = () => {

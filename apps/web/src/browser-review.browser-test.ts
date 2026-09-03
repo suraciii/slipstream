@@ -1347,6 +1347,95 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
+test("creating an Album opens that exact empty Album on desktop and narrow layouts", async ({
+  page,
+}) => {
+  for (const [index, viewport] of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ].entries()) {
+    const { base, root } = await fixture();
+    await writeFile(join(root, "one.jpg"), await jpeg());
+    const running = await server(base, root);
+    const existingName = `Existing ${index + 1}`;
+    const createdName = `Created ${index + 1}`;
+    await post(running.url, "/api/albums", { name: existingName });
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+
+    if (viewport.width === 390) await openSources(page);
+    await page
+      .getByRole("button", { name: new RegExp(`^${existingName} 0 Photos`) })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: existingName }),
+    ).toBeVisible();
+
+    if (viewport.width === 390) await openSources(page);
+    await page.getByRole("button", { name: "New Album" }).click();
+    await page.getByLabel("Album name").fill(createdName);
+    await page.getByRole("button", { name: "Create Album" }).click();
+
+    await expect(
+      page.getByRole("heading", { name: createdName }),
+    ).toBeVisible();
+    await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+    await expect(
+      page.getByText(
+        "This Album contains no Photos. Add Photos from another source's Photo View.",
+      ),
+    ).toBeVisible();
+    if (viewport.width === 390) await openSources(page);
+    const created = page.getByRole("button", {
+      name: new RegExp(`^${createdName} 0 Photos`),
+    });
+    await expect(created).toHaveClass(/active/);
+    await expect(
+      page.getByRole("button", { name: `Rename ${createdName}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Delete ${createdName}` }),
+    ).toBeVisible();
+    if (viewport.width === 390)
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+  }
+
+  await openSources(page);
+  await page.route("**/api/albums", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        albums: [
+          {
+            id: "ambiguous-1",
+            name: "Ambiguous",
+            photoCount: 0,
+            hasSavedPosition: false,
+          },
+          {
+            id: "ambiguous-2",
+            name: "Ambiguous",
+            photoCount: 0,
+            hasSavedPosition: false,
+          },
+        ],
+      }),
+    });
+  });
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Ambiguous");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(page.getByText("The Album could not be created.")).toBeVisible();
+  await expect(page.getByLabel("Album name")).toHaveValue("Ambiguous");
+  await expect(page.locator("[data-grid-title]")).toHaveText("Created 2");
+  await page.unroute("**/api/albums");
+});
+
 test("deleting the open album returns to the All Photos source", async ({
   page,
 }) => {
@@ -1611,7 +1700,7 @@ test("album creation reports duplicates and validates name boundaries by code po
   ).toBeVisible();
 });
 
-test("creating an album from the photo view immediately enables adding the current photo", async ({
+test("creating an album from the photo view opens it and makes it available for membership", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -1626,8 +1715,16 @@ test("creating an album from the photo view immediately enables adding the curre
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Fresh");
   await page.getByRole("button", { name: "Create Album" }).click();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
-  // The picker refreshes in place: no Photo View reopen needed.
+  await expect(page.getByRole("heading", { name: "Fresh" })).toBeVisible();
+  await expect(
+    page.getByText(
+      "This Album contains no Photos. Add Photos from another source's Photo View.",
+    ),
+  ).toBeVisible();
+
+  await openSources(page);
+  await page.getByRole("button", { name: /^All Photos 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
   await page
     .getByLabel("Album", { exact: true })

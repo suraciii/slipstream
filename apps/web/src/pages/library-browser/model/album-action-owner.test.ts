@@ -24,6 +24,19 @@ const deferred = <T>(): Deferred<T> => {
 
 const response = (status = 204): Response => new Response(null, { status });
 
+const albumResponse = (
+  albums: ReadonlyArray<{
+    id: string;
+    name: string;
+    photoCount: number;
+    hasSavedPosition: boolean;
+  }>,
+): Response =>
+  new Response(JSON.stringify({ albums }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
 const defaultSourceAuthority = Object.freeze({}) as SourceAuthority;
 
 const context = (
@@ -45,7 +58,18 @@ describe("AlbumActionOwner", () => {
     const requests: Array<Readonly<{ path: string; init?: RequestInit }>> = [];
     const fetcher: AlbumActionFetch = (path, init) => {
       requests.push({ path, ...(init ? { init } : {}) });
-      return Promise.resolve(response());
+      return Promise.resolve(
+        path === "/api/albums"
+          ? albumResponse([
+              {
+                id: "album-trip",
+                name: "Trip",
+                photoCount: 0,
+                hasSavedPosition: false,
+              },
+            ])
+          : response(),
+      );
     };
     const owner = createAlbumActionOwner(fetcher);
     const form = owner.openForm("album-form-1");
@@ -84,6 +108,65 @@ describe("AlbumActionOwner", () => {
     ).toBe(true);
     for (const outcome of outcomes) owner.finish(outcome.mutation);
     owner.dispose();
+  });
+
+  test("returns only an exact, unambiguous created Album identity", async () => {
+    const created = {
+      id: "album-created",
+      name: "Created",
+      photoCount: 0,
+      hasSavedPosition: false,
+    };
+    const owner = createAlbumActionOwner(() =>
+      Promise.resolve(
+        albumResponse([
+          {
+            id: "album-existing",
+            name: "Existing",
+            photoCount: 2,
+            hasSavedPosition: true,
+          },
+          created,
+        ]),
+      ),
+    );
+    const form = owner.openForm("album-form-create");
+    const action = owner.create("Created", context({ form }));
+    if (!action) throw new Error("expected create admission");
+    const outcome = await action.settlement;
+    if (outcome.kind !== "persisted") throw new Error("expected persistence");
+
+    expect(outcome.createdAlbum).toEqual(created);
+    expect(Object.isFrozen(outcome.createdAlbum)).toBe(true);
+    expect(owner.isFormCurrent(form)).toBe(true);
+    owner.finish(outcome.mutation);
+    owner.dispose();
+
+    for (const albums of [
+      [],
+      [created, { ...created, id: "album-duplicate" }],
+    ]) {
+      const ambiguousOwner = createAlbumActionOwner(() =>
+        Promise.resolve(albumResponse(albums)),
+      );
+      const ambiguousForm = ambiguousOwner.openForm("album-form-ambiguous");
+      const ambiguous = ambiguousOwner.create(
+        "Created",
+        context({ form: ambiguousForm }),
+      );
+      if (!ambiguous) throw new Error("expected ambiguous create admission");
+      const ambiguousOutcome = await ambiguous.settlement;
+      if (ambiguousOutcome.kind !== "failed")
+        throw new Error("expected unconfirmed create to fail");
+      expect(ambiguousOutcome.settlement).toEqual({ kind: "malformed" });
+      expect(ambiguousOutcome.connectivity).toBe("unchanged");
+      expect(ambiguousOutcome.failureMessage).toBe(
+        "The Album could not be created.",
+      );
+      expect(ambiguousOwner.isFormCurrent(ambiguousForm)).toBe(true);
+      ambiguousOwner.finish(ambiguousOutcome.mutation);
+      ambiguousOwner.dispose();
+    }
   });
 
   test("suppresses only duplicate membership keys", async () => {
