@@ -6933,6 +6933,10 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
 
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+    // The original-token adjacent request has already been superseded by the
+    // reopen. Release its stale route now; the successor gate remains held so
+    // the retry still proves Preview completion before adjacent work settles.
+    releaseAdjacent();
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
     await page.evaluate(() => {
