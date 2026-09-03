@@ -292,6 +292,27 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
+  test("keeps Retry authority current while its Photo fact is reloaded", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const { owner } = bind(source, () =>
+      Promise.resolve(new Response(null, { status: 202 })),
+    );
+    source.facts.delete(0);
+
+    const retry = owner.beginRetry()!;
+    expect(owner.isCurrent(retry.authority)).toBe(true);
+    expect(owner.retryIsCurrent(retry)).toBe(true);
+    expect(owner.retryPhotoIsCurrent(retry)).toBe(false);
+
+    source.facts.set(0, fact("photo-0"));
+    expect(owner.retryPhotoIsCurrent(retry)).toBe(true);
+    source.facts.set(0, fact("replacement"));
+    expect(owner.retryPhotoIsCurrent(retry)).toBe(false);
+    owner.finishRetry(retry);
+    owner.dispose();
+  });
+
   test("reloads an evicted Undo through an opaque window then returns to its Photo", async () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));

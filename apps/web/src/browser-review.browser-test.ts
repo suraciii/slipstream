@@ -3235,8 +3235,12 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Position Retry 1 Photo/ }).click();
 
+  let progressStatus = 503;
   await page.route("**/api/albums/*/progress", async (route) => {
-    await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+    await route.fulfill({
+      status: progressStatus,
+      body: '{"error":"failed"}',
+    });
   });
   const failed = progressResponse(page, albumId, 503);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -3249,6 +3253,42 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
+  progressStatus = 409;
+  const stale = progressResponse(page, albumId, 409);
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await stale;
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Could not refresh this Photo. Retry to continue.",
+  );
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.route("**/api/photos/*/preview", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        state: "ready",
+        url: "/review.jpg",
+        source: "matching-jpeg",
+        stale: true,
+        message: "Showing retained Preview.",
+      }),
+    }),
+  );
+  const stalePreview = progressResponse(page, albumId, 409);
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await stalePreview;
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Showing retained Preview.",
+  );
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+  await page.unroute("**/api/photos/*/preview");
   await page.unroute("**/api/albums/*/progress");
   const recovered = progressResponse(page, albumId);
   await page.getByRole("button", { name: "Retry", exact: true }).click();
@@ -5197,6 +5237,52 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
+test("Photo Retry reports a replacement current fact instead of remaining in progress", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await page.route("**/api/photos/*/preview", (route) =>
+    route.fulfill({ status: 503, body: '{"error":"failed"}' }),
+  );
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+  let replacementServed = false;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "0",
+    async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        photos: Array<Record<string, unknown>>;
+      };
+      replacementServed = true;
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          photos: [{ ...body.photos[0], id: "replacement-photo" }],
+        },
+      });
+    },
+  );
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect.poll(() => replacementServed).toBe(true);
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Could not refresh this Photo. Retry to continue.",
+  );
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+});
+
 test("source switching aborts a pending current-Photo Preview request", async ({
   page,
 }) => {
@@ -6673,8 +6759,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   let reopenWindowFailed = false;
   let browseAllocations = 0;
   let reopenPhotoId = "";
-  let observeRetryPreview = false;
-  let retryCurrentPreviewResponses = 0;
   const successfulBrowseStarts = new Map<string, Set<string>>();
   page.on("request", (request) => {
     const url = new URL(request.url());
@@ -6687,14 +6771,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   page.on("response", (response) => {
     const request = response.request();
     const url = new URL(response.url());
-    if (
-      observeRetryPreview &&
-      request.method() === "GET" &&
-      url.pathname === `/api/photos/${reopenPhotoId}/preview` &&
-      !url.searchParams.has("priority") &&
-      response.status() === 200
-    )
-      retryCurrentPreviewResponses += 1;
     if (
       request.method() !== "GET" ||
       !url.pathname.startsWith("/api/browse/") ||
@@ -6797,9 +6873,9 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     });
     holdPhotoRetry = true;
     await photoRetry.click();
-    const retriedPhotoRange = await photoRetryStarted;
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+    const retriedPhotoRange = await photoRetryStarted;
 
     expect(retriedPhotoRange.method()).toBe("GET");
     const retriedRequest = new URL(retriedPhotoRange.url());
@@ -6830,13 +6906,25 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "10",
       priority: "high",
     });
-    observeRetryPreview = true;
+    const refreshedPreview = page.waitForResponse((response) => {
+      const request = response.request();
+      const url = new URL(response.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/photos/${reopenPhotoId}/preview` &&
+        !url.searchParams.has("priority") &&
+        response.status() === 200
+      );
+    });
     releasePhotoRetry();
-    await expect.poll(() => retryCurrentPreviewResponses).toBe(1);
+    await refreshedPreview;
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-status]")).toHaveText(
+      "Connected. Current state refreshed.",
+    );
     await expect(page.getByText("60 / 70")).toBeVisible();
     await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
     await expect(

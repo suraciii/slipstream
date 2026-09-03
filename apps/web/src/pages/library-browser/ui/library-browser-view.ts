@@ -182,6 +182,7 @@ type ControlsViewModel = Readonly<{
 
 export interface LibraryBrowserView {
   readonly photoStatusSurface: object;
+  readonly photoStatusEmpty: boolean;
   isPhotoStatusSurfaceCurrent(surface: object): boolean;
   setPhotoStatus(text: string): void;
   presentSummary(
@@ -1350,6 +1351,9 @@ export function createLibraryBrowserView(
   return {
     get photoStatusSurface() {
       return photoStatusSurface;
+    },
+    get photoStatusEmpty() {
+      return status.textContent === "";
     },
     isPhotoStatusSurfaceCurrent: (surface) =>
       alive && surface === photoStatusSurface,
