@@ -1,7 +1,10 @@
-//! Production Library and persistence core for Slipstream.
+//! Production Photo Library and Preview core for Slipstream.
 //!
-//! Issue #21 provides domain identities, Linux read-only Original confinement,
-//! and the SQLite persistence foundation. HTTP and Preview processing live elsewhere.
+//! This crate owns domain values, Linux read-only Original File confinement,
+//! Library scanning and SQLite persistence, plus bounded capture inspection,
+//! native Preview extraction, derivative processing, and cache publication.
+//! Application configuration, startup and shutdown, HTTP protocol mapping, and
+//! Web delivery live in `slipstream-server`.
 
 pub mod cache;
 pub mod capture;
