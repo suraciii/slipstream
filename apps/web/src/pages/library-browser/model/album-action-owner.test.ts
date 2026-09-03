@@ -24,6 +24,12 @@ const deferred = <T>(): Deferred<T> => {
 
 const response = (status = 204): Response => new Response(null, { status });
 
+const jsonResponse = (body: unknown): Response =>
+  new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
 const albumResponse = (
   albums: ReadonlyArray<{
     id: string;
@@ -31,11 +37,7 @@ const albumResponse = (
     photoCount: number;
     hasSavedPosition: boolean;
   }>,
-): Response =>
-  new Response(JSON.stringify({ albums }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
+): Response => jsonResponse({ albums });
 
 const defaultSourceAuthority = Object.freeze({}) as SourceAuthority;
 
@@ -142,12 +144,48 @@ describe("AlbumActionOwner", () => {
     owner.finish(outcome.mutation);
     owner.dispose();
 
-    for (const albums of [
-      [],
-      [created, { ...created, id: "album-duplicate" }],
-    ]) {
+    const malformedCases: ReadonlyArray<
+      readonly [description: string, body: unknown]
+    > = [
+      ["malformed Album shape", { albums: [{ ...created, photoCount: "0" }] }],
+      [
+        "zero exact name matches",
+        {
+          albums: [
+            {
+              id: "album-existing",
+              name: "Existing",
+              photoCount: 0,
+              hasSavedPosition: false,
+            },
+          ],
+        },
+      ],
+      [
+        "multiple exact name matches",
+        { albums: [created, { ...created, id: "album-duplicate-name" }] },
+      ],
+      [
+        "an ID duplicated by another Album",
+        {
+          albums: [
+            created,
+            {
+              ...created,
+              name: "Existing",
+            },
+          ],
+        },
+      ],
+      ["a nonempty match", { albums: [{ ...created, photoCount: 1 }] }],
+      [
+        "a match with saved position",
+        { albums: [{ ...created, hasSavedPosition: true }] },
+      ],
+    ];
+    for (const [description, body] of malformedCases) {
       const ambiguousOwner = createAlbumActionOwner(() =>
-        Promise.resolve(albumResponse(albums)),
+        Promise.resolve(jsonResponse(body)),
       );
       const ambiguousForm = ambiguousOwner.openForm("album-form-ambiguous");
       const ambiguous = ambiguousOwner.create(
@@ -157,7 +195,7 @@ describe("AlbumActionOwner", () => {
       if (!ambiguous) throw new Error("expected ambiguous create admission");
       const ambiguousOutcome = await ambiguous.settlement;
       if (ambiguousOutcome.kind !== "failed")
-        throw new Error("expected unconfirmed create to fail");
+        throw new Error(`expected ${description} to fail`);
       expect(ambiguousOutcome.settlement).toEqual({ kind: "malformed" });
       expect(ambiguousOutcome.connectivity).toBe("unchanged");
       expect(ambiguousOutcome.failureMessage).toBe(

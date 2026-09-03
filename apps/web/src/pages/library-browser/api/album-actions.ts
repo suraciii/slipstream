@@ -66,9 +66,16 @@ export const createAlbum = async (
   const albums = body.albums.filter(isAlbumSummary);
   if (albums.length !== body.albums.length)
     return Object.freeze({ kind: "malformed" });
+  if (new Set(albums.map((album) => album.id)).size !== albums.length)
+    return Object.freeze({ kind: "malformed" });
   const matches = albums.filter((album) => album.name === name);
   const createdAlbum = matches[0];
-  if (!createdAlbum || matches.length !== 1)
+  if (
+    !createdAlbum ||
+    matches.length !== 1 ||
+    createdAlbum.photoCount !== 0 ||
+    createdAlbum.hasSavedPosition
+  )
     return Object.freeze({ kind: "malformed" });
   return Object.freeze({
     kind: "persisted",

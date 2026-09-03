@@ -866,13 +866,15 @@ export function mountLibraryBrowser(
       return;
     }
     view.setAlbumFormPending(formId, true, name);
+    const sourceAuthority = sourceGrid.authority;
+    const photoAuthority = photoOwner.authority;
     const result = await mutateAlbum(
       (context) =>
         record.kind === "create"
           ? albumActions.create(name, context)
           : albumActions.rename(record.albumId!, name, context),
       "summary",
-      photoOwner.authority,
+      photoAuthority,
       record.authority,
     );
     const formIsCurrent = albumActions.isFormCurrent(record.authority);
@@ -884,7 +886,13 @@ export function mountLibraryBrowser(
       else view.setAlbumFormPending(formId, false);
     }
     renderSources();
-    if (formIsCurrent && result.ok && createdAlbum)
+    if (
+      formIsCurrent &&
+      sourceGrid.isCurrent(sourceAuthority) &&
+      photoOwner.isCurrent(photoAuthority) &&
+      result.ok &&
+      createdAlbum
+    )
       await openSource("album", createdAlbum);
   };
 

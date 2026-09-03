@@ -1412,14 +1412,14 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
       body: JSON.stringify({
         albums: [
           {
-            id: "ambiguous-1",
+            id: "duplicate-id",
             name: "Ambiguous",
             photoCount: 0,
             hasSavedPosition: false,
           },
           {
-            id: "ambiguous-2",
-            name: "Ambiguous",
+            id: "duplicate-id",
+            name: "Other",
             photoCount: 0,
             hasSavedPosition: false,
           },
@@ -1434,6 +1434,82 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
   await expect(page.getByLabel("Album name")).toHaveValue("Ambiguous");
   await expect(page.locator("[data-grid-title]")).toHaveText("Created 2");
   await page.unroute("**/api/albums");
+});
+
+test("a delayed Album creation cannot replace a newer source or Photo", async ({
+  page,
+}) => {
+  for (const changedOwner of ["source", "photo"] as const) {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await createAlbum(running.url, "Existing");
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    if (changedOwner === "photo")
+      await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/albums", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch();
+      markStarted();
+      await released;
+      await route.fulfill({ response });
+    });
+
+    await openSources(page);
+    await page.getByRole("button", { name: "New Album" }).click();
+    const createdName = `Delayed ${changedOwner}`;
+    await page.getByLabel("Album name").fill(createdName);
+    await page.getByRole("button", { name: "Create Album" }).click();
+    await started;
+
+    if (changedOwner === "source") {
+      await page.getByRole("button", { name: /^Existing 2 Photos/ }).click();
+      await expect(
+        page.getByRole("heading", { name: "Existing" }),
+      ).toBeVisible();
+    } else {
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: "Next" }).click();
+      await expect(page.getByText("2 / 2")).toBeVisible();
+    }
+
+    release();
+    if (changedOwner === "photo") {
+      await expect(
+        page.getByRole("heading", { name: "All Photos" }),
+      ).toBeVisible();
+      await expect(page.getByText("2 / 2")).toBeVisible();
+      await openSources(page);
+    }
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`^${createdName} 0 Photos`),
+      }),
+    ).toBeVisible();
+    if (changedOwner === "source") {
+      await expect(
+        page.getByRole("heading", { name: "Existing" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: /^Existing 2 Photos/ }),
+      ).toHaveAttribute("aria-current", "true");
+    } else {
+      await expect(page.getByText("2 / 2")).toBeVisible();
+    }
+    await page.unroute("**/api/albums");
+  }
 });
 
 test("deleting the open album returns to the All Photos source", async ({
