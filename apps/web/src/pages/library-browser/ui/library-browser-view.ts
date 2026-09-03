@@ -1136,15 +1136,17 @@ export function createLibraryBrowserView(
       event.altKey
     )
       return;
+    const sourcesOpen = browser.classList.contains("sources-open");
     if (
       event.key === "Escape" &&
       (compactSources.matches || !photoView.hidden) &&
-      browser.classList.contains("sources-open")
+      sourcesOpen
     ) {
       event.preventDefault();
       closeSources();
       return;
     }
+    if (sourcesOpen) return;
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
       event.preventDefault();
