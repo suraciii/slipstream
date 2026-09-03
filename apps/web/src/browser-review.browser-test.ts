@@ -12,13 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
-import {
-  expect,
-  test,
-  type Locator,
-  type Page,
-  type Request,
-} from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 
@@ -6742,17 +6736,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   const adjacentSuccessorGate = new Promise<void>((resolve) => {
     releaseAdjacentSuccessor = resolve;
   });
-  let releasePhotoRetry: () => void = () => undefined;
-  const photoRetryGate = new Promise<void>((resolve) => {
-    releasePhotoRetry = resolve;
-  });
-  let markPhotoRetryStarted!: (request: Request) => void;
-  const photoRetryStarted = new Promise<Request>((resolve) => {
-    markPhotoRetryStarted = resolve;
-  });
-  let photoRetryObserved = false;
   let holdAdjacentSuccessors = false;
-  let holdPhotoRetry = false;
   let boundaryRequests = 0;
   let originalToken = "";
   let reopenedToken = "";
@@ -6816,23 +6800,14 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
         await route.fulfill({ status: 503, body: '{"error":"failed"}' });
         return;
       }
-      if (token === reopenedToken && holdAdjacentSuccessors)
+      if (token === reopenedToken && holdAdjacentSuccessors) {
         await adjacentSuccessorGate;
-      await route.continue();
-    },
-  );
-  await page.route(
-    (url) =>
-      url.pathname.startsWith("/api/browse/") &&
-      url.searchParams.get("start") === "0",
-    async (route) => {
-      const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
-      if (token === reopenedToken && holdPhotoRetry) {
-        if (!photoRetryObserved) {
-          photoRetryObserved = true;
-          markPhotoRetryStarted(route.request());
+        try {
+          await route.continue();
+        } catch {
+          /* Retry supersedes this held adjacent Photo prefetch. */
         }
-        await photoRetryGate;
+        return;
       }
       await route.continue();
     },
@@ -6871,16 +6846,35 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
         }
       ).__slipstreamBrowseAdmissions.length = 0;
     });
-    holdPhotoRetry = true;
+    const retriedPhotoRange = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/browse/${reopenedToken}` &&
+        url.searchParams.get("start") === "0" &&
+        url.searchParams.get("limit") === "60"
+      );
+    });
+    const refreshedPreview = page.waitForResponse((response) => {
+      const request = response.request();
+      const url = new URL(response.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/photos/${reopenPhotoId}/preview` &&
+        url.search === "" &&
+        response.status() === 200
+      );
+    });
     await photoRetry.click();
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
-    const retriedPhotoRange = await photoRetryStarted;
+    const retriedPhotoRangeRequest = await retriedPhotoRange;
 
-    expect(retriedPhotoRange.method()).toBe("GET");
-    const retriedRequest = new URL(retriedPhotoRange.url());
+    expect(retriedPhotoRangeRequest.method()).toBe("GET");
+    const retriedRequest = new URL(retriedPhotoRangeRequest.url());
     expect(retriedRequest.pathname).toBe(`/api/browse/${reopenedToken}`);
     expect(retriedRequest.searchParams.get("start")).toBe("0");
+    expect(retriedRequest.searchParams.get("limit")).toBe("60");
     const retryAdmissions = await page.evaluate(
       (token) =>
         (
@@ -6906,17 +6900,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "10",
       priority: "high",
     });
-    const refreshedPreview = page.waitForResponse((response) => {
-      const request = response.request();
-      const url = new URL(response.url());
-      return (
-        request.method() === "GET" &&
-        url.pathname === `/api/photos/${reopenPhotoId}/preview` &&
-        !url.searchParams.has("priority") &&
-        response.status() === 200
-      );
-    });
-    releasePhotoRetry();
     await refreshedPreview;
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
@@ -6960,7 +6943,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   } finally {
     releaseAdjacent();
     releaseAdjacentSuccessor();
-    releasePhotoRetry();
   }
 });
 
