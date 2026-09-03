@@ -4709,7 +4709,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/api/browse")
       browseAllocations += 1;
-    if (request.method() === "GET" && url.pathname === "/api/library")
+    if (request.method() === "GET" && url.pathname === "/api/overview")
       overviewRequests += 1;
   });
   await page.route(/\/api\/browse\//, async (route) => {
@@ -4741,6 +4741,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByText(/returned an invalid response/)).toBeVisible();
   await expect(page.getByText(/Ready · 1 Photos/)).toBeHidden();
+  await expect.poll(() => overviewRequests).toBeGreaterThan(0);
   const initialOverviewRequests = overviewRequests;
 
   windowMode = "bad-photo";
@@ -5955,7 +5956,15 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
   await writePhotos(root, 70);
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
+  let overviewRequests = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/overview")
+      overviewRequests += 1;
+  });
   await openGrid(page, running.url, "All Photos");
+  await expect.poll(() => overviewRequests).toBeGreaterThan(0);
+  const initialOverviewRequests = overviewRequests;
 
   let tailAttempts = 0;
   let failing = true;
@@ -5970,14 +5979,11 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
   });
   let tailRetryObserved = false;
   let browseAllocations = 0;
-  let overviewRequests = 0;
   const tokens: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/api/browse")
       browseAllocations += 1;
-    if (request.method() === "GET" && url.pathname === "/api/library")
-      overviewRequests += 1;
   });
   await page.route(/\/api\/browse\//, async (route) => {
     const request = route.request();
@@ -6027,7 +6033,7 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
     await expect(page.locator('[data-photo-index="69"]')).toBeVisible();
     expect(new Set(tokens).size).toBe(1);
     expect(browseAllocations).toBe(0);
-    expect(overviewRequests).toBe(0);
+    expect(overviewRequests).toBe(initialOverviewRequests);
   } finally {
     releaseTailRetry();
     await page.unroute(/\/api\/browse\//);
@@ -6045,20 +6051,25 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
   await page.route(thumbnailRoute, (route) =>
     route.fulfill({ status: 503, body: '{"error":"not under test"}' }),
   );
+  let overviewRequests = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/overview")
+      overviewRequests += 1;
+  });
   await openGrid(page, running.url, "All Photos");
+  await expect.poll(() => overviewRequests).toBeGreaterThan(0);
+  const initialOverviewRequests = overviewRequests;
 
   const attempts = new Map<string, number>();
   const tokens: string[] = [];
   let phase: "initial" | "first-retry" | "final-retry" = "initial";
   let browseAllocations = 0;
-  let overviewRequests = 0;
   let firstWindowReloads = 0;
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/api/browse")
       browseAllocations += 1;
-    if (request.method() === "GET" && url.pathname === "/api/library")
-      overviewRequests += 1;
     if (
       request.method() === "GET" &&
       url.pathname.startsWith("/api/browse/") &&
@@ -6115,7 +6126,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     );
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     expect(browseAllocations).toBe(0);
-    expect(overviewRequests).toBe(0);
+    expect(overviewRequests).toBe(initialOverviewRequests);
     expect(firstWindowReloads).toBe(0);
     expect(new Set(tokens).size).toBe(1);
 
@@ -6129,7 +6140,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     expect(attempts.get("60")).toBe(recovered60);
     expect(browseAllocations).toBe(0);
-    expect(overviewRequests).toBe(0);
+    expect(overviewRequests).toBe(initialOverviewRequests);
 
     await page.getByRole("button", { name: "Close" }).click();
     await scrollToIndex(0);
@@ -6229,7 +6240,15 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       return nativeFetch(input, init);
     }) as typeof window.fetch;
   });
+  let overviewRequests = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/overview")
+      overviewRequests += 1;
+  });
   await openGrid(page, running.url, "All Photos");
+  await expect.poll(() => overviewRequests).toBeGreaterThan(0);
+  const initialOverviewRequests = overviewRequests;
 
   const viewport = page.locator("[data-grid-viewport]");
   await viewport.evaluate((element) => {
@@ -6286,7 +6305,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   let reopenedToken = "";
   let reopenWindowFailed = false;
   let browseAllocations = 0;
-  let overviewRequests = 0;
   let reopenPhotoId = "";
   let observeRetryPreview = false;
   let retryCurrentPreviewResponses = 0;
@@ -6298,8 +6316,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       const body = request.postDataJSON() as { photoId?: string };
       reopenPhotoId = body.photoId ?? "";
     }
-    if (request.method() === "GET" && url.pathname === "/api/library")
-      overviewRequests += 1;
   });
   page.on("response", (response) => {
     const request = response.request();
@@ -6398,7 +6414,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     expect(reopenedToken).not.toBe(originalToken);
     expect(successfulBrowseStarts.get(reopenedToken)).toContain("0");
     expect(browseAllocations).toBe(1);
-    expect(overviewRequests).toBe(0);
+    expect(overviewRequests).toBe(initialOverviewRequests);
     expect(reopenPhotoId).not.toBe("");
 
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
