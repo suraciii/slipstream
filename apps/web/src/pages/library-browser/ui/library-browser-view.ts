@@ -229,9 +229,14 @@ type AlbumFormState = {
   formId: string;
   albumId?: string;
   name: string;
+  returnFocusKey: string;
   pending: boolean;
   message?: string;
 };
+
+type AlbumFocusRequest =
+  | Readonly<{ kind: "form"; formId: string }>
+  | Readonly<{ kind: "return"; focusKey: string }>;
 
 export function createLibraryBrowserView(
   root: HTMLElement,
@@ -338,6 +343,7 @@ export function createLibraryBrowserView(
       "aria-label",
       value === 0 ? "Clear Rating" : `Rate ${value} stars`,
     );
+    button.setAttribute("aria-pressed", String(value === 0));
     button.textContent = value === 0 ? "0" : `${value}★`;
     ratings.append(button);
   }
@@ -348,6 +354,9 @@ export function createLibraryBrowserView(
   let membershipModel: MembershipViewModel | undefined;
   let albumFormCounter = 0;
   let albumForm: AlbumFormState | undefined;
+  let albumFocusRequest: AlbumFocusRequest | undefined;
+  let gridFocusIndex: number | undefined;
+  let gridFocusRequested = false;
   let renderedColumns = 0;
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
@@ -457,6 +466,7 @@ export function createLibraryBrowserView(
     const button = document.createElement("button");
     button.type = "button";
     button.className = `source-card${active ? " active" : ""}`;
+    if (active) button.setAttribute("aria-current", "true");
     button.disabled = disableWhenEmpty && count === 0;
     button.innerHTML = "<strong></strong><span></span>";
     required<HTMLElement>(button, "strong").textContent = name;
@@ -545,6 +555,8 @@ export function createLibraryBrowserView(
   };
 
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
+  const albumActionFocusKey = (kind: AlbumFormState["kind"], albumId = "") =>
+    kind === "create" ? "album:create" : `album:${kind}:${albumId}`;
   const openAlbumForm = (
     kind: AlbumFormState["kind"],
     albumId = "",
@@ -556,13 +568,19 @@ export function createLibraryBrowserView(
       formId: nextAlbumFormId(),
       ...(albumId ? { albumId } : {}),
       name,
+      returnFocusKey: albumActionFocusKey(kind, albumId),
       pending: false,
     };
+    albumFocusRequest = { kind: "form", formId: albumForm.formId };
     send({ kind: "album-form-open", form: { ...albumForm } });
     if (sourceModel) renderSources(sourceModel);
   };
   const closeAlbumForm = (form: AlbumFormState) => {
     if (!alive || albumForm !== form) return;
+    albumFocusRequest = {
+      kind: "return",
+      focusKey: form.returnFocusKey,
+    };
     albumForm = undefined;
     send({ kind: "album-form-close", formId: form.formId });
     if (sourceModel) renderSources(sourceModel);
@@ -578,6 +596,7 @@ export function createLibraryBrowserView(
     input.type = "text";
     input.name = "name";
     input.dataset.albumFormId = form.formId;
+    input.dataset.focusKey = `album:form:${form.formId}:name`;
     input.setAttribute("aria-label", "Album name");
     input.value = form.name;
     input.addEventListener("input", () => {
@@ -601,10 +620,14 @@ export function createLibraryBrowserView(
     message.textContent = form.message ?? "";
     const save = document.createElement("button");
     save.type = "submit";
+    save.dataset.albumFormId = form.formId;
+    save.dataset.focusKey = `album:form:${form.formId}:submit`;
     save.textContent = saveText;
     save.disabled = form.pending;
     const cancel = document.createElement("button");
     cancel.type = "button";
+    cancel.dataset.albumFormId = form.formId;
+    cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
     cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => closeAlbumForm(form));
     element.append(input, save, cancel, message);
@@ -634,6 +657,8 @@ export function createLibraryBrowserView(
       const text = paragraph("Photos and Original Files remain unchanged.");
       const confirm = document.createElement("button");
       confirm.type = "button";
+      confirm.dataset.albumFormId = form.formId;
+      confirm.dataset.focusKey = `album:form:${form.formId}:confirm`;
       confirm.textContent = "Delete Album";
       confirm.disabled = form.pending;
       confirm.addEventListener("click", () => {
@@ -642,6 +667,8 @@ export function createLibraryBrowserView(
       });
       const cancel = document.createElement("button");
       cancel.type = "button";
+      cancel.dataset.albumFormId = form.formId;
+      cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
       cancel.textContent = "Cancel";
       cancel.addEventListener("click", () => closeAlbumForm(form));
       confirmBox.append(text, confirm, cancel);
@@ -652,6 +679,7 @@ export function createLibraryBrowserView(
     rename.type = "button";
     rename.className = "album-tool";
     rename.textContent = "Rename";
+    rename.dataset.focusKey = albumActionFocusKey("rename", album.id);
     rename.setAttribute("aria-label", `Rename ${album.name}`);
     rename.addEventListener("click", () =>
       openAlbumForm("rename", album.id, album.name),
@@ -660,6 +688,7 @@ export function createLibraryBrowserView(
     remove.type = "button";
     remove.className = "album-tool";
     remove.textContent = "Delete";
+    remove.dataset.focusKey = albumActionFocusKey("delete", album.id);
     remove.setAttribute("aria-label", `Delete ${album.name}`);
     remove.addEventListener("click", () =>
       openAlbumForm("delete", album.id, album.name),
@@ -673,9 +702,9 @@ export function createLibraryBrowserView(
     sourceModel = model;
     const focused = document.activeElement;
     const focusedFormId =
-      focused instanceof HTMLInputElement
-        ? focused.dataset.albumFormId
-        : undefined;
+      focused instanceof HTMLElement ? focused.dataset.albumFormId : undefined;
+    const focusedKey =
+      focused instanceof HTMLElement ? focused.dataset.focusKey : undefined;
     const focusedSelection =
       focused instanceof HTMLInputElement
         ? [focused.selectionStart, focused.selectionEnd]
@@ -686,6 +715,7 @@ export function createLibraryBrowserView(
       model.libraryCount,
       model.libraryActive,
     );
+    library.dataset.focusKey = "source:library";
     library.addEventListener("click", () =>
       send({ kind: "source-open", source: { kind: "library" } }),
     );
@@ -710,6 +740,7 @@ export function createLibraryBrowserView(
       false,
       false,
     );
+    rootCard.dataset.focusKey = "source:folder:";
     rootCard.disabled = !model.fileLocationsEnabled;
     rootCard.addEventListener("click", () =>
       send({
@@ -749,6 +780,7 @@ export function createLibraryBrowserView(
     newAlbum.type = "button";
     newAlbum.className = "album-new";
     newAlbum.textContent = "New Album";
+    newAlbum.dataset.focusKey = albumActionFocusKey("create");
     newAlbum.addEventListener("click", () => openAlbumForm("create"));
     albumHeadingRow.append(albumHeading, newAlbum);
     sourceList.append(albumHeadingRow);
@@ -764,6 +796,7 @@ export function createLibraryBrowserView(
         album.hasSavedPosition,
         false,
       );
+      button.dataset.focusKey = `source:album:${album.id}`;
       button.addEventListener("click", () =>
         send({ kind: "source-open", source: { kind: "album", id: album.id } }),
       );
@@ -772,19 +805,53 @@ export function createLibraryBrowserView(
       row.append(button, createAlbumTools(album));
       sourceList.append(row);
     }
-    if (focusedFormId) {
-      const restored = sourceList.querySelector<HTMLInputElement>(
-        `input[data-album-form-id="${focusedFormId}"]`,
-      );
-      if (restored) {
+    const focusTarget = (focusKey: string) =>
+      Array.from(
+        sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
+      ).find((candidate) => candidate.dataset.focusKey === focusKey);
+    const focusForm = (form: AlbumFormState, selectName: boolean) => {
+      const selector =
+        form.kind === "delete"
+          ? `[data-album-form-id="${form.formId}"][data-focus-key$=":confirm"]`
+          : `input[data-album-form-id="${form.formId}"]`;
+      let target = sourceList.querySelector<HTMLElement>(selector);
+      if (target?.matches(":disabled"))
+        target = sourceList.querySelector<HTMLElement>(
+          `[data-album-form-id="${form.formId}"][data-focus-key$=":cancel"]`,
+        );
+      if (!target) return false;
+      target.focus();
+      if (selectName && target instanceof HTMLInputElement) target.select();
+      return document.activeElement === target;
+    };
+    const request = albumFocusRequest;
+    if (request?.kind === "form" && albumForm?.formId === request.formId) {
+      albumFocusRequest = undefined;
+      focusForm(albumForm, true);
+      return;
+    }
+    if (request?.kind === "return") {
+      albumFocusRequest = undefined;
+      const target =
+        focusTarget(request.focusKey) ??
+        focusTarget(albumActionFocusKey("create"));
+      target?.focus();
+      return;
+    }
+    const restored = focusedKey ? focusTarget(focusedKey) : undefined;
+    if (restored && !restored.matches(":disabled")) {
+      restored.focus();
+      if (restored instanceof HTMLInputElement) {
         const end = restored.value.length;
-        restored.focus();
         restored.setSelectionRange(
           Math.min(focusedSelection?.[0] ?? end, end),
           Math.min(focusedSelection?.[1] ?? end, end),
         );
       }
+      return;
     }
+    if (focusedFormId && albumForm?.formId === focusedFormId)
+      focusForm(albumForm, false);
   };
 
   const scheduleGridRender = () => {
@@ -867,6 +934,17 @@ export function createLibraryBrowserView(
       }
       gridLayer.append(cell);
     }
+    if (gridFocusRequested) {
+      gridFocusRequested = false;
+      const cell =
+        gridFocusIndex === undefined
+          ? undefined
+          : gridLayer.querySelector<HTMLButtonElement>(
+              `[data-photo-index="${gridFocusIndex}"]`,
+            );
+      gridFocusIndex = undefined;
+      (cell ?? gridViewport).focus();
+    }
   };
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
@@ -876,6 +954,13 @@ export function createLibraryBrowserView(
     selection.textContent = selectionLabel(currentSelection);
     const value = model.rating ?? 0;
     rating.textContent = `${value} ${value === 1 ? "star" : "stars"}`;
+    for (const button of Array.from(
+      ratings.querySelectorAll<HTMLButtonElement>("[data-rating-value]"),
+    ))
+      button.setAttribute(
+        "aria-pressed",
+        String(Number(button.dataset.ratingValue) === value),
+      );
   };
   const presentReviewImage = (
     url: string,
@@ -1293,6 +1378,8 @@ export function createLibraryBrowserView(
       gridStatus.textContent = "Preparing Library order…";
       currentPhotoId = undefined;
       photoSurface = {};
+      gridFocusRequested = false;
+      gridFocusIndex = undefined;
     },
     renderGrid,
     scheduleGridRender,
@@ -1308,9 +1395,12 @@ export function createLibraryBrowserView(
       photoView.hidden = true;
       gridView.hidden = false;
       closeSources(false);
+      gridViewport.focus();
       if (index !== undefined)
         gridViewport.scrollTop =
           Math.floor(index / columns()) * GRID_CELL_HEIGHT;
+      gridFocusRequested = true;
+      gridFocusIndex = index;
       scheduleGridRender();
     },
     enterPhoto() {
@@ -1357,6 +1447,10 @@ export function createLibraryBrowserView(
     },
     dismissAlbumForm(formId) {
       if (!alive || !albumForm || albumForm.formId !== formId) return;
+      albumFocusRequest = {
+        kind: "return",
+        focusKey: albumForm.returnFocusKey,
+      };
       albumForm = undefined;
       if (sourceModel) renderSources(sourceModel);
     },

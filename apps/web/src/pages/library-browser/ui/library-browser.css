@@ -676,10 +676,25 @@
 }
 
 .rating-controls button {
+  position: relative;
   min-width: 0;
   padding-inline: 0.2rem;
   color: var(--rating);
   font-size: 0.78rem;
+}
+
+.rating-controls button[aria-pressed="true"] {
+  border-color: var(--rating);
+  background: #3a301e;
+  box-shadow: inset 0 0 0 1px var(--rating);
+}
+
+.rating-controls button[aria-pressed="true"]::after {
+  content: "\2713";
+  position: absolute;
+  top: 0.1rem;
+  right: 0.25rem;
+  font-size: 0.65rem;
 }
 
 .membership-controls {

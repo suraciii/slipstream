@@ -15,6 +15,8 @@ The Library Browser is Slipstream's primary screen. It must open directly to the
 
 A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
+The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
+
 Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. File Locations must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
 
 All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
@@ -24,7 +26,7 @@ The first product uses two views:
 - **Grid View** shows progressively loaded thumbnail cells from the current source.
 - **Photo View** shows one current Photo with selection, Rating, Preview, navigation, and Detail Review controls.
 
-The Photographer opens Photo View by activating a Grid cell. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source.
+The Photographer opens Photo View by activating a Grid cell. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
 
 Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or RAW adjustment controls.
 
@@ -141,6 +143,8 @@ The first product does not persist an `All Photos` or Original Folder position a
 
 The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique case-insensitively within the flat Album list. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
 
+Opening Album creation or rename must focus the Album name input and select its current value. Closing an Album form after cancellation or a completed action must return focus to the control that opened it when that control remains available, or to the nearest stable Album action. A validation or persistence failure must keep the form and its input recoverable; closing that form follows the same focus rule.
+
 The Photographer must be able to rename an Album and delete an Album after a confirmation that Photos and Original Files remain unchanged. Deleting the open Album must return to `All Photos` or another valid source without leaving an unusable current source.
 
 Photo View must let the Photographer add the current Photo to one or more Albums. Adding a Photo that already belongs to an Album must not create a duplicate membership. When the current source is an Album, Photo View must let the Photographer remove the current Photo from that Album.
@@ -195,6 +199,8 @@ A Photo has a Rating from zero through five stars. Zero means no Rating.
 Changing Rating must not change Selection State. Selecting or rejecting a Photo must not change Rating.
 
 The Photographer must be able to set Rating through visible controls. Keyboard shortcuts `0` through `5` may provide the same behavior on devices with keyboards.
+
+Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. Zero must remain an explicit current value when the Photo has no Rating.
 
 ## Undo
 
