@@ -273,6 +273,7 @@ export function mountLibraryBrowser(
   let connected = false;
   let connectionEstablished = false;
   let pageBusy = false;
+  let photoRetryPending = false;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
@@ -411,9 +412,12 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
-    const interactionBusy = pageBusy || photoOwner.busy;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
-      !pageBusy && !photoOwner.busy && !photoOwner.opening;
+      !pageBusy &&
+      !photoRetryPending &&
+      !photoOwner.busy &&
+      !photoOwner.opening;
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
       decisionEnabled: enabled,
@@ -454,6 +458,7 @@ export function mountLibraryBrowser(
       photoId: string;
       sourceAuthority: SourceAuthority;
     }>;
+    createdAlbum?: AlbumSummary;
   }> => {
     const capturedPhotoStatus = view.photoStatusSurface;
     const sourceOwner = sourceGrid.authority;
@@ -525,15 +530,28 @@ export function mountLibraryBrowser(
             );
           if (presentOnPhoto)
             application.releaseAlbumSummary(summaryPresentation);
-          if (
-            outcome.connectivity === "lost-if-latest" &&
-            albumActions.isLatest(outcome.mutation)
-          )
-            disconnect(outcome.sourceAuthority);
+          if (outcome.connectivity === "lost-if-latest") {
+            // Persistence is ambiguous even when a newer, unrelated Album
+            // action owns presentation, so always invalidate the exact
+            // position authority. Only the latest action may fence its
+            // successor Overview or change connectivity.
+            if (action.invalidatesSavedPositionFor)
+              application.invalidateSavedPositionAuthority(
+                action.invalidatesSavedPositionFor,
+              );
+            if (albumActions.isLatest(outcome.mutation)) {
+              application.advanceAlbumMutationFloor();
+              disconnect(outcome.sourceAuthority);
+            }
+          }
           return { admitted: true, ok: false, announce: () => {} };
         }
 
         let disconnectAfterRefresh = false;
+        if (action.invalidatesSavedPositionFor)
+          application.invalidateSavedPositionAuthority(
+            action.invalidatesSavedPositionFor,
+          );
         if (application.advanceAlbumMutationFloor()) {
           try {
             const committed = await application.refreshOverview();
@@ -567,6 +585,9 @@ export function mountLibraryBrowser(
           },
           ...(outcome.removedFromCurrentAlbum
             ? { removedFromCurrentAlbum: outcome.removedFromCurrentAlbum }
+            : {}),
+          ...(outcome.createdAlbum
+            ? { createdAlbum: outcome.createdAlbum }
             : {}),
         };
       } finally {
@@ -862,20 +883,34 @@ export function mountLibraryBrowser(
       return;
     }
     view.setAlbumFormPending(formId, true, name);
-    const { ok } = await mutateAlbum(
+    const sourceAuthority = sourceGrid.authority;
+    const photoAuthority = photoOwner.authority;
+    const result = await mutateAlbum(
       (context) =>
         record.kind === "create"
           ? albumActions.create(name, context)
           : albumActions.rename(record.albumId!, name, context),
       "summary",
-      photoOwner.authority,
+      photoAuthority,
       record.authority,
     );
-    if (albumActions.isFormCurrent(record.authority)) {
-      if (ok) dismissAlbumForm(record);
+    const formIsCurrent = albumActions.isFormCurrent(record.authority);
+    const createdAlbum =
+      record.kind === "create" ? result.createdAlbum : undefined;
+    if (formIsCurrent) {
+      if (result.ok && (record.kind === "rename" || createdAlbum))
+        dismissAlbumForm(record);
       else view.setAlbumFormPending(formId, false);
     }
     renderSources();
+    if (
+      formIsCurrent &&
+      sourceGrid.isCurrent(sourceAuthority) &&
+      photoOwner.isCurrent(photoAuthority) &&
+      result.ok &&
+      createdAlbum
+    )
+      await openSource("album", createdAlbum);
   };
 
   const cancelScheduledGridRender = () => {
@@ -1580,6 +1615,7 @@ export function mountLibraryBrowser(
     if (sourceGrid.kind !== "album" || !sourceGrid.albumId || !currentPhoto())
       return Promise.resolve(true);
     const albumId = sourceGrid.albumId;
+    const albumSummaryAuthority = application.albumSummaryAuthority(albumId);
     const photoId = currentPhoto()!.id;
     const sourceAuthority = sourceGrid.authority;
     const admission = savedPositions.save({
@@ -1610,8 +1646,13 @@ export function mountLibraryBrowser(
         );
         return false;
       }
-      application.confirmSavedPosition(outcome.target.albumId);
-      renderSources();
+      if (
+        application.confirmSavedPosition(
+          outcome.target.albumId,
+          albumSummaryAuthority,
+        )
+      )
+        renderSources();
       return true;
     });
   };
@@ -1838,10 +1879,12 @@ export function mountLibraryBrowser(
   };
 
   const retryCurrentPhoto = (): void => {
-    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
+    if (pageBusy || photoRetryPending || photoOwner.busy || photoOwner.opening)
+      return;
     void (async () => {
       const retry = photoOwner.beginRetry();
       if (!retry) return;
+      photoRetryPending = true;
       view.setPhotoStatus("Reconnecting…");
       const photoTransition = recoveryGate.beginTransition(
         "photo",
@@ -1892,6 +1935,7 @@ export function mountLibraryBrowser(
         }
       } finally {
         photoOwner.finishRetry(retry);
+        photoRetryPending = false;
         updateControls();
       }
     })();

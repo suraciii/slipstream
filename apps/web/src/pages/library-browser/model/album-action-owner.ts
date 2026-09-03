@@ -5,8 +5,10 @@ import {
   removeAlbumMember,
   renameAlbum,
   type AlbumActionFetch,
+  type AlbumCreateResult,
   type AlbumWriteResult,
 } from "../api/album-actions.js";
+import type { AlbumSummary } from "../api/contracts.js";
 import { SettlementFamily, type SettlementHandle } from "./async-ownership.js";
 import type { SourceAuthority } from "./source-grid-owner.js";
 
@@ -37,6 +39,7 @@ export type AlbumActionContext = Readonly<{
 
 export type AlbumActionSettlement =
   | AlbumWriteResult
+  | AlbumCreateResult
   | Readonly<{ kind: "transport-failed" }>;
 
 type AlbumOutcomeOwner = Readonly<{
@@ -51,6 +54,7 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
     | Readonly<{
         kind: "persisted";
         settlement: Readonly<{ kind: "persisted" }>;
+        createdAlbum?: AlbumSummary;
         connectivity: "unchanged";
         removedFromCurrentAlbum?: Readonly<{
           albumId: string;
@@ -62,6 +66,7 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
         kind: "failed";
         settlement:
           | Readonly<{ kind: "rejected"; status: number }>
+          | Readonly<{ kind: "malformed" }>
           | Readonly<{ kind: "transport-failed" }>;
         failureMessage: string;
         connectivity: "unchanged" | "lost-if-latest";
@@ -71,6 +76,7 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
 export type AlbumActionAdmission = Readonly<{
   mutation: AlbumMutation;
   noticeKey: string;
+  invalidatesSavedPositionFor?: string;
   settlement: Promise<AlbumActionOutcome>;
 }>;
 
@@ -124,7 +130,7 @@ type FormRecord = Readonly<{
   authority: AlbumFormAuthority;
 }>;
 
-type Write = () => Promise<AlbumWriteResult>;
+type Write = () => Promise<AlbumWriteResult | AlbumCreateResult>;
 
 const membershipKey = (
   verb: "add" | "remove",
@@ -152,6 +158,7 @@ export function createAlbumActionOwner(
         albumId: string;
         photoId: string;
       }>;
+      invalidatesSavedPositionFor?: string;
     } = {},
   ): AlbumActionAdmission | undefined => {
     if (closed) return undefined;
@@ -192,6 +199,10 @@ export function createAlbumActionOwner(
               sourceAuthority: context.sourceAuthority,
             })
           : undefined;
+      const createdAlbum =
+        result.kind === "persisted" && "createdAlbum" in result
+          ? result.createdAlbum
+          : undefined;
       const owner = {
         mutation,
         surface,
@@ -204,6 +215,7 @@ export function createAlbumActionOwner(
             kind: "persisted",
             settlement: result,
             connectivity: "unchanged",
+            ...(createdAlbum ? { createdAlbum } : {}),
             ...(removed ? { removedFromCurrentAlbum: removed } : {}),
           })
         : Object.freeze({
@@ -217,7 +229,16 @@ export function createAlbumActionOwner(
           });
     })();
 
-    return Object.freeze({ mutation, noticeKey, settlement });
+    return Object.freeze({
+      mutation,
+      noticeKey,
+      ...(options.invalidatesSavedPositionFor
+        ? {
+            invalidatesSavedPositionFor: options.invalidatesSavedPositionFor,
+          }
+        : {}),
+      settlement,
+    });
   };
 
   return {
@@ -257,6 +278,7 @@ export function createAlbumActionOwner(
         context,
         () => deleteAlbum(fetcher, albumId),
         () => "The Album could not be deleted.",
+        { invalidatesSavedPositionFor: albumId },
       ),
     addMembership: (albumId, photoId, context) =>
       start(
@@ -275,6 +297,7 @@ export function createAlbumActionOwner(
         {
           admissionKey: membershipKey("remove", albumId, photoId),
           removedFromCurrentAlbum: { albumId, photoId },
+          invalidatesSavedPositionFor: albumId,
         },
       ),
     isMembershipAdmitted: (verb, albumId, photoId) =>

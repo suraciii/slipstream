@@ -12,7 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Request,
+} from "@playwright/test";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 
@@ -1347,6 +1353,171 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
 });
 
+test("creating an Album opens that exact empty Album on desktop and narrow layouts", async ({
+  page,
+}) => {
+  for (const [index, viewport] of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ].entries()) {
+    const { base, root } = await fixture();
+    await writeFile(join(root, "one.jpg"), await jpeg());
+    const running = await server(base, root);
+    const existingName = `Existing ${index + 1}`;
+    const createdName = `Created ${index + 1}`;
+    await post(running.url, "/api/albums", { name: existingName });
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+
+    if (viewport.width === 390) await openSources(page);
+    await page
+      .getByRole("button", { name: new RegExp(`^${existingName} 0 Photos`) })
+      .click();
+    await expect(
+      page.getByRole("heading", { name: existingName }),
+    ).toBeVisible();
+
+    if (viewport.width === 390) await openSources(page);
+    await page.getByRole("button", { name: "New Album" }).click();
+    await page.getByLabel("Album name").fill(createdName);
+    await page.getByRole("button", { name: "Create Album" }).click();
+
+    await expect(
+      page.getByRole("heading", { name: createdName }),
+    ).toBeVisible();
+    await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+    await expect(
+      page.getByText(
+        "This Album contains no Photos. Add Photos from another source's Photo View.",
+      ),
+    ).toBeVisible();
+    if (viewport.width === 390) await openSources(page);
+    const created = page.getByRole("button", {
+      name: new RegExp(`^${createdName} 0 Photos`),
+    });
+    await expect(created).toHaveClass(/active/);
+    await expect(
+      page.getByRole("button", { name: `Rename ${createdName}` }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Delete ${createdName}` }),
+    ).toBeVisible();
+    if (viewport.width === 390)
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+  }
+
+  await openSources(page);
+  await page.route("**/api/albums", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        albums: [
+          {
+            id: "ambiguous-upper-id",
+            name: "Ambiguous",
+            photoCount: 0,
+            hasSavedPosition: false,
+          },
+          {
+            id: "ambiguous-lower-id",
+            name: "ambiguous",
+            photoCount: 0,
+            hasSavedPosition: false,
+          },
+        ],
+      }),
+    });
+  });
+  await page.getByRole("button", { name: "New Album" }).click();
+  await page.getByLabel("Album name").fill("Ambiguous");
+  await page.getByRole("button", { name: "Create Album" }).click();
+  await expect(page.getByText("The Album could not be created.")).toBeVisible();
+  await expect(page.getByLabel("Album name")).toHaveValue("Ambiguous");
+  await expect(page.locator("[data-grid-title]")).toHaveText("Created 2");
+  await page.unroute("**/api/albums");
+});
+
+test("a delayed Album creation cannot replace a newer source or Photo", async ({
+  page,
+}) => {
+  for (const changedOwner of ["source", "photo"] as const) {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await createAlbum(running.url, "Existing");
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    if (changedOwner === "photo")
+      await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route("**/api/albums", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      const response = await route.fetch();
+      markStarted();
+      await released;
+      await route.fulfill({ response });
+    });
+
+    await openSources(page);
+    await page.getByRole("button", { name: "New Album" }).click();
+    const createdName = `Delayed ${changedOwner}`;
+    await page.getByLabel("Album name").fill(createdName);
+    await page.getByRole("button", { name: "Create Album" }).click();
+    await started;
+
+    if (changedOwner === "source") {
+      await page.getByRole("button", { name: /^Existing 2 Photos/ }).click();
+      await expect(
+        page.getByRole("heading", { name: "Existing" }),
+      ).toBeVisible();
+    } else {
+      await page.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: "Next" }).click();
+      await expect(page.getByText("2 / 2")).toBeVisible();
+    }
+
+    release();
+    if (changedOwner === "photo") {
+      await expect(
+        page.getByRole("heading", { name: "All Photos" }),
+      ).toBeVisible();
+      await expect(page.getByText("2 / 2")).toBeVisible();
+      await openSources(page);
+    }
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`^${createdName} 0 Photos`),
+      }),
+    ).toBeVisible();
+    if (changedOwner === "source") {
+      await expect(
+        page.getByRole("heading", { name: "Existing" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: /^Existing 2 Photos/ }),
+      ).toHaveAttribute("aria-current", "true");
+    } else {
+      await expect(page.getByText("2 / 2")).toBeVisible();
+    }
+    await page.unroute("**/api/albums");
+  }
+});
+
 test("deleting the open album returns to the All Photos source", async ({
   page,
 }) => {
@@ -1370,7 +1541,10 @@ test("the current photo joins and leaves albums from the photo view", async ({
   const { base, root } = await fixture();
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
-  await post(running.url, "/api/albums", { name: "Picks" });
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Picks")!.id;
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -1417,7 +1591,11 @@ test("the current photo joins and leaves albums from the photo view", async ({
   // snapshot keeps its copied order.
   await page.getByRole("button", { name: /Picks 1 Photos/ }).click();
   await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
-  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  );
   await page.getByRole("button", { name: "Remove from this Album" }).click();
   await expect(
     page.getByText(
@@ -1427,11 +1605,130 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("1 / 1")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /Picks 0 Photos/ }),
+    page.getByRole("button", { name: /^Picks 0 Photos$/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /All Photos 1 Photos/ }),
   ).toBeVisible();
+});
+
+test("an older saved-position response cannot supersede a newer Album removal", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Picks");
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    const instrumentedFetch = async (
+      input: Parameters<typeof window.fetch>[0],
+      init?: Parameters<typeof window.fetch>[1],
+    ) => {
+      const response = await nativeFetch(input, init);
+      if (
+        typeof input === "string" &&
+        input.endsWith("/progress") &&
+        init?.method === "POST"
+      )
+        setTimeout(() => {
+          document.documentElement.dataset.savedPositionSettled = "true";
+        }, 0);
+      return response;
+    };
+    window.fetch = instrumentedFetch as typeof window.fetch;
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Picks 1 Photos$/ }).click();
+  await expect(page.getByText("Ready · 1 Photos")).toBeVisible();
+
+  let markProgressPersisted!: () => void;
+  const progressPersisted = new Promise<void>((resolve) => {
+    markProgressPersisted = resolve;
+  });
+  let releaseProgress!: () => void;
+  const progressHeld = new Promise<void>((resolve) => {
+    releaseProgress = resolve;
+  });
+  let markOverviewCaptured!: () => void;
+  const overviewCaptured = new Promise<void>((resolve) => {
+    markOverviewCaptured = resolve;
+  });
+  let releaseOverview!: () => void;
+  const overviewHeld = new Promise<void>((resolve) => {
+    releaseOverview = resolve;
+  });
+  let markOverviewDelivered!: () => void;
+  const overviewDelivered = new Promise<void>((resolve) => {
+    markOverviewDelivered = resolve;
+  });
+  await page.route("**/api/albums/*/progress", async (route) => {
+    const response = await route.fetch();
+    markProgressPersisted();
+    await progressHeld;
+    await route.fulfill({ response });
+  });
+  await page.route("**/api/overview", async (route) => {
+    const response = await route.fetch();
+    const body = await response.body();
+    const parsed = JSON.parse(body.toString()) as {
+      albums: Array<{
+        id: string;
+        photoCount: number;
+        hasSavedPosition: boolean;
+      }>;
+    };
+    expect(parsed.albums.find((album) => album.id === albumId)).toMatchObject({
+      photoCount: 0,
+      hasSavedPosition: false,
+    });
+    markOverviewCaptured();
+    await overviewHeld;
+    try {
+      await route.fulfill({ response, body });
+    } finally {
+      markOverviewDelivered();
+    }
+  });
+  try {
+    const savedPositionResponse = progressResponse(page, albumId);
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await progressPersisted;
+    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await overviewCaptured;
+    releaseProgress();
+    const deliveredProgress = await savedPositionResponse;
+    await deliveredProgress.finished();
+    // The sentinel's next event-loop task runs only after the complete fetch
+    // continuation, including the stale Album summary confirmation attempt.
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-saved-position-settled",
+      "true",
+    );
+    releaseOverview();
+    await overviewDelivered;
+
+    await expect(
+      page.getByText(
+        "Removed from the Album. It stays in this open view until reopened.",
+      ),
+    ).toBeVisible();
+    await expect(page.getByText("1 / 1")).toBeVisible();
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(
+      page.getByRole("button", { name: /^Picks 0 Photos$/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /All Photos 1 Photos/ }),
+    ).toBeVisible();
+    expect((await state(running.url, albumId)).members).toHaveLength(0);
+  } finally {
+    releaseProgress();
+    releaseOverview();
+    await page.unroute("**/api/albums/*/progress");
+    await page.unroute("**/api/overview");
+  }
 });
 
 test("a successful membership retry recovers its exact Album connection", async ({
@@ -1611,7 +1908,7 @@ test("album creation reports duplicates and validates name boundaries by code po
   ).toBeVisible();
 });
 
-test("creating an album from the photo view immediately enables adding the current photo", async ({
+test("creating an album from the photo view opens it and makes it available for membership", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -1626,8 +1923,16 @@ test("creating an album from the photo view immediately enables adding the curre
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Fresh");
   await page.getByRole("button", { name: "Create Album" }).click();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
-  // The picker refreshes in place: no Photo View reopen needed.
+  await expect(page.getByRole("heading", { name: "Fresh" })).toBeVisible();
+  await expect(
+    page.getByText(
+      "This Album contains no Photos. Add Photos from another source's Photo View.",
+    ),
+  ).toBeVisible();
+
+  await openSources(page);
+  await page.getByRole("button", { name: /^All Photos 1 Photos/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
   await page
     .getByLabel("Album", { exact: true })
@@ -5667,6 +5972,11 @@ test("Photo Retry recovers the exact source range after an expired reopen window
   const sourceRetryGate = new Promise<void>((resolve) => {
     releaseSourceRetry = resolve;
   });
+  let markSourceRetryStarted!: (request: Request) => void;
+  const sourceRetryStarted = new Promise<Request>((resolve) => {
+    markSourceRetryStarted = resolve;
+  });
+  let sourceRetryObserved = false;
   let holdSourceRetry = false;
   let boundaryRequests = 0;
   let originalToken = "";
@@ -5713,10 +6023,19 @@ test("Photo Retry recovers the exact source range after an expired reopen window
       if (token !== originalToken && !reopenWindowFailed) {
         reopenedToken = token;
         reopenWindowFailed = true;
+        // Close the gate before exposing the failed response so no successor
+        // request can pass between the failure UI and Retry admission.
+        holdSourceRetry = true;
         await route.fulfill({ status: 503, body: '{"error":"failed"}' });
         return;
       }
-      if (token === reopenedToken && holdSourceRetry) await sourceRetryGate;
+      if (token === reopenedToken && holdSourceRetry) {
+        if (!sourceRetryObserved) {
+          sourceRetryObserved = true;
+          markSourceRetryStarted(route.request());
+        }
+        await sourceRetryGate;
+      }
       await route.continue();
     },
   );
@@ -5745,14 +6064,6 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
-    const exactSourceRetry = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return (
-        request.method() === "GET" &&
-        url.pathname.endsWith(`/${reopenedToken}`) &&
-        url.searchParams.get("start") === "10"
-      );
-    });
     const refreshedPreview = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return (
@@ -5760,21 +6071,23 @@ test("Photo Retry recovers the exact source range after an expired reopen window
         url.pathname === `/api/photos/${reopenPhotoId}/preview`
       );
     });
-    holdSourceRetry = true;
     const photoRetryAdmitted = await photoRetry.evaluate((button) => {
       (button as HTMLButtonElement).click();
       return (button as HTMLButtonElement).disabled;
     });
     expect(photoRetryAdmitted).toBe(true);
     await expect(photoRetry).toBeDisabled();
-    const retried = await exactSourceRetry;
+    await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+    const retried = await sourceRetryStarted;
     releaseSourceRetry();
     await refreshedPreview;
     await expect(photoRetry).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
 
-    expect(new URL(retried.url()).pathname).toBe(
-      `/api/browse/${reopenedToken}`,
-    );
+    expect(retried.method()).toBe("GET");
+    const retriedRequest = new URL(retried.url());
+    expect(retriedRequest.pathname).toBe(`/api/browse/${reopenedToken}`);
+    expect(retriedRequest.searchParams.get("start")).toBe("10");
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     await expect(page.getByText("60 / 70")).toBeVisible();
     expect(browseAllocations).toBe(allocationsBeforeRetry);

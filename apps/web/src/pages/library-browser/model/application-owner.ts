@@ -82,6 +82,11 @@ export type AlbumSummaryPresentation = Readonly<{
   [albumSummaryPresentationBrand]: true;
 }>;
 
+declare const albumSummaryAuthorityBrand: unique symbol;
+export type AlbumSummaryAuthority = Readonly<{
+  [albumSummaryAuthorityBrand]: true;
+}>;
+
 export interface ApplicationOwner {
   readonly overview: LibraryOverviewResponse | undefined;
   readonly albums: ReadonlyArray<AlbumSummary>;
@@ -89,8 +94,13 @@ export interface ApplicationOwner {
   refreshOverview(): Promise<boolean>;
   requestLibraryCheck(): void;
   notePublicationConflict(): void;
+  albumSummaryAuthority(albumId: string): AlbumSummaryAuthority;
+  invalidateSavedPositionAuthority(albumId: string): boolean;
   advanceAlbumMutationFloor(): boolean;
-  confirmSavedPosition(albumId: string): void;
+  confirmSavedPosition(
+    albumId: string,
+    authority: AlbumSummaryAuthority,
+  ): boolean;
   claimFileLocation(key: string, message: string): FileLocationPresentation;
   presentFileLocation(
     presentation: FileLocationPresentation,
@@ -152,6 +162,9 @@ export function createApplicationOwner(
   const schedule = options.schedule ?? defaultSchedule;
 
   let overviewDataFloor = 0;
+  let savedPositionConfirmationSequence = 0;
+  const albumSummaryAuthorities = new Map<string, AlbumSummaryAuthority>();
+  const confirmedSavedPositions = new Map<string, number>();
   let overview: LibraryOverviewResponse | undefined;
   let albums: ReadonlyArray<AlbumSummary> = [];
   let visibleSummary: ApplicationSummary = { text: "Loading Library…" };
@@ -165,6 +178,14 @@ export function createApplicationOwner(
   let scanCompletionNotice: NoticeHandle | undefined;
   let activeScanCycle: ScanCycle | undefined;
   let lastCompletedPublication: string | undefined;
+
+  const authorityForAlbum = (albumId: string): AlbumSummaryAuthority => {
+    const known = albumSummaryAuthorities.get(albumId);
+    if (known) return known;
+    const authority = Object.freeze({}) as AlbumSummaryAuthority;
+    albumSummaryAuthorities.set(albumId, authority);
+    return authority;
+  };
 
   const recovery = (): ApplicationRecovery =>
     Object.freeze({}) as ApplicationRecovery;
@@ -296,6 +317,7 @@ export function createApplicationOwner(
     markReachable?: () => boolean;
   }): Promise<OverviewRefreshResult> => {
     if (closed) return "detached";
+    const savedPositionFloor = savedPositionConfirmationSequence;
     const task = tasks.beginOrdered("overview", overviewDataFloor);
     const background = notices.backgroundEpoch();
     let backgroundSettled = false;
@@ -317,8 +339,22 @@ export function createApplicationOwner(
       }
       if (!task.commit(overviewDataFloor)) return "detached";
       observePublication(body.publication);
-      overview = body;
-      albums = Object.freeze([...body.albums]);
+      const currentAlbumIds = new Set(body.albums.map((album) => album.id));
+      for (const [albumId, sequence] of confirmedSavedPositions)
+        if (!currentAlbumIds.has(albumId) || sequence <= savedPositionFloor)
+          confirmedSavedPositions.delete(albumId);
+      for (const albumId of albumSummaryAuthorities.keys())
+        if (!currentAlbumIds.has(albumId))
+          albumSummaryAuthorities.delete(albumId);
+      albums = Object.freeze(
+        body.albums.map((album) =>
+          (confirmedSavedPositions.get(album.id) ?? 0) > savedPositionFloor &&
+          !album.hasSavedPosition
+            ? { ...album, hasSavedPosition: true }
+            : album,
+        ),
+      );
+      overview = { ...body, albums };
       ensureStatusMonitor(body.scan);
       applySummaryUpdate(
         notices.presentBackground(background, scanSummary(body.scan)),
@@ -623,23 +659,37 @@ export function createApplicationOwner(
     notePublicationConflict: () => {
       if (!closed) overviewDataFloor += 1;
     },
+    albumSummaryAuthority: (albumId) => authorityForAlbum(albumId),
+    invalidateSavedPositionAuthority: (albumId) => {
+      if (closed) return false;
+      albumSummaryAuthorities.set(
+        albumId,
+        Object.freeze({}) as AlbumSummaryAuthority,
+      );
+      confirmedSavedPositions.delete(albumId);
+      return true;
+    },
     advanceAlbumMutationFloor: () => {
       if (closed) return false;
       overviewDataFloor += 1;
       return true;
     },
-    confirmSavedPosition: (albumId) => {
-      if (closed) return;
+    confirmSavedPosition: (albumId, authority) => {
+      if (closed || authority !== albumSummaryAuthorities.get(albumId))
+        return false;
+      if (!albums.some((album) => album.id === albumId)) return false;
+      confirmedSavedPositions.set(
+        albumId,
+        (savedPositionConfirmationSequence += 1),
+      );
       const next = albums.map((album) =>
         album.id === albumId ? { ...album, hasSavedPosition: true } : album,
       );
-      if (next.every((album, index) => album === albums[index])) return;
-      // Saved position is shared Album summary state. Fence any Overview body
-      // captured before this confirmation so it cannot regress Resume state.
-      overviewDataFloor += 1;
+      if (next.every((album, index) => album === albums[index])) return true;
       albums = Object.freeze(next);
       if (overview) overview = { ...overview, albums };
       publishOverview();
+      return true;
     },
     claimFileLocation: (key, message) => {
       const presentation = Object.freeze({}) as FileLocationPresentation;
@@ -716,6 +766,8 @@ export function createApplicationOwner(
       notices.close();
       fileLocationRecords.clear();
       albumSummaryRecords.clear();
+      albumSummaryAuthorities.clear();
+      confirmedSavedPositions.clear();
     },
   };
   return owner;

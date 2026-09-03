@@ -34,11 +34,15 @@ const response = (body: unknown, status = 200): Response =>
 
 const album = (
   name: string,
-  options: { id?: string; hasSavedPosition?: boolean } = {},
+  options: {
+    id?: string;
+    photoCount?: number;
+    hasSavedPosition?: boolean;
+  } = {},
 ) => ({
   id: options.id ?? "album-1",
   name,
-  photoCount: 1,
+  photoCount: options.photoCount ?? 1,
   hasSavedPosition: options.hasSavedPosition ?? false,
 });
 
@@ -47,6 +51,7 @@ const overview = (
   name: string,
   options: {
     scanState?: string;
+    photoCount?: number;
     hasSavedPosition?: boolean;
   } = {},
 ): LibraryOverviewResponse => ({
@@ -59,6 +64,9 @@ const overview = (
   },
   albums: [
     album(name, {
+      ...(options.photoCount === undefined
+        ? {}
+        : { photoCount: options.photoCount }),
       ...(options.hasSavedPosition === undefined
         ? {}
         : { hasSavedPosition: options.hasSavedPosition }),
@@ -569,36 +577,46 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
-  test("saved-position confirmation advances the Overview data floor", async () => {
-    const stale = deferred<Response>();
+  test("a newer Album mutation rejects an older saved-position confirmation", async () => {
+    const fresh = deferred<Response>();
     let overviewRequests = 0;
     const { owner, events } = harness((input) => {
       if (input === "/api/overview") {
         overviewRequests += 1;
         return overviewRequests === 1
           ? Promise.resolve(response(overview("publication-1", "Album")))
-          : stale.promise;
+          : fresh.promise;
       }
       return Promise.resolve(response(scan("idle", "publication-1")));
     });
 
     await owner.refreshOverview();
-    const capturedBeforeConfirmation = owner.refreshOverview();
+    const savedPosition = owner.albumSummaryAuthority("album-1");
+    expect(owner.invalidateSavedPositionAuthority("album-1")).toBe(true);
+    expect(owner.advanceAlbumMutationFloor()).toBe(true);
+    const capturedAfterMutation = owner.refreshOverview();
     await Promise.resolve();
-    owner.confirmSavedPosition("album-1");
-    stale.resolve(
-      response(overview("publication-1", "Album", { hasSavedPosition: false })),
+    expect(owner.confirmSavedPosition("album-1", savedPosition)).toBe(false);
+    fresh.resolve(
+      response(
+        overview("publication-1", "Album", {
+          photoCount: 0,
+          hasSavedPosition: false,
+        }),
+      ),
     );
 
-    expect(await capturedBeforeConfirmation).toBe(false);
-    expect(owner.albums[0]?.hasSavedPosition).toBe(true);
+    expect(await capturedAfterMutation).toBe(true);
+    expect(owner.albums[0]?.photoCount).toBe(0);
+    expect(owner.albums[0]?.hasSavedPosition).toBe(false);
+    expect(overviewEvents(events).at(-1)?.albums[0]?.photoCount).toBe(0);
     expect(overviewEvents(events).at(-1)?.albums[0]?.hasSavedPosition).toBe(
-      true,
+      false,
     );
     owner.dispose();
   });
 
-  test("a locally superseded foreground load releases its barrier without failing Recovery", async () => {
+  test("a foreground load merges saved position and reaches normally", async () => {
     const stale = deferred<Response>();
     let overviewRequests = 0;
     const { owner, events } = harness((input) => {
@@ -613,9 +631,10 @@ describe("ApplicationOwner", () => {
 
     expect(await owner.refreshOverview()).toBe(true);
     events.splice(0);
+    const savedPosition = owner.albumSummaryAuthority("album-1");
     const pending = owner.loadOverview();
     await Promise.resolve();
-    owner.confirmSavedPosition("album-1");
+    expect(owner.confirmSavedPosition("album-1", savedPosition)).toBe(true);
     stale.resolve(
       response(overview("publication-1", "Album", { hasSavedPosition: false })),
     );
@@ -627,10 +646,86 @@ describe("ApplicationOwner", () => {
       events.some(
         (event) =>
           event.kind === "fail-application-recovery" ||
-          event.kind === "recover" ||
-          event.kind === "mark-reachable",
+          event.kind === "recover",
       ),
     ).toBe(false);
+    expect(
+      events.filter((event) => event.kind === "mark-reachable"),
+    ).toHaveLength(1);
+    owner.dispose();
+  });
+
+  test("a later Overview owns saved progress cleared by the server", async () => {
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return Promise.resolve(
+          response(
+            overview("publication-1", "Album", {
+              photoCount: overviewRequests === 1 ? 1 : 0,
+              hasSavedPosition: false,
+            }),
+          ),
+        );
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    expect(await owner.refreshOverview()).toBe(true);
+    const savedPosition = owner.albumSummaryAuthority("album-1");
+    expect(owner.confirmSavedPosition("album-1", savedPosition)).toBe(true);
+    expect(owner.albums[0]?.hasSavedPosition).toBe(true);
+
+    expect(await owner.refreshOverview()).toBe(true);
+    expect(owner.albums[0]?.photoCount).toBe(0);
+    expect(owner.albums[0]?.hasSavedPosition).toBe(false);
+    expect(overviewEvents(events).at(-1)?.albums[0]).toMatchObject({
+      photoCount: 0,
+      hasSavedPosition: false,
+    });
+    owner.dispose();
+  });
+
+  test("an unrelated Album mutation preserves saved-position authority", async () => {
+    const { owner } = harness((input) =>
+      input === "/api/overview"
+        ? Promise.resolve(response(overview("publication-1", "Album")))
+        : Promise.resolve(response(scan("idle", "publication-1"))),
+    );
+
+    expect(await owner.refreshOverview()).toBe(true);
+    const savedPosition = owner.albumSummaryAuthority("album-1");
+    expect(owner.invalidateSavedPositionAuthority("album-2")).toBe(true);
+    expect(owner.advanceAlbumMutationFloor()).toBe(true);
+    expect(owner.confirmSavedPosition("album-1", savedPosition)).toBe(true);
+    expect(owner.albums[0]?.hasSavedPosition).toBe(true);
+    owner.dispose();
+  });
+
+  test("exact position invalidation preserves a newer shared Overview", async () => {
+    const successor = deferred<Response>();
+    let overviewRequests = 0;
+    const { owner } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return overviewRequests === 1
+          ? Promise.resolve(response(overview("publication-1", "Album")))
+          : successor.promise;
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    expect(await owner.refreshOverview()).toBe(true);
+    const olderPosition = owner.albumSummaryAuthority("album-1");
+    const newerOverview = owner.refreshOverview();
+    await Promise.resolve();
+    expect(owner.invalidateSavedPositionAuthority("album-1")).toBe(true);
+    expect(owner.confirmSavedPosition("album-1", olderPosition)).toBe(false);
+    successor.resolve(response(overview("publication-1", "Newer Album")));
+
+    expect(await newerOverview).toBe(true);
+    expect(owner.albums[0]?.name).toBe("Newer Album");
     owner.dispose();
   });
 
@@ -705,6 +800,7 @@ describe("ApplicationOwner", () => {
       requests += 1;
       return Promise.reject(new Error("unexpected request"));
     });
+    const albumSummaryAuthority = owner.albumSummaryAuthority("album-1");
     owner.dispose();
     owner.dispose();
 
@@ -716,8 +812,11 @@ describe("ApplicationOwner", () => {
     const albumPresentation = owner.claimAlbumSummary("late");
     owner.presentAlbumSummary(albumPresentation, "Late Album failure");
     owner.resolveAlbumSummary(albumPresentation);
+    expect(owner.invalidateSavedPositionAuthority("album-1")).toBe(false);
     expect(owner.advanceAlbumMutationFloor()).toBe(false);
-    owner.confirmSavedPosition("album-1");
+    expect(owner.confirmSavedPosition("album-1", albumSummaryAuthority)).toBe(
+      false,
+    );
     owner.notePublicationConflict();
     owner.requestLibraryCheck();
 
