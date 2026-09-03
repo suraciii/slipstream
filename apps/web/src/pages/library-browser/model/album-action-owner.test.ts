@@ -166,6 +166,19 @@ describe("AlbumActionOwner", () => {
         { albums: [created, { ...created, id: "album-duplicate-name" }] },
       ],
       [
+        "an ASCII-NOCASE name collision",
+        {
+          albums: [
+            created,
+            {
+              ...created,
+              id: "album-case-collision",
+              name: "created",
+            },
+          ],
+        },
+      ],
+      [
         "an ID duplicated by another Album",
         {
           albums: [

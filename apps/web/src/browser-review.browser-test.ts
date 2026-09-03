@@ -1412,14 +1412,14 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
       body: JSON.stringify({
         albums: [
           {
-            id: "duplicate-id",
+            id: "ambiguous-upper-id",
             name: "Ambiguous",
             photoCount: 0,
             hasSavedPosition: false,
           },
           {
-            id: "duplicate-id",
-            name: "Other",
+            id: "ambiguous-lower-id",
+            name: "ambiguous",
             photoCount: 0,
             hasSavedPosition: false,
           },

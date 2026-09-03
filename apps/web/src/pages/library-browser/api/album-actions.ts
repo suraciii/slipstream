@@ -26,6 +26,9 @@ const isAlbumSummary = (value: unknown): value is AlbumSummary =>
   Number(value.photoCount) >= 0 &&
   typeof value.hasSavedPosition === "boolean";
 
+const albumNameKey = (name: string): string =>
+  name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+
 const requestAlbumAction = (
   fetcher: AlbumActionFetch,
   path: string,
@@ -67,6 +70,11 @@ export const createAlbum = async (
   if (albums.length !== body.albums.length)
     return Object.freeze({ kind: "malformed" });
   if (new Set(albums.map((album) => album.id)).size !== albums.length)
+    return Object.freeze({ kind: "malformed" });
+  if (
+    new Set(albums.map((album) => albumNameKey(album.name))).size !==
+    albums.length
+  )
     return Object.freeze({ kind: "malformed" });
   const matches = albums.filter((album) => album.name === name);
   const createdAlbum = matches[0];
