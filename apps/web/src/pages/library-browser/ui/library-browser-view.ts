@@ -40,6 +40,7 @@ export type LibraryBrowserIntent =
   | Readonly<{
       kind:
         | "show-grid"
+        | "library-check"
         | "refresh"
         | "retry-source"
         | "retry-photo"
@@ -192,6 +193,7 @@ export interface LibraryBrowserView {
   ): void;
   setSourceTitle(name: string): void;
   setGridStatus(text: string): void;
+  setGridEmpty(text?: string, libraryCheck?: boolean): void;
   renderSources(model: SourceListViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
@@ -257,7 +259,7 @@ export function createLibraryBrowserView(
         </aside>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
           <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div></header>
-          <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div></div>
+          <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
@@ -302,6 +304,15 @@ export function createLibraryBrowserView(
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
+  const gridEmpty = required<HTMLElement>(root, "[data-grid-empty]");
+  const gridEmptyMessage = required<HTMLElement>(
+    root,
+    "[data-grid-empty-message]",
+  );
+  const gridEmptyAction = required<HTMLButtonElement>(
+    root,
+    "[data-grid-empty-action]",
+  );
   const photoView = required<HTMLElement>(root, "[data-photo-view]");
   const photoTitle = required<HTMLElement>(root, "[data-photo-title]");
   const position = required<HTMLElement>(root, "[data-position]");
@@ -1237,6 +1248,9 @@ export function createLibraryBrowserView(
   window.addEventListener("keydown", keydown);
   back.addEventListener("click", () => send({ kind: "show-grid" }));
   refresh.addEventListener("click", () => send({ kind: "refresh" }));
+  gridEmptyAction.addEventListener("click", () =>
+    send({ kind: "library-check" }),
+  );
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
   previous.addEventListener("click", () => send({ kind: "previous" }));
@@ -1343,7 +1357,17 @@ export function createLibraryBrowserView(
       photoTitle.textContent = name;
     },
     setGridStatus(text) {
-      if (alive) gridStatus.textContent = text;
+      if (!alive) return;
+      gridStatus.textContent = text;
+      gridEmpty.hidden = true;
+      gridEmptyMessage.textContent = "";
+      gridEmptyAction.hidden = true;
+    },
+    setGridEmpty(text, libraryCheck = false) {
+      if (!alive) return;
+      gridEmptyMessage.textContent = text ?? "";
+      gridEmptyAction.hidden = !text || !libraryCheck;
+      gridEmpty.hidden = !text;
     },
     renderSources,
     setControls(model) {
@@ -1376,6 +1400,9 @@ export function createLibraryBrowserView(
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
       gridStatus.textContent = "Preparing Library order…";
+      gridEmpty.hidden = true;
+      gridEmptyMessage.textContent = "";
+      gridEmptyAction.hidden = true;
       currentPhotoId = undefined;
       photoSurface = {};
       gridFocusRequested = false;

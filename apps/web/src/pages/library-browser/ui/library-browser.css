@@ -342,6 +342,22 @@
   min-height: 100%;
 }
 
+.grid-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.grid-empty p {
+  max-width: 32rem;
+}
+
 .photo-cell {
   position: absolute;
   width: 140px;

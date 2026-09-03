@@ -980,11 +980,14 @@ export function mountLibraryBrowser(
       sourceGrid.establish(authority);
       setConnected(true);
       renderGrid();
-      view.setGridStatus(
-        sourceGrid.total
-          ? `Ready · ${sourceGrid.total.toLocaleString()} Photos`
-          : "No Photos in this source",
-      );
+      if (sourceGrid.total) {
+        view.setGridStatus(
+          `Ready · ${sourceGrid.total.toLocaleString()} Photos`,
+        );
+      } else {
+        view.setGridStatus("0 Photos");
+        view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
+      }
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
       view.setGridStatus("Could not load this source. Retry to continue.");
@@ -1003,6 +1006,12 @@ export function mountLibraryBrowser(
       }
     }
   }
+
+  const emptySourceStatus = (): string => {
+    if (sourceGrid.kind === "album")
+      return "This Album contains no Photos. Add Photos from another source's Photo View.";
+    return "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.";
+  };
 
   const reopenExpired = async (
     anchorIndex: number,
@@ -1955,6 +1964,9 @@ export function mountLibraryBrowser(
         return;
       case "show-grid":
         showGrid();
+        return;
+      case "library-check":
+        application.requestLibraryCheck();
         return;
       case "refresh":
         void refreshSource();
