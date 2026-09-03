@@ -412,12 +412,15 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     const photo = currentPhoto();
     const interactionBusy = pageBusy || photoOwner.busy;
+    const recoveryEnabled =
+      !pageBusy && !photoOwner.busy && !photoOwner.opening;
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
       decisionEnabled: enabled,
       clearEnabled: enabled && photo?.selectionState !== "undecided",
       backEnabled: !interactionBusy,
       refreshEnabled: !interactionBusy,
+      recoveryEnabled,
       previousEnabled:
         !interactionBusy && !photoOwner.opening && photoOwner.currentIndex > 0,
       nextEnabled:
@@ -1835,6 +1838,7 @@ export function mountLibraryBrowser(
   };
 
   const retryCurrentPhoto = (): void => {
+    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
     void (async () => {
       const retry = photoOwner.beginRetry();
       if (!retry) return;

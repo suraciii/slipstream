@@ -5296,6 +5296,11 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
   let expiredToken = "";
   let reopenAttempts = 0;
   let releases = 0;
+  let holdFreshOpen = false;
+  let releaseFreshOpen: () => void = () => undefined;
+  const freshOpenGate = new Promise<void>((resolve) => {
+    releaseFreshOpen = resolve;
+  });
   const boundaryTokens: string[] = [];
   await page.route(/\/api\/browse/, async (route) => {
     const request = route.request();
@@ -5323,6 +5328,7 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
         await route.fulfill({ status: 503, body: '{"error":"reopen failed"}' });
         return;
       }
+      if (holdFreshOpen) await freshOpenGate;
     }
     await route.continue();
   });
@@ -5353,14 +5359,25 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
         new URL(request.url()).pathname === "/api/browse",
     );
     await page.locator("[data-source-toggle]").click();
-    await page.getByRole("button", { name: "Retry connection" }).click();
+    const sourceRetry = page.getByRole("button", { name: "Retry connection" });
+    await expect(sourceRetry).toBeVisible();
+    await expect(sourceRetry).toBeEnabled();
+    holdFreshOpen = true;
+    const sourceRetryAdmitted = await sourceRetry.evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      return (button as HTMLButtonElement).disabled;
+    });
+    expect(sourceRetryAdmitted).toBe(true);
     const freshRequest = await freshOpen;
+    await expect(page.locator("[data-retry]")).toBeDisabled();
+    releaseFreshOpen();
     const freshResponse = await freshRequest.response();
     expect(freshResponse?.status()).toBe(200);
     const freshToken = ((await freshResponse!.json()) as { token: string })
       .token;
     expect(freshToken).not.toBe(expiredToken);
     await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+    await expect(page.locator("[data-retry]")).toBeEnabled();
 
     const freshBoundary = page.waitForRequest((request) => {
       const url = new URL(request.url());
@@ -5376,6 +5393,7 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
     expect(releases).toBe(1);
     expect(reopenAttempts).toBe(2);
   } finally {
+    releaseFreshOpen();
     await page.unroute(/\/api\/browse/);
   }
 });
@@ -5645,6 +5663,11 @@ test("Photo Retry recovers the exact source range after an expired reopen window
   const adjacentGate = new Promise<void>((resolve) => {
     releaseAdjacent = resolve;
   });
+  let releaseSourceRetry: () => void = () => undefined;
+  const sourceRetryGate = new Promise<void>((resolve) => {
+    releaseSourceRetry = resolve;
+  });
+  let holdSourceRetry = false;
   let boundaryRequests = 0;
   let originalToken = "";
   let reopenedToken = "";
@@ -5693,6 +5716,7 @@ test("Photo Retry recovers the exact source range after an expired reopen window
         await route.fulfill({ status: 503, body: '{"error":"failed"}' });
         return;
       }
+      if (token === reopenedToken && holdSourceRetry) await sourceRetryGate;
       await route.continue();
     },
   );
@@ -5707,7 +5731,9 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     await page.getByRole("button", { name: "Next" }).click();
     await expect.poll(() => reopenWindowFailed).toBe(true);
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
-    await expect(page.locator("[data-retry-photo]")).toBeVisible();
+    const photoRetry = page.locator("[data-retry-photo]");
+    await expect(photoRetry).toBeVisible();
+    await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     expect(reopenedToken).not.toBe("");
     expect(reopenedToken).not.toBe(originalToken);
@@ -5715,12 +5741,6 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     expect(overviewRequests).toBe(0);
     expect(reopenPhotoId).not.toBe("");
 
-    await page.evaluate(
-      () =>
-        new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        ),
-    );
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     const allocationsBeforeRetry = browseAllocations;
@@ -5740,9 +5760,17 @@ test("Photo Retry recovers the exact source range after an expired reopen window
         url.pathname === `/api/photos/${reopenPhotoId}/preview`
       );
     });
-    await page.locator("[data-retry-photo]").click();
+    holdSourceRetry = true;
+    const photoRetryAdmitted = await photoRetry.evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      return (button as HTMLButtonElement).disabled;
+    });
+    expect(photoRetryAdmitted).toBe(true);
+    await expect(photoRetry).toBeDisabled();
     const retried = await exactSourceRetry;
+    releaseSourceRetry();
     await refreshedPreview;
+    await expect(photoRetry).toBeEnabled();
 
     expect(new URL(retried.url()).pathname).toBe(
       `/api/browse/${reopenedToken}`,
@@ -5753,6 +5781,7 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     expect(overviewRequests).toBe(overviewsBeforeRetry);
   } finally {
     releaseAdjacent();
+    releaseSourceRetry();
   }
 });
 
