@@ -360,7 +360,9 @@ export function createLibraryBrowserView(
     button.dataset.ratingValue = String(value);
     button.setAttribute(
       "aria-label",
-      value === 0 ? "Clear Rating" : `Rate ${value} stars`,
+      value === 0
+        ? "Clear Rating, 0 stars"
+        : `Rate ${value} ${value === 1 ? "star" : "stars"}`,
     );
     button.setAttribute("aria-pressed", String(value === 0));
     button.textContent = value === 0 ? "0" : `${value}★`;
