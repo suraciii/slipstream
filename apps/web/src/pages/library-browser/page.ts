@@ -1161,6 +1161,9 @@ export function mountLibraryBrowser(
       if (opened.kind === "failed") throw new Error("browse reopen failed");
       const gridPosition = sourceGrid.readGridPosition(authority);
       if (gridPosition === undefined) return;
+      // The replacement Snapshot is now authoritative. Retain this memory when
+      // reopen fails so the old recoverable view remains truthful.
+      removedFromCurrentAlbum.clear();
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,

@@ -6711,7 +6711,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await page.unroute(thumbnailRoute);
   }
 });
-test("an expired Browse snapshot reopens around the current Photo", async ({
+test("an expired Album snapshot replaces retired membership memory", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -6730,6 +6730,19 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
   );
   await expect(page.getByText("1 / 130")).toBeVisible();
   const firstId = (await state(running.url, albumId)).members[0]!.photoId;
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove from this Album" }),
+  ).toBeHidden();
+  const readded = await post(running.url, `/api/albums/${albumId}/members`, {
+    photoIds: [firstId],
+  });
+  expect(readded.status).toBe(200);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   const reopenBodies: Array<Record<string, unknown>> = [];
@@ -6767,8 +6780,82 @@ test("an expired Browse snapshot reopens around the current Photo", async ({
     )
     .toBe(true);
   await expect(
-    page.getByRole("button", { name: /^Photo 1 of 130/ }),
+    page.getByRole("button", { name: /^Photo 130 of 130/ }),
   ).toBeVisible();
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 130 of 130/ }),
+  );
+  await expect(
+    page.getByRole("button", { name: "Remove from this Album" }),
+  ).toBeVisible();
+});
+
+test("a failed expired Album reopen retains retired membership memory", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Expiry failure");
+  await openGrid(page, running.url, "Expiry failure");
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 70/ }),
+  );
+  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(
+    page.getByText(
+      "Removed from the Album. It stays in this open view until reopened.",
+    ),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+
+  let expiredServed = false;
+  await page.route(/\/api\/browse/, async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: '{"error":"reopen unavailable"}',
+      });
+      return;
+    }
+    if (request.method() === "GET" && !expiredServed) {
+      expiredServed = true;
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: '{"error":"Browse source expired or not found"}',
+      });
+      return;
+    }
+    await route.continue();
+  });
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect.poll(() => expiredServed).toBe(true);
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "This source expired and could not be reopened. Retry the connection.",
+  );
+
+  await viewport.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(
+    page.getByRole("button", { name: /^Photo 1 of 70/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 70/ }).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Remove from this Album" }),
+  ).toBeHidden();
 });
 
 test("Photo Retry reloads the current aligned range after an expired reopen prefetch fails", async ({
