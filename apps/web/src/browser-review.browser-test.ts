@@ -5216,28 +5216,215 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   );
   expect(response.ok).toBe(true);
 
-  await page.route("**/*", (route) => {
-    const pathname = new URL(route.request().url()).pathname;
+  let thumbnailApiRequests = 0;
+  let derivativeRequests = 0;
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (/^\/api\/photos\/[^/]+\/thumbnail$/.test(pathname))
+      thumbnailApiRequests += 1;
     if (
       pathname.includes("/api/derivatives/") &&
       pathname.includes("/thumbnail/")
     )
-      return route.fulfill({ status: 404, body: "missing derivative" });
-    return route.continue();
+      derivativeRequests += 1;
   });
+  await page.route("**/*", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (
+      route.request().method() === "GET" &&
+      pathname.startsWith("/api/browse/")
+    ) {
+      const browseResponse = await route.fetch();
+      const body = (await browseResponse.json()) as {
+        photos: BrowsePhoto[];
+      };
+      await route.fulfill({
+        response: browseResponse,
+        json: {
+          ...body,
+          photos: body.photos.map((photo) => ({
+            ...photo,
+            ambiguous: true,
+          })),
+        },
+      });
+      return;
+    }
+    if (
+      pathname.includes("/api/derivatives/") &&
+      pathname.includes("/thumbnail/")
+    ) {
+      await route.fulfill({ status: 404, body: "missing derivative" });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(running.url);
+  const image = page.locator(".photo-cell img").first();
+  await image.scrollIntoViewIfNeeded();
+  const cell = page.locator('[data-photo-index="0"]');
+  const facts = cell.locator(".cell-facts");
+  const factsText = "Ambiguous pairing · Thumbnail delivery failed";
+  const accessibleName =
+    "Photo 1 of 1 — Undecided — 0 stars — Ambiguous pairing — Thumbnail delivery failed";
+  await expect(image).toHaveAttribute("alt", "Photo 1 of 1");
+  await expect(facts).toBeVisible();
+  await expect(facts).toHaveText(factsText);
+  await expect(cell).toHaveAccessibleName(
+    /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
+  );
+  expect(thumbnailApiRequests).toBe(0);
+  expect(derivativeRequests).toBe(1);
+
+  const failedCell = await cell.elementHandle();
+  expect(failedCell).not.toBeNull();
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    viewport.dispatchEvent(new Event("scroll"));
+  });
+  await expect
+    .poll(() => failedCell!.evaluate((node) => node.isConnected))
+    .toBe(false);
+  await expect(facts).toHaveText(factsText);
+  await expect(cell).toHaveAccessibleName(accessibleName);
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await waitForGridFrame(page);
+    await cell.scrollIntoViewIfNeeded();
+    await expect(cell).toBeVisible();
+    await expect(cell).toBeEnabled();
+    await expect(facts).toBeVisible();
+    await expect(facts).toHaveText(factsText);
+    await expect(cell).toHaveAccessibleName(accessibleName);
+
+    const geometry = await facts.evaluate((label) => {
+      const cell = label.closest<HTMLElement>(".photo-cell");
+      const viewport = label.closest<HTMLElement>("[data-grid-viewport]");
+      if (!cell || !viewport) throw new Error("Grid geometry is missing");
+      const factsBox = label.getBoundingClientRect();
+      const cellBox = cell.getBoundingClientRect();
+      const viewportBox = viewport.getBoundingClientRect();
+      const inside = (inner: DOMRect, outer: DOMRect) =>
+        inner.left >= outer.left - 1 &&
+        inner.right <= outer.right + 1 &&
+        inner.top >= outer.top - 1 &&
+        inner.bottom <= outer.bottom + 1;
+      return {
+        factsInsideCell: inside(factsBox, cellBox),
+        cellInsideViewport: inside(cellBox, viewportBox),
+        factsNotInternallyClipped:
+          label.scrollWidth <= label.clientWidth &&
+          label.scrollHeight <= label.clientHeight,
+      };
+    });
+    expect(geometry).toEqual({
+      factsInsideCell: true,
+      cellInsideViewport: true,
+      factsNotInternallyClipped: true,
+    });
+
+    await cell.click();
+    await expect(page.getByText("1 / 1")).toBeVisible();
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await waitForGridFrame(page);
+  }
+  expect(thumbnailApiRequests).toBe(0);
+  expect(derivativeRequests).toBe(1);
+});
+
+test("Grid presents independent Photo, pairing, and Preview facts without removing actions", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const hydrated = await fetch(`${running.url}/api/photos/${ids[3]}/thumbnail`);
+  expect(hydrated.ok).toBe(true);
   const thumbnailRequests: string[] = [];
   page.on("request", (request) => {
     if (new URL(request.url()).pathname.endsWith("/thumbnail"))
       thumbnailRequests.push(request.url());
   });
+  await page.route("**/api/browse/**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      start: number;
+      total: number;
+      photos: Array<
+        BrowsePhoto & {
+          ambiguous: boolean;
+          originals: Array<Readonly<{ kind: string; available: boolean }>>;
+          preview: Readonly<{ state: string }>;
+        }
+      >;
+    };
+    const photos = body.photos.map((photo) => {
+      const position = ids.indexOf(photo.id);
+      if (position === 0)
+        return {
+          ...photo,
+          available: false,
+          originals: photo.originals.map((original) => ({
+            ...original,
+            available: false,
+          })),
+          preview: { state: "unavailable" },
+        };
+      if (position === 1)
+        return {
+          ...photo,
+          ambiguous: true,
+          preview: { state: "unavailable" },
+        };
+      if (position === 2)
+        return { ...photo, preview: { state: "unavailable" } };
+      return {
+        ...photo,
+        preview: { ...photo.preview, state: "failed" },
+      };
+    });
+    await route.fulfill({ response, json: { ...body, photos } });
+  });
+
   await page.goto(running.url);
-  const image = page.locator(".photo-cell img").first();
-  await image.scrollIntoViewIfNeeded();
-  await expect(image).toHaveAttribute(
-    "alt",
-    "Photo 1 of 1 — Thumbnail unavailable",
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  const first = page.locator('[data-photo-index="0"]');
+  const second = page.locator('[data-photo-index="1"]');
+  const third = page.locator('[data-photo-index="2"]');
+  const fourth = page.locator('[data-photo-index="3"]');
+  const factLabels = page.locator(".cell-facts");
+  await expect(factLabels).toHaveCount(4);
+  for (const label of await factLabels.all()) await expect(label).toBeVisible();
+  await expect(first.locator(".cell-facts")).toHaveText(
+    "Photo unavailable · Preview unavailable",
   );
+  await expect(second.locator(".cell-facts")).toHaveText(
+    "Ambiguous pairing · Preview unavailable",
+  );
+  await expect(third.locator(".cell-facts")).toHaveText("Preview unavailable");
+  await expect(fourth.locator(".cell-facts")).toHaveText("Preview failed");
+  await expect(first).toHaveAccessibleName(
+    /Photo 1 of 4.*Photo unavailable.*Preview unavailable/,
+  );
+  await expect(second).toHaveAccessibleName(
+    /Photo 2 of 4.*Ambiguous pairing.*Preview unavailable/,
+  );
+  await expect(third).toHaveAccessibleName(/Photo 3 of 4.*Preview unavailable/);
+  await expect(fourth).toHaveAccessibleName(/Photo 4 of 4.*Preview failed/);
+  await expect(fourth.locator("img")).toHaveAttribute("src", /\/thumbnail\//);
+  for (const cell of [first, second, third, fourth])
+    await expect(cell).toBeEnabled();
   expect(thumbnailRequests).toHaveLength(0);
+  await first.click();
+  await expect(page.getByText("1 / 4")).toBeVisible();
 });
 
 test("detached Grid image errors cannot poison the replacement cell", async ({
@@ -5253,7 +5440,8 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   expect(response.ok).toBe(true);
 
   await page.goto(running.url);
-  const currentImage = page.locator(".photo-cell img").first();
+  const currentCell = page.locator('[data-photo-index="0"]');
+  const currentImage = currentCell.locator("img");
   await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
   const detachedImage = await currentImage.elementHandle();
   expect(detachedImage).not.toBeNull();
@@ -5276,6 +5464,7 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
 
   await expect(currentImage).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
+  await expect(currentCell.locator(".cell-facts")).toBeHidden();
 });
 
 test("a completed mutation cannot reopen or advance a superseding source", async ({

@@ -103,13 +103,13 @@ export type SourceWindowOutcome =
     }>;
 
 export interface GridThumbnailImage {
-  alt: string;
   complete: boolean;
   isConnected: boolean;
   src: string;
   onload: GlobalEventHandlers["onload"];
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
+  setDeliveryFailed(failed: boolean): void;
 }
 
 export interface SourceGridOwner {
@@ -126,7 +126,7 @@ export interface SourceGridOwner {
   readonly retryRequired: boolean;
   readonly retainedFactCount: number;
   readonly retainedThumbnailCount: number;
-  readonly retainedThumbnailFailureCount: number;
+  readonly retainedThumbnailDeliveryFailureCount: number;
   isCurrent(authority: SourceAuthority): boolean;
   renewPhotoWindow(): PhotoWindowAuthority;
   open(
@@ -177,7 +177,6 @@ export interface SourceGridOwner {
     url?: string,
     attachDisconnected?: boolean,
   ): void;
-  markThumbnailUnavailable(photoId: string, image: GridThumbnailImage): void;
   clearRenderedThumbnails(): void;
   dispose(): void;
 }
@@ -248,7 +247,8 @@ export function createSourceGridOwner(
   let gridTasks = new TaskScope();
   let facts = new Map<number, PhotoSummary>();
   let thumbnails = new Map<string, string>();
-  let thumbnailFailures = new Set<string>();
+  // null means the endpoint failed before it supplied a Thumbnail URL.
+  let thumbnailDeliveryFailures = new Map<string, string | null>();
   const renderedImages = new Map<string, GridThumbnailImage>();
   const imageTransfers = new Map<string, ImageTransfer>();
   const knownTokens = new Set<string>();
@@ -365,7 +365,7 @@ export function createSourceGridOwner(
       gridPosition = 0;
       facts = new Map();
       thumbnails = new Map();
-      thumbnailFailures = new Set();
+      thumbnailDeliveryFailures = new Map();
     }
     const task = sourceTasks.beginLatest("browse-open", {
       abortTransport: true,
@@ -392,7 +392,7 @@ export function createSourceGridOwner(
         if (mode === "reopen") {
           facts = new Map();
           thumbnails = new Map();
-          thumbnailFailures = new Set();
+          thumbnailDeliveryFailures = new Map();
         }
         return {
           kind: "opened",
@@ -572,18 +572,21 @@ export function createSourceGridOwner(
     renderedImages.set(photoId, image);
   };
 
-  const markUnavailable = (photoId: string, image: GridThumbnailImage) => {
+  const markDeliveryFailed = (
+    photoId: string,
+    image: GridThumbnailImage,
+    failedUrl: string | null,
+  ) => {
     if (renderedImages.get(photoId) !== image || closed) return;
-    thumbnailFailures.delete(photoId);
-    thumbnailFailures.add(photoId);
-    while (thumbnailFailures.size > MAX_RETAINED_THUMBNAILS) {
-      const oldest = thumbnailFailures.values().next().value;
+    thumbnailDeliveryFailures.delete(photoId);
+    thumbnailDeliveryFailures.set(photoId, failedUrl);
+    while (thumbnailDeliveryFailures.size > MAX_RETAINED_THUMBNAILS) {
+      const oldest = thumbnailDeliveryFailures.keys().next().value;
       if (oldest === undefined) break;
-      thumbnailFailures.delete(oldest);
+      thumbnailDeliveryFailures.delete(oldest);
     }
     image.removeAttribute("src");
-    if (!image.alt.includes("Thumbnail unavailable"))
-      image.alt = `${image.alt} — Thumbnail unavailable`;
+    image.setDeliveryFailed(true);
   };
 
   const attachThumbnail = (
@@ -594,18 +597,20 @@ export function createSourceGridOwner(
   ) => {
     if (!url || closed || renderedImages.get(photoId) !== image) return;
     registerImage(photoId, image);
-    if (thumbnailFailures.has(photoId)) {
-      if (!image.alt.includes("Thumbnail unavailable"))
-        image.alt = `${image.alt} — Thumbnail unavailable`;
-      return;
-    }
-    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
-      abortTransport: false,
-    });
     const expectedUrl = new URL(
       url,
       globalThis.location?.href ?? "http://slipstream.test/",
     ).href;
+    const failedUrl = thumbnailDeliveryFailures.get(photoId);
+    if (failedUrl === expectedUrl) {
+      image.setDeliveryFailed(true);
+      return;
+    }
+    if (failedUrl !== undefined) thumbnailDeliveryFailures.delete(photoId);
+    image.setDeliveryFailed(false);
+    const transfer = gridTasks.beginLatest(`image:${photoId}`, {
+      abortTransport: false,
+    });
     const finish = () => {
       transfer.finish();
       finishImage(photoId, image);
@@ -622,7 +627,7 @@ export function createSourceGridOwner(
     image.onload = finish;
     image.onerror = () => {
       if (!transfer.isCurrent()) return;
-      markUnavailable(photoId, image);
+      markDeliveryFailed(photoId, image, expectedUrl);
       finish();
     };
     if (attachDisconnected || image.isConnected) image.src = url;
@@ -649,9 +654,8 @@ export function createSourceGridOwner(
       attachThumbnail(photoId, image, cached, true);
       return;
     }
-    if (thumbnailFailures.has(photoId)) {
-      if (!image.alt.includes("Thumbnail unavailable"))
-        image.alt = `${image.alt} — Thumbnail unavailable`;
+    if (thumbnailDeliveryFailures.has(photoId)) {
+      image.setDeliveryFailed(true);
       return;
     }
     const ownerAuthority = authority;
@@ -673,10 +677,9 @@ export function createSourceGridOwner(
     if (renderedImages.get(photoId) !== image) return;
     if (url) {
       rememberThumbnail(photoId, url);
-      thumbnailFailures.delete(photoId);
       attachThumbnail(photoId, image, url);
     } else {
-      markUnavailable(photoId, image);
+      markDeliveryFailed(photoId, image, null);
     }
   }
 
@@ -728,8 +731,8 @@ export function createSourceGridOwner(
     get retainedThumbnailCount() {
       return thumbnails.size;
     },
-    get retainedThumbnailFailureCount() {
-      return thumbnailFailures.size;
+    get retainedThumbnailDeliveryFailureCount() {
+      return thumbnailDeliveryFailures.size;
     },
     isCurrent,
     renewPhotoWindow,
@@ -804,13 +807,8 @@ export function createSourceGridOwner(
     beginGridRender,
     loadThumbnail,
     presentThumbnail(photoId, image, url, attachDisconnected) {
-      if (url) thumbnailFailures.delete(photoId);
       registerImage(photoId, image);
       attachThumbnail(photoId, image, url, attachDisconnected);
-    },
-    markThumbnailUnavailable(photoId, image) {
-      registerImage(photoId, image);
-      markUnavailable(photoId, image);
     },
     clearRenderedThumbnails,
     dispose() {

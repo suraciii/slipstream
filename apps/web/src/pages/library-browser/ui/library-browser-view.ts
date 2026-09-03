@@ -64,13 +64,13 @@ type GridThumbnailBinding = Readonly<{
 }>;
 
 interface GridThumbnailTarget {
-  alt: string;
-  complete: boolean;
-  isConnected: boolean;
+  readonly complete: boolean;
+  readonly isConnected: boolean;
   src: string;
   onload: GlobalEventHandlers["onload"];
   onerror: GlobalEventHandlers["onerror"];
   removeAttribute(name: string): void;
+  setDeliveryFailed(failed: boolean): void;
 }
 
 interface ReviewImageTarget {
@@ -127,6 +127,8 @@ export type SourceListViewModel = Readonly<{
 
 type GridPhotoViewModel = Readonly<{
   id: string;
+  available: boolean;
+  ambiguous: boolean;
   selectionState: ViewSelectionState;
   rating: number;
   preview: Readonly<{
@@ -935,7 +937,25 @@ export function createLibraryBrowserView(
         caption.textContent = photo.rating
           ? `${index + 1} · ${photo.rating}★`
           : String(index + 1);
-        cell.append(image, badge, caption);
+        const facts = document.createElement("span");
+        facts.className = "cell-facts";
+        let deliveryFailed = false;
+        const presentFacts = () => {
+          const values = gridPhotoFacts(photo, deliveryFailed);
+          facts.textContent = values.join(" · ");
+          facts.hidden = values.length === 0;
+          cell.setAttribute(
+            "aria-label",
+            [
+              `Photo ${index + 1} of ${model.total}`,
+              selectionLabel(photo.selectionState),
+              photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
+              ...values,
+            ].join(" — "),
+          );
+        };
+        presentFacts();
+        cell.append(image, badge, facts, caption);
         cell.addEventListener("click", () =>
           send({ kind: "open-photo", index }),
         );
@@ -943,7 +963,10 @@ export function createLibraryBrowserView(
           bindThumbnail({
             photoId: photo.id,
             preview: photo.preview,
-            target: image,
+            target: gridThumbnailTarget(image, (failed) => {
+              deliveryFailed = failed;
+              presentFacts();
+            }),
           });
       }
       gridLayer.append(cell);
@@ -1526,6 +1549,55 @@ function selectionLabel(value?: ViewSelectionState): string {
     : value === "rejected"
       ? "Rejected"
       : "Undecided";
+}
+
+function gridPhotoFacts(
+  photo: GridPhotoViewModel,
+  deliveryFailed: boolean,
+): string[] {
+  const facts: string[] = [];
+  if (!photo.available) facts.push("Photo unavailable");
+  if (photo.ambiguous) facts.push("Ambiguous pairing");
+  if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
+  if (photo.preview.state === "failed") facts.push("Preview failed");
+  if (deliveryFailed) facts.push("Thumbnail delivery failed");
+  return facts;
+}
+
+function gridThumbnailTarget(
+  image: HTMLImageElement,
+  setDeliveryFailed: (failed: boolean) => void,
+): GridThumbnailTarget {
+  return {
+    get complete() {
+      return image.complete;
+    },
+    get isConnected() {
+      return image.isConnected;
+    },
+    get src() {
+      return image.src;
+    },
+    set src(value) {
+      image.src = value;
+    },
+    get onload() {
+      return image.onload;
+    },
+    set onload(value) {
+      image.onload = value;
+    },
+    get onerror() {
+      return image.onerror;
+    },
+    set onerror(value) {
+      image.onerror = value;
+    },
+    removeAttribute(name) {
+      image.removeAttribute(name);
+    },
+    setDeliveryFailed,
+  };
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {

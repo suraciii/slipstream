@@ -231,9 +231,11 @@ cancellation does not cancel an admitted reusable server job.
 Thumbnail reads are owned by the source/Grid scope with key
 `(sourceGeneration, photoId)`. Requests with the same key coalesce. Source
 change or application teardown aborts old work. Only the captured generation
-may attach a thumbnail or mark it unavailable. Answered and transport failures
-leave a stable unavailable placeholder; they present no summary or
-connectivity failure.
+may attach a thumbnail or mark its delivery failed. Answered and transport failures
+leave a stable failed-delivery placeholder; they present no summary or
+connectivity failure. Server-supplied Photo availability, pairing ambiguity,
+and Preview state remain bounded Photo facts; a browser-owned thumbnail
+delivery failure is retained separately and does not overwrite them.
 
 ### Browser image transfers
 

@@ -62,8 +62,8 @@ const openLibrary = async (owner: SourceGridOwner, token = "browse-1") => {
 };
 
 class FakeImage implements GridThumbnailImage {
-  alt = "Photo";
   complete = false;
+  deliveryFailed = false;
   isConnected = true;
   src = "";
   onload: GlobalEventHandlers["onload"] = null;
@@ -75,6 +75,10 @@ class FakeImage implements GridThumbnailImage {
       this.removeCalls += 1;
       this.src = "";
     }
+  }
+
+  setDeliveryFailed(failed: boolean): void {
+    this.deliveryFailed = failed;
   }
 }
 
@@ -215,6 +219,60 @@ describe("SourceGridOwner", () => {
     }
     expect(owner.photoAt(0)).toBeUndefined();
     expect(owner.photoAt(240)?.id).toBe("photo-240");
+  });
+
+  test("retains independent Photo, pairing, and Preview facts in a bounded window", async () => {
+    const photos = [
+      {
+        ...photo("unavailable-photo"),
+        available: false,
+        preview: { state: "unavailable" as const },
+      },
+      {
+        ...photo("ambiguous-photo"),
+        ambiguous: true,
+      },
+      {
+        ...photo("failed-preview"),
+        preview: { state: "failed" as const },
+      },
+    ];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", photos.length));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ start: 0, total: photos.length, photos }),
+            { status: 200 },
+          ),
+        );
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner);
+    expect(
+      await owner.loadWindow(0, { kind: "source", authority }),
+    ).toMatchObject({ kind: "loaded" });
+    expect(owner.retainedFactCount).toBe(photos.length);
+    expect(owner.photoAt(0)).toMatchObject({
+      available: false,
+      ambiguous: false,
+      preview: { state: "unavailable" },
+    });
+    expect(owner.photoAt(1)).toMatchObject({
+      available: true,
+      ambiguous: true,
+      preview: { state: "inspection-pending" },
+    });
+    expect(owner.photoAt(2)).toMatchObject({
+      available: true,
+      ambiguous: false,
+      preview: { state: "failed" },
+    });
   });
 
   test("does not commit a stale window into a replacement source", async () => {
@@ -612,7 +670,8 @@ describe("SourceGridOwner", () => {
     expect(first.src).toBe("");
     expect(replacement.src).toBe("/thumb.jpg");
     staleError?.call(first, new Event("error"));
-    expect(replacement.alt).toBe("Photo");
+    expect(replacement.deliveryFailed).toBe(false);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
     replacement.onerror?.call(
       replacement,
       new Event("error"),
@@ -621,7 +680,48 @@ describe("SourceGridOwner", () => {
       0,
       new Error("failed"),
     );
-    expect(replacement.alt).toContain("Thumbnail unavailable");
+    expect(replacement.deliveryFailed).toBe(true);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+  });
+
+  test("retains the same failed hydrated URL across Grid replacement and accepts a changed URL", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    const failed = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", failed, "/hydrated.jpg", true);
+    failed.onerror?.call(
+      failed,
+      new Event("error"),
+      "",
+      0,
+      0,
+      new Error("failed"),
+    );
+    expect(failed.deliveryFailed).toBe(true);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+
+    const sameUrl = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", sameUrl, "/hydrated.jpg", true);
+    expect(sameUrl.deliveryFailed).toBe(true);
+    expect(sameUrl.src).toBe("");
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
+
+    const changedUrl = new FakeImage();
+    owner.beginGridRender();
+    owner.presentThumbnail("photo-0", changedUrl, "/replacement.jpg", true);
+    expect(changedUrl.deliveryFailed).toBe(false);
+    expect(changedUrl.src).toBe("/replacement.jpg");
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(0);
   });
 
   test("bounds the rebuildable Thumbnail cache independently of Library size", async () => {
@@ -650,11 +750,13 @@ describe("SourceGridOwner", () => {
     expect(owner.retainedThumbnailCount).toBe(240);
   });
 
-  test("bounds Thumbnail failures and accepts a newly hydrated URL", async () => {
+  test("bounds Thumbnail delivery failures and accepts a newly hydrated URL", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(opened("browse-1", 241));
+      if (url.pathname.startsWith("/api/photos/"))
+        return Promise.resolve(new Response(null, { status: 503 }));
       if (init?.method === "DELETE")
         return Promise.resolve(new Response(null, { status: 204 }));
       throw new Error(`unexpected request ${url.pathname}`);
@@ -662,16 +764,18 @@ describe("SourceGridOwner", () => {
     await openLibrary(owner);
     for (let index = 0; index < 241; index += 1) {
       owner.beginGridRender();
-      owner.markThumbnailUnavailable(`photo-${index}`, new FakeImage());
+      const image = new FakeImage();
+      await owner.loadThumbnail(`photo-${index}`, image);
+      expect(image.deliveryFailed).toBe(true);
     }
-    expect(owner.retainedThumbnailFailureCount).toBe(240);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(240);
 
     const hydrated = new FakeImage();
     owner.beginGridRender();
     owner.presentThumbnail("photo-240", hydrated, "/hydrated.jpg", true);
     expect(hydrated.src).toBe("/hydrated.jpg");
-    expect(hydrated.alt).toBe("Photo");
-    expect(owner.retainedThumbnailFailureCount).toBe(239);
+    expect(hydrated.deliveryFailed).toBe(false);
+    expect(owner.retainedThumbnailDeliveryFailureCount).toBe(239);
   });
 
   test("cleans a browser-managed image transfer exactly once", async () => {
