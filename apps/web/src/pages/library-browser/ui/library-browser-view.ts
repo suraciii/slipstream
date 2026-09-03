@@ -170,6 +170,7 @@ type ControlsViewModel = Readonly<{
   clearEnabled: boolean;
   backEnabled: boolean;
   refreshEnabled: boolean;
+  recoveryEnabled: boolean;
   previousEnabled: boolean;
   nextEnabled: boolean;
   undoEnabled: boolean;
@@ -1393,6 +1394,8 @@ export function createLibraryBrowserView(
       clear.disabled = !model.clearEnabled;
       back.disabled = !model.backEnabled;
       refresh.disabled = !model.refreshEnabled;
+      retry.disabled = !model.recoveryEnabled;
+      retryPhoto.disabled = !model.recoveryEnabled;
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
