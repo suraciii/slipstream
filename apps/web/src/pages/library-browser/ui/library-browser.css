@@ -528,6 +528,10 @@
   user-select: none;
 }
 
+.preview.detail {
+  touch-action: none;
+}
+
 .image-stage {
   min-width: 0;
   min-height: 0;
@@ -773,11 +777,20 @@
   }
 }
 
-@media (max-width: 760px) {
-  button {
+@media (max-width: 760px), (max-height: 480px) {
+  .app-shell button,
+  .app-shell input,
+  .app-shell select {
+    min-width: 2.75rem;
     min-height: 2.75rem;
   }
 
+  .preview:not(.detail) {
+    touch-action: pan-y;
+  }
+}
+
+@media (max-width: 760px) {
   .app-shell {
     grid-template-rows: 2.75rem minmax(0, 1fr);
   }
