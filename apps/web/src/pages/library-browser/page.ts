@@ -273,6 +273,7 @@ export function mountLibraryBrowser(
   let connected = false;
   let connectionEstablished = false;
   let pageBusy = false;
+  let photoRetryPending = false;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
@@ -411,9 +412,12 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
-    const interactionBusy = pageBusy || photoOwner.busy;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
-      !pageBusy && !photoOwner.busy && !photoOwner.opening;
+      !pageBusy &&
+      !photoRetryPending &&
+      !photoOwner.busy &&
+      !photoOwner.opening;
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
       decisionEnabled: enabled,
@@ -1856,10 +1860,12 @@ export function mountLibraryBrowser(
   };
 
   const retryCurrentPhoto = (): void => {
-    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
+    if (pageBusy || photoRetryPending || photoOwner.busy || photoOwner.opening)
+      return;
     void (async () => {
       const retry = photoOwner.beginRetry();
       if (!retry) return;
+      photoRetryPending = true;
       view.setPhotoStatus("Reconnecting…");
       const photoTransition = recoveryGate.beginTransition(
         "photo",
@@ -1910,6 +1916,7 @@ export function mountLibraryBrowser(
         }
       } finally {
         photoOwner.finishRetry(retry);
+        photoRetryPending = false;
         updateControls();
       }
     })();

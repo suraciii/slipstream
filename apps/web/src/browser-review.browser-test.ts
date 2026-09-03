@@ -5940,10 +5940,12 @@ test("Photo Retry recovers the exact source range after an expired reopen window
     });
     expect(photoRetryAdmitted).toBe(true);
     await expect(photoRetry).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
     const retried = await exactSourceRetry;
     releaseSourceRetry();
     await refreshedPreview;
     await expect(photoRetry).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
 
     expect(new URL(retried.url()).pathname).toBe(
       `/api/browse/${reopenedToken}`,
