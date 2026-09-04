@@ -1,0 +1,7 @@
+build-essential=12.12ubuntu2.26.04.2
+ca-certificates=20260601~26.04.1
+libjpeg-dev=8c-2ubuntu12
+liblcms2-dev=2.17-1ubuntu0.2
+libraw-dev=0.21.5b-1ubuntu1.1
+libvips-dev=8.18.0-1build1
+pkg-config=2.5.1-4

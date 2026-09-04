@@ -1,0 +1,6 @@
+Types: deb
+URIs: https://snapshot.ubuntu.com/ubuntu/20260904T000000Z/
+Suites: resolute resolute-updates resolute-security
+Components: main universe
+Architectures: amd64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg

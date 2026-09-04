@@ -149,13 +149,58 @@ Build from a clean checkout of the exact commit:
 
 ```sh
 commit=$(git rev-parse HEAD)
-docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
+docker buildx build --platform linux/amd64 --load \
+  --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
 ```
 
 Record the image digest. Verify the image user is `1000:1000` and that no
 Node, Bun, npm, Sharp, or Node-API runtime artifact is present before an
 operator-controlled deployment. Operators may script these checks; any
 equivalent inspection is acceptable.
+
+## Reproducible Inputs
+
+Slipstream supports Linux amd64 release images. The Dockerfile fixes every
+non-scratch base image by digest. Its Ubuntu build and runtime inputs use the
+official snapshot and direct package locks in [`../docker/apt/`](../docker/apt/).
+The [container input design](../design/container-inputs.md) defines their
+ownership and update rule.
+
+Use the same Dockerfile with `--platform linux/amd64` for release
+qualification. The Compose service also fixes source builds to `linux/amd64`,
+the only supported source-build platform. A normal `docker compose` build is
+not qualification evidence.
+The GitHub Actions `ubuntu-latest` is a source and test runner. It is not a
+release-image input, and its native test dependencies do not prove the native
+packages in a release container.
+
+These checked-in inputs provide source reproducibility: rebuilding one exact
+candidate selects the same base image indexes and native package inputs. They
+do not promise a byte-identical output image. A resulting digest, timestamp,
+or other output record establishes a single build's traceability only.
+
+Change an image digest, the Ubuntu snapshot, or either direct package lock in
+one reviewed dependency update. Do not substitute a moving tag, archive, or
+fallback mirror.
+
+## Qualification Evidence
+
+Release qualification is operator work. It must use the exact candidate and
+the image command above. Keep its evidence outside the repository with the
+private deployment material.
+
+Record all of the following:
+
+- exact candidate SHA and the `linux/amd64` build command;
+- OCI revision and immutable digest from the final image;
+- final native package versions from `dpkg-query` in that image;
+- the generated SBOM and the tool identity used to generate it; and
+- advisory scanner identity, advisory database timestamp, findings, and their
+  disposition.
+
+The advisory database timestamp states what data the scanner used for that one
+qualification. It does not freeze future advisory results or replace a later
+advisory review.
 
 ## Backup
 

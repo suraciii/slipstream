@@ -1,5 +1,6 @@
 services:
   slipstream:
+    platform: linux/amd64
     image: ${SLIPSTREAM_IMAGE:-slipstream:local}
     build:
       context: .

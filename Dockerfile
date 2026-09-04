@@ -1,4 +1,4 @@
-FROM oven/bun:1.4.0 AS web-build
+FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS web-build
 WORKDIR /src
 
 # Bun is used only to build the Web application. The Rust service is built in
@@ -9,11 +9,17 @@ COPY apps/web apps/web
 RUN bun install --frozen-lockfile --ignore-scripts
 RUN bun run --cwd apps/web build
 
-FROM rust:1.97.1-bookworm AS rust-toolchain
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS rust-toolchain
 
-FROM ubuntu:26.04 AS rust-build
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS rust-build
 WORKDIR /src
 
+# The pinned Ubuntu rootfs has no CA bundle. Bootstrap HTTPS from the already
+# digest-pinned Rust stage, then install the snapshot-pinned Ubuntu package.
+COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /usr/local/share/slipstream-ca-certificates.crt
+COPY docker/apt/bootstrap-ca.conf /etc/apt/apt.conf.d/00slipstream-bootstrap-ca
+COPY docker/apt/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
+COPY docker/apt/build-amd64.lock /tmp/apt-packages.lock
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:$PATH \
@@ -22,15 +28,9 @@ ENV PATH=/usr/local/cargo/bin:$PATH \
 
 RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update \
-    && apt-get install --no-install-recommends --yes \
-        build-essential \
-        ca-certificates \
-        libjpeg-dev \
-        liblcms2-dev \
-        libraw-dev \
-        libvips-dev \
-        pkg-config
+    apt-get update --error-on=any \
+    && apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock) \
+    && rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
@@ -38,18 +38,17 @@ COPY compatibility compatibility
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p slipstream-server
 
-FROM ubuntu:26.04 AS runtime-rootfs
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS runtime-rootfs
 
+COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /usr/local/share/slipstream-ca-certificates.crt
+COPY docker/apt/bootstrap-ca.conf /etc/apt/apt.conf.d/00slipstream-bootstrap-ca
+COPY docker/apt/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources
+COPY docker/apt/runtime-amd64.lock /tmp/apt-packages.lock
 RUN --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update \
-    && apt-get install --no-install-recommends --yes \
-        ca-certificates \
-        curl \
-        libjpeg-turbo8 \
-        liblcms2-2 \
-        libraw23t64 \
-        libvips42t64 \
+    apt-get update --error-on=any \
+    && apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock) \
+    && rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock \
     && rm --force /usr/bin/pebble \
     && rm --recursive --force /var/lib/pebble \
     && existing_group=$(getent group 1000 | cut -d: -f1) \

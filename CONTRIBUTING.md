@@ -38,6 +38,7 @@ Use the repository commands rather than invoking individual tools in CI or revie
 
 ```sh
 bun run test:rust
+bun run test:container-input
 bun run test:fast
 bun run verify
 ```
@@ -114,11 +115,12 @@ then completes a normal scan before reporting success.
 
 ## Container verification
 
-The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and an Ubuntu runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. Build an image before an operator-controlled deployment:
+The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and an Ubuntu runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. `bun run test:container-input` checks the fixed container inputs without building an image. Build a supported image before an operator-controlled deployment:
 
 ```sh
 commit=$(git rev-parse HEAD)
-docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
+docker buildx build --platform linux/amd64 --load \
+  --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
 ```
 
 Inspect the digest, image user, and runtime contents; the deployment contract
