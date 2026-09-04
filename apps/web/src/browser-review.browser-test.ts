@@ -6799,7 +6799,7 @@ test("an expired Album snapshot replaces retired membership memory", async ({
   page,
 }) => {
   const { base, root } = await fixture();
-  for (let index = 0; index < 130; index += 1)
+  for (let index = 0; index < 250; index += 1)
     await writeFile(
       join(root, `${String(index).padStart(3, "0")}.jpg`),
       await jpeg(),
@@ -6810,9 +6810,9 @@ test("an expired Album snapshot replaces retired membership memory", async ({
   await openPhotoAndWaitForProgress(
     page,
     albumId,
-    page.getByRole("button", { name: /^Photo 1 of 130/ }),
+    page.getByRole("button", { name: /^Photo 1 of 250/ }),
   );
-  await expect(page.getByText("1 / 130")).toBeVisible();
+  await expect(page.getByText("1 / 250")).toBeVisible();
   const firstId = (await state(running.url, albumId)).members[0]!.photoId;
   await page.getByRole("button", { name: "Remove from this Album" }).click();
   await expect(
@@ -6829,12 +6829,32 @@ test("an expired Album snapshot replaces retired membership memory", async ({
   expect(readded.status).toBe(200);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
+  const viewport = page.locator("[data-grid-viewport]");
+  // Retain a tail Photo while a middle range remains unopened. The later
+  // expiry therefore starts replacement while a real old cell can render.
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(
+    page.getByRole("button", { name: /^Photo 250 of 250/ }),
+  ).toBeVisible();
   const reopenBodies: Array<Record<string, unknown>> = [];
+  let releaseReopen!: () => void;
+  const reopenReleased = new Promise<void>((resolve) => {
+    releaseReopen = resolve;
+  });
+  let markReopenStarted!: () => void;
+  const reopenStarted = new Promise<void>((resolve) => {
+    markReopenStarted = resolve;
+  });
   let expiredServed = false;
   await page.route(/\/api\/browse/, async (route) => {
     const request = route.request();
     if (request.method() === "POST") {
       reopenBodies.push(request.postDataJSON() as Record<string, unknown>);
+      markReopenStarted();
+      await reopenReleased;
       await route.continue();
       return;
     }
@@ -6849,8 +6869,9 @@ test("an expired Album snapshot replaces retired membership memory", async ({
     }
     await route.continue();
   });
-  await page.locator("[data-grid-viewport]").evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event("scroll"));
   });
   await expect.poll(() => expiredServed).toBe(true);
   await expect
@@ -6863,14 +6884,19 @@ test("an expired Album snapshot replaces retired membership memory", async ({
       ),
     )
     .toBe(true);
-  await expect(
-    page.getByRole("button", { name: /^Photo 130 of 130/ }),
-  ).toBeVisible();
-  await openPhotoAndWaitForProgress(
-    page,
-    albumId,
-    page.getByRole("button", { name: /^Photo 130 of 130/ }),
-  );
+  await reopenStarted;
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const tailPhoto = page.getByRole("button", {
+    name: /^Photo 250 of 250/,
+  });
+  await expect(tailPhoto).toBeVisible();
+  await expect(tailPhoto).toBeDisabled();
+  releaseReopen();
+  await expect(tailPhoto).toBeEnabled();
+  await openPhotoAndWaitForProgress(page, albumId, tailPhoto);
   await expect(
     page.getByRole("button", { name: "Remove from this Album" }),
   ).toBeVisible();

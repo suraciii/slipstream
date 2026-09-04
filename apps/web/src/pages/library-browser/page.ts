@@ -413,6 +413,7 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
+    const gridEnabled = !pageBusy && !photoOwner.busy && !photoOwner.opening;
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
       !pageBusy &&
@@ -421,6 +422,7 @@ export function mountLibraryBrowser(
       !photoOwner.opening;
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
+      gridEnabled,
       decisionEnabled: enabled,
       clearEnabled: enabled && photo?.selectionState !== "undecided",
       backEnabled: !interactionBusy,
@@ -949,6 +951,7 @@ export function mountLibraryBrowser(
         ? { ...requested, publication: fileLocations.publication }
         : requested;
     pageBusy = true;
+    updateControls();
     cancelScheduledGridRender();
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
@@ -1057,6 +1060,7 @@ export function mountLibraryBrowser(
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
     pageBusy = true;
+    updateControls();
     const resumePhoto = photoOwner.active;
     const resumeIndex = photoOwner.currentIndex;
     const currentSourceAuthority = photoOwner.sourceAuthority;
