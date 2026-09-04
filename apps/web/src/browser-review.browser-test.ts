@@ -7034,7 +7034,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
     const photoRetry = page.locator("[data-retry-photo]");
     await expect(photoRetry).toBeVisible();
-    await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     expect(reopenedToken).not.toBe("");
     expect(reopenedToken).not.toBe(originalToken);
@@ -7050,6 +7049,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     // the retry still proves Preview completion before adjacent work settles.
     releaseAdjacent();
     await adjacentSettled;
+    await expect(photoRetry).toBeEnabled();
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
     await page.evaluate(() => {
