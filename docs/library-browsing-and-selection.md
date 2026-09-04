@@ -28,7 +28,7 @@ The first product uses two views:
 - **Grid View** shows progressively loaded thumbnail cells from the current source.
 - **Photo View** shows one current Photo with selection, Rating, Preview, navigation, and Detail Review controls.
 
-The Photographer opens Photo View by activating a Grid cell. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
+The Photographer opens Photo View by activating a Grid cell. A Grid cell must be enabled only while its activation can immediately open Photo View against the current source. While Slipstream replaces an expired source snapshot, it must make retained Grid cells unavailable until the replacement source is ready. It must not expose an enabled Grid cell whose activation does nothing. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
 
 Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or RAW adjustment controls.
 

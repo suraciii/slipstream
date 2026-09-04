@@ -170,6 +170,12 @@ completed stale response exposes a token, the client starts a token-release
 operation. If aborting loses the response after server allocation, bounded
 server expiry remains the cleanup fallback.
 
+During a current source open or reopen, retained Grid cells remain
+display-only. Their enabled state and Photo-open admission share one
+current-source readiness predicate, so an enabled action is immediately
+admissible. The replacement source's first required window establishes that
+readiness; a failed or superseded reopen follows its existing recovery path.
+
 A Folder Browse open additionally captures the bound File Location
 publication. It never sends without that publication, and publication expiry
 starts a new root-binding operation before a retry. A current open or reopen

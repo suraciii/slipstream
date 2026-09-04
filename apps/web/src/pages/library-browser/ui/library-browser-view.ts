@@ -170,6 +170,7 @@ type MembershipViewModel = Readonly<{
 }>;
 
 type ControlsViewModel = Readonly<{
+  gridEnabled: boolean;
   decisionEnabled: boolean;
   clearEnabled: boolean;
   backEnabled: boolean;
@@ -393,6 +394,7 @@ export function createLibraryBrowserView(
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
+  let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
   let pointer:
     | {
@@ -935,6 +937,7 @@ export function createLibraryBrowserView(
         send({ kind: "grid-window", index });
       } else {
         cell.dataset.photoIndex = String(index);
+        cell.disabled = !gridInteractionEnabled;
         const image = document.createElement("img");
         image.alt = `Photo ${index + 1} of ${model.total}`;
         image.loading = "lazy";
@@ -1429,6 +1432,13 @@ export function createLibraryBrowserView(
     renderSources,
     setControls(model) {
       if (!alive) return;
+      gridInteractionEnabled = model.gridEnabled;
+      for (const cell of Array.from(
+        gridLayer.querySelectorAll<HTMLButtonElement>(
+          ".photo-cell[data-photo-index]",
+        ),
+      ))
+        cell.disabled = !gridInteractionEnabled;
       decisionInteractionEnabled = model.decisionEnabled;
       for (const button of [
         select,

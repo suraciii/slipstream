@@ -275,6 +275,11 @@ export function mountLibraryBrowser(
   let connectionEstablished = false;
   let pageBusy = false;
   let photoRetryPending = false;
+  const canOpenGridPhoto = () =>
+    sourceGrid.isReady(sourceGrid.authority) &&
+    !pageBusy &&
+    !photoOwner.busy &&
+    !photoOwner.opening;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
@@ -413,6 +418,7 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
+    const gridEnabled = canOpenGridPhoto();
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
       !pageBusy &&
@@ -421,6 +427,7 @@ export function mountLibraryBrowser(
       !photoOwner.opening;
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
+      gridEnabled,
       decisionEnabled: enabled,
       clearEnabled: enabled && photo?.selectionState !== "undecided",
       backEnabled: !interactionBusy,
@@ -949,6 +956,7 @@ export function mountLibraryBrowser(
         ? { ...requested, publication: fileLocations.publication }
         : requested;
     pageBusy = true;
+    updateControls();
     cancelScheduledGridRender();
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
@@ -1057,6 +1065,7 @@ export function mountLibraryBrowser(
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
     pageBusy = true;
+    updateControls();
     const resumePhoto = photoOwner.active;
     const resumeIndex = photoOwner.currentIndex;
     const currentSourceAuthority = photoOwner.sourceAuthority;
@@ -1328,7 +1337,7 @@ export function mountLibraryBrowser(
   };
 
   const openPhoto = async (index: number) => {
-    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
+    if (!canOpenGridPhoto()) return;
     const navigation = photoOwner.beginOpen(index);
     if (!navigation) return;
     const photoTransition = recoveryGate.beginTransition(
