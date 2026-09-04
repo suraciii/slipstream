@@ -195,6 +195,14 @@ and starts a foreground request instead of coalescing with the aborted work.
 A source change aborts every window request from the old source. A response
 commits only to its captured source generation and token.
 
+Photo navigation keeps its target index pending while a required window is
+unavailable. The Photo owner commits that index and the source's Grid position
+only after the target fact is available under the same current owner. A failed
+or detached window leaves the prior committed Photo binding unchanged, so
+Photo Retry derives its identity and aligned range from the Photo still shown
+to the Photographer. A source reopen may replace that binding only through its
+own current source authority.
+
 An answered `404` starts current-source Browse recovery. If recovery fails,
 the owning Grid or Photo surface identifies that the source expired and
 remains retryable. A current-generation transport failure changes connectivity
@@ -478,6 +486,12 @@ operations and settlement ownership, not a general workflow engine.
 Keeping separate per-feature coordinators was rejected. The same lifecycle
 policies would remain encoded in multiple incompatible forms.
 
+Eagerly changing the current Photo index and rolling it back after a failed
+window was rejected. Snapshot replacement can supersede the original Photo
+authority while that window settles, making rollback another cross-owner state
+change. Keeping the target pending and committing once under its current owner
+preserves one authoritative Photo binding.
+
 ## Verification
 
 Focused automated coverage must prove:
@@ -528,10 +542,13 @@ Focused automated coverage must prove:
   claim or permitting either stale owner to change controls;
 - Photo opening promotes an aborted adjacent boundary window to a new
   high-priority Photo-owned request;
+- a Photo open whose target window fails or detaches leaves the prior committed
+  Photo identity, index, Grid position, and Retry range aligned;
 - moving an adjacent prefetched Photo to current causes the shared Preview
   service job to be deduplicated and promoted to current priority;
-- Photo Retry invalidates and reloads the current bounded window before
-  Preview revalidation and position persistence;
+- Photo Retry invalidates and reloads the current bounded window, waits for its
+  successful Browse response, and only then starts Preview revalidation and
+  position persistence;
 - a saved-position failure from Photo A is silent after Photo B becomes
   current in the same Album;
 - superseded composite workflows start no child after losing their parent

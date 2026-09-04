@@ -37,6 +37,47 @@ const fact = (id: string): PhotoSummary => ({
   preview: { state: "inspection-pending" },
 });
 
+const reviewImage = () => {
+  let onLoad: (() => void) | undefined;
+  let onError: (() => void) | undefined;
+  let imageSource = "";
+  let clearedSources = 0;
+  const image: ReviewImageTransferPort = {
+    connected: true,
+    get source() {
+      return imageSource;
+    },
+    setHandlers(nextLoad, nextError) {
+      onLoad = nextLoad;
+      onError = nextError;
+    },
+    clearHandlers() {
+      onLoad = undefined;
+      onError = undefined;
+    },
+    setSource(next) {
+      imageSource = next;
+    },
+    clearSource() {
+      clearedSources += 1;
+      imageSource = "";
+    },
+  };
+  return {
+    image,
+    load: () => onLoad?.(),
+    get source() {
+      return imageSource;
+    },
+    get clearedSources() {
+      return clearedSources;
+    },
+    get hasHandlers() {
+      return onLoad !== undefined || onError !== undefined;
+    },
+  };
+};
+
 const sourceAuthority = () => Object.freeze({}) as SourceAuthority;
 
 class FakeSource implements PhotoSourcePort {
@@ -115,7 +156,7 @@ const bind = (source: FakeSource, fetcher: PhotoFetch) => {
   });
   const opened = owner.beginOpen(0);
   if (!opened) throw new Error("expected Photo open");
-  owner.finishOpen(opened.authority);
+  owner.commitOpen(opened);
   return { owner, opened };
 };
 
@@ -183,7 +224,7 @@ describe("PhotoOwner", () => {
     );
     owner.bindSource({ sourceAuthority: source.authority, total: 1, index: 0 });
     const opened = owner.beginOpen(0)!;
-    owner.finishOpen(opened.authority);
+    owner.commitOpen(opened);
     const outcome = await owner.loadCurrentPreview(opened.authority);
     expect(outcome.kind).toBe("ready");
     expect(source.facts.get(0)?.preview.url).toBe("/review.jpg");
@@ -313,6 +354,171 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
+  test("keeps a loaded Review image through pending navigation and releases it on commit", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const owner = createPhotoOwner(
+      () => Promise.resolve(new Response(null, { status: 202 })),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+    const initial = owner.beginOpen(0)!;
+    expect(owner.commitOpen(initial)?.id).toBe("photo-0");
+
+    const currentImage = reviewImage();
+    expect(
+      owner.attachReviewImage(
+        initial.authority,
+        currentImage.image,
+        "/review-a.jpg",
+        {},
+      ),
+    ).toBe(true);
+    currentImage.load();
+    expect(currentImage.source).toBe("/review-a.jpg");
+    expect(currentImage.hasHandlers).toBe(false);
+
+    const retry = owner.beginRetry()!;
+    expect(currentImage.source).toBe("/review-a.jpg");
+    owner.finishRetry(retry);
+
+    const pending = owner.beginOpen(1)!;
+    expect(owner.current?.id).toBe("photo-0");
+    expect(currentImage.source).toBe("/review-a.jpg");
+    expect(owner.commitOpen(pending)?.id).toBe("photo-1");
+    expect(currentImage.source).toBe("");
+    expect(currentImage.clearedSources).toBe(1);
+    owner.dispose();
+  });
+
+  test("clears an unfinished Review transfer when navigation starts", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const { owner, opened } = bind(source, () =>
+      Promise.resolve(new Response(null, { status: 202 })),
+    );
+    const currentImage = reviewImage();
+    expect(
+      owner.attachReviewImage(
+        opened.authority,
+        currentImage.image,
+        "/review-a.jpg",
+        {},
+      ),
+    ).toBe(true);
+    expect(currentImage.source).toBe("/review-a.jpg");
+
+    const pending = owner.beginOpen(1)!;
+    expect(currentImage.source).toBe("");
+    expect(currentImage.clearedSources).toBe(1);
+    expect(currentImage.hasHandlers).toBe(false);
+    owner.cancelOpen(pending.authority);
+    owner.dispose();
+  });
+
+  test("retains a loaded Review image when pending navigation is canceled", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const owner = createPhotoOwner(
+      () => Promise.resolve(new Response(null, { status: 202 })),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+    const initial = owner.beginOpen(0)!;
+    expect(owner.commitOpen(initial)?.id).toBe("photo-0");
+
+    const currentImage = reviewImage();
+    expect(
+      owner.attachReviewImage(
+        initial.authority,
+        currentImage.image,
+        "/review-a.jpg",
+        {},
+      ),
+    ).toBe(true);
+    currentImage.load();
+
+    const pending = owner.beginOpen(1)!;
+    expect(owner.commitOpen(pending)).toBeUndefined();
+    expect(owner.opening).toBe(true);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(currentImage.source).toBe("/review-a.jpg");
+    owner.cancelOpen(pending.authority);
+    expect(owner.opening).toBe(false);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(currentImage.source).toBe("/review-a.jpg");
+    owner.dispose();
+  });
+
+  test("commits a Photo navigation only after its target fact is available", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const owner = createPhotoOwner(
+      () => Promise.resolve(new Response(null, { status: 202 })),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+    const initial = owner.beginOpen(0)!;
+    expect(owner.commitOpen(initial)?.id).toBe("photo-0");
+
+    const unavailable = owner.beginOpen(1)!;
+    expect(owner.currentIndex).toBe(0);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(source.moved).toEqual([0]);
+    expect(owner.commitOpen(unavailable)).toBeUndefined();
+    expect(source.moved).toEqual([0]);
+    expect(owner.opening).toBe(true);
+    owner.cancelOpen(unavailable.authority);
+    expect(owner.currentIndex).toBe(0);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(owner.opening).toBe(false);
+    const retry = owner.beginRetry()!;
+    expect(retry.index).toBe(0);
+    expect(retry.expectedPhotoId).toBe("photo-0");
+    owner.finishRetry(retry);
+
+    source.facts.set(1, fact("photo-1"));
+    const available = owner.beginOpen(1)!;
+    expect(owner.currentIndex).toBe(0);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(owner.commitOpen(available)?.id).toBe("photo-1");
+    expect(owner.currentIndex).toBe(1);
+    expect(owner.current?.id).toBe("photo-1");
+    expect(source.moved).toEqual([0, 1]);
+    owner.dispose();
+  });
+
+  test("does not commit a pending Photo navigation after source rebind", () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const owner = createPhotoOwner(
+      () => Promise.resolve(new Response(null, { status: 202 })),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+    const initial = owner.beginOpen(0)!;
+    expect(owner.commitOpen(initial)?.id).toBe("photo-0");
+
+    const pending = owner.beginOpen(1)!;
+    const reboundAuthority = sourceAuthority();
+    source.authority = reboundAuthority;
+    owner.rebindSource({
+      sourceAuthority: reboundAuthority,
+      total: 2,
+      index: 0,
+      preferredPhotoId: "photo-0",
+    });
+    source.facts.set(1, fact("photo-1"));
+
+    expect(owner.commitOpen(pending)).toBeUndefined();
+    expect(owner.currentIndex).toBe(0);
+    expect(owner.current?.id).toBe("photo-0");
+    expect(source.moved).toEqual([0]);
+    owner.dispose();
+  });
+
   test("reloads an evicted Undo through an opaque window then returns to its Photo", async () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
@@ -333,7 +539,7 @@ describe("PhotoOwner", () => {
     });
     await owner.mutate("selectionState", "selected", true)!.settlement;
     const second = owner.beginOpen(1)!;
-    owner.finishOpen(second.authority);
+    owner.commitOpen(second);
     owner.leave();
     source.facts.delete(0);
 

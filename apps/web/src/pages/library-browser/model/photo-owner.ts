@@ -169,7 +169,8 @@ export interface PhotoOwner {
   rebindSource(binding: PhotoSourceBinding): PhotoAuthority;
   updateSource(binding: PhotoSourceBinding): boolean;
   beginOpen(index: number): PhotoOperation | undefined;
-  finishOpen(authority: PhotoAuthority): PhotoSummary | undefined;
+  commitOpen(open: PhotoOperation): PhotoSummary | undefined;
+  cancelOpen(authority: PhotoAuthority): void;
   leave(): PhotoAuthority;
   loadCurrentPreview(authority: PhotoAuthority): Promise<PhotoPreviewOutcome>;
   prefetchAdjacent(authority: PhotoAuthority, index: number): Promise<void>;
@@ -263,8 +264,9 @@ export function createPhotoOwner(
 
   const renewLifetime = (
     sourceAuthority: SourceAuthority,
+    options: Readonly<{ preserveReviewImage?: boolean }> = {},
   ): Lifetime | undefined => {
-    releaseReviewImage();
+    if (!options.preserveReviewImage) releaseReviewImage();
     lifetime?.tasks.halt();
     lifetime = undefined;
     latestAuthority = makeAuthority();
@@ -389,23 +391,37 @@ export function createPhotoOwner(
         owner.busy ||
         opening ||
         index < 0 ||
-        index >= binding.total ||
-        !source.movePosition(binding.sourceAuthority, index)
+        index >= binding.total
       )
         return undefined;
-      binding = Object.freeze({ ...binding, index });
-      active = true;
-      const record = renewLifetime(binding.sourceAuthority);
+      const record = renewLifetime(binding.sourceAuthority, {
+        preserveReviewImage: true,
+      });
       if (!record) return undefined;
+      active = true;
       opening = true;
       return operation(record, index);
     },
-    finishOpen: (authority) => {
-      if (!isCurrent(authority) || !binding) return undefined;
+    commitOpen: (open) => {
+      if (
+        !opening ||
+        !binding ||
+        !isCurrent(open.authority) ||
+        binding.sourceAuthority !== open.sourceAuthority ||
+        lifetime?.windowAuthority !== open.windowAuthority
+      )
+        return undefined;
+      const photo = source.photoAt(open.sourceAuthority, open.index);
+      if (!photo || !source.movePosition(open.sourceAuthority, open.index))
+        return undefined;
+      binding = Object.freeze({ ...binding, index: open.index });
       opening = false;
-      const photo = source.photoAt(binding.sourceAuthority, binding.index);
-      if (photo) lastCurrentPhotoId = photo.id;
+      lastCurrentPhotoId = photo.id;
+      releaseReviewImage();
       return photo;
+    },
+    cancelOpen: (authority) => {
+      if (isCurrent(authority)) opening = false;
     },
     leave: () => {
       active = false;
@@ -774,7 +790,9 @@ export function createPhotoOwner(
       if (!binding || !active || owner.busy) return undefined;
       const expectedPhotoId = owner.current?.id ?? lastCurrentPhotoId;
       if (!expectedPhotoId) return undefined;
-      const record = renewLifetime(binding.sourceAuthority);
+      const record = renewLifetime(binding.sourceAuthority, {
+        preserveReviewImage: true,
+      });
       if (!record) return undefined;
       busyAuthority = record.authority;
       return Object.freeze({

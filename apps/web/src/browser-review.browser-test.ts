@@ -7410,6 +7410,9 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   let reopenedToken = "";
   let retryStage = "establishing expired-reopen failure";
   let retryTraceArmed = false;
+  let expectedRetryEpoch = "";
+  let retryCurrentRangeBrowseResponseSeen = false;
+  let retryPreviewRequestedBeforeBrowseResponse = false;
   await page.addInitScript(() => {
     const retryEpoch = window as typeof window & {
       __slipstreamRetryHandlerEpoch: number;
@@ -7487,6 +7490,15 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     const url = new URL(request.url());
     const priority = request.headers()["x-slipstream-test-priority"];
     const retryEpoch = request.headers()["x-slipstream-test-retry-epoch"];
+    if (
+      url.pathname.startsWith("/api/photos/") &&
+      url.pathname.endsWith("/preview") &&
+      `${url.pathname}${url.search}` === retryPreviewPath &&
+      priority === "high" &&
+      retryEpoch === expectedRetryEpoch &&
+      !retryCurrentRangeBrowseResponseSeen
+    )
+      retryPreviewRequestedBeforeBrowseResponse = true;
     if (url.pathname.startsWith("/api/browse/")) {
       recordRetryTransport({
         stage: "playwright-browse-request",
@@ -7525,6 +7537,15 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     const url = new URL(response.url());
     const priority = request.headers()["x-slipstream-test-priority"];
     const retryEpoch = request.headers()["x-slipstream-test-retry-epoch"];
+    if (
+      url.pathname.startsWith("/api/browse/") &&
+      `${url.pathname}${url.search}` === retryBrowsePath &&
+      url.searchParams.get("start") === "0" &&
+      priority === "high" &&
+      retryEpoch === expectedRetryEpoch &&
+      response.status() === 200
+    )
+      retryCurrentRangeBrowseResponseSeen = true;
     if (url.pathname.startsWith("/api/browse/")) {
       recordRetryTransport({
         stage: "browse-response",
@@ -7833,7 +7854,8 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     retryPreviewPath = `/api/photos/${reopenPhotoId}/preview`;
     retryTransportTrace.length = 0;
     droppedRetryTransportEvents = 0;
-    retryTraceArmed = true;
+    retryCurrentRangeBrowseResponseSeen = false;
+    retryPreviewRequestedBeforeBrowseResponse = false;
     const retryEpoch = await page.evaluate(
       () =>
         (
@@ -7842,6 +7864,8 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
           }
         ).__slipstreamRetryHandlerEpoch + 1,
     );
+    expectedRetryEpoch = String(retryEpoch);
+    retryTraceArmed = true;
     const retriedHighPriorityBrowse = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return (
@@ -7965,6 +7989,8 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     await refreshedPreview;
+    expect(retryCurrentRangeBrowseResponseSeen).toBe(true);
+    expect(retryPreviewRequestedBeforeBrowseResponse).toBe(false);
     retryStage = "awaiting Retry settlement";
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
@@ -8164,22 +8190,45 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   });
   await page.locator('[data-photo-index="59"]').click();
   await expect(page.getByText("60 / 70")).toBeVisible();
+  const currentImage = page.locator("[data-stage] img");
+  await expect(currentImage).toBeVisible();
+  await page.waitForFunction(() => {
+    const image = document.querySelector("[data-stage] img");
+    return (
+      image instanceof HTMLImageElement &&
+      image.complete &&
+      image.naturalWidth > 0
+    );
+  });
+  const retainedPreviewSrc = await currentImage.getAttribute("src");
+  if (!retainedPreviewSrc) throw new Error("Current Preview src is missing");
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toBeEnabled();
   await page.keyboard.press("ArrowRight");
   await expect.poll(() => boundaryRequests).toBeGreaterThanOrEqual(2);
   staleBoundaryRequests = boundaryRequests;
   // The boundary Photo waits for its shared facts; Back to Grid must remain
   // available instead of claiming the unavailable Photo is already open.
   await expect(page.getByText("60 / 70")).toBeVisible();
+  await expect(currentImage).toHaveAttribute("src", retainedPreviewSrc);
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toBeEnabled();
   // The boundary window is still loading; Back to Grid must stay available.
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  await expect(currentImage).not.toHaveAttribute("src", retainedPreviewSrc);
+  // The pending boundary Photo never committed, so returning to Grid keeps
+  // the last visible Photo's position instead of adopting the failed target.
   await expect
     .poll(() => viewport.evaluate((element) => element.scrollTop))
-    .toBe(30 * 178);
-  await expect(viewport).toBeFocused();
+    .toBe(29 * 178);
+  await waitForGridFrame(page);
+  await expect(page.locator('[data-photo-index="59"]')).toBeFocused();
   releaseBoundary();
   await page.evaluate(
     () =>
