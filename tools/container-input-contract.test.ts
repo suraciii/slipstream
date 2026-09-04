@@ -229,18 +229,19 @@ function expectLockedUbuntuStage(
     "apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock)";
   const cleanup =
     "rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock";
-  const copies = stage
-    .filter((instruction) => instruction.command === "COPY")
-    .map(copyInstruction)
-    .filter((copy) =>
-      [
-        "/usr/local/share/slipstream-ca-certificates.crt",
-        "/etc/apt/apt.conf.d/00slipstream-bootstrap-ca",
-        "/etc/apt/sources.list.d/ubuntu.sources",
-        "/tmp/apt-packages.lock",
-      ].includes(copy.target),
-    );
-  expect(copies).toEqual([
+  const copies = stage.flatMap((instruction, index) => {
+    if (instruction.command !== "COPY") return [];
+    const copy = copyInstruction(instruction);
+    return [
+      "/usr/local/share/slipstream-ca-certificates.crt",
+      "/etc/apt/apt.conf.d/00slipstream-bootstrap-ca",
+      "/etc/apt/sources.list.d/ubuntu.sources",
+      "/tmp/apt-packages.lock",
+    ].includes(copy.target)
+      ? [{ index, copy }]
+      : [];
+  });
+  expect(copies.map(({ copy }) => copy)).toEqual([
     {
       from: "rust-toolchain",
       sources: ["/etc/ssl/certs/ca-certificates.crt"],
@@ -260,12 +261,14 @@ function expectLockedUbuntuStage(
     },
   ] satisfies readonly CopyInstruction[]);
 
-  const aptRuns = stage.filter(
-    (instruction) =>
-      instruction.command === "RUN" && instruction.value.includes("apt-get"),
+  const aptRuns = stage.flatMap((instruction, index) =>
+    instruction.command === "RUN" && instruction.value.includes("apt-get")
+      ? [{ index, instruction }]
+      : [],
   );
   expect(aptRuns).toHaveLength(1);
-  const commands = runCommands(aptRuns[0]!);
+  expect(copies.every(({ index }) => index < aptRuns[0]!.index)).toBeTrue();
+  const commands = runCommands(aptRuns[0]!.instruction);
   expect(commands.filter((command) => command.includes("apt-get"))).toEqual([
     update,
     install,
