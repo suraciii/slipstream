@@ -149,11 +149,13 @@ to that owner through the page controller; they do not mutate its state or call
 it through reverse imports.
 
 Cross-owner connectivity and decision readiness are derived once from transport
-reachability, Recovery claims, and active interaction ownership. Individual
-owners cannot independently declare the page connected or clear another
-owner's busy state. A presentation surface that must reject late settlement is
-represented by an opaque ownership token, not by an unguarded `setStatus`
-callback.
+reachability, Recovery claims, and active interaction ownership. Local Preview
+inspection readiness is separate: an already loaded Preview may zoom and pan
+without transport or persistence readiness, while fit-mode decision gestures
+remain governed by decision readiness. Individual owners cannot independently
+declare the page connected or clear another owner's busy state. A presentation
+surface that must reject late settlement is represented by an opaque ownership
+token, not by an unguarded `setStatus` callback.
 
 An operation's semantic owner is explicit at a module boundary. Transport
 objects such as `AbortSignal` carry cancellation only and are not used as

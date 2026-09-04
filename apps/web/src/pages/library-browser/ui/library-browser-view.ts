@@ -387,7 +387,7 @@ export function createLibraryBrowserView(
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
-  let interactionEnabled = false;
+  let decisionInteractionEnabled = false;
   let pointer:
     | {
         id: number;
@@ -1086,7 +1086,7 @@ export function createLibraryBrowserView(
       !alive ||
       pointer ||
       !event.isPrimary ||
-      !interactionEnabled ||
+      (!zoomed && !decisionInteractionEnabled) ||
       !currentPhotoId
     )
       return;
@@ -1136,7 +1136,7 @@ export function createLibraryBrowserView(
       zoomed ||
       cancelled ||
       active.vertical ||
-      !interactionEnabled ||
+      !decisionInteractionEnabled ||
       active.surface !== photoSurface ||
       active.photoId !== currentPhotoId
     )
@@ -1413,7 +1413,7 @@ export function createLibraryBrowserView(
     renderSources,
     setControls(model) {
       if (!alive) return;
-      interactionEnabled = model.decisionEnabled;
+      decisionInteractionEnabled = model.decisionEnabled;
       for (const button of [
         select,
         reject,

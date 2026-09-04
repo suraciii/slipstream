@@ -251,7 +251,7 @@ If an Album creation, rename, delete, or membership change cannot persist, Slips
 
 If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
 
-A disconnected browser may continue displaying already loaded thumbnails and Previews, but it must stop accepting new decisions until the server confirms the connection and current Photo state. Success from an unrelated request, such as another File Location range, does not confirm that state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
+A disconnected browser may continue displaying already loaded thumbnails and Previews. An already loaded Preview must remain available for local Detail Review zoom and pan while disconnected, but the browser must stop accepting new decisions until the server confirms the connection and current Photo state. Fit-mode decision gestures and persisted controls remain unavailable while disconnected. Success from an unrelated request, such as another File Location range, does not confirm that state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
 
 If an ephemeral server-side browse snapshot expires or is lost after server restart, Slipstream must reopen the current source from the latest published Library and identify that newly completed scans may affect its order. A successful replacement snapshot also replaces browser-local Album membership facts from the retired snapshot; a failed reopen retains the recoverable current view.
 
