@@ -735,6 +735,8 @@ export function createLibraryBrowserView(
       "All Photos",
       model.libraryCount,
       model.libraryActive,
+      false,
+      false,
     );
     library.dataset.focusKey = "source:library";
     library.addEventListener("click", () =>

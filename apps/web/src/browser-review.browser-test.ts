@@ -3886,6 +3886,37 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
+test("an empty All Photos source remains openable after switching away", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
+
+  const allPhotos = page.getByRole("button", {
+    name: /^All Photos 0 Photos/,
+  });
+  await expect(allPhotos).toBeVisible();
+  await expect(allPhotos).toBeEnabled();
+
+  await page.getByRole("button", { name: /^Library Folder 0 Photos/ }).click();
+  const emptyLibrary = page.getByText(
+    "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.",
+  );
+  await expect(emptyLibrary).toBeVisible();
+
+  await openSources(page);
+  await allPhotos.click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await expect(emptyLibrary).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Check Library" }),
+  ).toBeVisible();
+});
+
 test("file location publication values stay unique across server restarts", async () => {
   const { base, root } = await fixture();
   const data = await jpeg();
