@@ -24,6 +24,12 @@ const originalBytes = "Original bytes must not change";
 
 type StorageRole = "library" | "state" | "cache";
 
+const storageEnvironmentKeys: Record<StorageRole, string> = {
+  library: "SLIPSTREAM_LIBRARY_ROOT",
+  state: "SLIPSTREAM_STATE_DIRECTORY",
+  cache: "SLIPSTREAM_CACHE_DIRECTORY",
+};
+
 interface Fixture {
   root: string;
   environmentFile: string;
@@ -43,6 +49,67 @@ interface Topology {
 interface CommandResult {
   exitCode: number;
   stderr: string;
+}
+
+async function dockerComposeConfig(
+  environmentFile: string,
+): Promise<Record<string, unknown>> {
+  const environment = { ...process.env };
+  for (const key of Object.keys(environment)) {
+    if (
+      key.startsWith("SLIPSTREAM_") ||
+      key.startsWith("COMPOSE_") ||
+      key.startsWith("DOCKER_")
+    ) {
+      delete environment[key];
+    }
+  }
+
+  let child: ReturnType<typeof Bun.spawn>;
+  try {
+    child = Bun.spawn(
+      [
+        "docker",
+        "compose",
+        "--env-file",
+        environmentFile,
+        "-f",
+        composeFile,
+        "config",
+        "--format",
+        "json",
+      ],
+      {
+        cwd: repositoryRoot,
+        env: environment,
+        stderr: "pipe",
+        stdout: "pipe",
+      },
+    );
+  } catch (error) {
+    throw new Error(
+      "Docker Compose is required for the Compose configuration contract test",
+      { cause: error },
+    );
+  }
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(
+      `Docker Compose config failed with exit code ${exitCode}: ${stderr.trim()}`,
+    );
+  }
+  try {
+    return JSON.parse(stdout) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error("Docker Compose config returned invalid JSON", {
+      cause: error,
+    });
+  }
 }
 
 interface MountCoordinate {
@@ -368,11 +435,6 @@ function nulInValueEnvironmentBytes(
   sources: Record<StorageRole, string>,
   role: StorageRole,
 ): Buffer {
-  const keys: Record<StorageRole, string> = {
-    library: "SLIPSTREAM_LIBRARY_ROOT",
-    state: "SLIPSTREAM_STATE_DIRECTORY",
-    cache: "SLIPSTREAM_CACHE_DIRECTORY",
-  };
   const chunks: Buffer[] = [];
   for (const candidate of ["library", "state", "cache"] as const) {
     const value = Buffer.from(sources[candidate]);
@@ -385,7 +447,7 @@ function nulInValueEnvironmentBytes(
           ])
         : value;
     chunks.push(
-      Buffer.from(`${keys[candidate]}=`),
+      Buffer.from(`${storageEnvironmentKeys[candidate]}=`),
       nulValue,
       Buffer.from("\n"),
     );
@@ -458,6 +520,40 @@ async function prepareInvalidTopology(
 
 async function removeFixture(target: Fixture): Promise<void> {
   await rm(target.root, { force: true, recursive: true });
+}
+
+for (const role of ["library", "state", "cache"] as const) {
+  for (const kind of ["missing", "non-directory"] as const) {
+    test(`startup rejects ${kind} ${role} storage before Docker`, async () => {
+      const target = await fixture();
+      try {
+        const layout = await topology(target);
+        await writeFile(
+          join(layout.sources.library, "preserved.ARW"),
+          originalBytes,
+        );
+        const before = await originalEvidence(layout.sources.library);
+        const invalidPath = join(target.root, `${role}-${kind}`);
+        if (kind === "non-directory") await writeFile(invalidPath, "file");
+        await writeEnvironment(target, {
+          ...layout.sources,
+          [role]: invalidPath,
+        });
+
+        const result = await runCompose(target, ["up"]);
+
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain(
+          `storage environment file has ${kind === "missing" ? "unavailable" : "non-directory"} ${storageEnvironmentKeys[role]}`,
+        );
+        expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+        expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+        expect(await originalEvidence(layout.sources.library)).toEqual(before);
+      } finally {
+        await removeFixture(target);
+      }
+    });
+  }
 }
 
 test("the Compose entry point forwards canonical sources to matching targets", async () => {
@@ -1263,6 +1359,78 @@ test("down uses the fixed local Compose route without storage preflight", async 
       ].join("\n"),
     );
     expect(await Bun.file(target.composeSources).text()).toBe("\n\n\n");
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("Docker Compose config preserves the storage and environment-file contract", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+
+    const configuration = await dockerComposeConfig(target.environmentFile);
+    const services = configuration.services as Record<string, unknown>;
+    expect(services).toBeDefined();
+    const service = services.slipstream as Record<string, unknown>;
+    expect(service).toBeDefined();
+    const build = service.build as Record<string, unknown>;
+    const buildArguments = build.args as Record<string, unknown>;
+    const environment = service.environment as Record<string, unknown>;
+    const ports = service.ports as Array<Record<string, unknown>>;
+    const volumes = service.volumes as Array<Record<string, unknown>>;
+
+    expect(service.read_only).toBe(true);
+    expect(service.user).toBe("1000:1000");
+    expect(service.cap_drop).toEqual(["ALL"]);
+    expect(service.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(service.image).toBe("slipstream:from-environment-file");
+    expect(buildArguments.SLIPSTREAM_VCS_REF).toBe("environment-file-ref");
+    expect(environment).toMatchObject({
+      SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
+      SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
+    });
+    expect(ports).toContainEqual(
+      expect.objectContaining({
+        host_ip: "127.0.0.2",
+        published: "3100",
+        target: 3000,
+      }),
+    );
+
+    const bindMounts = volumes
+      .filter((candidate) => candidate.type === "bind")
+      .map(
+        (candidate) =>
+          `${String(candidate.source)}\0${String(candidate.target)}`,
+      )
+      .sort();
+    expect(bindMounts).toEqual(
+      Object.values(layout.sources)
+        .map((source) => `${source}\0${source}`)
+        .sort(),
+    );
+
+    for (const role of ["library", "state", "cache"] as const) {
+      const source = layout.sources[role];
+      const key = storageEnvironmentKeys[role];
+      const volume = volumes.find(
+        (candidate) =>
+          candidate.type === "bind" &&
+          candidate.source === source &&
+          candidate.target === source,
+      );
+
+      expect(environment[key]).toBe(source);
+      expect(volume).toBeDefined();
+      expect(volume?.source).toBe(environment[key]);
+      expect(volume?.target).toBe(environment[key]);
+      expect(volume?.read_only ?? false).toBe(role === "library");
+    }
+
+    expect(service.restart).toBeUndefined();
+    expect(service.restart_policy).toBeUndefined();
   } finally {
     await removeFixture(target);
   }
