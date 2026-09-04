@@ -120,4 +120,4 @@ docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
 Inspect the digest, image user, and runtime contents; the deployment contract
 is in [`docs/deployment.md`](docs/deployment.md).
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. The host-agnostic deployment contract is [`docs/deployment.md`](docs/deployment.md).
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. Supported Compose operations use [`scripts/compose`](scripts/compose); the Linux-local Docker deployment contract is [`docs/deployment.md`](docs/deployment.md).

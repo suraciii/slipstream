@@ -22,8 +22,8 @@ services:
       - "${SLIPSTREAM_BIND_ADDRESS:-127.0.0.1}:${SLIPSTREAM_PORT:-3000}:3000"
     environment:
       SLIPSTREAM_LIBRARY_ROOT: ${SLIPSTREAM_LIBRARY_ROOT:?Set SLIPSTREAM_LIBRARY_ROOT to the Originals directory}
-      SLIPSTREAM_STATE_DIRECTORY: /state
-      SLIPSTREAM_CACHE_DIRECTORY: /cache
+      SLIPSTREAM_STATE_DIRECTORY: ${SLIPSTREAM_STATE_DIRECTORY:?Set SLIPSTREAM_STATE_DIRECTORY to the application state directory}
+      SLIPSTREAM_CACHE_DIRECTORY: ${SLIPSTREAM_CACHE_DIRECTORY:?Set SLIPSTREAM_CACHE_DIRECTORY to the derivative cache directory}
       SLIPSTREAM_DATABASE_BASENAME: ${SLIPSTREAM_DATABASE_BASENAME:-library.sqlite}
       SLIPSTREAM_WEB_ROOT: /app/web
       SLIPSTREAM_HOST: 0.0.0.0
@@ -40,10 +40,10 @@ services:
         read_only: true
       - type: bind
         source: ${SLIPSTREAM_STATE_DIRECTORY:?Set SLIPSTREAM_STATE_DIRECTORY to the application state directory}
-        target: /state
+        target: ${SLIPSTREAM_STATE_DIRECTORY:?Set SLIPSTREAM_STATE_DIRECTORY to the application state directory}
       - type: bind
         source: ${SLIPSTREAM_CACHE_DIRECTORY:?Set SLIPSTREAM_CACHE_DIRECTORY to the derivative cache directory}
-        target: /cache
+        target: ${SLIPSTREAM_CACHE_DIRECTORY:?Set SLIPSTREAM_CACHE_DIRECTORY to the derivative cache directory}
     healthcheck:
       test:
         [
