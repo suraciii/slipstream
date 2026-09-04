@@ -29,6 +29,7 @@ interface Fixture {
   composeConfiguration: string;
   composeEnvironment: string;
   composeSources: string;
+  dockerCalls: string;
   findmntData: string;
   path: string;
 }
@@ -56,6 +57,7 @@ async function fixture(): Promise<Fixture> {
   const composeConfiguration = join(root, "compose-configuration");
   const composeEnvironment = join(root, "compose-environment");
   const composeSources = join(root, "compose-sources");
+  const dockerCalls = join(root, "docker-calls");
   const findmntData = join(root, "findmnt-data");
   const environmentFile = join(root, "slipstream.env");
   await mkdir(bin);
@@ -65,6 +67,7 @@ async function fixture(): Promise<Fixture> {
     [
       "#!/usr/bin/env bash",
       "set -euo pipefail",
+      "printf 'called\\n' > \"$FAKE_DOCKER_CALLS\"",
       'if [[ "$1" == "context" && "$2" == "inspect" && "$3" == "default" ]]; then',
       "  printf '%s\\n' \"${FAKE_DOCKER_CONTEXT_ENDPOINT:-unix:///var/run/docker.sock}\"",
       "  exit 0",
@@ -94,44 +97,52 @@ async function fixture(): Promise<Fixture> {
       "  exit 1",
       "fi",
       'endpoint=""',
-      'column=""',
       "noheadings=false",
       "raw=false",
+      "submounts=false",
       "print_raw() {",
       "  local value=$1",
       "  value=${value//\\/\\x5c}",
       "  value=${value// /\\x20}",
-      '  printf "%s\\n" "$value"',
+      '  printf "%s" "$value"',
+      "}",
+      "print_row() {",
+      '  print_raw "$1"',
+      "  printf ' '",
+      '  print_raw "$2"',
+      "  printf ' %s\\n' \"$3\"",
       "}",
       'while [[ "$#" -gt 0 ]]; do',
       '  case "$1" in',
       "    --noheadings) noheadings=true; shift ;;",
       "    --raw) raw=true; shift ;;",
+      "    --submounts) submounts=true; shift ;;",
+      "    --uniq) shift ;;",
       "    -T) endpoint=$2; shift 2 ;;",
-      "    -o) column=$2; shift 2 ;;",
+      "    -o) shift 2 ;;",
       "    *) shift ;;",
       "  esac",
       "done",
-      '[[ "$noheadings" == true && "$raw" == true ]] || exit 92',
+      '[[ "$noheadings" == true && "$raw" == true && "$submounts" == true ]] || exit 92',
       'case "${FAKE_FINDMNT_RAW_OVERRIDE:-}" in',
       "  control) printf '%s\\n' '/unsafe\\x0a'; exit 0 ;;",
       "  malformed) printf '%s\\n' '/unsafe\\xZZ'; exit 0 ;;",
+      "  byte) printf '/unsafe\\377 / 7:42\\n'; exit 0 ;;",
       "esac",
       'if [[ -s "${FAKE_FINDMNT_DATA:-}" ]]; then',
+      "  found=false",
       "  while IFS=$'\\t' read -r mapped_endpoint target fsroot device || [[ -n \"$mapped_endpoint\" ]]; do",
       '    if [[ "$mapped_endpoint" == "$endpoint" ]]; then',
-      '      case "$column" in',
-      '        TARGET) print_raw "$target" ;;',
-      '        FSROOT) print_raw "$fsroot" ;;',
-      '        MAJ:MIN) printf "%s\\n" "$device" ;;',
-      "        *) exit 1 ;;",
-      "      esac",
-      '      if [[ "${FAKE_FINDMNT_TRAILING_EMPTY:-}" == "1" ]]; then',
-      '        printf "\\n"',
-      "      fi",
-      "      exit 0",
+      "      found=true",
+      '      print_row "$target" "$fsroot" "$device"',
       "    fi",
       '  done < "$FAKE_FINDMNT_DATA"',
+      '  if [[ "$found" == true ]]; then',
+      '    if [[ "${FAKE_FINDMNT_TRAILING_EMPTY:-}" == "1" ]]; then',
+      '      printf "\\n"',
+      "    fi",
+      "    exit 0",
+      "  fi",
       "fi",
       'exec env PATH="$FAKE_SYSTEM_PATH" findmnt "${original_arguments[@]}"',
       "",
@@ -145,6 +156,7 @@ async function fixture(): Promise<Fixture> {
     composeConfiguration,
     composeEnvironment,
     composeSources,
+    dockerCalls,
     findmntData,
     path: `${bin}:${process.env.PATH ?? ""}`,
   };
@@ -250,6 +262,7 @@ async function runCompose(
         FAKE_DOCKER_COMPOSE_CONFIGURATION: target.composeConfiguration,
         FAKE_DOCKER_COMPOSE_ENVIRONMENT: target.composeEnvironment,
         FAKE_DOCKER_COMPOSE_SOURCES: target.composeSources,
+        FAKE_DOCKER_CALLS: target.dockerCalls,
         FAKE_FINDMNT_DATA: target.findmntData,
         FAKE_SYSTEM_PATH: process.env.PATH ?? "",
         ...options.environment,
@@ -403,6 +416,156 @@ test("storage paths may contain the names of other storage keys", async () => {
       await realpath(layout.sources.cache),
       "",
     ]);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("a raw non-UTF-8 storage input fails before Docker and preserves Originals", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeFile(
+      join(layout.sources.library, "preserved.ARW"),
+      originalBytes,
+    );
+    const before = await originalSnapshot(layout.sources.library);
+    const rawState = Buffer.concat([
+      Buffer.from(join(target.root, "state-")),
+      Buffer.from([0xff]),
+      Buffer.from("-raw"),
+    ]);
+    await mkdir(rawState);
+    await writeFile(
+      target.environmentFile,
+      Buffer.concat([
+        Buffer.from(`SLIPSTREAM_LIBRARY_ROOT=${layout.sources.library}\n`),
+        Buffer.from("SLIPSTREAM_STATE_DIRECTORY="),
+        rawState,
+        Buffer.from(`\nSLIPSTREAM_CACHE_DIRECTORY=${layout.sources.cache}`),
+      ]),
+    );
+
+    const result = await runCompose(target, ["up"]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      "storage environment file has invalid SLIPSTREAM_STATE_DIRECTORY",
+    );
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await originalSnapshot(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("a canonical non-UTF-8 storage path fails before Docker and preserves Originals", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeFile(
+      join(layout.sources.library, "preserved.ARW"),
+      originalBytes,
+    );
+    const before = await originalSnapshot(layout.sources.library);
+    const rawState = Buffer.concat([
+      Buffer.from(join(target.root, "state-")),
+      Buffer.from([0xff]),
+      Buffer.from("-target"),
+    ]);
+    const stateAlias = join(target.root, "state-alias");
+    await mkdir(rawState);
+    await symlink(rawState, stateAlias);
+    await writeEnvironment(target, { ...layout.sources, state: stateAlias });
+
+    const result = await runCompose(target, ["up"]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      "storage environment file has invalid SLIPSTREAM_STATE_DIRECTORY",
+    );
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await originalSnapshot(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("a raw non-UTF-8 findmnt path fails before Docker and preserves Originals", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    await writeFile(
+      join(layout.sources.library, "preserved.ARW"),
+      originalBytes,
+    );
+    const before = await originalSnapshot(layout.sources.library);
+
+    const result = await runCompose(target, ["up"], {
+      environment: { FAKE_FINDMNT_RAW_OVERRIDE: "byte" },
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("findmnt");
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await originalSnapshot(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("a nested cross-filesystem bind alias fails before Docker and preserves Originals", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const nestedMount = join(layout.sources.library, "nested-filesystem");
+    await mkdir(nestedMount);
+    await writeEnvironment(target, layout.sources);
+    await writeFile(
+      join(layout.sources.library, "preserved.ARW"),
+      originalBytes,
+    );
+    const before = await originalSnapshot(layout.sources.library);
+    await writeMountCoordinates(target, [
+      {
+        endpoint: layout.sources.library,
+        target: layout.sources.library,
+        fsroot: "/",
+        device: "7:1",
+      },
+      {
+        endpoint: layout.sources.library,
+        target: nestedMount,
+        fsroot: "/mounted-library",
+        device: "8:2",
+      },
+      {
+        endpoint: layout.sources.state,
+        target: layout.sources.state,
+        fsroot: "/mounted-library/state",
+        device: "8:2",
+      },
+      {
+        endpoint: layout.sources.cache,
+        target: layout.sources.cache,
+        fsroot: "/",
+        device: "9:3",
+      },
+    ]);
+
+    const result = await runCompose(target, ["up"]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      "host storage paths overlap: library and state",
+    );
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await originalSnapshot(layout.sources.library)).toEqual(before);
   } finally {
     await removeFixture(target);
   }

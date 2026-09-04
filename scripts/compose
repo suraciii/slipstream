@@ -9,8 +9,9 @@ declare -A storage_keys=(
   [cache]=SLIPSTREAM_CACHE_DIRECTORY
 )
 declare -A storage_sources=()
-declare -A storage_filesystems=()
-declare -A storage_effective_paths=()
+declare -A storage_mount_root_count=()
+declare -A storage_mount_root_filesystems=()
+declare -A storage_mount_root_paths=()
 
 fail() {
   printf 'slipstream compose: %s\n' "$*" >&2
@@ -35,7 +36,7 @@ require_local_docker() {
   captured=${captured%$'\037'}
   [[ "$captured" == *$'\n' ]] || fail "local Docker Engine default context is malformed"
   endpoint=${captured%$'\n'}
-  if [[ ! "$endpoint" =~ ^unix:///[^[:cntrl:]]+$ ]]; then
+  if ! valid_utf8 "$endpoint" || [[ ! "$endpoint" =~ ^unix:///[^[:cntrl:]]+$ ]]; then
     fail "local Docker Engine default context must use a Unix socket"
   fi
 }
@@ -58,6 +59,7 @@ resolve_existing_path() {
 
 literal_storage_path() {
   local value=$1
+  valid_utf8 "$value" || return 1
   [[ "$value" == /* ]] || return 1
   [[ "$value" != [[:space:]]* && "$value" != *[[:space:]] ]] || return 1
   [[ "$value" != *[[:cntrl:]]* ]] || return 1
@@ -115,6 +117,7 @@ contains_path() {
 
 canonical_mount_path() {
   local value=$1
+  valid_utf8 "$value" || return 1
   [[ "$value" == /* ]] || return 1
   [[ "$value" != *[[:cntrl:]]* ]] || return 1
   [[ "$value" == / || "$value" != */ ]] || return 1
@@ -124,6 +127,11 @@ canonical_mount_path() {
 }
 
 decoded_findmnt_value=''
+
+valid_utf8() {
+  local value=$1
+  printf '%s' "$value" | LC_ALL=C iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+}
 
 decode_findmnt_raw() {
   local encoded=$1 decoded='' prefix remainder hex character
@@ -139,27 +147,6 @@ decode_findmnt_raw() {
   done
   [[ "$encoded" != *'\'* ]] || return 1
   decoded_findmnt_value="$decoded$encoded"
-}
-
-findmnt_field() {
-  local endpoint=$1
-  local field=$2
-  local captured encoded value
-  if ! captured=$(
-    LC_ALL=C findmnt --noheadings --raw -T "$endpoint" -o "$field" 2>/dev/null || exit 1
-    printf '\037'
-  ); then
-    return 1
-  fi
-  [[ "$captured" == *$'\037' ]] || return 1
-  encoded=${captured%$'\037'}
-  [[ "$encoded" == *$'\n' ]] || return 1
-  encoded=${encoded%$'\n'}
-  [[ -n "$encoded" && "$encoded" != *$'\n'* && "$encoded" != *[[:cntrl:]]* ]] || return 1
-  decode_findmnt_raw "$encoded" || return 1
-  value=$decoded_findmnt_value
-  [[ -n "$value" && "$value" != *$'\n'* && "$value" != *[[:cntrl:]]* ]] || return 1
-  printf '%s\n' "$value"
 }
 
 relative_to_mount_target() {
@@ -187,30 +174,105 @@ effective_mount_path() {
 }
 
 capture_mount_coordinates() {
-  local role endpoint target fsroot filesystem relative effective
+  local role endpoint captured mount_table
+  local encoded_target encoded_fsroot filesystem extra
+  local target fsroot relative effective
+  local owner_index owner_length target_length index
+  local -a mount_targets=() mount_fsroots=() mount_filesystems=()
   for role in "${storage_roles[@]}"; do
     endpoint=${storage_sources[$role]}
-    target=$(findmnt_field "$endpoint" TARGET) \
-      || fail "findmnt cannot determine mount TARGET for $role"
-    fsroot=$(findmnt_field "$endpoint" FSROOT) \
-      || fail "findmnt cannot determine mount FSROOT for $role"
-    filesystem=$(findmnt_field "$endpoint" MAJ:MIN) \
-      || fail "findmnt cannot determine mount MAJ:MIN for $role"
-    literal_storage_path "$target" && canonical_mount_path "$target" \
-      || fail "findmnt returned an invalid mount TARGET for $role"
+    if ! captured=$(
+      LC_ALL=C findmnt --noheadings --raw --submounts --uniq -T "$endpoint" \
+        -o TARGET,FSROOT,MAJ:MIN 2>/dev/null || exit 1
+      printf '\037'
+    ); then
+      fail "findmnt cannot determine mount hierarchy for $role"
+    fi
+    [[ "$captured" == *$'\037' ]] \
+      || fail "findmnt returned an incomplete mount hierarchy for $role"
+    mount_table=${captured%$'\037'}
+    [[ "$mount_table" == *$'\n' ]] \
+      || fail "findmnt returned an incomplete mount hierarchy for $role"
+    mount_table=${mount_table%$'\n'}
+    [[ -n "$mount_table" ]] \
+      || fail "findmnt returned an empty mount hierarchy for $role"
+
+    mount_targets=()
+    mount_fsroots=()
+    mount_filesystems=()
+    while IFS=$' \t' read -r encoded_target encoded_fsroot filesystem extra; do
+      [[ -n "$encoded_target" && -n "$encoded_fsroot" && -n "$filesystem" \
+        && -z "${extra:-}" ]] \
+        || fail "findmnt returned a malformed mount hierarchy for $role"
+      decode_findmnt_raw "$encoded_target" \
+        || fail "findmnt returned an invalid mount TARGET for $role"
+      target=$decoded_findmnt_value
+      literal_storage_path "$target" && canonical_mount_path "$target" \
+        || fail "findmnt returned an invalid mount TARGET for $role"
+      decode_findmnt_raw "$encoded_fsroot" \
+        || fail "findmnt returned an invalid mount FSROOT for $role"
+      fsroot=$decoded_findmnt_value
+      valid_utf8 "$fsroot" && [[ -n "$fsroot" && "$fsroot" != *$'\n'* \
+        && "$fsroot" != *[[:cntrl:]]* ]] \
+        || fail "findmnt returned an invalid mount FSROOT for $role"
+      [[ "$filesystem" =~ ^[0-9]+:[0-9]+$ ]] \
+        || fail "findmnt returned an invalid mount MAJ:MIN for $role"
+      for index in "${!mount_targets[@]}"; do
+        [[ "${mount_targets[$index]}" != "$target" ]] \
+          || fail "findmnt returned duplicate mount TARGET for $role"
+      done
+      mount_targets+=("$target")
+      mount_fsroots+=("$fsroot")
+      mount_filesystems+=("$filesystem")
+    done <<< "$mount_table"
+
+    owner_index=-1
+    owner_length=-1
+    for index in "${!mount_targets[@]}"; do
+      target=${mount_targets[$index]}
+      if contains_path "$target" "$endpoint"; then
+        target_length=${#target}
+        if ((target_length > owner_length)); then
+          owner_index=$index
+          owner_length=$target_length
+        fi
+      fi
+    done
+    ((owner_index >= 0)) \
+      || fail "findmnt mount TARGET is not an ancestor of $role"
+    target=${mount_targets[$owner_index]}
+    fsroot=${mount_fsroots[$owner_index]}
+    filesystem=${mount_filesystems[$owner_index]}
     literal_storage_path "$fsroot" && canonical_mount_path "$fsroot" \
       || fail "findmnt returned an invalid mount FSROOT for $role"
-    [[ "$filesystem" =~ ^[0-9]+:[0-9]+$ ]] \
-      || fail "findmnt returned an invalid mount MAJ:MIN for $role"
-    contains_path "$target" "$endpoint" \
-      || fail "findmnt mount TARGET is not an ancestor of $role"
     relative=$(relative_to_mount_target "$endpoint" "$target")
     effective=$(effective_mount_path "$fsroot" "$relative")
     literal_storage_path "$effective" && canonical_mount_path "$effective" \
       || fail "findmnt returned an invalid effective path for $role"
-    storage_filesystems[$role]=$filesystem
-    storage_effective_paths[$role]=$effective
+    storage_mount_root_count[$role]=0
+    append_storage_mount_root "$role" "$filesystem" "$effective"
+    for index in "${!mount_targets[@]}"; do
+      target=${mount_targets[$index]}
+      if [[ "$target" != "${mount_targets[$owner_index]}" ]] \
+        && contains_path "$endpoint" "$target"; then
+        fsroot=${mount_fsroots[$index]}
+        filesystem=${mount_filesystems[$index]}
+        literal_storage_path "$fsroot" && canonical_mount_path "$fsroot" \
+          || fail "findmnt returned an invalid nested mount FSROOT for $role"
+        append_storage_mount_root "$role" "$filesystem" "$fsroot"
+      fi
+    done
   done
+}
+
+append_storage_mount_root() {
+  local role=$1
+  local filesystem=$2
+  local path=$3
+  local index=${storage_mount_root_count[$role]:-0}
+  storage_mount_root_filesystems["$role:$index"]=$filesystem
+  storage_mount_root_paths["$role:$index"]=$path
+  storage_mount_root_count[$role]=$((index + 1))
 }
 
 reject_overlaps() {
@@ -228,21 +290,34 @@ reject_overlaps() {
 }
 
 reject_mount_coordinate_overlaps() {
-  local left right index next
+  local left right index next left_index right_index
+  local left_count right_count left_filesystem right_filesystem
+  local left_path right_path
   for ((index = 0; index < ${#storage_roles[@]}; index += 1)); do
     left=${storage_roles[$index]}
     for ((next = index + 1; next < ${#storage_roles[@]}; next += 1)); do
       right=${storage_roles[$next]}
-      if [[ "${storage_filesystems[$left]}" == "${storage_filesystems[$right]}" ]] \
-        && { contains_path "${storage_effective_paths[$left]}" "${storage_effective_paths[$right]}" \
-          || contains_path "${storage_effective_paths[$right]}" "${storage_effective_paths[$left]}"; }; then
-        fail "host storage paths overlap: $left and $right"
-      fi
+      left_count=${storage_mount_root_count[$left]}
+      right_count=${storage_mount_root_count[$right]}
+      for ((left_index = 0; left_index < left_count; left_index += 1)); do
+        left_filesystem=${storage_mount_root_filesystems["$left:$left_index"]}
+        left_path=${storage_mount_root_paths["$left:$left_index"]}
+        for ((right_index = 0; right_index < right_count; right_index += 1)); do
+          right_filesystem=${storage_mount_root_filesystems["$right:$right_index"]}
+          right_path=${storage_mount_root_paths["$right:$right_index"]}
+          if [[ "$left_filesystem" == "$right_filesystem" ]] \
+            && { contains_path "$left_path" "$right_path" \
+              || contains_path "$right_path" "$left_path"; }; then
+            fail "host storage paths overlap: $left and $right"
+          fi
+        done
+      done
     done
   done
 }
 
 command -v realpath >/dev/null || fail "GNU realpath is required"
+command -v iconv >/dev/null || fail "iconv is required for UTF-8 path validation"
 
 if [[ $# -lt 3 || $1 != --env-file ]]; then
   fail "usage: scripts/compose --env-file PATH {up [-d]|run --rm --no-deps slipstream expand-library|down}"
@@ -255,6 +330,7 @@ shift 2
 resolve_existing_path "$environment_file_input" \
   || fail "environment file must be canonicalizable"
 environment_file=$resolved_path
+valid_utf8 "$environment_file" || fail "environment file path must use UTF-8"
 [[ -r "$environment_file" && -f "$environment_file" ]] \
   || fail "environment file must be a readable regular file"
 reject_engine_control_declarations "$environment_file"
@@ -281,6 +357,8 @@ entry_point=$resolved_path
 resolve_existing_path "$(dirname -- "$(dirname -- "$entry_point")")/compose.yaml" \
   || fail "repository compose.yaml is unavailable"
 compose_file=$resolved_path
+valid_utf8 "$entry_point" || fail "entry point path must use UTF-8"
+valid_utf8 "$compose_file" || fail "repository compose.yaml path must use UTF-8"
 
 if [[ "$startup" == true ]]; then
   command -v findmnt >/dev/null || fail "Linux findmnt is required"

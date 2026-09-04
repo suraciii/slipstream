@@ -30,31 +30,33 @@ The preflight reads the literal absolute directory values for
 `SLIPSTREAM_CACHE_DIRECTORY`. For startup and expansion, each key must occur
 exactly once as `KEY=/absolute/path` in the environment file. Values are
 unquoted literals and may contain ordinary internal spaces. The preflight
-rejects leading or trailing whitespace, tabs, carriage returns, control
-characters, `#`, quotes, backslashes, backticks, `$`, shell syntax, Compose
-interpolation, duplicate keys, and any value that is not an existing directory.
-It does not evaluate the environment file or reimplement general Compose
-dotenv syntax. It requires the environment file to be readable and
-canonicalizes that file before passing it to Docker.
+requires every input value to be valid UTF-8 and rejects leading or trailing
+whitespace, tabs, carriage returns, control characters, `#`, quotes,
+backslashes, backticks, `$`, shell syntax, Compose interpolation, duplicate
+keys, and any value that is not an existing directory. It does not evaluate
+the environment file or reimplement general Compose dotenv syntax. It requires
+the environment file to be readable and canonicalizes that file before
+passing it to Docker.
 
 The preflight canonicalizes every source with GNU `realpath -e`, resolving
 symbolic links and lexical aliases without creating a directory. It then uses
-Linux `findmnt` for each canonical endpoint to obtain the owning mount's
-`TARGET`, `FSROOT`, and `MAJ:MIN`. The mount coordinate is the endpoint's
-lexical relative path beneath `TARGET`, appended to `FSROOT`, together with
-`MAJ:MIN` as its filesystem identity. `findmnt` must provide one complete
-coordinate for every endpoint; missing, malformed, or ambiguous output fails
-closed.
+Linux `findmnt --submounts` for each canonical endpoint to capture the complete
+mount hierarchy rooted at the endpoint's owning mount. Every returned
+`TARGET`, `FSROOT`, and `MAJ:MIN` value must be unambiguous, valid UTF-8, and
+well-formed. The endpoint coordinate is the lexical relative path beneath its
+owning `TARGET`, appended to that mount's `FSROOT`, together with `MAJ:MIN` as
+its filesystem identity. The proof set for each storage source also includes
+the `FSROOT` coordinate of every nested mount target beneath that source.
 
 Every pair among Library, state, and cache is incompatible when their
-canonical paths are equal or nested, or when their mount coordinates have the
-same `MAJ:MIN` and equal or nested effective paths. This includes state-cache
-overlap: it could let SQLite state and rebuildable cache overwrite one another
-through different container mount targets. The coordinate comparison catches a
-bind mount that aliases an exact source and one that aliases an ancestor or
-descendant of another source. The same literal-path character rules apply to
-each canonical result, so a safe input alias cannot hide an ambiguous target
-path.
+canonical paths are equal or nested, or when any coordinates in their proof
+sets have the same `MAJ:MIN` and equal or nested paths. This compares all
+cross-role source roots, not only the endpoints' current devices, so a
+different-filesystem mount nested below the Originals source cannot hide a
+state or cache bind alias. This includes state-cache overlap: it could let
+SQLite state and rebuildable cache overwrite one another through different
+container mount targets. The same literal-path character rules apply to each
+canonical result, so a safe input alias cannot hide an ambiguous target path.
 
 After a successful check, the entry point passes the three canonical source
 values to Docker Compose. `compose.yaml` mounts each source at that same
@@ -77,12 +79,13 @@ ordinary nesting relationship.
    whose endpoint is not a local Unix socket before invoking Compose.
 4. For every startup form, it canonicalizes the readable environment file and
    accepts only one literal declaration for each required storage value. It
-   rejects duplicates, ambiguous characters, variable references,
-   non-absolute paths, and missing or non-directory sources without evaluating
-   any file content.
-5. For every startup form, it canonicalizes all three sources and rejects an
-   equal, descendant, or ancestor relationship for every pair, including a
-   relationship exposed by their Linux mount coordinates.
+   rejects invalid UTF-8, duplicates, ambiguous characters, variable
+   references, non-absolute paths, and missing or non-directory sources
+   without evaluating any file content.
+5. For every startup form, it canonicalizes all three sources and captures
+   their complete nested mount hierarchies. It rejects an equal, descendant,
+   or ancestor relationship for every pair, including a relationship exposed
+   by any cross-filesystem mount source coordinate.
 6. A fixed `down` skips storage-source parsing, existence, canonicalization,
    and topology checks. It retains the environment-file, repository Compose
    file, local-context, and exact-argument constraints so an operator can stop
@@ -121,10 +124,11 @@ time-of-check/time-of-use window.
 ### Selected: Bash Entry Point with GNU `realpath -e` and `findmnt`
 
 A small Bash launcher can resolve the actual bind sources before Docker sees
-them, derive their Linux mount coordinates, reject unsafe topology without
-creating a container, and force the validated source values into the Compose
-process. Bash, GNU coreutils, and util-linux `findmnt` are part of the
-supported Linux host baseline, so this adds no language runtime.
+them, derive their complete Linux mount hierarchy coordinates, reject unsafe
+topology without creating a container, and force the validated source values
+into the Compose process. Bash, GNU coreutils `realpath` and `iconv`, and
+util-linux `findmnt` are part of the supported Linux host baseline, so this
+adds no language runtime.
 Requiring one explicit environment file, a narrow literal grammar, and exact
 command forms keeps the input bounded and auditable without treating operator
 configuration as shell code.
@@ -167,6 +171,10 @@ Automated entry-point tests prove that:
   for every pair among Library, state, and cache;
 - exact bind aliases and bind aliases of a source ancestor or descendant fail
   for every pair among Library, state, and cache;
+- raw non-UTF-8 input and canonical or mount-coordinate paths fail closed
+  before Docker;
+- a nested mount on another filesystem whose source coordinate aliases a
+  different storage role fails closed before Docker; and
 - each failed startup avoids the Docker invocation and leaves the Originals
   tree and content unchanged; and
 - the offline `run ... expand-library` path uses the same failed preflight.

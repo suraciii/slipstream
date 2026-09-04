@@ -60,18 +60,19 @@ Storage rules:
 
 - For `up` and Library Expansion, the Originals, state, and cache directories
   must already exist. Each must occur exactly once as `KEY=/absolute/path` in
-  the environment file. Its value must be an unquoted literal. It may contain
-  ordinary internal spaces, but must not have leading or trailing whitespace,
-  tabs, carriage returns, control characters, `#`, quotes, backslashes,
-  backticks, or `$`. Shell expansion and Compose variable interpolation are
-  not supported for these three values. The same rule applies after resolving
-  a symlink or lexical alias, so a safe-looking alias cannot hide an ambiguous
-  target path.
+  the environment file. Its value must be an unquoted, valid UTF-8 literal. It
+  may contain ordinary internal spaces, but must not have leading or trailing
+  whitespace, tabs, carriage returns, control characters, `#`, quotes,
+  backslashes, backticks, or `$`. Shell expansion and Compose variable
+  interpolation are not supported for these three values. The same rule
+  applies after resolving a symlink or lexical alias and to returned mount
+  paths, so a safe-looking alias cannot hide an ambiguous target path or byte
+  encoding.
 - The Originals directory must be readable by UID 1000. State and cache
   directories must be writable by UID 1000.
 - Originals, state, and cache must be pairwise disjoint after symlinks,
-  lexical aliases, and Linux bind-mount coordinates resolve. No pair may
-  equal, contain, or be contained by the other.
+  lexical aliases, and the complete Linux nested-mount source coordinates
+  resolve. No pair may equal, contain, or be contained by the other.
 - Never run two Slipstream processes against one SQLite database.
 
 `GET /healthz` returns `200 {"status":"ok"}` after storage admission, Preview
@@ -87,7 +88,7 @@ requires one environment file and always uses this repository's `compose.yaml`:
 ./scripts/compose --env-file /path/to/slipstream.env up -d
 ```
 
-The entry point requires Bash, GNU `realpath`, and Linux `findmnt`. It supports
+The entry point requires Bash, GNU `realpath` and `iconv`, and Linux `findmnt`. It supports
 only these command forms:
 
 ```sh
@@ -97,12 +98,14 @@ only these command forms:
 ./scripts/compose --env-file /path/to/slipstream.env down
 ```
 
-It resolves the three host storage sources before it invokes Compose. It passes
-every resolved source both as the container path and as the server
-configuration value, so Docker mounts the sources that the preflight checked
-and the server sees their real topology. It rejects any equal, nested,
-symbolic-link-alias, or Linux bind-mount-alias pair before it invokes Compose
-or changes the Originals tree or content.
+It resolves the three host storage sources and captures each endpoint's complete
+nested mount hierarchy before it invokes Compose. It passes every resolved
+source both as the container path and as the server configuration value, so
+Docker mounts the sources that the preflight checked and the server sees their
+real topology. It rejects any equal, nested, symbolic-link-alias, or
+Linux bind-mount-alias pair—including aliases exposed through a nested mount
+on another filesystem—before it invokes Compose or changes the Originals tree
+or content.
 It also rejects alternate Compose files, additional environment files, mount,
 environment, or entrypoint overrides, and unsupported Compose commands. The
 server retains its storage admission as a second safety boundary. The entry
