@@ -1356,13 +1356,14 @@ test("environment-file configuration wins over ambient values", async () => {
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
       SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
     });
-    expect(ports).toContainEqual(
-      expect.objectContaining({
-        host_ip: "127.0.0.2",
-        published: "3100",
-        target: 3000,
-      }),
-    );
+    expect(
+      ports.some(
+        (port) =>
+          port.host_ip === "127.0.0.2" &&
+          port.published === "3100" &&
+          port.target === 3000,
+      ),
+    ).toBeTrue();
 
     for (const role of ["library", "state", "cache"] as const) {
       const source = canonicalSources[role];
@@ -1485,13 +1486,14 @@ test("Docker Compose config preserves the storage and environment-file contract"
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
       SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
     });
-    expect(ports).toContainEqual(
-      expect.objectContaining({
-        host_ip: "127.0.0.2",
-        published: "3100",
-        target: 3000,
-      }),
-    );
+    expect(
+      ports.some(
+        (port) =>
+          port.host_ip === "127.0.0.2" &&
+          port.published === "3100" &&
+          port.target === 3000,
+      ),
+    ).toBeTrue();
 
     const bindMounts = volumes
       .filter((candidate) => candidate.type === "bind")
