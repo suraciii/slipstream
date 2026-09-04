@@ -377,6 +377,37 @@ test("the Compose entry point forwards canonical sources to matching targets", a
   }
 });
 
+test("storage paths may contain the names of other storage keys", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const stateWithKeyName = join(
+      target.root,
+      "state-SLIPSTREAM_LIBRARY_ROOT-backup",
+    );
+    await mkdir(stateWithKeyName);
+    layout.sources.state = stateWithKeyName;
+    await writeEnvironment(target, layout.sources);
+    await writeMountCoordinates(
+      target,
+      Object.values(directMountCoordinates(layout.sources)),
+    );
+
+    const result = await runCompose(target, ["up"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(await Bun.file(target.composeArguments).exists()).toBeTrue();
+    expect((await Bun.file(target.composeSources).text()).split("\n")).toEqual([
+      await realpath(layout.sources.library),
+      await realpath(layout.sources.state),
+      await realpath(layout.sources.cache),
+      "",
+    ]);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
 for (const [left, right] of [
   ["library", "state"],
   ["library", "cache"],
@@ -648,10 +679,14 @@ test("a safe alias cannot hide an ambiguous canonical storage path", async () =>
       "dollar$target",
       "newline\ntarget",
       "tab\ttarget",
+      "trailing-newline\n",
     ].entries()) {
       const ambiguousTarget = join(target.root, `ambiguous-${suffix}`);
       const safeAlias = join(target.root, `state-alias-${index}`);
       await mkdir(ambiguousTarget);
+      if (suffix.endsWith("\n")) {
+        await mkdir(ambiguousTarget.slice(0, -1));
+      }
       await symlink(ambiguousTarget, safeAlias);
       await writeEnvironment(target, { ...layout.sources, state: safeAlias });
 
@@ -745,7 +780,11 @@ test("remote Docker selection is rejected before Compose", async () => {
     for (const environment of [
       { DOCKER_HOST: "tcp://remote.example:2375" },
       { DOCKER_CONTEXT: "remote" },
+      { DOCKER_HOST: "" },
+      { DOCKER_CONTEXT: "" },
       { FAKE_DOCKER_CONTEXT_ENDPOINT: "tcp://remote.example:2375" },
+      { FAKE_DOCKER_CONTEXT_ENDPOINT: "unix://" },
+      { FAKE_DOCKER_CONTEXT_ENDPOINT: "unix:///tmp/docker\n" },
     ]) {
       const result = await runCompose(target, ["up"], { environment });
 
@@ -821,6 +860,7 @@ test("the environment file cannot select a Compose project, profile, file, or Do
       "COMPOSE_ENV_FILES=other.env",
       "DOCKER_CONTEXT=remote",
       "DOCKER_HOST=tcp://remote.example:2375",
+      "COMPOSE_1=other",
     ]) {
       await writeFile(
         target.environmentFile,

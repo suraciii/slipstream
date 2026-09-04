@@ -21,16 +21,39 @@ require_local_docker() {
   if [[ "$(uname -s)" != Linux ]]; then
     fail "local Docker Engine requires Linux"
   fi
-  if [[ -n "${DOCKER_HOST:-}" || -n "${DOCKER_CONTEXT:-}" ]]; then
+  if [[ -v DOCKER_HOST || -v DOCKER_CONTEXT ]]; then
     fail "local Docker Engine does not allow DOCKER_HOST or DOCKER_CONTEXT"
   fi
-  local endpoint
-  if ! endpoint="$(docker context inspect default --format '{{ .Endpoints.docker.Host }}' 2>/dev/null)"; then
+  local captured endpoint
+  if ! captured=$(
+    docker context inspect default --format '{{ .Endpoints.docker.Host }}' 2>/dev/null || exit 1
+    printf '\037'
+  ); then
     fail "local Docker Engine default context is unavailable"
   fi
-  if [[ "$endpoint" != unix://* || "$endpoint" == *$'\n'* ]]; then
+  [[ "$captured" == *$'\037' ]] || fail "local Docker Engine default context is malformed"
+  captured=${captured%$'\037'}
+  [[ "$captured" == *$'\n' ]] || fail "local Docker Engine default context is malformed"
+  endpoint=${captured%$'\n'}
+  if [[ ! "$endpoint" =~ ^unix:///[^[:cntrl:]]+$ ]]; then
     fail "local Docker Engine default context must use a Unix socket"
   fi
+}
+
+resolved_path=''
+
+resolve_existing_path() {
+  local input=$1 captured
+  if ! captured=$(
+    realpath -e -- "$input" || exit 1
+    printf '\037'
+  ); then
+    return 1
+  fi
+  [[ "$captured" == *$'\037' ]] || return 1
+  captured=${captured%$'\037'}
+  [[ "$captured" == *$'\n' ]] || return 1
+  resolved_path=${captured%$'\n'}
 }
 
 literal_storage_path() {
@@ -54,14 +77,15 @@ parse_storage_sources() {
         [[ ! -v "declared[$key]" ]] || fail "storage environment file has duplicate $key"
         value=${line#"$key="}
         literal_storage_path "$value" || fail "storage environment file has invalid $key"
-        canonical=$(realpath -e -- "$value") || fail "storage environment file has unavailable $key"
+        resolve_existing_path "$value" || fail "storage environment file has unavailable $key"
+        canonical=$resolved_path
         literal_storage_path "$canonical" || fail "storage environment file has invalid $key"
         [[ -d "$canonical" ]] || fail "storage environment file has non-directory $key"
         declared[$key]=1
         storage_sources[$role]=$canonical
         continue 2
       fi
-      if [[ "$line" == *"$key"* ]]; then
+      if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?${key}([^A-Za-z0-9_]|$) ]]; then
         fail "storage environment file has invalid $key"
       fi
     done
@@ -77,7 +101,7 @@ reject_engine_control_declarations() {
   local line
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(COMPOSE|DOCKER)_[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=|$) ]]; then
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(COMPOSE|DOCKER)_[A-Za-z0-9_]*[[:space:]]*(=|$) ]]; then
       fail "environment file must not declare Compose or Docker control variables"
     fi
   done < "$environment_file"
@@ -228,8 +252,9 @@ environment_file_input=$2
 shift 2
 [[ -r "$environment_file_input" && -f "$environment_file_input" ]] \
   || fail "environment file must be a readable regular file"
-environment_file=$(realpath -e -- "$environment_file_input") \
+resolve_existing_path "$environment_file_input" \
   || fail "environment file must be canonicalizable"
+environment_file=$resolved_path
 [[ -r "$environment_file" && -f "$environment_file" ]] \
   || fail "environment file must be a readable regular file"
 reject_engine_control_declarations "$environment_file"
@@ -250,9 +275,12 @@ else
   fail "unsupported Compose command"
 fi
 
-entry_point=$(realpath -e -- "${BASH_SOURCE[0]}") || fail "entry point must be canonicalizable"
-compose_file=$(realpath -e -- "$(dirname -- "$(dirname -- "$entry_point")")/compose.yaml") \
+resolve_existing_path "${BASH_SOURCE[0]}" \
+  || fail "entry point must be canonicalizable"
+entry_point=$resolved_path
+resolve_existing_path "$(dirname -- "$(dirname -- "$entry_point")")/compose.yaml" \
   || fail "repository compose.yaml is unavailable"
+compose_file=$resolved_path
 
 if [[ "$startup" == true ]]; then
   command -v findmnt >/dev/null || fail "Linux findmnt is required"
