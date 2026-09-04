@@ -6,8 +6,12 @@ The native Preview boundary is currently verified on Linux only.
 
 - Rust `1.97.1` with Cargo, Clippy, and rustfmt
 - Bun `1.4.0`
+- Docker CLI with the Compose plugin supporting `docker compose config --format json`
 - A C++17 compiler and Python 3
 - `pkg-config`, LibRaw, libjpeg-turbo, libvips, and LittleCMS development headers
+
+The canonical `verify` gate uses Docker Compose only for its daemon-free
+configuration parser check; it does not require a running Docker daemon.
 
 On Debian/Ubuntu, install native dependencies with:
 

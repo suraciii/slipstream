@@ -1373,6 +1373,7 @@ test("Docker Compose config preserves the storage and environment-file contract"
     const configuration = await dockerComposeConfig(target.environmentFile);
     const services = configuration.services as Record<string, unknown>;
     expect(services).toBeDefined();
+    expect(Object.keys(services)).toEqual(["slipstream"]);
     const service = services.slipstream as Record<string, unknown>;
     expect(service).toBeDefined();
     const build = service.build as Record<string, unknown>;
