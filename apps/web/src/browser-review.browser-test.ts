@@ -1002,9 +1002,25 @@ test("current source and Rating are programmatic states and Back to Grid restore
   ).not.toHaveAttribute("aria-current");
   await page.getByRole("button", { name: "Close", exact: true }).click();
 
-  const zero = page.getByRole("button", { name: "Clear Rating" });
+  const ratingNames = [
+    "Clear Rating, 0 stars",
+    "Rate 1 star",
+    "Rate 2 stars",
+    "Rate 3 stars",
+    "Rate 4 stars",
+    "Rate 5 stars",
+  ];
+  for (const name of ratingNames)
+    await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+
+  const zero = page.getByRole("button", {
+    name: "Clear Rating, 0 stars",
+  });
   await expect(
-    page.getByRole("button", { name: "Clear Rating", pressed: true }),
+    page.getByRole("button", {
+      name: "Clear Rating, 0 stars",
+      pressed: true,
+    }),
   ).toBeVisible();
   await page.keyboard.press("5");
   await expect(
