@@ -1,11 +1,7 @@
 services:
   slipstream:
-    image: ${SLIPSTREAM_IMAGE:-slipstream:local}
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        SLIPSTREAM_VCS_REF: ${SLIPSTREAM_VCS_REF:-unknown}
+    platform: linux/amd64
+    image: ${SLIPSTREAM_IMAGE:?Set SLIPSTREAM_IMAGE to an immutable image digest}
     user: "1000:1000"
     read_only: true
     tmpfs:

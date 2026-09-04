@@ -11,6 +11,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Photo Library Identity and Expansion](library-identity.md): stable Original File and Photo identity, one Library Folder, explicit ancestor expansion, failure behavior, and rejected asset-management abstractions
 - [Physical File Locations and Virtual Albums](photo-organization.md): read-only Original Folder projection, Album ownership, source semantics, bounded Folder navigation, and the v4-to-v5 terminology migration
 - [Rust Server Architecture](rust-server.md): production language, module ownership, dependency direction, compatibility, cutover, and rollback
+- [Container Build Inputs](container-inputs.md): immutable base images, Ubuntu native package inputs, and release qualification boundaries
 - [Capture-Time Library Ordering](capture-time-ordering.md): metadata authority, deterministic Library and Original Folder order, explicit Album order, persistence, rescan lifecycle, migration, and rollback
 - [Scalable Library Browsing](library-browsing.md): lightweight overview, progressively loaded Grid and Photo views, stable hidden browse snapshots, background scan status, and persistent Preview caching
 - [Preview Pipeline](preview-pipeline.md): matching-JPEG and embedded-JPEG selection, extraction, normalization, caching, and delivery

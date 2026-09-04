@@ -25,8 +25,8 @@ check before Compose creates or starts a container.
 The repository owns one Compose entry point, `scripts/compose`. It owns the
 host storage preflight, the Compose configuration it executes, and the
 canonical host sources supplied to Docker. [Deployment](../docs/deployment.md)
-defines the supported operator invocation, input grammar, host prerequisites,
-and configuration precedence.
+defines the supported operator invocation, image and storage input grammar,
+host prerequisites, and configuration precedence.
 
 For startup and Library Expansion, the preflight works over exactly three host
 storage roles: Library, state, and cache. It canonicalizes each source without
@@ -51,8 +51,9 @@ see the ordinary nesting relationship.
 ## Semantics
 
 1. Every supported startup and Library Expansion traverses the entry point.
-   It cannot reach Compose unless the preflight establishes the three-source
-   invariant.
+   It cannot reach Compose unless the required immutable image and the
+   three-source invariant are established. The entry point runs Compose with
+   build disabled, so the repository cannot become an image fallback.
 2. A preflight rejects every equal, ancestor, descendant, symbolic-link alias,
    or mount-coordinate alias pair. Ambiguous source or mount information also
    fails closed.
@@ -62,8 +63,8 @@ see the ordinary nesting relationship.
    same paths the server receives. The server's existing storage admission
    remains a second safety boundary.
 5. The supported stop operation is not a startup path. It may run without
-   source existence or topology checks so an operator can stop a container
-   after its configuration becomes unavailable or unsafe.
+   image, source-existence, or topology checks so an operator can stop a
+   container after its configuration becomes unavailable or unsafe.
 6. Docker autonomous restart is prohibited. Any future automatic recovery must
    use a preflight-aware host start path.
 
@@ -134,4 +135,5 @@ even when a configured storage source no longer exists.
 
 The Compose contract test also proves that the entry point fixes the repository
 Compose configuration, rejects replacement configuration and topology
-overrides, and leaves no autonomous restart policy.
+overrides, runs a digest-only service with build disabled, and leaves no
+autonomous restart policy.

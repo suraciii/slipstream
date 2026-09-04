@@ -12,8 +12,7 @@ with the deployment, not in this repository.
 Create an environment file outside the repository:
 
 ```dotenv
-SLIPSTREAM_IMAGE=slipstream:<immutable-release-tag>
-SLIPSTREAM_VCS_REF=<exact-merged-commit>
+SLIPSTREAM_IMAGE=registry.example.com:5000/slipstream/release@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 SLIPSTREAM_LIBRARY_ROOT=/srv/slipstream/originals
 SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
 SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
@@ -58,6 +57,13 @@ would otherwise receive `405` or `404`.
 
 Storage rules:
 
+- For `up` and Library Expansion, `SLIPSTREAM_IMAGE` must occur exactly once as
+  an unquoted, literal immutable image reference. Its repository path uses
+  lowercase components and may include a registry port. It must end in
+  `@sha256:` followed by 64 lowercase hexadecimal characters. Shell expansion,
+  Compose interpolation, and mutable tags are not supported. Supported Compose
+  operations run that digest-pinned image only; they never build an image from
+  the repository as a fallback.
 - For `up` and Library Expansion, the Originals, state, and cache directories
   must already exist. Each must occur exactly once as `KEY=/absolute/path` in
   the environment file. Its value must be an unquoted, valid UTF-8 literal. It
@@ -100,27 +106,27 @@ Linux `findmnt`. It supports only these command forms:
 ./scripts/compose --env-file /path/to/slipstream.env down
 ```
 
-It resolves the three host storage sources and captures each endpoint's complete
+For `up` and Library Expansion, it validates the required image input and
+resolves the three host storage sources and captures each endpoint's complete
 nested mount hierarchy before it invokes Compose. It passes every resolved
 source both as the container path and as the server configuration value, so
 Docker mounts the sources that the preflight checked and the server sees their
-real topology. It rejects any equal, nested, symbolic-link-alias, or
-Linux bind-mount-alias pair—including aliases exposed through a nested mount
-on another filesystem—before it invokes Compose or changes the Originals tree
-or content.
+real topology. It rejects any equal, nested, symbolic-link-alias, or Linux
+bind-mount-alias pair—including aliases exposed through a nested mount on
+another filesystem—before it invokes Compose or changes the Originals tree or
+content.
 It also rejects alternate Compose files, additional environment files, mount,
 environment, or entrypoint overrides, and unsupported Compose commands. The
 server retains its storage admission as a second safety boundary. The entry
 point fixes the Compose project name as `slipstream` and rejects any
 `COMPOSE_*` or `DOCKER_*` declaration in the environment file.
-For the finite Compose configuration surface, the environment file also wins
-over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_VCS_REF`,
-`SLIPSTREAM_BIND_ADDRESS`, `SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and
-`SLIPSTREAM_DATABASE_BASENAME` values.
-It also clears ambient `SLIPSTREAM_LIBRARY_ROOT`,
-`SLIPSTREAM_STATE_DIRECTORY`, and `SLIPSTREAM_CACHE_DIRECTORY`: startup then
-exports its checked canonical values, while fixed `down` leaves those values to
-the environment file without reading their paths.
+For the finite startup Compose configuration surface, the environment file also
+wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
+`SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and
+`SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
+`SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
+`SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
+values.
 
 `compose.yaml` intentionally declares no Docker restart policy. Every container
 start must be initiated through `scripts/compose` so the host storage preflight
@@ -132,10 +138,15 @@ This contract supports only a Linux host using its local Docker Engine. Do not
 set `DOCKER_HOST` or `DOCKER_CONTEXT`; the entry point rejects them and rejects
 a Docker default context that is not a local Unix socket. Direct `docker
 compose` invocation is outside the supported deployment contract. The fixed
-`down` form intentionally skips storage-source existence and topology checks,
-so an operator can stop an existing container after a source path disappears
-or becomes unsafe. It still uses the supplied environment file, the repository
-Compose file, and the local Docker context.
+`down` form intentionally skips image and storage-source preflight, so an
+operator can stop an existing container after a source path or image input
+becomes unavailable or unsafe. While Compose parses that fixed stop operation,
+the entry point supplies fixed internal stop-only image and storage values
+instead of using the environment file values. They do not select, pull, build,
+or run an image, and they do not access storage paths. This exception applies
+only to a readable, Compose-parseable environment file; its image and storage
+values may be missing or unsafe. The operation still uses the repository
+Compose file and local Docker context.
 
 The operator must trust the local Docker daemon and socket, and that daemon
 must use the same host mount namespace as `scripts/compose`. The three storage
@@ -149,13 +160,58 @@ Build from a clean checkout of the exact commit:
 
 ```sh
 commit=$(git rev-parse HEAD)
-docker build --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
+docker buildx build --platform linux/amd64 --load \
+  --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
 ```
 
 Record the image digest. Verify the image user is `1000:1000` and that no
 Node, Bun, npm, Sharp, or Node-API runtime artifact is present before an
 operator-controlled deployment. Operators may script these checks; any
 equivalent inspection is acceptable.
+
+## Reproducible Inputs
+
+Slipstream supports Linux amd64 release images. The Dockerfile fixes every
+non-scratch base image by digest. Its Ubuntu build and runtime inputs use the
+official snapshot and direct package locks in [`../docker/apt/`](../docker/apt/).
+The [container input design](../design/container-inputs.md) defines their
+ownership and update rule.
+
+Use the explicit `docker buildx build --platform linux/amd64` command above
+for release qualification. Supported Compose does not build from this checkout:
+it runs only the digest-pinned image named by `SLIPSTREAM_IMAGE`, with no source
+fallback. A normal `docker compose` build is not qualification evidence.
+The GitHub Actions `ubuntu-latest` is a source and test runner. It is not a
+release-image input, and its native test dependencies do not prove the native
+packages in a release container.
+
+These checked-in inputs provide source reproducibility: rebuilding one exact
+candidate selects the same base image indexes and native package inputs. They
+do not promise a byte-identical output image. A resulting digest, timestamp,
+or other output record establishes a single build's traceability only.
+
+Change an image digest, the Ubuntu snapshot, or either direct package lock in
+one reviewed dependency update. Do not substitute a moving tag, archive, or
+fallback mirror.
+
+## Qualification Evidence
+
+Release qualification is operator work. It must use the exact candidate and
+the image command above. Keep its evidence outside the repository with the
+private deployment material.
+
+Record all of the following:
+
+- exact candidate SHA and the `linux/amd64` build command;
+- OCI revision and immutable digest from the final image;
+- final native package versions from `dpkg-query` in that image;
+- the generated SBOM and the tool identity used to generate it; and
+- advisory scanner identity, advisory database timestamp, findings, and their
+  disposition.
+
+The advisory database timestamp states what data the scanner used for that one
+qualification. It does not freeze future advisory results or replace a later
+advisory review.
 
 ## Backup
 
@@ -203,7 +259,7 @@ prior Folder.
 ## Cutover and verification
 
 1. Confirm the target image digest and the verified state backup.
-2. Start the tagged image with the prepared environment:
+2. Start the digest-pinned image with the prepared environment:
 
    ```sh
    ./scripts/compose --env-file /path/to/slipstream.env up -d

@@ -20,6 +20,10 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const composeEntryPoint = join(repositoryRoot, "scripts", "compose");
 const composeFile = join(repositoryRoot, "compose.yaml");
+const immutableImage =
+  "registry.example.com:5000/slipstream/release@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const downImageSentinel =
+  "registry.invalid/slipstream/stop@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const originalBytes = "Original bytes must not change";
 
 type StorageRole = "library" | "state" | "cache";
@@ -28,6 +32,12 @@ const storageEnvironmentKeys: Record<StorageRole, string> = {
   library: "SLIPSTREAM_LIBRARY_ROOT",
   state: "SLIPSTREAM_STATE_DIRECTORY",
   cache: "SLIPSTREAM_CACHE_DIRECTORY",
+};
+
+const downStorageSentinels: Record<StorageRole, string> = {
+  library: "/__slipstream-down-library__",
+  state: "/__slipstream-down-state__",
+  cache: "/__slipstream-down-cache__",
 };
 
 interface Fixture {
@@ -153,14 +163,20 @@ async function fixture(): Promise<Fixture> {
       '  original_arguments=("$@")',
       "  shift 3",
       '  printf \'%s\\n\' "$@" > "$FAKE_DOCKER_COMPOSE_ARGUMENTS"',
-      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_VCS_REF-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_PUBLIC_ORIGIN-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
+      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_PUBLIC_ORIGIN-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
       '  printf \'%s\\n\' "${COMPOSE_FILE-}" "${COMPOSE_ENV_FILES-}" "${COMPOSE_PROFILES-}" "${COMPOSE_PROJECT_NAME-}" > "$FAKE_DOCKER_COMPOSE_ENVIRONMENT"',
       '  printf \'%s\\n\' "${SLIPSTREAM_LIBRARY_ROOT-}" "${SLIPSTREAM_STATE_DIRECTORY-}" "${SLIPSTREAM_CACHE_DIRECTORY-}" > "$FAKE_DOCKER_COMPOSE_SOURCES"',
       '  if [[ "${FAKE_DOCKER_REAL_CONFIG:-}" == "1" ]]; then',
       '    config_arguments=("${original_arguments[@]}")',
       "    last_index=$((${#config_arguments[@]} - 1))",
-      '    [[ "$last_index" -ge 0 && "${config_arguments[$last_index]}" == "up" ]] || exit 93',
-      '    config_arguments=("${config_arguments[@]:0:last_index}" config --format json)',
+      "    previous_index=$((last_index - 1))",
+      '    if [[ "$previous_index" -ge 0 && "${config_arguments[$previous_index]}" == "up" && "${config_arguments[$last_index]}" == "--no-build" ]]; then',
+      '      config_arguments=("${config_arguments[@]:0:previous_index}" config --format json)',
+      '    elif [[ "$last_index" -ge 0 && "${config_arguments[$last_index]}" == "down" ]]; then',
+      '      config_arguments=("${config_arguments[@]:0:last_index}" config --format json)',
+      "    else",
+      "      exit 93",
+      "    fi",
       "    real_docker=${FAKE_REAL_DOCKER:?}",
       '    [[ "$real_docker" == /* && -x "$real_docker" ]] || exit 94',
       '    exec "$real_docker" "${config_arguments[@]}"',
@@ -310,8 +326,7 @@ async function writeEnvironment(
   await writeFile(
     target.environmentFile,
     [
-      "SLIPSTREAM_IMAGE=slipstream:from-environment-file",
-      "SLIPSTREAM_VCS_REF=environment-file-ref",
+      `SLIPSTREAM_IMAGE=${immutableImage}`,
       "SLIPSTREAM_BIND_ADDRESS=127.0.0.2",
       "SLIPSTREAM_PORT=3100",
       "SLIPSTREAM_PUBLIC_ORIGIN=https://environment-file.invalid",
@@ -508,6 +523,72 @@ async function expectNulEnvironmentRejected(
   expect(await originalEvidence(sources.library)).toEqual(before);
 }
 
+for (const { commandName, command } of [
+  { commandName: "startup", command: ["up"] },
+  {
+    commandName: "Library Expansion",
+    command: ["run", "--rm", "--no-deps", "slipstream", "expand-library"],
+  },
+] as const) {
+  for (const { label, imageLines } of [
+    { label: "missing", imageLines: [] },
+    { label: "unassigned", imageLines: ["SLIPSTREAM_IMAGE"] },
+    { label: "quoted", imageLines: [`SLIPSTREAM_IMAGE="${immutableImage}"`] },
+    {
+      label: "interpolated",
+      imageLines: ["SLIPSTREAM_IMAGE=${SLIPSTREAM_RELEASE_IMAGE}"],
+    },
+    {
+      label: "mutable tag",
+      imageLines: ["SLIPSTREAM_IMAGE=registry.example.com/slipstream:stable"],
+    },
+    {
+      label: "invalid digest",
+      imageLines: [
+        "SLIPSTREAM_IMAGE=registry.example.com:5000/slipstream/release@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF",
+      ],
+    },
+    {
+      label: "duplicate",
+      imageLines: [
+        `SLIPSTREAM_IMAGE=${immutableImage}`,
+        `SLIPSTREAM_IMAGE=${immutableImage}`,
+      ],
+    },
+  ] as const) {
+    test(`${commandName} rejects ${label} image input before Docker and preserves Originals`, async () => {
+      const target = await fixture();
+      try {
+        const layout = await topology(target);
+        await writeFile(
+          join(layout.sources.library, "preserved.ARW"),
+          originalBytes,
+        );
+        const before = await originalEvidence(layout.sources.library);
+        await writeFile(
+          target.environmentFile,
+          [
+            ...imageLines,
+            `SLIPSTREAM_LIBRARY_ROOT=${layout.sources.library}`,
+            `SLIPSTREAM_STATE_DIRECTORY=${layout.sources.state}`,
+            `SLIPSTREAM_CACHE_DIRECTORY=${layout.sources.cache}`,
+          ].join("\n"),
+        );
+
+        const result = await runCompose(target, command);
+
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("image environment file");
+        expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+        expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+        expect(await originalEvidence(layout.sources.library)).toEqual(before);
+      } finally {
+        await removeFixture(target);
+      }
+    });
+  }
+}
+
 async function prepareInvalidTopology(
   target: Fixture,
   left: StorageRole,
@@ -575,7 +656,7 @@ for (const role of ["library", "state", "cache"] as const) {
   }
 }
 
-test("the Compose entry point forwards canonical sources to matching targets", async () => {
+test("startup and Library Expansion forward canonical sources with builds disabled", async () => {
   const target = await fixture();
   try {
     const layout = await topology(target);
@@ -600,35 +681,54 @@ test("the Compose entry point forwards canonical sources to matching targets", a
     const environmentAlias = join(target.root, "environment-alias");
     await symlink(target.environmentFile, environmentAlias);
 
-    const result = await runCompose(target, ["up", "-d"], {
-      environmentFile: environmentAlias,
-      environment: {
-        SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
-        SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
-        SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+    for (const { command, expectedCommand } of [
+      {
+        command: ["up", "-d"],
+        expectedCommand: ["up", "-d", "--no-build"],
       },
-    });
+      {
+        command: ["run", "--rm", "--no-deps", "slipstream", "expand-library"],
+        expectedCommand: [
+          "run",
+          "--rm",
+          "--no-deps",
+          "--no-build",
+          "slipstream",
+          "expand-library",
+        ],
+      },
+    ] as const) {
+      const result = await runCompose(target, command, {
+        environmentFile: environmentAlias,
+        environment: {
+          SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
+          SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
+          SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+        },
+      });
 
-    expect(result.exitCode).toBe(0);
-    expect(await Bun.file(target.composeArguments).text()).toBe(
-      [
-        "--project-name",
-        "slipstream",
-        "--env-file",
-        await realpath(target.environmentFile),
-        "-f",
-        composeFile,
-        "up",
-        "-d",
+      expect(result.exitCode).toBe(0);
+      expect(await Bun.file(target.composeArguments).text()).toBe(
+        [
+          "--project-name",
+          "slipstream",
+          "--env-file",
+          await realpath(target.environmentFile),
+          "-f",
+          composeFile,
+          ...expectedCommand,
+          "",
+        ].join("\n"),
+      );
+      expect(
+        (await Bun.file(target.composeSources).text()).split("\n"),
+      ).toEqual([
+        await realpath(layout.sources.library),
+        await realpath(layout.sources.state),
+        await realpath(layout.sources.cache),
         "",
-      ].join("\n"),
-    );
-    expect((await Bun.file(target.composeSources).text()).split("\n")).toEqual([
-      await realpath(layout.sources.library),
-      await realpath(layout.sources.state),
-      await realpath(layout.sources.cache),
-      "",
-    ]);
+      ]);
+    }
   } finally {
     await removeFixture(target);
   }
@@ -1294,7 +1394,6 @@ test("environment-file configuration wins over ambient values", async () => {
     const result = await runCompose(target, ["up"], {
       environment: {
         SLIPSTREAM_IMAGE: "slipstream:ambient",
-        SLIPSTREAM_VCS_REF: "ambient-ref",
         SLIPSTREAM_BIND_ADDRESS: "0.0.0.0",
         SLIPSTREAM_PORT: "3999",
         SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.invalid",
@@ -1323,11 +1422,12 @@ test("environment-file configuration wins over ambient values", async () => {
         "-f",
         composeFile,
         "up",
+        "--no-build",
         "",
       ].join("\n"),
     );
     expect(await Bun.file(target.composeConfiguration).text()).toBe(
-      "\n\n\n\n\n\n",
+      "\n\n\n\n\n",
     );
     expect(await Bun.file(target.composeEnvironment).text()).toBe("\n\n\n\n");
 
@@ -1344,14 +1444,17 @@ test("environment-file configuration wins over ambient values", async () => {
     const services = configuration.services as Record<string, unknown>;
     expect(Object.keys(services)).toEqual(["slipstream"]);
     const service = services.slipstream as Record<string, unknown>;
-    const build = service.build as Record<string, unknown>;
-    const buildArguments = build.args as Record<string, unknown>;
     const environment = service.environment as Record<string, unknown>;
     const ports = service.ports as Array<Record<string, unknown>>;
     const volumes = service.volumes as Array<Record<string, unknown>>;
 
-    expect(service.image).toBe("slipstream:from-environment-file");
-    expect(buildArguments.SLIPSTREAM_VCS_REF).toBe("environment-file-ref");
+    expect(service.platform).toBe("linux/amd64");
+    expect(service.image).toBe(immutableImage);
+    expect(service.build).toBeUndefined();
+    expect(service.read_only).toBe(true);
+    expect(service.user).toBe("1000:1000");
+    expect(service.cap_drop).toEqual(["ALL"]);
+    expect(service.security_opt).toEqual(["no-new-privileges:true"]);
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
       SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
@@ -1379,7 +1482,10 @@ test("environment-file configuration wins over ambient values", async () => {
       expect(volume).toBeDefined();
       expect(volume?.source).toBe(environment[key]);
       expect(volume?.target).toBe(environment[key]);
+      expect(volume?.read_only ?? false).toBe(role === "library");
     }
+    expect(service.restart).toBeUndefined();
+    expect(service.restart_policy).toBeUndefined();
   } finally {
     await removeFixture(target);
   }
@@ -1424,41 +1530,94 @@ test("the environment file cannot select a Compose project, profile, file, or Do
   }
 });
 
-test("down uses the fixed local Compose route without storage preflight", async () => {
+test("down parses semantic-invalid image and storage values with stop-only sentinels", async () => {
   const target = await fixture();
   try {
-    const layout = await topology(target);
-    layout.sources.library = join(target.root, "missing Originals");
-    await writeEnvironment(target, layout.sources);
-
-    const result = await runCompose(target, ["down"], {
-      environment: {
-        SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
-        SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
-        SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+    const variants = [
+      {
+        name: "missing image and storage values",
+        values: ["SLIPSTREAM_BIND_ADDRESS=127.0.0.1"],
       },
-    });
+      {
+        name: "mutable image and unsafe storage values",
+        values: [
+          "SLIPSTREAM_IMAGE=registry.example.com/slipstream:stable",
+          "SLIPSTREAM_LIBRARY_ROOT=relative-library",
+          "SLIPSTREAM_STATE_DIRECTORY=/unsafe-state",
+          "SLIPSTREAM_CACHE_DIRECTORY=/unsafe-cache",
+        ],
+      },
+      {
+        name: "malformed digest image and missing storage values",
+        values: ["SLIPSTREAM_IMAGE=registry.example.com/slipstream@sha256:bad"],
+      },
+    ] as const;
 
-    expect(result.exitCode).toBe(0);
-    expect(await Bun.file(target.composeArguments).text()).toBe(
-      [
-        "--project-name",
-        "slipstream",
-        "--env-file",
-        await realpath(target.environmentFile),
-        "-f",
-        composeFile,
-        "down",
-        "",
-      ].join("\n"),
-    );
-    expect(await Bun.file(target.composeSources).text()).toBe("\n\n\n");
+    for (const variant of variants) {
+      await writeFile(target.environmentFile, variant.values.join("\n"));
+
+      const result = await runCompose(target, ["down"], {
+        environment: {
+          SLIPSTREAM_IMAGE: "slipstream:ambient",
+          SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
+          SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
+          SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+          FAKE_DOCKER_REAL_CONFIG: "1",
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(await Bun.file(target.composeArguments).text()).toBe(
+        [
+          "--project-name",
+          "slipstream",
+          "--env-file",
+          await realpath(target.environmentFile),
+          "-f",
+          composeFile,
+          "down",
+          "",
+        ].join("\n"),
+      );
+      expect(await Bun.file(target.composeConfiguration).text()).toBe(
+        `${downImageSentinel}\n\n\n\n\n`,
+      );
+      expect(await Bun.file(target.composeSources).text()).toBe(
+        `${downStorageSentinels.library}\n${downStorageSentinels.state}\n${downStorageSentinels.cache}\n`,
+      );
+
+      const configuration = JSON.parse(result.stdout) as Record<
+        string,
+        unknown
+      >;
+      const services = configuration.services as Record<string, unknown>;
+      const service = services.slipstream as Record<string, unknown>;
+      const environment = service.environment as Record<string, unknown>;
+      const volumes = service.volumes as Array<Record<string, unknown>>;
+
+      expect(Object.keys(services)).toEqual(["slipstream"]);
+      expect(service.image).toBe(downImageSentinel);
+      expect(service.build).toBeUndefined();
+      for (const role of ["library", "state", "cache"] as const) {
+        const source = downStorageSentinels[role];
+        const volume = volumes.find(
+          (candidate) =>
+            candidate.type === "bind" &&
+            candidate.source === source &&
+            candidate.target === source,
+        );
+
+        expect(environment[storageEnvironmentKeys[role]]).toBe(source);
+        expect(volume).toBeDefined();
+        expect(volume?.read_only ?? false).toBe(role === "library");
+      }
+    }
   } finally {
     await removeFixture(target);
   }
 });
 
-test("Docker Compose config preserves the storage and environment-file contract", async () => {
+test("Docker Compose config preserves the digest-only storage contract", async () => {
   const target = await fixture();
   try {
     const layout = await topology(target);
@@ -1470,18 +1629,22 @@ test("Docker Compose config preserves the storage and environment-file contract"
     expect(Object.keys(services)).toEqual(["slipstream"]);
     const service = services.slipstream as Record<string, unknown>;
     expect(service).toBeDefined();
-    const build = service.build as Record<string, unknown>;
-    const buildArguments = build.args as Record<string, unknown>;
     const environment = service.environment as Record<string, unknown>;
     const ports = service.ports as Array<Record<string, unknown>>;
     const volumes = service.volumes as Array<Record<string, unknown>>;
+    const canonicalSources = {
+      library: await realpath(layout.sources.library),
+      state: await realpath(layout.sources.state),
+      cache: await realpath(layout.sources.cache),
+    };
 
+    expect(service.platform).toBe("linux/amd64");
     expect(service.read_only).toBe(true);
     expect(service.user).toBe("1000:1000");
     expect(service.cap_drop).toEqual(["ALL"]);
     expect(service.security_opt).toEqual(["no-new-privileges:true"]);
-    expect(service.image).toBe("slipstream:from-environment-file");
-    expect(buildArguments.SLIPSTREAM_VCS_REF).toBe("environment-file-ref");
+    expect(service.image).toBe(immutableImage);
+    expect(service.build).toBeUndefined();
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
       SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
@@ -1503,13 +1666,13 @@ test("Docker Compose config preserves the storage and environment-file contract"
       )
       .sort();
     expect(bindMounts).toEqual(
-      Object.values(layout.sources)
+      Object.values(canonicalSources)
         .map((source) => `${source}\0${source}`)
         .sort(),
     );
 
     for (const role of ["library", "state", "cache"] as const) {
-      const source = layout.sources[role];
+      const source = canonicalSources[role];
       const key = storageEnvironmentKeys[role];
       const volume = volumes.find(
         (candidate) =>
@@ -1530,23 +1693,4 @@ test("Docker Compose config preserves the storage and environment-file contract"
   } finally {
     await removeFixture(target);
   }
-});
-
-test("Compose mounts and server configuration use the same storage variables", async () => {
-  const source = await Bun.file(composeFile).text();
-  for (const variable of [
-    "SLIPSTREAM_LIBRARY_ROOT",
-    "SLIPSTREAM_STATE_DIRECTORY",
-    "SLIPSTREAM_CACHE_DIRECTORY",
-  ]) {
-    const reference = `\${${variable}:?`;
-    expect(source).toContain(`      ${variable}: ${reference}`);
-    expect(source).toContain(`        source: ${reference}`);
-    expect(source).toContain(`        target: ${reference}`);
-  }
-});
-
-test("Compose has no autonomous restart policy", async () => {
-  const source = await Bun.file(composeFile).text();
-  expect(source).not.toMatch(/^\s+restart(?:_policy)?\s*:/m);
 });
