@@ -120,13 +120,13 @@ environment, or entrypoint overrides, and unsupported Compose commands. The
 server retains its storage admission as a second safety boundary. The entry
 point fixes the Compose project name as `slipstream` and rejects any
 `COMPOSE_*` or `DOCKER_*` declaration in the environment file.
-For the finite Compose configuration surface, the environment file also wins
-over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`, `SLIPSTREAM_PORT`,
-`SLIPSTREAM_PUBLIC_ORIGIN`, and `SLIPSTREAM_DATABASE_BASENAME` values.
-It also clears ambient `SLIPSTREAM_LIBRARY_ROOT`,
-`SLIPSTREAM_STATE_DIRECTORY`, and `SLIPSTREAM_CACHE_DIRECTORY`: startup then
-exports its checked canonical values, while fixed `down` leaves those values to
-the environment file without reading their paths.
+For the finite startup Compose configuration surface, the environment file also
+wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
+`SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and
+`SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
+`SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
+`SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
+values.
 
 `compose.yaml` intentionally declares no Docker restart policy. Every container
 start must be initiated through `scripts/compose` so the host storage preflight
@@ -140,8 +140,13 @@ a Docker default context that is not a local Unix socket. Direct `docker
 compose` invocation is outside the supported deployment contract. The fixed
 `down` form intentionally skips image and storage-source preflight, so an
 operator can stop an existing container after a source path or image input
-becomes unavailable or unsafe. It still uses the supplied environment file, the
-repository Compose file, and the local Docker context.
+becomes unavailable or unsafe. While Compose parses that fixed stop operation,
+the entry point supplies fixed internal stop-only image and storage values
+instead of using the environment file values. They do not select, pull, build,
+or run an image, and they do not access storage paths. This exception applies
+only to a readable, Compose-parseable environment file; its image and storage
+values may be missing or unsafe. The operation still uses the repository
+Compose file and local Docker context.
 
 The operator must trust the local Docker daemon and socket, and that daemon
 must use the same host mount namespace as `scripts/compose`. The three storage

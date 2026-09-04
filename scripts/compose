@@ -4,6 +4,10 @@ set -euo pipefail
 
 readonly storage_roles=(library state cache)
 readonly image_key=SLIPSTREAM_IMAGE
+readonly down_image_sentinel='registry.invalid/slipstream/stop@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+readonly down_library_sentinel='/__slipstream-down-library__'
+readonly down_state_sentinel='/__slipstream-down-state__'
+readonly down_cache_sentinel='/__slipstream-down-cache__'
 declare -A storage_keys=(
   [library]=SLIPSTREAM_LIBRARY_ROOT
   [state]=SLIPSTREAM_STATE_DIRECTORY
@@ -418,6 +422,11 @@ if [[ "$startup" == true ]]; then
   export SLIPSTREAM_LIBRARY_ROOT="${storage_sources[library]}"
   export SLIPSTREAM_STATE_DIRECTORY="${storage_sources[state]}"
   export SLIPSTREAM_CACHE_DIRECTORY="${storage_sources[cache]}"
+else
+  export SLIPSTREAM_IMAGE="$down_image_sentinel"
+  export SLIPSTREAM_LIBRARY_ROOT="$down_library_sentinel"
+  export SLIPSTREAM_STATE_DIRECTORY="$down_state_sentinel"
+  export SLIPSTREAM_CACHE_DIRECTORY="$down_cache_sentinel"
 fi
 
 exec docker --context default compose --project-name slipstream --env-file "$environment_file" -f "$compose_file" "${compose_command[@]}"

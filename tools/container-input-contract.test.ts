@@ -15,6 +15,18 @@ type PositionedFromInstruction = FromInstruction &
     offset: number;
   }>;
 
+type DockerfileInstruction = Readonly<{
+  command: string;
+  value: string;
+  offset: number;
+}>;
+
+type CopyInstruction = Readonly<{
+  from?: string;
+  sources: readonly string[];
+  target: string;
+}>;
+
 const repositoryRoot = new URL("../", import.meta.url);
 
 const baseImages = [
@@ -71,40 +83,102 @@ async function packageManifest(): Promise<PackageManifest> {
   ).json()) as PackageManifest;
 }
 
-function dockerfileFromInstructions(
-  source: string,
-): PositionedFromInstruction[] {
-  const sourceLines = source
-    .split(/\r?\n/)
-    .filter((line) => /^\s*from\b/i.test(line));
-  const instructions = [
-    ...source.matchAll(
-      /^\s*from\s+(?:--platform=([^\s]+)\s+)?([^\s]+)(?:\s+as\s+([^\s]+))?\s*(?:#.*)?$/gim,
-    ),
-  ].map((match) => {
-    const [, platform, reference, stage] = match;
-    return {
-      ...(platform === undefined ? {} : { platform }),
-      reference: reference!,
-      ...(stage === undefined ? {} : { stage }),
-      offset: match.index!,
-    };
-  });
+function mapping(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
 
-  expect(instructions).toHaveLength(sourceLines.length);
+function workflowRunValues(source: string): string[] {
+  const document = mapping(Bun.YAML.parse(source));
+  const jobs = mapping(document?.jobs);
+  if (!jobs) return [];
+
+  const runs: string[] = [];
+  for (const jobValue of Object.values(jobs)) {
+    const job = mapping(jobValue);
+    if (!Array.isArray(job?.steps)) continue;
+    for (const stepValue of job.steps) {
+      const step = mapping(stepValue);
+      if (typeof step?.run === "string") runs.push(step.run);
+    }
+  }
+  return runs;
+}
+
+function dockerfileInstructions(source: string): DockerfileInstruction[] {
+  const instructions: DockerfileInstruction[] = [];
+  let value = "";
+  let instructionOffset = 0;
+  let offset = 0;
+
+  for (const rawLine of source.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      offset += rawLine.length + 1;
+      continue;
+    }
+
+    if (!value) instructionOffset = offset;
+    const continues = /\\\s*$/.test(line);
+    const fragment = (continues ? line.replace(/\\\s*$/, "") : line).trim();
+    value = value ? `${value} ${fragment}` : fragment;
+    if (!continues) {
+      const match = /^([a-z]+)(?:\s+(.*))?$/i.exec(value);
+      expect(match).not.toBeNull();
+      instructions.push({
+        command: match![1]!.toUpperCase(),
+        value: match![2] ?? "",
+        offset: instructionOffset,
+      });
+      value = "";
+    }
+    offset += rawLine.length + 1;
+  }
+
+  expect(value).toBe("");
   return instructions;
 }
 
-function dockerfileStage(source: string, stage: string): string {
-  const instructions = dockerfileFromInstructions(source);
-  const index = instructions.findIndex(
+function dockerfileFromInstructions(
+  source: string,
+): PositionedFromInstruction[] {
+  return dockerfileInstructions(source)
+    .filter((instruction) => instruction.command === "FROM")
+    .map(({ offset, value }) => {
+      const match =
+        /^(?:--platform=([^\s]+)\s+)?([^\s]+)(?:\s+as\s+([^\s]+))?\s*(?:#.*)?$/i.exec(
+          value,
+        );
+      expect(match).not.toBeNull();
+      const [, platform, reference, stage] = match!;
+      return {
+        ...(platform === undefined ? {} : { platform }),
+        reference: reference!,
+        ...(stage === undefined ? {} : { stage }),
+        offset,
+      };
+    });
+}
+
+function dockerfileStage(
+  source: string,
+  stage: string,
+): readonly DockerfileInstruction[] {
+  const instructions = dockerfileInstructions(source);
+  const from = dockerfileFromInstructions(source).find(
     (candidate) => candidate.stage?.toLowerCase() === stage.toLowerCase(),
   );
-  expect(index).toBeGreaterThanOrEqual(0);
-  const start = instructions[index]?.offset;
-  if (start === undefined) throw new Error(`missing Dockerfile stage ${stage}`);
-  const end = instructions[index + 1]?.offset ?? source.length;
-  return source.slice(start, end);
+  expect(from).toBeDefined();
+  const start = instructions.findIndex(
+    (instruction) => instruction.offset === from?.offset,
+  );
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = instructions.findIndex(
+    (instruction, index) => index > start && instruction.command === "FROM",
+  );
+  return instructions.slice(start + 1, end < 0 ? undefined : end);
 }
 
 function lockEntries(source: string): string[] {
@@ -115,67 +189,94 @@ function lockEntries(source: string): string[] {
   return entries;
 }
 
-function occurrences(source: string, pattern: RegExp): number {
-  return [...source.matchAll(pattern)].length;
+function copyInstruction(instruction: DockerfileInstruction): CopyInstruction {
+  expect(instruction.command).toBe("COPY");
+  const fields = instruction.value.split(/\s+/);
+  let from: string | undefined;
+  while (fields[0]?.startsWith("--")) {
+    const flag = fields.shift()!;
+    const match = /^--from=(.+)$/.exec(flag);
+    if (match) {
+      expect(from).toBeUndefined();
+      from = match[1]!;
+    }
+  }
+  expect(fields.length).toBeGreaterThanOrEqual(2);
+  const target = fields.pop();
+  if (target === undefined) throw new Error("COPY instruction has no target");
+  return {
+    ...(from === undefined ? {} : { from }),
+    sources: fields,
+    target,
+  };
 }
 
-function expectLockedUbuntuStage(stage: string, lock: string): void {
-  const caCopy =
-    "COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /usr/local/share/slipstream-ca-certificates.crt";
-  const bootstrapCopy =
-    "COPY docker/apt/bootstrap-ca.conf /etc/apt/apt.conf.d/00slipstream-bootstrap-ca";
-  const sourceCopy =
-    "COPY docker/apt/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources";
-  const lockCopy = `COPY ${lock} /tmp/apt-packages.lock`;
+function runCommands(instruction: DockerfileInstruction): string[] {
+  expect(instruction.command).toBe("RUN");
+  return instruction.value
+    .split(/\s+&&\s+/)
+    .map((command, index) =>
+      (index === 0 ? command.replace(/^(?:--[^\s]+\s+)*/, "") : command).trim(),
+    );
+}
+
+function expectLockedUbuntuStage(
+  stage: readonly DockerfileInstruction[],
+  lock: string,
+): void {
   const update = "apt-get update --error-on=any";
   const install =
     "apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock)";
   const cleanup =
     "rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock";
+  const copies = stage
+    .filter((instruction) => instruction.command === "COPY")
+    .map(copyInstruction)
+    .filter((copy) =>
+      [
+        "/usr/local/share/slipstream-ca-certificates.crt",
+        "/etc/apt/apt.conf.d/00slipstream-bootstrap-ca",
+        "/etc/apt/sources.list.d/ubuntu.sources",
+        "/tmp/apt-packages.lock",
+      ].includes(copy.target),
+    );
+  expect(copies).toEqual([
+    {
+      from: "rust-toolchain",
+      sources: ["/etc/ssl/certs/ca-certificates.crt"],
+      target: "/usr/local/share/slipstream-ca-certificates.crt",
+    },
+    {
+      sources: ["docker/apt/bootstrap-ca.conf"],
+      target: "/etc/apt/apt.conf.d/00slipstream-bootstrap-ca",
+    },
+    {
+      sources: ["docker/apt/ubuntu.sources"],
+      target: "/etc/apt/sources.list.d/ubuntu.sources",
+    },
+    {
+      sources: [lock],
+      target: "/tmp/apt-packages.lock",
+    },
+  ] satisfies readonly CopyInstruction[]);
 
-  expect(
-    occurrences(
-      stage,
-      /COPY --from=rust-toolchain \/etc\/ssl\/certs\/ca-certificates\.crt \/usr\/local\/share\/slipstream-ca-certificates\.crt/g,
-    ),
-  ).toBe(1);
-  expect(
-    occurrences(
-      stage,
-      /COPY docker\/apt\/bootstrap-ca\.conf \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca/g,
-    ),
-  ).toBe(1);
-  expect(
-    occurrences(
-      stage,
-      /COPY docker\/apt\/ubuntu\.sources \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/g,
-    ),
-  ).toBe(1);
-  expect(
-    stage.match(/^COPY docker\/apt\/[^\s]+\.lock \/tmp\/apt-packages\.lock$/gm),
-  ).toEqual([lockCopy]);
-  expect(occurrences(stage, /\bapt-get\s+update\b/g)).toBe(1);
-  expect(occurrences(stage, /apt-get update --error-on=any/g)).toBe(1);
-  expect(occurrences(stage, /\bapt-get\s+install\b/g)).toBe(1);
-  expect(
-    occurrences(
-      stage,
-      /apt-get install --no-install-recommends --yes \$\(cat \/tmp\/apt-packages\.lock\)/g,
-    ),
-  ).toBe(1);
-  expect(
-    occurrences(
-      stage,
-      /rm --force \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca \/usr\/local\/share\/slipstream-ca-certificates\.crt \/tmp\/apt-packages\.lock/g,
-    ),
-  ).toBe(1);
-  expect(stage.indexOf(caCopy)).toBeGreaterThanOrEqual(0);
-  expect(stage.indexOf(bootstrapCopy)).toBeGreaterThanOrEqual(0);
-  expect(stage.indexOf(sourceCopy)).toBeGreaterThanOrEqual(0);
-  expect(stage.indexOf(lockCopy)).toBeGreaterThanOrEqual(0);
-  expect(stage.indexOf(update)).toBeGreaterThan(stage.indexOf(lockCopy));
-  expect(stage.indexOf(install)).toBeGreaterThan(stage.indexOf(update));
-  expect(stage.indexOf(cleanup)).toBeGreaterThan(stage.indexOf(install));
+  const aptRuns = stage.filter(
+    (instruction) =>
+      instruction.command === "RUN" && instruction.value.includes("apt-get"),
+  );
+  expect(aptRuns).toHaveLength(1);
+  const commands = runCommands(aptRuns[0]!);
+  expect(commands.filter((command) => command.includes("apt-get"))).toEqual([
+    update,
+    install,
+  ]);
+  const updateIndex = commands.indexOf(update);
+  const installIndex = commands.indexOf(install);
+  const cleanupIndex = commands.indexOf(cleanup);
+  expect(updateIndex).toBeGreaterThanOrEqual(0);
+  expect(installIndex).toBeGreaterThan(updateIndex);
+  expect(cleanupIndex).toBeGreaterThan(installIndex);
+  expect(commands.filter((command) => command === cleanup)).toEqual([cleanup]);
 }
 
 test("Dockerfile enumerates every base image and pins each non-scratch input", async () => {
@@ -236,9 +337,11 @@ test("the container and Compose focused contracts are wired through test:fast an
   expect(fastGate).toContain("bun run test:container-input");
   expect(fastGate).toContain("bun run test:compose-storage");
   expect(scripts?.verify?.split(" && ")).toContain("bun run test:fast");
-  expect(await text(".github/workflows/verify.yml")).toContain(
-    "- run: bun run verify",
-  );
+  expect(
+    workflowRunValues(await text(".github/workflows/verify.yml")).some(
+      (run) => run === "bun run verify",
+    ),
+  ).toBeTrue();
 });
 
 test("deployment documentation distinguishes build inputs from qualification output", async () => {
