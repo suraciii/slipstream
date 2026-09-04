@@ -1830,6 +1830,7 @@ export function mountLibraryBrowser(
         recovered = false;
         continue;
       }
+      sourceGrid.invalidateWindow(range.anchorIndex);
       const loaded = await loadWindow(
         range.anchorIndex,
         {
