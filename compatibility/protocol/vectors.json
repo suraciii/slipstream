@@ -29,7 +29,10 @@
     "name": "retired-photo-set-create",
     "request": {
       "method": "POST",
-      "path": "/api/photo-sets"
+      "path": "/api/photo-sets",
+      "headers": {
+        "origin": "http://camera.local"
+      }
     },
     "expected": {
       "status": 404,
@@ -55,7 +58,10 @@
     "name": "scan-reports-status-without-photo-facts",
     "request": {
       "method": "POST",
-      "path": "/api/scan"
+      "path": "/api/scan",
+      "headers": {
+        "origin": "http://camera.local"
+      }
     },
     "expected": {
       "status": 200,
@@ -73,7 +79,8 @@
       "method": "POST",
       "path": "/api/albums",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "name": "Compat Album"
@@ -99,7 +106,8 @@
       "method": "POST",
       "path": "/api/albums",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "name": ""

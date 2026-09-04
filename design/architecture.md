@@ -122,7 +122,11 @@ The server exposes the smallest required surfaces:
 
 Protocol types must not expose database rows, native library objects, absolute Original File paths, or internal errors.
 
-The browser mutation boundary rejects cross-origin mutations and must not expose Original File paths as arbitrary download parameters. Authentication, accounts, and network-access policy are not product features in this architecture.
+The browser mutation boundary follows the configured public-origin admission in
+[`rust-server.md`](rust-server.md): request and forwarded headers never define
+the trusted authority. It must not expose Original File paths as arbitrary
+download parameters. Authentication and accounts are not product features in
+this architecture.
 
 ## Module Boundaries
 

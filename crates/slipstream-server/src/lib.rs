@@ -50,9 +50,13 @@ mod wire;
 pub use app::Application;
 #[cfg(test)]
 pub(crate) use config::BROWSE_SNAPSHOT_IDLE;
-pub use config::{Config, ConfigError, HEALTH_PATH, ServerConfig, ServerError, StartupConfig};
+pub use config::{
+    Config, ConfigError, ExpansionConfig, HEALTH_PATH, PublicOrigin, PublicOriginError,
+    ServerConfig, ServerError, StartupConfig,
+};
 pub(crate) use config::{
-    MAXIMUM_HEADER_BYTES, MAXIMUM_MUTATION_BODY_BYTES, validate_storage_layout,
+    MAXIMUM_HEADER_BYTES, MAXIMUM_MUTATION_BODY_BYTES, validate_expansion_storage_layout,
+    validate_storage_layout,
 };
 #[cfg(test)]
 pub(crate) use http::{HttpState, healthz, open_web_root, static_web};

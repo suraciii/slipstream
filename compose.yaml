@@ -28,6 +28,9 @@ services:
       SLIPSTREAM_WEB_ROOT: /app/web
       SLIPSTREAM_HOST: 0.0.0.0
       SLIPSTREAM_PORT: 3000
+      # The online server rejects an empty value. Leaving it optional here lets
+      # `docker compose run … expand-library` stay an offline-only command.
+      SLIPSTREAM_PUBLIC_ORIGIN: ${SLIPSTREAM_PUBLIC_ORIGIN:-}
       HOME: /home/slipstream
       TMPDIR: /tmp/slipstream
     volumes:

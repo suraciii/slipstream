@@ -27,7 +27,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "library"
@@ -113,7 +114,10 @@
     "name": "browse-close",
     "request": {
       "method": "DELETE",
-      "path": "/api/browse/$token"
+      "path": "/api/browse/$token",
+      "headers": {
+        "origin": "http://camera.local"
+      }
     },
     "expected": {
       "status": 204
@@ -136,7 +140,10 @@
     "name": "browse-close-idempotent",
     "request": {
       "method": "DELETE",
-      "path": "/api/browse/$token"
+      "path": "/api/browse/$token",
+      "headers": {
+        "origin": "http://camera.local"
+      }
     },
     "expected": {
       "status": 204
@@ -148,7 +155,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "album"
@@ -167,7 +175,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "album",
@@ -187,7 +196,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "library",
@@ -207,7 +217,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "photo-set"
@@ -338,7 +349,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "folder",
@@ -361,7 +373,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "folder",
@@ -381,7 +394,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "folder",
@@ -402,7 +416,8 @@
       "method": "POST",
       "path": "/api/browse",
       "headers": {
-        "content-type": "application/json"
+        "content-type": "application/json",
+        "origin": "http://camera.local"
       },
       "body": {
         "source": "folder",

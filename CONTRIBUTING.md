@@ -78,18 +78,35 @@ SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
 SLIPSTREAM_WEB_ROOT="$PWD/apps/web/dist" \
 SLIPSTREAM_HOST=127.0.0.1 \
 SLIPSTREAM_PORT=3000 \
+SLIPSTREAM_PUBLIC_ORIGIN=http://127.0.0.1:3000 \
 cargo run --locked -p slipstream-server
 ```
 
-`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults to loopback; set `SLIPSTREAM_HOST` to whatever address you deploy on. `GET /healthz` reports service readiness after storage admission, Preview startup, and HTTP bind. `GET /api/status` separately reports Library initialization, scan, and publication state.
+`SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults
+to loopback; set `SLIPSTREAM_HOST` to the listener address. Set the required
+`SLIPSTREAM_PUBLIC_ORIGIN` to the exact browser-visible `http` or `https`
+origin, including a non-default port. It is not inferred from the listener,
+request Host, or forwarded headers. Other than the local `GET /healthz` or
+`HEAD /healthz` readiness probe, normal origin-form requests must use its Host
+authority and absolute targets must match it; browser `POST` and `DELETE`
+requests must also use it as `Origin`. `GET /api/status` separately reports
+Library initialization, scan, and publication state.
 
-To expand a stopped schema-v5 Library to an ancestor Folder, first create and record a verified consistent backup with the service stopped (see [`docs/deployment.md`](docs/deployment.md)). Then set `SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining the same state, cache, and database settings, and run:
+To expand a stopped schema-v5 Library to an ancestor Folder, first create and
+record a verified consistent backup with the service stopped (see
+[`docs/deployment.md`](docs/deployment.md)). Then set
+`SLIPSTREAM_LIBRARY_ROOT` to the proposed canonical ancestor while retaining
+the same state, cache, and database settings, and run:
 
 ```sh
 cargo run --locked -p slipstream-server -- expand-library
 ```
 
-The offline command rejects a running database, sidecars, non-v5 state, an unrelated Folder, descriptor mismatch, invalid remembered Locations, and scan-limit failures. It commits the binding and Location changes once, then completes a normal scan before reporting success.
+The offline command rejects a running database, sidecars, non-v5 state, an
+unrelated Folder, descriptor mismatch, invalid remembered Locations, and
+scan-limit failures. It never opens HTTP and does not require
+`SLIPSTREAM_PUBLIC_ORIGIN`. It commits the binding and Location changes once,
+then completes a normal scan before reporting success.
 
 ## Container verification
 

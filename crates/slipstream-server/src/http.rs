@@ -60,8 +60,8 @@ impl RunningServer {
     }
 }
 
-pub async fn expand_library(config: Config) -> Result<(), ServerError> {
-    validate_storage_layout(&config)?;
+pub async fn expand_library(config: ExpansionConfig) -> Result<(), ServerError> {
+    validate_expansion_storage_layout(&config)?;
     let library_config = LibraryConfig {
         library_root: config.library_root,
         state_directory: config.state_directory,
@@ -128,6 +128,10 @@ pub(crate) fn create_router_with_web_root(
     application: Arc<Application>,
     web_root: WebRoot,
 ) -> Router {
+    let state = HttpState {
+        application,
+        web_root: Arc::new(web_root),
+    };
     Router::new()
         .route(HEALTH_PATH, get(healthz))
         .route("/api/overview", get(overview))
@@ -176,11 +180,11 @@ pub(crate) fn create_router_with_web_root(
             get(get_derivative),
         )
         .fallback(static_web)
-        .layer(middleware::from_fn(request_policy))
-        .with_state(HttpState {
-            application,
-            web_root: Arc::new(web_root),
-        })
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_policy,
+        ))
+        .with_state(state)
 }
 
 pub(crate) fn open_web_root(path: PathBuf) -> WebRoot {
@@ -247,9 +251,6 @@ pub(crate) async fn open_browse(
     State(state): State<HttpState>,
     request: Request<Body>,
 ) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
     let body = match read_json_body(request).await {
         Ok(body) => body,
         Err(response) => return response,
@@ -331,11 +332,8 @@ pub(crate) async fn get_file_locations(
 pub(crate) async fn close_browse(
     State(state): State<HttpState>,
     axum::extract::Path(token): axum::extract::Path<String>,
-    request: Request<Body>,
+    _request: Request<Body>,
 ) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
     state.application.browse_close(&token);
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -416,10 +414,10 @@ pub(crate) async fn method_not_allowed() -> Response<Body> {
     api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed")
 }
 
-pub(crate) async fn scan(State(state): State<HttpState>, request: Request<Body>) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
+pub(crate) async fn scan(
+    State(state): State<HttpState>,
+    _request: Request<Body>,
+) -> Response<Body> {
     match state.application.rescan().await {
         Ok(response) => json_response(StatusCode::OK, &response),
         Err(error) => ApiError::from(error).into_response(),
@@ -460,11 +458,8 @@ pub(crate) async fn rename_album(
 pub(crate) async fn delete_album(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    request: Request<Body>,
+    _request: Request<Body>,
 ) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
     if !valid_id(&id) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Album");
     }
@@ -557,9 +552,6 @@ pub(crate) async fn mutate_photo_state(
     axum::extract::Path(photo_id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
     if !valid_id(&photo_id) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state mutation");
     }
@@ -772,9 +764,6 @@ pub(crate) async fn mutate_album_route(
         &serde_json::Map<String, Value>,
     ) -> Result<slipstream_core::AlbumMutation, &'static str>,
 ) -> Response<Body> {
-    if !mutation_allowed(&request) {
-        return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-    }
     let body = match read_json_body(request).await {
         Ok(body) => body,
         Err(response) => return response,
@@ -839,32 +828,6 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         .expect("valid JSON response")
 }
 
-pub(crate) fn mutation_allowed(request: &Request<Body>) -> bool {
-    let Some(origin) = request.headers().get(header::ORIGIN) else {
-        return true;
-    };
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
-    let Ok(supplied) = origin.parse::<::http::Uri>() else {
-        return false;
-    };
-    let Some(scheme) = supplied.scheme_str() else {
-        return false;
-    };
-    let Some(authority) = supplied.authority() else {
-        return false;
-    };
-    if request.uri().scheme_str() == Some(scheme) && request.uri().authority() == Some(authority) {
-        return true;
-    }
-    request
-        .headers()
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .is_some_and(|host| request.uri().scheme_str().is_none() && host == authority.as_str())
-}
-
 pub(crate) fn valid_id(value: &str) -> bool {
     value.len() >= 36
         && value.len() <= 64
@@ -915,7 +878,87 @@ pub(crate) fn valid_rating(value: &Value) -> Option<u8> {
     (rating <= 5).then_some(rating as u8)
 }
 
-pub(crate) async fn request_policy(request: Request<Body>, next: Next) -> Response<Body> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityAdmission {
+    Invalid,
+    Untrusted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OriginAdmission {
+    Invalid,
+    CrossOrigin,
+}
+
+fn request_authority_admission(
+    request: &Request<Body>,
+    public_origin: &PublicOrigin,
+) -> Result<(), AuthorityAdmission> {
+    let absolute_target = match (
+        request.uri().scheme_str().is_some(),
+        request.uri().authority().is_some(),
+    ) {
+        (false, false) => false,
+        (true, true) => true,
+        _ => return Err(AuthorityAdmission::Invalid),
+    };
+    if absolute_target {
+        match public_origin.matches_absolute_uri(request.uri()) {
+            Ok(true) => {}
+            Ok(false) => return Err(AuthorityAdmission::Untrusted),
+            Err(PublicOriginError) => return Err(AuthorityAdmission::Invalid),
+        }
+    }
+
+    let mut hosts = request.headers().get_all(header::HOST).iter();
+    let Some(host) = hosts.next() else {
+        return absolute_target
+            .then_some(())
+            .ok_or(AuthorityAdmission::Invalid);
+    };
+    if hosts.next().is_some() {
+        return Err(AuthorityAdmission::Invalid);
+    }
+    let host = host.to_str().map_err(|_| AuthorityAdmission::Invalid)?;
+    match public_origin.matches_authority(host) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AuthorityAdmission::Untrusted),
+        Err(PublicOriginError) => Err(AuthorityAdmission::Invalid),
+    }
+}
+
+fn mutation_origin_admission(
+    request: &Request<Body>,
+    public_origin: &PublicOrigin,
+) -> Result<(), OriginAdmission> {
+    let mut origins = request.headers().get_all(header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return Err(OriginAdmission::CrossOrigin);
+    };
+    if origins.next().is_some() {
+        return Err(OriginAdmission::Invalid);
+    }
+    let origin = origin.to_str().map_err(|_| OriginAdmission::Invalid)?;
+    if origin == "null" {
+        return Err(OriginAdmission::CrossOrigin);
+    }
+    let supplied = PublicOrigin::parse(origin).map_err(|_| OriginAdmission::Invalid)?;
+    (supplied == *public_origin)
+        .then_some(())
+        .ok_or(OriginAdmission::CrossOrigin)
+}
+
+fn is_exact_health_request(request: &Request<Body>) -> bool {
+    matches!(request.method().as_str(), "GET" | "HEAD")
+        && request.uri().path() == HEALTH_PATH
+        && request.uri().query().is_none()
+}
+
+pub(crate) async fn request_policy(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
     let header_bytes = request
         .headers()
         .iter()
@@ -927,19 +970,42 @@ pub(crate) async fn request_policy(request: Request<Body>, next: Next) -> Respon
             "Request headers are too large",
         );
     }
+    if !is_exact_health_request(&request) {
+        match request_authority_admission(&request, &state.application.public_origin) {
+            Ok(()) => {}
+            Err(AuthorityAdmission::Invalid) => {
+                return api_error(StatusCode::BAD_REQUEST, "Invalid request authority");
+            }
+            Err(AuthorityAdmission::Untrusted) => {
+                return api_error(StatusCode::FORBIDDEN, "Untrusted request authority");
+            }
+        }
+    }
     if !matches!(
         request.method().as_str(),
         "GET" | "HEAD" | "POST" | "DELETE"
     ) {
         return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
-    if matches!(request.method().as_str(), "POST" | "DELETE") {
+    let mutation = matches!(request.method().as_str(), "POST" | "DELETE");
+    if mutation {
         let path = request.uri().path();
         let api_path = path == "/api" || path.starts_with("/api/");
         let admitted = api_path
             && (!request.method().as_str().eq("DELETE") || path.starts_with("/api/browse/"));
         if !admitted {
             return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
+        }
+    }
+    if mutation {
+        match mutation_origin_admission(&request, &state.application.public_origin) {
+            Ok(()) => {}
+            Err(OriginAdmission::Invalid) => {
+                return api_error(StatusCode::BAD_REQUEST, "Invalid request origin");
+            }
+            Err(OriginAdmission::CrossOrigin) => {
+                return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
+            }
         }
     }
     next.run(request).await

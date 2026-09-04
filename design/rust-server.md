@@ -16,7 +16,7 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 
 The Rust service is one modular monolith with these boundaries:
 
-- **Application and HTTP** own configuration, startup order, request limits, protocol mapping, static Web delivery, readiness, and graceful shutdown.
+- **Application and HTTP** own configuration, public-origin admission, startup order, request limits, protocol mapping, static Web delivery, readiness, and graceful shutdown.
 - **Library and Confinement** own the current Library Folder descriptor, deterministic traversal, Original capabilities, stable persisted identity, Original Locations, pairing, and revision facts. Paths do not confer authority or identity.
 - **Persistence** owns one SQLite connection on one dedicated thread with a bounded typed command queue. It owns schema validation, migration, sidecar admission, transactions, and durable state.
 - **Preview and Native** own bounded matching-JPEG reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
@@ -28,7 +28,7 @@ The modules exchange domain values and typed failures. HTTP types do not enter P
 
 Startup proceeds in one direction:
 
-1. Parse and validate configuration.
+1. Parse and validate configuration, including the required public origin.
 2. Open the canonical Library Folder, state directory, and cache directory.
 3. Admit and open SQLite, validate or migrate it, and start its bounded owner thread.
 4. Load the last complete Published Library when one exists.
@@ -36,13 +36,53 @@ Startup proceeds in one direction:
 6. Bind HTTP and expose Library Overview and Loading Status.
 7. Run an ordinary rescan in the background; a new state store remains initializing until its first complete scan publishes the Library.
 
-The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` after storage admission, Preview worker startup, and HTTP bind complete. `GET /api/status` separately reports whether a Published Library is available, initializing, scanning, idle, or failed. A root binding, schema, sidecar, or storage-layout admission failure never exposes a listener. Shutdown stops HTTP admission before closing Preview and Library resources.
+The Rust server exposes `GET /healthz` for deployment health checks. It returns `200` with the exact path-free JSON body `{"status":"ok"}` after storage admission, Preview worker startup, and HTTP bind complete. `GET /api/status` separately reports whether a Published Library is available, initializing, scanning, idle, or failed. A root binding, schema, sidecar, storage-layout, or public-origin admission failure never exposes a listener. Shutdown stops HTTP admission before closing Preview and Library resources.
 
 A failure closes resources in reverse order. Shutdown stops admission, drains already accepted mutations, stops Preview publication, closes SQLite, and then completes. Repeated shutdown requests share one completion path.
 
 SQLite startup accepts the configured `DELETE` journal policy only from a sidecar-free state. If a journal, WAL, or shared-memory sidecar remains after another process or an unclean stop, startup must return a recovery-required failure before opening SQLite and must leave the database and every sidecar unchanged. Recovery uses an operator-controlled copy rather than letting startup checkpoint or rewrite state whose schema and Library binding may exist only in WAL.
 
 Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous HTTP executor threads. Queue saturation is explicit backpressure, not unbounded memory growth.
+
+## Public Origin Admission
+
+The operator supplies one required `SLIPSTREAM_PUBLIC_ORIGIN`: an absolute
+`http` or `https` origin with one scheme and authority, but no userinfo, path,
+query, or fragment. Application and HTTP own the parsed, canonical value:
+ASCII host case and default `http:80` and `https:443` ports compare equally.
+Only an absent port receives its scheme default; an explicit nonnumeric,
+signed, or out-of-range port is malformed. Bind address, request Host,
+absolute request-target authority, and forwarded
+headers are transport facts; none can replace the configured public origin.
+
+Header-size admission runs first. Exact `GET /healthz` and `HEAD /healthz` are
+the only authority exception. Every other request undergoes authority
+admission before method or path policy, routing, static delivery, Library
+reads, request-body parsing, or a mutation. Normal origin-form must have the
+configured Host authority. An absolute request target, when present, must use
+the configured scheme and authority, and any Host must match too. A missing
+origin-form Host, malformed Host or absolute target receives a path-free
+`400`; a well-formed authority outside the configured origin receives a
+path-free `403`.
+
+An admitted `POST` or `DELETE` must carry an `Origin` that is exactly the
+configured public origin. A malformed Origin receives a path-free `400`;
+missing or different Origins receive the existing path-free `403` cross-origin
+rejection before their route validates a body or changes state. Read requests
+do not derive trust from Origin. Method and mutation-path policy follow
+authority admission, so an untrusted authority cannot obtain a `405` instead
+of rejection. Origin admission follows an admitted mutation path, preserving
+the existing `405` for an otherwise unsupported mutation. The health response
+is non-sensitive and allows the container-local probe to use its loopback Host.
+
+### Rejected: Request-Derived Authority
+
+Comparing an Origin to a request Host, accepting an absolute request target
+without comparing it to the configured origin, or honoring `Forwarded` and
+`X-Forwarded-*` would let a DNS-rebound request establish its own trust
+boundary. They also make reverse-proxy policy implicit. One
+operator-configured public origin keeps the boundary explicit and lets the HTTP
+layer reject every other authority before product work begins.
 
 ## Compatibility
 
@@ -104,7 +144,7 @@ The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.
 
 The service preserves:
 
-- the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, same-origin mutation rule, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
+- the bounded protocol routes and statuses defined by the latest compatibility fixtures, configured public-origin Host admission, configured-Origin mutation admission, path-free JSON errors, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
 - canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
 - the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 and v4 as preserved migration inputs and v5 as required writable state;
