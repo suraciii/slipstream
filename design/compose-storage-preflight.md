@@ -15,6 +15,7 @@ check before Compose creates or starts a container.
 - Canonical host paths alone do not reveal Linux bind-mount aliases.
 - A failed check must not invoke Compose or change the Originals tree or
   content.
+- Docker must not autonomously restart the service around the host check.
 - The existing Rust storage admission remains a separate container-visible
   defense.
 - The operator contract has one authority in [Deployment](../docs/deployment.md).
@@ -34,7 +35,9 @@ requires every input value to be valid UTF-8 and rejects leading or trailing
 whitespace, tabs, carriage returns, control characters, `#`, quotes,
 backslashes, backticks, `$`, shell syntax, Compose interpolation, duplicate
 keys, and any value that is not an existing directory. It does not evaluate
-the environment file or reimplement general Compose dotenv syntax. It requires
+the environment file or reimplement general Compose dotenv syntax. Before any
+Bash line reader examines the file, the preflight scans its raw bytes and
+rejects a NUL byte anywhere in a key, value, or trailing content. It requires
 the environment file to be readable and canonicalizes that file before
 passing it to Docker.
 
@@ -77,11 +80,11 @@ ordinary nesting relationship.
 3. The entry point supports only a Linux host and the local Docker default
    context. It rejects `DOCKER_HOST`, `DOCKER_CONTEXT`, and a default context
    whose endpoint is not a local Unix socket before invoking Compose.
-4. For every startup form, it canonicalizes the readable environment file and
-   accepts only one literal declaration for each required storage value. It
-   rejects invalid UTF-8, duplicates, ambiguous characters, variable
-   references, non-absolute paths, and missing or non-directory sources
-   without evaluating any file content.
+4. For every startup form, it canonicalizes the readable environment file,
+   rejects any raw NUL byte before line parsing, and accepts only one literal
+   declaration for each required storage value. It rejects invalid UTF-8,
+   duplicates, ambiguous characters, variable references, non-absolute paths,
+   and missing or non-directory sources without evaluating any file content.
 5. For every startup form, it canonicalizes all three sources and captures
    their complete nested mount hierarchies. It rejects an equal, descendant,
    or ancestor relationship for every pair, including a relationship exposed
@@ -104,6 +107,10 @@ ordinary nesting relationship.
    and `SLIPSTREAM_DATABASE_BASENAME`, plus all three ambient storage values.
    Startup exports the checked canonical storage values; fixed `down` leaves
    storage configuration to the environment file without checking it.
+9. `compose.yaml` declares no Docker restart policy. Every container start must
+   go through `scripts/compose` so the host preflight runs. If automatic
+   recovery is needed later, a host supervisor must invoke a preflight-aware
+   start path rather than enabling Docker autonomous restarts.
 
 Every retained start form traverses this entry point. The exact `run` form
 includes the offline `expand-library` command, so a Library Expansion cannot
@@ -126,9 +133,9 @@ time-of-check/time-of-use window.
 A small Bash launcher can resolve the actual bind sources before Docker sees
 them, derive their complete Linux mount hierarchy coordinates, reject unsafe
 topology without creating a container, and force the validated source values
-into the Compose process. Bash, GNU coreutils `realpath` and `iconv`, and
-util-linux `findmnt` are part of the supported Linux host baseline, so this
-adds no language runtime.
+into the Compose process. Bash, GNU coreutils `realpath`, `tr`, and `cmp`,
+`iconv`, and util-linux `findmnt` are part of the supported Linux host
+baseline, so this adds no language runtime.
 Requiring one explicit environment file, a narrow literal grammar, and exact
 command forms keeps the input bounded and auditable without treating operator
 configuration as shell code.
@@ -173,6 +180,9 @@ Automated entry-point tests prove that:
   for every pair among Library, state, and cache;
 - raw non-UTF-8 input and canonical or mount-coordinate paths fail closed
   before Docker;
+- raw NUL bytes in each storage value, a storage key, or trailing environment
+  content fail closed before Docker, including the offline Library Expansion
+  command; and
 - a nested mount on another filesystem whose source coordinate aliases a
   different storage role fails closed before Docker; and
 - each failed startup avoids the Docker invocation and leaves the Originals
@@ -185,4 +195,5 @@ when a configured storage source no longer exists.
 The Compose contract test also proves that the supported entry point fixes the
 repository `compose.yaml`, rejects an alternate source file, and rejects
 ambiguous storage declarations, topology overrides, and remote Docker contexts
-rather than accepting a caller-selected replacement.
+rather than accepting a caller-selected replacement. It also asserts that the
+Compose file has no autonomous restart policy.

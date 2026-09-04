@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -48,6 +50,11 @@ interface MountCoordinate {
   target: string;
   fsroot: string;
   device: string;
+}
+
+interface OriginalEvidence {
+  contentHash: string;
+  metadata: readonly string[];
 }
 
 async function fixture(): Promise<Fixture> {
@@ -298,6 +305,128 @@ async function originalSnapshot(root: string): Promise<readonly string[]> {
   return snapshot;
 }
 
+async function originalEvidence(root: string): Promise<OriginalEvidence> {
+  const contentHash = createHash("sha256");
+  const metadata: string[] = [];
+
+  async function visit(path: string, relativePath: string): Promise<void> {
+    const information = await lstat(path, { bigint: true });
+    const type = information.isDirectory()
+      ? "directory"
+      : information.isFile()
+        ? "file"
+        : information.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    const relative = relativePath || ".";
+    const linkTarget = information.isSymbolicLink() ? await readlink(path) : "";
+    metadata.push(
+      [
+        relative,
+        type,
+        information.mode.toString(),
+        information.uid.toString(),
+        information.gid.toString(),
+        information.size.toString(),
+        information.mtimeNs.toString(),
+        information.ctimeNs.toString(),
+        linkTarget,
+      ].join("\0"),
+    );
+    if (information.isFile()) {
+      contentHash.update(await readFile(path));
+    } else if (information.isSymbolicLink()) {
+      contentHash.update(linkTarget);
+    } else if (information.isDirectory()) {
+      const entries = (await readdir(path, { withFileTypes: true })).sort(
+        (left, right) => left.name.localeCompare(right.name),
+      );
+      for (const entry of entries) {
+        await visit(
+          join(path, entry.name),
+          relativePath ? `${relativePath}/${entry.name}` : entry.name,
+        );
+      }
+    }
+  }
+
+  await visit(root, "");
+  return { contentHash: contentHash.digest("hex"), metadata };
+}
+
+function validEnvironmentBytes(sources: Record<StorageRole, string>): Buffer {
+  return Buffer.from(
+    [
+      `SLIPSTREAM_LIBRARY_ROOT=${sources.library}`,
+      `SLIPSTREAM_STATE_DIRECTORY=${sources.state}`,
+      `SLIPSTREAM_CACHE_DIRECTORY=${sources.cache}`,
+    ].join("\n"),
+  );
+}
+
+function nulInValueEnvironmentBytes(
+  sources: Record<StorageRole, string>,
+  role: StorageRole,
+): Buffer {
+  const keys: Record<StorageRole, string> = {
+    library: "SLIPSTREAM_LIBRARY_ROOT",
+    state: "SLIPSTREAM_STATE_DIRECTORY",
+    cache: "SLIPSTREAM_CACHE_DIRECTORY",
+  };
+  const chunks: Buffer[] = [];
+  for (const candidate of ["library", "state", "cache"] as const) {
+    const value = Buffer.from(sources[candidate]);
+    const nulValue =
+      candidate === role
+        ? Buffer.concat([
+            value.subarray(0, Math.ceil(value.length / 2)),
+            Buffer.from([0]),
+            value.subarray(Math.ceil(value.length / 2)),
+          ])
+        : value;
+    chunks.push(
+      Buffer.from(`${keys[candidate]}=`),
+      nulValue,
+      Buffer.from("\n"),
+    );
+  }
+  return Buffer.concat(chunks);
+}
+
+function nulInKeyEnvironmentBytes(
+  sources: Record<StorageRole, string>,
+): Buffer {
+  return Buffer.concat([
+    Buffer.from(`SLIPSTREAM_LIBRARY_ROOT=${sources.library}\n`),
+    Buffer.from("SLIPSTREAM_STATE_DIRECT"),
+    Buffer.from([0]),
+    Buffer.from(
+      `ORY=${sources.state}\nSLIPSTREAM_CACHE_DIRECTORY=${sources.cache}`,
+    ),
+  ]);
+}
+
+async function expectNulEnvironmentRejected(
+  target: Fixture,
+  sources: Record<StorageRole, string>,
+  environment: Buffer,
+  command: readonly string[],
+): Promise<void> {
+  await writeFile(join(sources.library, "preserved.ARW"), originalBytes);
+  await writeFile(target.environmentFile, environment);
+  const before = await originalEvidence(sources.library);
+
+  const result = await runCompose(target, command);
+
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain(
+    "environment file must not contain NUL bytes",
+  );
+  expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+  expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+  expect(await originalEvidence(sources.library)).toEqual(before);
+}
+
 async function prepareInvalidTopology(
   target: Fixture,
   left: StorageRole,
@@ -513,6 +642,61 @@ test("a raw non-UTF-8 findmnt path fails before Docker and preserves Originals",
     expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
     expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
     expect(await originalSnapshot(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+for (const { label, command } of [
+  { label: "startup", command: ["up"] },
+  {
+    label: "Library Expansion",
+    command: ["run", "--rm", "--no-deps", "slipstream", "expand-library"],
+  },
+] as const) {
+  for (const role of ["library", "state", "cache"] as const) {
+    test(`a NUL inside the ${role} value fails closed before ${label}`, async () => {
+      const target = await fixture();
+      try {
+        const layout = await topology(target);
+        await expectNulEnvironmentRejected(
+          target,
+          layout.sources,
+          nulInValueEnvironmentBytes(layout.sources, role),
+          command,
+        );
+      } finally {
+        await removeFixture(target);
+      }
+    });
+  }
+}
+
+test("a NUL inside a storage key fails closed before Docker", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await expectNulEnvironmentRejected(
+      target,
+      layout.sources,
+      nulInKeyEnvironmentBytes(layout.sources),
+      ["up"],
+    );
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("a trailing NUL fails closed before Docker", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await expectNulEnvironmentRejected(
+      target,
+      layout.sources,
+      Buffer.concat([validEnvironmentBytes(layout.sources), Buffer.from([0])]),
+      ["up"],
+    );
   } finally {
     await removeFixture(target);
   }
@@ -1096,4 +1280,9 @@ test("Compose mounts and server configuration use the same storage variables", a
     expect(source).toContain(`        source: ${reference}`);
     expect(source).toContain(`        target: ${reference}`);
   }
+});
+
+test("Compose has no autonomous restart policy", async () => {
+  const source = await Bun.file(composeFile).text();
+  expect(source).not.toMatch(/^\s+restart(?:_policy)?\s*:/m);
 });

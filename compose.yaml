@@ -15,7 +15,6 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
-    restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 30s
     ports:

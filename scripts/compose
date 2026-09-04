@@ -57,6 +57,14 @@ resolve_existing_path() {
   resolved_path=${captured%$'\n'}
 }
 
+reject_nul_bytes() {
+  local environment_file=$1
+  if LC_ALL=C tr -d '\000' < "$environment_file" | cmp -s - "$environment_file"; then
+    return 0
+  fi
+  fail "environment file must not contain NUL bytes"
+}
+
 literal_storage_path() {
   local value=$1
   valid_utf8 "$value" || return 1
@@ -318,6 +326,8 @@ reject_mount_coordinate_overlaps() {
 
 command -v realpath >/dev/null || fail "GNU realpath is required"
 command -v iconv >/dev/null || fail "iconv is required for UTF-8 path validation"
+command -v cmp >/dev/null || fail "cmp is required for environment file validation"
+command -v tr >/dev/null || fail "tr is required for environment file validation"
 
 if [[ $# -lt 3 || $1 != --env-file ]]; then
   fail "usage: scripts/compose --env-file PATH {up [-d]|run --rm --no-deps slipstream expand-library|down}"
@@ -333,6 +343,7 @@ environment_file=$resolved_path
 valid_utf8 "$environment_file" || fail "environment file path must use UTF-8"
 [[ -r "$environment_file" && -f "$environment_file" ]] \
   || fail "environment file must be a readable regular file"
+reject_nul_bytes "$environment_file"
 reject_engine_control_declarations "$environment_file"
 
 startup=false

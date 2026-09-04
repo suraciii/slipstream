@@ -67,7 +67,9 @@ Storage rules:
   interpolation are not supported for these three values. The same rule
   applies after resolving a symlink or lexical alias and to returned mount
   paths, so a safe-looking alias cannot hide an ambiguous target path or byte
-  encoding.
+  encoding. Before parsing any line, the entry point rejects a raw NUL byte
+  anywhere in the environment file, including keys, values, or trailing
+  content.
 - The Originals directory must be readable by UID 1000. State and cache
   directories must be writable by UID 1000.
 - Originals, state, and cache must be pairwise disjoint after symlinks,
@@ -88,8 +90,8 @@ requires one environment file and always uses this repository's `compose.yaml`:
 ./scripts/compose --env-file /path/to/slipstream.env up -d
 ```
 
-The entry point requires Bash, GNU `realpath` and `iconv`, and Linux `findmnt`. It supports
-only these command forms:
+The entry point requires Bash, GNU `realpath`, `tr`, and `cmp`, `iconv`, and
+Linux `findmnt`. It supports only these command forms:
 
 ```sh
 ./scripts/compose --env-file /path/to/slipstream.env up
@@ -119,6 +121,12 @@ It also clears ambient `SLIPSTREAM_LIBRARY_ROOT`,
 `SLIPSTREAM_STATE_DIRECTORY`, and `SLIPSTREAM_CACHE_DIRECTORY`: startup then
 exports its checked canonical values, while fixed `down` leaves those values to
 the environment file without reading their paths.
+
+`compose.yaml` intentionally declares no Docker restart policy. Every container
+start must be initiated through `scripts/compose` so the host storage preflight
+runs first. If automatic recovery is needed in the future, it must be provided
+by a host supervisor that uses a preflight-aware start path; do not enable
+Docker autonomous restarts that can bypass this wrapper.
 
 This contract supports only a Linux host using its local Docker Engine. Do not
 set `DOCKER_HOST` or `DOCKER_CONTEXT`; the entry point rejects them and rejects
