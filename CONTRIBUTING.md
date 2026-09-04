@@ -69,7 +69,7 @@ Ordinary `test:rust` and `verify` runs report the real-camera tests as ignored. 
 SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 ```
 
-`test:raw` runs every real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
+`test:raw` runs every native, service, and browser real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
 
 ## Server startup
 
