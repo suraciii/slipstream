@@ -39,6 +39,7 @@ interface Fixture {
   composeSources: string;
   dockerCalls: string;
   findmntData: string;
+  realDocker: string;
   path: string;
 }
 
@@ -49,6 +50,7 @@ interface Topology {
 interface CommandResult {
   exitCode: number;
   stderr: string;
+  stdout: string;
 }
 
 async function dockerComposeConfig(
@@ -134,6 +136,7 @@ async function fixture(): Promise<Fixture> {
   const dockerCalls = join(root, "docker-calls");
   const findmntData = join(root, "findmnt-data");
   const environmentFile = join(root, "slipstream.env");
+  const realDocker = Bun.which("docker") ?? "";
   await mkdir(bin);
   const docker = join(bin, "docker");
   await writeFile(
@@ -142,16 +145,26 @@ async function fixture(): Promise<Fixture> {
       "#!/usr/bin/env bash",
       "set -euo pipefail",
       "printf 'called\\n' > \"$FAKE_DOCKER_CALLS\"",
-      'if [[ "$1" == "context" && "$2" == "inspect" && "$3" == "default" ]]; then',
+      'if [[ "$#" -eq 5 && "$1" == "context" && "$2" == "inspect" && "$3" == "default" && "$4" == "--format" && "$5" == "{{ .Endpoints.docker.Host }}" ]]; then',
       "  printf '%s\\n' \"${FAKE_DOCKER_CONTEXT_ENDPOINT:-unix:///var/run/docker.sock}\"",
       "  exit 0",
       "fi",
       'if [[ "$1" == "--context" && "$2" == "default" && "$3" == "compose" ]]; then',
+      '  original_arguments=("$@")',
       "  shift 3",
       '  printf \'%s\\n\' "$@" > "$FAKE_DOCKER_COMPOSE_ARGUMENTS"',
       '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_VCS_REF-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_PUBLIC_ORIGIN-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
       '  printf \'%s\\n\' "${COMPOSE_FILE-}" "${COMPOSE_ENV_FILES-}" "${COMPOSE_PROFILES-}" "${COMPOSE_PROJECT_NAME-}" > "$FAKE_DOCKER_COMPOSE_ENVIRONMENT"',
       '  printf \'%s\\n\' "${SLIPSTREAM_LIBRARY_ROOT-}" "${SLIPSTREAM_STATE_DIRECTORY-}" "${SLIPSTREAM_CACHE_DIRECTORY-}" > "$FAKE_DOCKER_COMPOSE_SOURCES"',
+      '  if [[ "${FAKE_DOCKER_REAL_CONFIG:-}" == "1" ]]; then',
+      '    config_arguments=("${original_arguments[@]}")',
+      "    last_index=$((${#config_arguments[@]} - 1))",
+      '    [[ "$last_index" -ge 0 && "${config_arguments[$last_index]}" == "up" ]] || exit 93',
+      '    config_arguments=("${config_arguments[@]:0:last_index}" config --format json)',
+      "    real_docker=${FAKE_REAL_DOCKER:?}",
+      '    [[ "$real_docker" == /* && -x "$real_docker" ]] || exit 94',
+      '    exec "$real_docker" "${config_arguments[@]}"',
+      "  fi",
       "  exit 0",
       "fi",
       "printf 'unexpected docker command\\n' >&2",
@@ -232,6 +245,7 @@ async function fixture(): Promise<Fixture> {
     composeSources,
     dockerCalls,
     findmntData,
+    realDocker,
     path: `${bin}:${process.env.PATH ?? ""}`,
   };
 }
@@ -338,6 +352,7 @@ async function runCompose(
         FAKE_DOCKER_COMPOSE_SOURCES: target.composeSources,
         FAKE_DOCKER_CALLS: target.dockerCalls,
         FAKE_FINDMNT_DATA: target.findmntData,
+        FAKE_REAL_DOCKER: target.realDocker,
         FAKE_SYSTEM_PATH: process.env.PATH ?? "",
         ...options.environment,
       },
@@ -345,8 +360,12 @@ async function runCompose(
       stdout: "pipe",
     },
   );
-  const stderr = await new Response(child.stderr).text();
-  return { exitCode: await child.exited, stderr };
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stderr, stdout };
 }
 
 async function originalSnapshot(root: string): Promise<readonly string[]> {
@@ -1267,6 +1286,10 @@ test("environment-file configuration wins over ambient values", async () => {
   try {
     const layout = await topology(target);
     await writeEnvironment(target, layout.sources);
+    await writeMountCoordinates(
+      target,
+      Object.values(directMountCoordinates(layout.sources)),
+    );
 
     const result = await runCompose(target, ["up"], {
       environment: {
@@ -1276,16 +1299,86 @@ test("environment-file configuration wins over ambient values", async () => {
         SLIPSTREAM_PORT: "3999",
         SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.invalid",
         SLIPSTREAM_DATABASE_BASENAME: "ambient.sqlite",
+        SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
+        SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
+        SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+        COMPOSE_DISABLE_ENV_FILE: "1",
+        COMPOSE_ENV_FILES: "/ambient/compose.env",
+        COMPOSE_FILE: "/ambient/compose.yaml",
+        COMPOSE_PATH_SEPARATOR: ";",
+        COMPOSE_PROFILES: "ambient",
+        COMPOSE_PROJECT_NAME: "ambient",
+        DOCKER_DEFAULT_PLATFORM: "linux/arm64",
+        FAKE_DOCKER_REAL_CONFIG: "1",
       },
     });
 
     expect(result.exitCode).toBe(0);
-    expect(await Bun.file(target.composeArguments).text()).toContain(
-      `--env-file\n${await realpath(target.environmentFile)}\n`,
+    expect(await Bun.file(target.composeArguments).text()).toBe(
+      [
+        "--project-name",
+        "slipstream",
+        "--env-file",
+        await realpath(target.environmentFile),
+        "-f",
+        composeFile,
+        "up",
+        "",
+      ].join("\n"),
     );
     expect(await Bun.file(target.composeConfiguration).text()).toBe(
       "\n\n\n\n\n\n",
     );
+    expect(await Bun.file(target.composeEnvironment).text()).toBe("\n\n\n\n");
+
+    const canonicalSources = {
+      library: await realpath(layout.sources.library),
+      state: await realpath(layout.sources.state),
+      cache: await realpath(layout.sources.cache),
+    };
+    expect(await Bun.file(target.composeSources).text()).toBe(
+      `${canonicalSources.library}\n${canonicalSources.state}\n${canonicalSources.cache}\n`,
+    );
+
+    const configuration = JSON.parse(result.stdout) as Record<string, unknown>;
+    const services = configuration.services as Record<string, unknown>;
+    expect(Object.keys(services)).toEqual(["slipstream"]);
+    const service = services.slipstream as Record<string, unknown>;
+    const build = service.build as Record<string, unknown>;
+    const buildArguments = build.args as Record<string, unknown>;
+    const environment = service.environment as Record<string, unknown>;
+    const ports = service.ports as Array<Record<string, unknown>>;
+    const volumes = service.volumes as Array<Record<string, unknown>>;
+
+    expect(service.image).toBe("slipstream:from-environment-file");
+    expect(buildArguments.SLIPSTREAM_VCS_REF).toBe("environment-file-ref");
+    expect(environment).toMatchObject({
+      SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
+      SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
+    });
+    expect(ports).toContainEqual(
+      expect.objectContaining({
+        host_ip: "127.0.0.2",
+        published: "3100",
+        target: 3000,
+      }),
+    );
+
+    for (const role of ["library", "state", "cache"] as const) {
+      const source = canonicalSources[role];
+      const key = storageEnvironmentKeys[role];
+      const volume = volumes.find(
+        (candidate) =>
+          candidate.type === "bind" &&
+          candidate.source === source &&
+          candidate.target === source,
+      );
+
+      expect(environment[key]).toBe(source);
+      expect(volume).toBeDefined();
+      expect(volume?.source).toBe(environment[key]);
+      expect(volume?.target).toBe(environment[key]);
+    }
   } finally {
     await removeFixture(target);
   }
