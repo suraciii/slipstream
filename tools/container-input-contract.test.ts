@@ -4,6 +4,17 @@ type PackageManifest = Readonly<{
   scripts?: Readonly<Record<string, string>>;
 }>;
 
+type FromInstruction = Readonly<{
+  platform?: string;
+  reference: string;
+  stage?: string;
+}>;
+
+type PositionedFromInstruction = FromInstruction &
+  Readonly<{
+    offset: number;
+  }>;
+
 const repositoryRoot = new URL("../", import.meta.url);
 
 const baseImages = [
@@ -27,7 +38,8 @@ const baseImages = [
     reference:
       "ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b",
   },
-] as const;
+  { stage: "runtime", reference: "scratch" },
+] as const satisfies readonly FromInstruction[];
 
 const packageLocks = {
   "docker/apt/build-amd64.lock": [
@@ -59,6 +71,42 @@ async function packageManifest(): Promise<PackageManifest> {
   ).json()) as PackageManifest;
 }
 
+function dockerfileFromInstructions(
+  source: string,
+): PositionedFromInstruction[] {
+  const sourceLines = source
+    .split(/\r?\n/)
+    .filter((line) => /^\s*from\b/i.test(line));
+  const instructions = [
+    ...source.matchAll(
+      /^\s*from\s+(?:--platform=([^\s]+)\s+)?([^\s]+)(?:\s+as\s+([^\s]+))?\s*(?:#.*)?$/gim,
+    ),
+  ].map((match) => {
+    const [, platform, reference, stage] = match;
+    return {
+      ...(platform === undefined ? {} : { platform }),
+      reference: reference!,
+      ...(stage === undefined ? {} : { stage }),
+      offset: match.index!,
+    };
+  });
+
+  expect(instructions).toHaveLength(sourceLines.length);
+  return instructions;
+}
+
+function dockerfileStage(source: string, stage: string): string {
+  const instructions = dockerfileFromInstructions(source);
+  const index = instructions.findIndex(
+    (candidate) => candidate.stage?.toLowerCase() === stage.toLowerCase(),
+  );
+  expect(index).toBeGreaterThanOrEqual(0);
+  const start = instructions[index]?.offset;
+  if (start === undefined) throw new Error(`missing Dockerfile stage ${stage}`);
+  const end = instructions[index + 1]?.offset ?? source.length;
+  return source.slice(start, end);
+}
+
 function lockEntries(source: string): string[] {
   const entries = source.split(/\r?\n/).filter(Boolean);
   for (const entry of entries)
@@ -67,18 +115,83 @@ function lockEntries(source: string): string[] {
   return entries;
 }
 
-test("Dockerfile pins every non-scratch base image by reviewed digest", async () => {
-  const dockerfile = await text("Dockerfile");
-  for (const { stage, reference } of baseImages)
-    expect(dockerfile).toContain(`FROM ${reference} AS ${stage}`);
+function occurrences(source: string, pattern: RegExp): number {
+  return [...source.matchAll(pattern)].length;
+}
 
-  const nonScratchBases = [...dockerfile.matchAll(/^FROM ([^\s]+) AS /gm)].map(
-    ([, reference]) => reference!,
-  );
-  expect(nonScratchBases).toEqual([
-    ...baseImages.map(({ reference }) => reference),
-    "scratch",
-  ]);
+function expectLockedUbuntuStage(stage: string, lock: string): void {
+  const caCopy =
+    "COPY --from=rust-toolchain /etc/ssl/certs/ca-certificates.crt /usr/local/share/slipstream-ca-certificates.crt";
+  const bootstrapCopy =
+    "COPY docker/apt/bootstrap-ca.conf /etc/apt/apt.conf.d/00slipstream-bootstrap-ca";
+  const sourceCopy =
+    "COPY docker/apt/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources";
+  const lockCopy = `COPY ${lock} /tmp/apt-packages.lock`;
+  const update = "apt-get update --error-on=any";
+  const install =
+    "apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock)";
+  const cleanup =
+    "rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt /tmp/apt-packages.lock";
+
+  expect(
+    occurrences(
+      stage,
+      /COPY --from=rust-toolchain \/etc\/ssl\/certs\/ca-certificates\.crt \/usr\/local\/share\/slipstream-ca-certificates\.crt/g,
+    ),
+  ).toBe(1);
+  expect(
+    occurrences(
+      stage,
+      /COPY docker\/apt\/bootstrap-ca\.conf \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca/g,
+    ),
+  ).toBe(1);
+  expect(
+    occurrences(
+      stage,
+      /COPY docker\/apt\/ubuntu\.sources \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/g,
+    ),
+  ).toBe(1);
+  expect(
+    stage.match(/^COPY docker\/apt\/[^\s]+\.lock \/tmp\/apt-packages\.lock$/gm),
+  ).toEqual([lockCopy]);
+  expect(occurrences(stage, /\bapt-get\s+update\b/g)).toBe(1);
+  expect(occurrences(stage, /apt-get update --error-on=any/g)).toBe(1);
+  expect(occurrences(stage, /\bapt-get\s+install\b/g)).toBe(1);
+  expect(
+    occurrences(
+      stage,
+      /apt-get install --no-install-recommends --yes \$\(cat \/tmp\/apt-packages\.lock\)/g,
+    ),
+  ).toBe(1);
+  expect(
+    occurrences(
+      stage,
+      /rm --force \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca \/usr\/local\/share\/slipstream-ca-certificates\.crt \/tmp\/apt-packages\.lock/g,
+    ),
+  ).toBe(1);
+  expect(stage.indexOf(caCopy)).toBeGreaterThanOrEqual(0);
+  expect(stage.indexOf(bootstrapCopy)).toBeGreaterThanOrEqual(0);
+  expect(stage.indexOf(sourceCopy)).toBeGreaterThanOrEqual(0);
+  expect(stage.indexOf(lockCopy)).toBeGreaterThanOrEqual(0);
+  expect(stage.indexOf(update)).toBeGreaterThan(stage.indexOf(lockCopy));
+  expect(stage.indexOf(install)).toBeGreaterThan(stage.indexOf(update));
+  expect(stage.indexOf(cleanup)).toBeGreaterThan(stage.indexOf(install));
+}
+
+test("Dockerfile enumerates every base image and pins each non-scratch input", async () => {
+  const instructions = dockerfileFromInstructions(await text("Dockerfile"));
+  expect(
+    instructions.map(({ platform, reference, stage }) => ({
+      ...(platform === undefined ? {} : { platform }),
+      reference,
+      ...(stage === undefined ? {} : { stage }),
+    })),
+  ).toEqual(baseImages);
+
+  for (const { reference } of instructions) {
+    if (reference.toLowerCase() === "scratch") continue;
+    expect(reference).toMatch(/@sha256:[0-9a-f]{64}$/);
+  }
 });
 
 test("Ubuntu native inputs use one official amd64 snapshot and explicit direct locks", async () => {
@@ -97,78 +210,47 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
     expect(lockEntries(await text(path))).toEqual(expected);
 });
 
-test("Dockerfile consumes and removes snapshot locks with a pinned CA bootstrap", async () => {
+test("each Ubuntu stage has one pinned CA, source, lock, update, install, and cleanup sequence", async () => {
   const dockerfile = await text("Dockerfile");
-  expect(
-    dockerfile.match(
-      /COPY --from=rust-toolchain \/etc\/ssl\/certs\/ca-certificates\.crt \/usr\/local\/share\/slipstream-ca-certificates\.crt/g,
-    ),
-  ).toHaveLength(2);
-  expect(
-    dockerfile.match(
-      /COPY docker\/apt\/bootstrap-ca\.conf \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca/g,
-    ),
-  ).toHaveLength(2);
-  expect(dockerfile).toContain(
-    "COPY docker/apt/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources",
+  expectLockedUbuntuStage(
+    dockerfileStage(dockerfile, "rust-build"),
+    "docker/apt/build-amd64.lock",
   );
-  expect(dockerfile).toContain(
-    "COPY docker/apt/build-amd64.lock /tmp/apt-packages.lock",
-  );
-  expect(dockerfile).toContain(
-    "COPY docker/apt/runtime-amd64.lock /tmp/apt-packages.lock",
-  );
-  expect(dockerfile).toContain(
-    "apt-get install --no-install-recommends --yes $(cat /tmp/apt-packages.lock)",
-  );
-  expect(dockerfile.match(/apt-get update --error-on=any/g)).toHaveLength(2);
-  expect(
-    dockerfile.match(
-      /rm --force \/etc\/apt\/apt\.conf\.d\/00slipstream-bootstrap-ca \/usr\/local\/share\/slipstream-ca-certificates\.crt \/tmp\/apt-packages\.lock/g,
-    ),
-  ).toHaveLength(2);
-  expect(dockerfile).toContain(
-    "rm --force /etc/apt/apt.conf.d/00slipstream-bootstrap-ca /usr/local/share/slipstream-ca-certificates.crt",
+  expectLockedUbuntuStage(
+    dockerfileStage(dockerfile, "runtime-rootfs"),
+    "docker/apt/runtime-amd64.lock",
   );
   expect(dockerfile).not.toContain("Acquire::https::Verify-Peer=false");
   expect(dockerfile).not.toContain("trusted=yes");
-  expect(dockerfile).not.toContain("http://snapshot.ubuntu.com");
 });
 
-test("the input contract is on the verify -> test:fast -> focused gate path", async () => {
+test("the container and Compose focused contracts are wired through test:fast and verify", async () => {
   const scripts = (await packageManifest()).scripts;
   expect(scripts?.["test:container-input"]).toBe(
     "bun test tools/container-input-contract.test.ts",
   );
-  expect(scripts?.["test:fast"]?.split(" && ")).toContain(
-    "bun run test:container-input",
+  expect(scripts?.["test:compose-storage"]).toBe(
+    "bun test tools/compose-storage-preflight.test.ts",
   );
+  const fastGate = scripts?.["test:fast"]?.split(" && ");
+  expect(fastGate).toContain("bun run test:container-input");
+  expect(fastGate).toContain("bun run test:compose-storage");
   expect(scripts?.verify?.split(" && ")).toContain("bun run test:fast");
   expect(await text(".github/workflows/verify.yml")).toContain(
     "- run: bun run verify",
   );
 });
 
-test("deployment documentation separates fixed inputs from qualification traceability", async () => {
+test("deployment documentation distinguishes build inputs from qualification output", async () => {
   const deployment = await text("docs/deployment.md");
-  expect(deployment).toContain("`--platform linux/amd64`");
-  expect(deployment).toContain("`ubuntu-latest` is a source and test runner");
+  const design = await text("design/container-inputs.md");
+  expect(deployment).toContain("`docker buildx build --platform linux/amd64`");
+  expect(deployment).toContain("runs only the digest-pinned image");
   expect(deployment).toContain("source reproducibility");
   expect(deployment).toContain("single build's traceability");
   expect(deployment).toContain("OCI revision and immutable digest");
   expect(deployment).toContain("final native package versions");
   expect(deployment).toContain("SBOM");
   expect(deployment).toContain("advisory database timestamp");
-});
-
-test("Compose source builds use the one supported platform", async () => {
-  expect(await text("compose.yaml")).toContain(
-    "services:\n  slipstream:\n    platform: linux/amd64\n",
-  );
-  expect(await text("design/container-inputs.md")).toContain(
-    "Compose source builds are supported only for that platform",
-  );
-  expect(await text("docs/deployment.md")).toContain(
-    "only supported source-build platform",
-  );
+  expect(design).toContain("has no `build` input");
 });

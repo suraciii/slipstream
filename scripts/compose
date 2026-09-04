@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly storage_roles=(library state cache)
+readonly image_key=SLIPSTREAM_IMAGE
 declare -A storage_keys=(
   [library]=SLIPSTREAM_LIBRARY_ROOT
   [state]=SLIPSTREAM_STATE_DIRECTORY
@@ -104,6 +105,32 @@ parse_storage_sources() {
     key=${storage_keys[$role]}
     [[ -v "declared[$key]" ]] || fail "storage environment file is missing $key"
   done
+}
+
+literal_image_reference() {
+  local value=$1
+  valid_utf8 "$value" || return 1
+  [[ "$value" =~ ^([a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*@sha256:[0-9a-f]{64}$ ]]
+}
+
+parse_image_input() {
+  local environment_file=$1
+  local line value declared=false
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" == "$image_key="* ]]; then
+      [[ "$declared" == false ]] || fail "image environment file has duplicate $image_key"
+      value=${line#"$image_key="}
+      literal_image_reference "$value" \
+        || fail "image environment file has invalid $image_key"
+      declared=true
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?${image_key}([^A-Za-z0-9_]|$) ]]; then
+      fail "image environment file has invalid $image_key"
+    fi
+  done < "$environment_file"
+  [[ "$declared" == true ]] || fail "image environment file is missing $image_key"
 }
 
 reject_engine_control_declarations() {
@@ -348,13 +375,13 @@ reject_engine_control_declarations "$environment_file"
 
 startup=false
 if [[ $# -eq 1 && $1 == up ]]; then
-  compose_command=(up)
+  compose_command=(up --no-build)
   startup=true
 elif [[ $# -eq 2 && $1 == up && $2 == -d ]]; then
-  compose_command=(up -d)
+  compose_command=(up -d --no-build)
   startup=true
 elif [[ $# -eq 5 && $1 == run && $2 == --rm && $3 == --no-deps && $4 == slipstream && $5 == expand-library ]]; then
-  compose_command=(run --rm --no-deps slipstream expand-library)
+  compose_command=(run --rm --no-deps --no-build slipstream expand-library)
   startup=true
 elif [[ $# -eq 1 && $1 == down ]]; then
   compose_command=(down)
@@ -374,6 +401,7 @@ valid_utf8 "$compose_file" || fail "repository compose.yaml path must use UTF-8"
 if [[ "$startup" == true ]]; then
   command -v findmnt >/dev/null || fail "Linux findmnt is required"
   parse_storage_sources "$environment_file"
+  parse_image_input "$environment_file"
   reject_overlaps
   capture_mount_coordinates
   reject_mount_coordinate_overlaps
@@ -382,7 +410,7 @@ fi
 require_local_docker
 unset COMPOSE_DISABLE_ENV_FILE COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR
 unset COMPOSE_PROFILES COMPOSE_PROJECT_NAME
-unset SLIPSTREAM_IMAGE SLIPSTREAM_VCS_REF SLIPSTREAM_BIND_ADDRESS
+unset SLIPSTREAM_IMAGE SLIPSTREAM_BIND_ADDRESS
 unset SLIPSTREAM_PORT SLIPSTREAM_PUBLIC_ORIGIN SLIPSTREAM_DATABASE_BASENAME
 unset SLIPSTREAM_LIBRARY_ROOT SLIPSTREAM_STATE_DIRECTORY SLIPSTREAM_CACHE_DIRECTORY
 

@@ -115,15 +115,13 @@ then completes a normal scan before reporting success.
 
 ## Container verification
 
-The production image uses Bun only while building the Web, Rust `1.97.1` to build the server, and an Ubuntu runtime containing the Rust binary, Web assets, native runtime libraries, and curl for the `/healthz` check. It has no Node, Bun, Sharp, or Node-API runtime. `bun run test:container-input` checks the fixed container inputs without building an image. Build a supported image before an operator-controlled deployment:
+The production image uses Bun only while building the Web, Rust `1.97.1` to
+build the server, and an Ubuntu runtime containing the Rust binary, Web assets,
+native runtime libraries, and curl for the `/healthz` check. It has no Node,
+Bun, Sharp, or Node-API runtime. `bun run test:container-input` checks the
+fixed container inputs without building an image. The explicit Linux amd64
+`docker buildx build` command, qualification-output boundary, and supported
+digest-only Compose operation are defined by
+[`docs/deployment.md`](docs/deployment.md).
 
-```sh
-commit=$(git rev-parse HEAD)
-docker buildx build --platform linux/amd64 --load \
-  --build-arg "SLIPSTREAM_VCS_REF=$commit" --tag slipstream:local .
-```
-
-Inspect the digest, image user, and runtime contents; the deployment contract
-is in [`docs/deployment.md`](docs/deployment.md).
-
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. Supported Compose operations use [`scripts/compose`](scripts/compose); the Linux-local Docker deployment contract is [`docs/deployment.md`](docs/deployment.md).
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).

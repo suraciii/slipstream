@@ -44,8 +44,11 @@ Qualification builds the repository Dockerfile for `linux/amd64`. It records
 the resulting image separately from the input contract. The ordinary GitHub
 Actions runner may remain `ubuntu-latest` because it verifies repository source
 and tests only. It is not a release-image input and it does not qualify a
-container build. The Compose service declares `linux/amd64` as its source-build
-platform too; Compose source builds are supported only for that platform.
+container build. Qualification uses an explicit `docker buildx build` command
+for `linux/amd64`; it does not use Compose. The Compose service declares
+`linux/amd64` but has no `build` input: the supported entry point runs only the
+digest-pinned `SLIPSTREAM_IMAGE` defined by [Deployment](../docs/deployment.md),
+with no repository-source fallback.
 
 Changing a base digest, snapshot timestamp or suite, or direct package lock is
 one container dependency update. The same review must update every affected
@@ -76,6 +79,8 @@ image's native inputs.
 ## Verification
 
 `bun run test:container-input` verifies the checked-in input contract. It runs
-through the existing `test:fast` and `verify` gates. Release qualification also
-builds the same Dockerfile for Linux amd64 and records the output evidence
-defined by the [deployment guide](../docs/deployment.md).
+through the existing `test:fast` and `verify` gates. The Compose focused
+contract verifies the digest-only service wiring. Release qualification builds
+the same Dockerfile for Linux amd64 and records output traceability separately
+from source reproducibility, as defined by the
+[deployment guide](../docs/deployment.md).
