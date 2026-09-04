@@ -84,7 +84,7 @@ async function server(base: string, root: string) {
 async function post(url: string, path: string, body: unknown) {
   return fetch(`${url}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: url },
     body: JSON.stringify(body),
   });
 }
@@ -124,7 +124,10 @@ async function browseIds(url: string): Promise<string[]> {
     start += window.photos.length;
     if (window.photos.length === 0 || start >= opened.total) break;
   }
-  await fetch(`${url}/api/browse/${opened.token}`, { method: "DELETE" });
+  await fetch(`${url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: url },
+  });
   return ids;
 }
 
@@ -239,7 +242,10 @@ async function state(url: string, albumId: string): Promise<AlbumState> {
     start += window.photos.length;
     if (window.photos.length === 0 || start >= opened.total) break;
   }
-  await fetch(`${url}/api/browse/${opened.token}`, { method: "DELETE" });
+  await fetch(`${url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: url },
+  });
   return { id: albumId, position: opened.position, members };
 }
 async function openGrid(page: Page, url: string, name: string) {

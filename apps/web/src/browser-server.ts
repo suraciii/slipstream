@@ -30,6 +30,7 @@ export async function startBrowserServer({
 
   for (let attempt = 1; attempt <= maxStartupAttempts; attempt += 1) {
     const port = await availablePort();
+    const url = `http://127.0.0.1:${port}`;
     const child = spawn(binary, [], {
       cwd: process.cwd(),
       env: {
@@ -41,6 +42,7 @@ export async function startBrowserServer({
         SLIPSTREAM_WEB_ROOT: webRoot,
         SLIPSTREAM_HOST: "127.0.0.1",
         SLIPSTREAM_PORT: String(port),
+        SLIPSTREAM_PUBLIC_ORIGIN: url,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -48,7 +50,6 @@ export async function startBrowserServer({
     child.stderr.on("data", (chunk: Buffer) => {
       if (errors.join("").length < 8_192) errors.push(chunk.toString());
     });
-    const url = `http://127.0.0.1:${port}`;
     try {
       await waitForReady(child, url, errors);
       let closing: Promise<void> | undefined;

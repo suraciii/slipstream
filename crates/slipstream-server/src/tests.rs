@@ -33,6 +33,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
         port,
+        public_origin: PublicOrigin::parse("http://camera.local").unwrap(),
         web_root: Some(web_root),
     }
 }
@@ -125,16 +126,27 @@ fn environment(values: &[(&str, &str)]) -> HashMap<String, String> {
 }
 
 #[test]
-fn startup_vectors_keep_defaults_and_explicit_binding_typed() {
+fn startup_vectors_require_a_public_origin_and_keep_binding_typed() {
+    let missing_public_origin = Config::from_env(environment(&[
+        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+    ]));
+    assert_eq!(
+        missing_public_origin,
+        Err(ConfigError::Missing("SLIPSTREAM_PUBLIC_ORIGIN"))
+    );
     let defaults = Config::from_env(environment(&[
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
         ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "http://127.0.0.1:3000"),
     ]))
     .unwrap();
     assert_eq!(defaults.library_root, PathBuf::from("/photos"));
     assert_eq!(defaults.database_basename, "library.sqlite");
     assert_eq!((defaults.host.as_str(), defaults.port), ("127.0.0.1", 3000));
+    assert_eq!(defaults.public_origin.to_string(), "http://127.0.0.1:3000");
     let explicit = Config::from_env(environment(&[
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
@@ -142,10 +154,53 @@ fn startup_vectors_keep_defaults_and_explicit_binding_typed() {
         ("SLIPSTREAM_DATABASE_BASENAME", "review.sqlite"),
         ("SLIPSTREAM_HOST", "0.0.0.0"),
         ("SLIPSTREAM_PORT", "8080"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://Photos.Example:443"),
     ]))
     .unwrap();
     assert_eq!(explicit.database_basename, "review.sqlite");
     assert_eq!((explicit.host.as_str(), explicit.port), ("0.0.0.0", 8080));
+    assert_eq!(explicit.public_origin.to_string(), "https://photos.example");
+    let http_default = PublicOrigin::parse("HTTP://Photos.Example:80").unwrap();
+    assert_eq!(http_default.to_string(), "http://photos.example");
+    assert_eq!(
+        http_default.matches_authority("PHOTOS.EXAMPLE:80"),
+        Ok(true)
+    );
+    let ipv6_default = PublicOrigin::parse("https://[2001:DB8::1]:443").unwrap();
+    assert_eq!(ipv6_default.to_string(), "https://[2001:db8::1]");
+    assert_eq!(ipv6_default.matches_authority("[2001:db8::1]"), Ok(true));
+    let ipv6_non_default = PublicOrigin::parse("https://[2001:DB8::1]:8443").unwrap();
+    assert_eq!(ipv6_non_default.to_string(), "https://[2001:db8::1]:8443");
+    assert_eq!(
+        ipv6_non_default.matches_authority("[2001:db8::1]:8443"),
+        Ok(true)
+    );
+    for invalid_ipv6_origin in ["https://[2001:db8::1]:bogus", "https://[2001:db8::1]:65536"] {
+        assert_eq!(
+            PublicOrigin::parse(invalid_ipv6_origin),
+            Err(PublicOriginError),
+            "{invalid_ipv6_origin}"
+        );
+    }
+    for invalid_ipv6_authority in ["[2001:db8::1]:bogus", "[2001:db8::1]:65536"] {
+        assert_eq!(
+            ipv6_non_default.matches_authority(invalid_ipv6_authority),
+            Err(PublicOriginError),
+            "{invalid_ipv6_authority}"
+        );
+    }
+}
+
+#[test]
+fn offline_expansion_config_does_not_require_a_public_origin() {
+    let expansion = ExpansionConfig::from_env(environment(&[
+        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+    ]))
+    .unwrap();
+    assert_eq!(expansion.library_root, PathBuf::from("/photos"));
+    assert_eq!(expansion.database_basename, "library.sqlite");
 }
 
 #[test]
@@ -180,6 +235,10 @@ fn checked_in_startup_vectors_parse_through_the_typed_config() {
         assert_eq!(
             config.port,
             vector["expected"]["port"].as_u64().unwrap() as u16
+        );
+        assert_eq!(
+            config.public_origin.to_string(),
+            vector["expected"]["publicOrigin"].as_str().unwrap()
         );
     }
 }
@@ -268,6 +327,32 @@ fn startup_vectors_reject_relative_paths_and_invalid_ports() {
         ("SLIPSTREAM_PORT", "65536"),
     ]));
     assert_eq!(invalid, Err(ConfigError::Invalid("SLIPSTREAM_PORT")));
+    for public_origin in [
+        "http://user@photos.example",
+        "https://photos.example/review",
+        "https://photos.example?view=review",
+        "https://photos.example#review",
+        "ftp://photos.example",
+        "http://photos.example:0",
+        "http://photos.example:",
+        "http://photos.example:bogus",
+        "http://photos.example:+80",
+        "http://photos.example:-80",
+        "http://photos.example:65536",
+        " https://photos.example",
+        "https://photos.example ",
+    ] {
+        assert_eq!(
+            Config::from_env(environment(&[
+                ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
+                ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
+                ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+                ("SLIPSTREAM_PUBLIC_ORIGIN", public_origin),
+            ])),
+            Err(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN")),
+            "{public_origin}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -280,7 +365,7 @@ async fn post_to_static_path_is_rejected_without_reading_or_mutating() {
         router,
         Request::builder()
             .method("POST")
-            .uri("/")
+            .uri("http://camera.local/")
             .body(Body::from(b"not-json".as_slice()))
             .unwrap(),
     )
@@ -304,7 +389,7 @@ async fn static_file_symlink_is_not_followed() {
     let response = tower::ServiceExt::oneshot(
         router,
         Request::builder()
-            .uri("/escape.txt")
+            .uri("http://camera.local/escape.txt")
             .body(Body::empty())
             .unwrap(),
     )
@@ -339,7 +424,10 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
-        Request::builder().uri("/").body(Body::empty()).unwrap(),
+        Request::builder()
+            .uri("http://camera.local/")
+            .body(Body::empty())
+            .unwrap(),
     )
     .await
     .unwrap();
@@ -349,7 +437,7 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
         app,
         Request::builder()
             .method("HEAD")
-            .uri("/assets/app.js")
+            .uri("http://camera.local/assets/app.js")
             .body(Body::empty())
             .unwrap(),
     )
@@ -421,7 +509,9 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
         let path = request_definition["path"].as_str().unwrap();
-        let mut builder = Request::builder().method(method).uri(path);
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(format!("http://camera.local{path}"));
         if let Some(headers) = request_definition["headers"].as_object() {
             for (name, value) in headers {
                 builder = builder.header(name, value.as_str().unwrap());
@@ -559,7 +649,9 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
             .unwrap()
             .replace("$token", &token)
             .replace("$publication", &publication);
-        let mut builder = Request::builder().method(method).uri(&path);
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(format!("http://camera.local{path}"));
         if let Some(headers) = request_definition["headers"].as_object() {
             for (header_name, value) in headers {
                 builder = builder.header(header_name, value.as_str().unwrap());
@@ -718,7 +810,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
     let response = tower::ServiceExt::oneshot(
         router.clone(),
         Request::builder()
-            .uri(HEALTH_PATH)
+            .uri("http://camera.local/healthz")
             .body(Body::empty())
             .unwrap(),
     )
@@ -743,7 +835,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
     let response = tower::ServiceExt::oneshot(
         missing_router,
         Request::builder()
-            .uri(HEALTH_PATH)
+            .uri("http://camera.local/healthz")
             .body(Body::empty())
             .unwrap(),
     )
@@ -754,7 +846,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
         router,
         Request::builder()
             .method("HEAD")
-            .uri("/api/overview")
+            .uri("http://camera.local/api/overview")
             .body(Body::empty())
             .unwrap(),
     )
@@ -782,7 +874,7 @@ async fn header_limit_rejects_only_values_over_sixteen_kib() {
     let response = tower::ServiceExt::oneshot(
         router.clone(),
         Request::builder()
-            .uri("/api/overview")
+            .uri("http://camera.local/api/overview")
             .header("x-test", exact)
             .body(Body::empty())
             .unwrap(),
@@ -794,7 +886,7 @@ async fn header_limit_rejects_only_values_over_sixteen_kib() {
     let response = tower::ServiceExt::oneshot(
         router,
         Request::builder()
-            .uri("/api/overview")
+            .uri("http://camera.local/api/overview")
             .header("x-test", over)
             .body(Body::empty())
             .unwrap(),
@@ -915,7 +1007,7 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        None,
+        Some("http://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -1844,7 +1936,7 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        None,
+        Some("http://camera.local"),
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1881,7 +1973,7 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        None,
+        Some("http://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -1957,7 +2049,7 @@ async fn persisted_library_serves_immediately_while_background_rescan_runs() {
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        None,
+        Some("http://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -2033,6 +2125,7 @@ async fn background_scan_failure_keeps_prior_published_library_and_reports_faile
         Request::builder()
             .method("POST")
             .uri("http://camera.local/api/scan")
+            .header(header::ORIGIN, "http://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2266,7 +2359,7 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        None,
+        Some("http://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -2497,7 +2590,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             &router,
             &format!("http://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "rating", "value": 4}),
-            None,
+            Some("http://camera.local"),
         )
         .await
         .status(),
@@ -2538,7 +2631,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             &router,
             &format!("http://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "selectionState", "value": "rejected"}),
-            None,
+            Some("http://camera.local"),
         )
         .await
         .status(),
@@ -2549,7 +2642,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
                 &router,
                 &format!("http://camera.local/api/photos/{}/state", ids[0]),
                 serde_json::json!({"field": "selectionState", "value": "selected", "expectedCurrent": "undecided"}),
-                None,
+                Some("http://camera.local"),
             )
             .await,
         )
@@ -2564,7 +2657,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             &router,
             &format!("http://camera.local/api/albums/{album_a}/members/remove"),
             serde_json::json!({"photoId": ids[0]}),
-            None,
+            Some("http://camera.local"),
         )
         .await
         .status(),
@@ -2587,7 +2680,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             &router,
             &format!("http://camera.local/api/albums/{album_a}/delete"),
             serde_json::json!({}),
-            None,
+            Some("http://camera.local"),
         )
         .await
         .status(),
@@ -2695,12 +2788,23 @@ async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
     .await;
     assert_eq!(
         malformed,
+        serde_json::json!({"error": "Invalid request origin"})
+    );
+    let missing = post_json(&router, "/api/scan", serde_json::json!(null), None).await;
+    assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response_json(missing).await,
         serde_json::json!({"error": "Cross-origin mutation rejected"})
     );
     assert_eq!(
-        post_json(&router, "/api/scan", serde_json::json!(null), None,)
-            .await
-            .status(),
+        post_json(
+            &router,
+            "/api/scan",
+            serde_json::json!(null),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
         StatusCode::OK
     );
     assert_eq!(
@@ -2709,13 +2813,347 @@ async fn mutation_origin_validation_precedes_validation_and_scan_has_no_body() {
                 &router,
                 "/api/albums",
                 serde_json::json!({"name": ""}),
-                None,
+                Some("http://camera.local"),
             )
             .await,
         )
         .await,
         serde_json::json!({"error": "Invalid Album name"})
     );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn public_origin_admission_precedes_static_reads_and_mutations() {
+    let (base, mut config) = prepare_fixture();
+    config.public_origin = PublicOrigin::parse("https://Photos.Example:443").unwrap();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let configured_static = send(
+        &router,
+        Request::builder()
+            .uri("https://photos.example/")
+            .header(header::HOST, "PHOTOS.EXAMPLE")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(configured_static.status(), StatusCode::OK);
+    let configured_read = send(
+        &router,
+        Request::builder()
+            .uri("https://photos.example/api/overview")
+            .header(header::HOST, "photos.example:443")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(configured_read.status(), StatusCode::OK);
+    let mismatched_absolute_host = send(
+        &router,
+        Request::builder()
+            .uri("https://photos.example/api/overview")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(mismatched_absolute_host.status(), StatusCode::FORBIDDEN);
+
+    let missing_host = send(
+        &router,
+        Request::builder()
+            .uri("/api/overview")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(missing_host.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(missing_host).await,
+        serde_json::json!({"error": "Invalid request authority"})
+    );
+    let untrusted_absolute_target = send(
+        &router,
+        Request::builder()
+            .uri("http://photos.example/api/overview")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(untrusted_absolute_target.status(), StatusCode::FORBIDDEN);
+
+    for uri in ["/", "/api/overview", "/api/unknown"] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .uri(uri)
+                .header(header::HOST, "attacker.example")
+                .header("forwarded", "host=photos.example;proto=https")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN, "{uri}");
+        assert_eq!(
+            response_json(rejected).await,
+            serde_json::json!({"error": "Untrusted request authority"}),
+            "{uri}"
+        );
+    }
+
+    let attacker_origin = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("/api/albums")
+            .header(header::HOST, "attacker.example")
+            .header(header::ORIGIN, "https://attacker.example")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("not-json"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(attacker_origin.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response_json(attacker_origin).await,
+        serde_json::json!({"error": "Untrusted request authority"})
+    );
+    assert!(application.albums().await.unwrap().albums.is_empty());
+
+    for malformed_host in [
+        "not a host",
+        "photos.example:",
+        "photos.example:bogus",
+        "photos.example:+443",
+        "photos.example:-443",
+        "photos.example:65536",
+    ] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .uri("/api/overview")
+                .header(header::HOST, malformed_host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed_host}"
+        );
+        assert_eq!(
+            response_json(rejected).await,
+            serde_json::json!({"error": "Invalid request authority"}),
+            "{malformed_host}"
+        );
+    }
+    for invalid_port in ["bogus", "+443", "-443", "65536"] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "https://photos.example:{invalid_port}/api/overview"
+                ))
+                .header(header::HOST, "photos.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "https://photos.example:{invalid_port}"
+        );
+        assert_eq!(
+            response_json(rejected).await,
+            serde_json::json!({"error": "Invalid request authority"}),
+            "https://photos.example:{invalid_port}"
+        );
+    }
+    let mut duplicate_host = Request::builder()
+        .uri("/api/overview")
+        .body(Body::empty())
+        .unwrap();
+    duplicate_host.headers_mut().append(
+        header::HOST,
+        ::http::HeaderValue::from_static("photos.example"),
+    );
+    duplicate_host.headers_mut().append(
+        header::HOST,
+        ::http::HeaderValue::from_static("photos.example"),
+    );
+    let duplicate_host = send(&router, duplicate_host).await;
+    assert_eq!(duplicate_host.status(), StatusCode::BAD_REQUEST);
+
+    for origin in [None, Some("https://elsewhere.example"), Some("null")] {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/api/albums")
+            .header(header::HOST, "photos.example")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(origin) = origin {
+            builder = builder.header(header::ORIGIN, origin);
+        }
+        let rejected = send(
+            &router,
+            builder
+                .body(Body::from(
+                    serde_json::json!({"name": "blocked"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(rejected).await,
+            serde_json::json!({"error": "Cross-origin mutation rejected"})
+        );
+    }
+    for malformed_origin in [
+        "https://photos.example/review",
+        "https://user@photos.example",
+        "https://photos.example:",
+        " https://photos.example",
+        "https://photos.example:bogus",
+        "https://photos.example:+443",
+        "https://photos.example:-443",
+        "https://photos.example:65536",
+    ] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("/api/albums")
+                .header(header::HOST, "photos.example")
+                .header(header::ORIGIN, malformed_origin)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("not-json"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rejected.status(),
+            StatusCode::BAD_REQUEST,
+            "{malformed_origin}"
+        );
+        assert_eq!(
+            response_json(rejected).await,
+            serde_json::json!({"error": "Invalid request origin"}),
+            "{malformed_origin}"
+        );
+    }
+    let mut duplicate_origin = Request::builder()
+        .method("POST")
+        .uri("/api/albums")
+        .header(header::HOST, "photos.example")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("not-json"))
+        .unwrap();
+    duplicate_origin.headers_mut().append(
+        header::ORIGIN,
+        ::http::HeaderValue::from_static("https://photos.example"),
+    );
+    duplicate_origin.headers_mut().append(
+        header::ORIGIN,
+        ::http::HeaderValue::from_static("https://photos.example"),
+    );
+    let duplicate_origin = send(&router, duplicate_origin).await;
+    assert_eq!(duplicate_origin.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(duplicate_origin).await,
+        serde_json::json!({"error": "Invalid request origin"})
+    );
+
+    let configured_mutation = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("https://photos.example/api/albums")
+            .header(header::HOST, "photos.example")
+            .header(header::ORIGIN, "https://PHOTOS.EXAMPLE")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({"name": "Configured"}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(configured_mutation.status(), StatusCode::OK);
+
+    let health = send(
+        &router,
+        Request::builder()
+            .uri("/healthz")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health.status(), StatusCode::OK);
+    let health_head = send(
+        &router,
+        Request::builder()
+            .method("HEAD")
+            .uri("/healthz")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health_head.status(), StatusCode::OK);
+    assert!(
+        axum::body::to_bytes(health_head.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for path in ["/healthz?probe=1", "/healthz/"] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .uri(path)
+                .header(header::HOST, "attacker.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    let health_post = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("/healthz")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health_post.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response_json(health_post).await,
+        serde_json::json!({"error": "Untrusted request authority"})
+    );
+    let admitted_health_post = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("/healthz")
+            .header(header::HOST, "photos.example")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        admitted_health_post.status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -2780,6 +3218,7 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
             Request::builder()
                 .method("POST")
                 .uri("http://camera.local/api/scan")
+                .header(header::ORIGIN, "http://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -2948,6 +3387,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             Request::builder()
                 .method("POST")
                 .uri("http://camera.local/api/scan")
+                .header(header::ORIGIN, "http://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3001,6 +3441,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
         Request::builder()
             .method("POST")
             .uri("http://camera.local/api/scan")
+            .header(header::ORIGIN, "http://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
@@ -3029,6 +3470,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
         Request::builder()
             .method("POST")
             .uri("http://camera.local/api/scan")
+            .header(header::ORIGIN, "http://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
