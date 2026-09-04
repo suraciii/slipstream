@@ -1453,6 +1453,37 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Detail Review" }).click();
+  const preview = page.locator("[data-preview]");
+  const image = page.locator("[data-stage] img");
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 71,
+    isPrimary: true,
+    clientX: 100,
+    clientY: 300,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 71,
+    isPrimary: true,
+    clientX: 140,
+    clientY: 330,
+    pointerType: "touch",
+  });
+  await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 40, 30\)/);
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 71,
+    isPrimary: true,
+    clientX: 140,
+    clientY: 330,
+    pointerType: "touch",
+  });
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
+    "undecided",
+  );
   await page.unroute("**/api/photos/*/state");
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
