@@ -7152,32 +7152,98 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
 
 test("Photo Retry reloads the current aligned range after an expired reopen prefetch fails", async ({
   page,
-}) => {
+}, testInfo) => {
   const { base, root } = await fixture();
   await writePhotos(root, 70);
   const running = await server(base, root);
+  type RetryTransportEvent = {
+    stage:
+      | "playwright-request"
+      | "response"
+      | "preview-response"
+      | "preview-settled";
+    at: number;
+    method?: string;
+    milestone?: string;
+    status?: number;
+    url: string;
+  };
+  const retryTransportTrace: RetryTransportEvent[] = [];
+  let droppedRetryTransportEvents = 0;
+  const recordRetryTransport = (event: RetryTransportEvent) => {
+    if (retryTransportTrace.length === 64) {
+      retryTransportTrace.shift();
+      droppedRetryTransportEvents += 1;
+    }
+    retryTransportTrace.push(event);
+  };
+  let retryBrowsePath = "";
+  let retryPreviewPath = "";
+  const isRetryTransport = (url: URL) => {
+    const path = `${url.pathname}${url.search}`;
+    return path === retryBrowsePath || path === retryPreviewPath;
+  };
+  let retryStage = "establishing expired-reopen failure";
+  let retryTraceArmed = false;
   await page.addInitScript(() => {
     const admissions: Array<{
       token: string;
       start: string;
+      limit: string;
       priority: RequestInit["priority"];
+      url: string;
     }> = [];
+    const droppedAdmissions = { count: 0 };
     Object.defineProperty(window, "__slipstreamBrowseAdmissions", {
       value: admissions,
+    });
+    Object.defineProperty(window, "__slipstreamBrowseAdmissionsDropped", {
+      value: droppedAdmissions,
     });
     const nativeFetch = window.fetch.bind(window);
     window.fetch = ((input, init) => {
       if (typeof input === "string") {
         const url = new URL(input, window.location.href);
-        if (url.pathname.startsWith("/api/browse/") && !init?.method)
+        if (url.pathname.startsWith("/api/browse/") && !init?.method) {
+          if (admissions.length === 64) {
+            admissions.shift();
+            droppedAdmissions.count += 1;
+          }
           admissions.push({
             token: url.pathname.split("/").at(-1) ?? "",
             start: url.searchParams.get("start") ?? "",
+            limit: url.searchParams.get("limit") ?? "",
             priority: init?.priority,
+            url: `${url.pathname}${url.search}`,
           });
+        }
       }
       return nativeFetch(input, init);
     }) as typeof window.fetch;
+  });
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() === "GET" && isRetryTransport(url))
+      recordRetryTransport({
+        stage: "playwright-request",
+        at: Date.now(),
+        method: request.method(),
+        url: `${url.pathname}${url.search}`,
+      });
+  });
+  page.on("response", (response) => {
+    const request = response.request();
+    const url = new URL(response.url());
+    if (request.method() !== "GET" || !isRetryTransport(url)) return;
+    const event = {
+      at: Date.now(),
+      method: request.method(),
+      status: response.status(),
+      url: `${url.pathname}${url.search}`,
+    };
+    recordRetryTransport({ stage: "response", ...event });
+    if (`${url.pathname}${url.search}` === retryPreviewPath)
+      recordRetryTransport({ stage: "preview-response", ...event });
   });
   let overviewRequests = 0;
   page.on("request", (request) => {
@@ -7240,6 +7306,79 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   let browseAllocations = 0;
   let reopenPhotoId = "";
   const successfulBrowseStarts = new Map<string, Set<string>>();
+  const attachRetryStageTrace = async (error: unknown) => {
+    const retryEvents = retryTraceArmed ? retryTransportTrace.slice() : [];
+    const browserFetchTrace = retryTraceArmed
+      ? await page
+          .evaluate(
+            ({ target, token }) => {
+              const state = window as typeof window & {
+                __slipstreamBrowseAdmissions?: Array<{
+                  limit: string;
+                  priority: RequestInit["priority"];
+                  start: string;
+                  token: string;
+                  url: string;
+                }>;
+                __slipstreamBrowseAdmissionsDropped?: { count: number };
+              };
+              return {
+                dropped: state.__slipstreamBrowseAdmissionsDropped?.count ?? 0,
+                events:
+                  state.__slipstreamBrowseAdmissions
+                    ?.filter(
+                      (admission) =>
+                        admission.token === token && admission.url === target,
+                    )
+                    .map((admission) => ({
+                      stage: "browser-fetch-admission",
+                      priority: admission.priority,
+                      url: admission.url,
+                    })) ?? [],
+              };
+            },
+            { target: retryBrowsePath, token: reopenedToken },
+          )
+          .catch(() => ({ dropped: 0, events: [] }))
+      : { dropped: 0, events: [] };
+    const body = JSON.stringify(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        expected: {
+          browse: reopenedToken
+            ? `/api/browse/${reopenedToken}?start=0&limit=60`
+            : undefined,
+          preview: reopenPhotoId
+            ? `/api/photos/${reopenPhotoId}/preview`
+            : undefined,
+        },
+        phase: retryStage,
+        traceArmed: retryTraceArmed,
+        droppedBrowserFetchAdmissions: browserFetchTrace.dropped,
+        droppedRetryTransportEvents,
+        stages: {
+          browserFetchAdmission: browserFetchTrace.events,
+          playwrightRequest: retryEvents.filter(
+            (event) => event.stage === "playwright-request",
+          ),
+          response: retryEvents.filter((event) => event.stage === "response"),
+          preview: retryEvents.filter(
+            (event) =>
+              event.stage === "preview-response" ||
+              event.stage === "preview-settled",
+          ),
+        },
+      },
+      null,
+      2,
+    );
+    const path = testInfo.outputPath("photo-retry-stage-trace.json");
+    await writeFile(path, body);
+    await testInfo.attach("photo-retry-stage-trace.json", {
+      path,
+      contentType: "application/json",
+    });
+  };
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (request.method() === "POST" && url.pathname === "/api/browse") {
@@ -7344,20 +7483,26 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await expect(photoRetry).toBeEnabled();
     const allocationsBeforeRetry = browseAllocations;
     const overviewsBeforeRetry = overviewRequests;
+    retryStage = "awaiting current-range admission";
+    retryBrowsePath = `/api/browse/${reopenedToken}?start=0&limit=60`;
+    retryPreviewPath = `/api/photos/${reopenPhotoId}/preview`;
+    retryTransportTrace.length = 0;
+    droppedRetryTransportEvents = 0;
     await page.evaluate(() => {
-      (
-        window as typeof window & {
-          __slipstreamBrowseAdmissions: unknown[];
-        }
-      ).__slipstreamBrowseAdmissions.length = 0;
+      const state = window as typeof window & {
+        __slipstreamBrowseAdmissions: unknown[];
+        __slipstreamBrowseAdmissionsDropped: { count: number };
+      };
+      state.__slipstreamBrowseAdmissions.length = 0;
+      state.__slipstreamBrowseAdmissionsDropped.count = 0;
     });
+    retryTraceArmed = true;
     const retriedPhotoRange = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return (
         request.method() === "GET" &&
         url.pathname === `/api/browse/${reopenedToken}` &&
-        url.searchParams.get("start") === "0" &&
-        url.searchParams.get("limit") === "60"
+        `${url.pathname}${url.search}` === retryBrowsePath
       );
     });
     const refreshedPreview = page.waitForResponse((response) => {
@@ -7375,6 +7520,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
     const retriedPhotoRangeRequest = await retriedPhotoRange;
 
+    retryStage = "awaiting refreshed Preview response";
     expect(retriedPhotoRangeRequest.method()).toBe("GET");
     const retriedRequest = new URL(retriedPhotoRangeRequest.url());
     expect(retriedRequest.pathname).toBe(`/api/browse/${reopenedToken}`);
@@ -7387,7 +7533,9 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
             __slipstreamBrowseAdmissions: Array<{
               token: string;
               start: string;
+              limit: string;
               priority: RequestInit["priority"];
+              url: string;
             }>;
           }
         ).__slipstreamBrowseAdmissions.filter(
@@ -7398,14 +7546,19 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     expect(retryAdmissions).toContainEqual({
       token: reopenedToken,
       start: "0",
+      limit: "60",
       priority: "high",
+      url: retryBrowsePath,
     });
     expect(retryAdmissions).not.toContainEqual({
       token: reopenedToken,
       start: "10",
+      limit: "60",
       priority: "high",
+      url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     await refreshedPreview;
+    retryStage = "awaiting Retry settlement";
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
@@ -7418,6 +7571,12 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await expect(
       page.getByRole("img", { name: "Photo 60 of 70" }),
     ).toBeVisible();
+    recordRetryTransport({
+      stage: "preview-settled",
+      at: Date.now(),
+      milestone: "Connected. Current state refreshed.",
+      url: retryPreviewPath,
+    });
     const completedAdmissions = await page.evaluate(
       (token) =>
         (
@@ -7425,7 +7584,9 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
             __slipstreamBrowseAdmissions: Array<{
               token: string;
               start: string;
+              limit: string;
               priority: RequestInit["priority"];
+              url: string;
             }>;
           }
         ).__slipstreamBrowseAdmissions.filter(
@@ -7436,15 +7597,27 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     expect(completedAdmissions).toContainEqual({
       token: reopenedToken,
       start: "10",
+      limit: "60",
       priority: "low",
+      url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     expect(completedAdmissions).not.toContainEqual({
       token: reopenedToken,
       start: "10",
+      limit: "60",
       priority: "high",
+      url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     expect(browseAllocations).toBe(allocationsBeforeRetry);
     expect(overviewRequests).toBe(overviewsBeforeRetry);
+    retryStage = "complete";
+  } catch (error) {
+    try {
+      await attachRetryStageTrace(error);
+    } catch {
+      // Preserve the original workflow failure if diagnostics cannot be written.
+    }
+    throw error;
   } finally {
     releaseAdjacent();
     releaseAdjacentSuccessor();
