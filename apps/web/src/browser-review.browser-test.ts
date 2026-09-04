@@ -6942,6 +6942,214 @@ test("a failed expired Album reopen retains retired membership memory", async ({
   ).toBeHidden();
 });
 
+test("Photo View recovery defers Grid windows until Grid is visible", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  await page.addInitScript(() => {
+    const admissions: Array<{ token: string; start: string }> = [];
+    Object.defineProperty(window, "__slipstreamGridAdmissions", {
+      value: admissions,
+    });
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = ((input, init) => {
+      if (typeof input === "string") {
+        const url = new URL(input, window.location.href);
+        if (url.pathname.startsWith("/api/browse/") && !init?.method)
+          admissions.push({
+            token: url.pathname.split("/").at(-1) ?? "",
+            start: url.searchParams.get("start") ?? "",
+          });
+      }
+      return nativeFetch(input, init);
+    }) as typeof window.fetch;
+  });
+  await openGrid(page, running.url, "All Photos");
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    Object.defineProperty(element, "clientWidth", {
+      configurable: true,
+      value: 900,
+    });
+    Object.defineProperty(element, "clientHeight", {
+      configurable: true,
+      value: 900,
+    });
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await viewport.evaluate((element) => {
+    element.scrollTop = 4 * 178;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.locator('[data-photo-index="59"]')).toHaveCount(1);
+  // Settle the visible tail before entering Photo View. Reopen then clears the
+  // retained facts, leaving a known missing tail for the hidden render below.
+  await expect(page.locator('[data-photo-index="60"]')).toHaveCount(1);
+  await page.evaluate(() => {
+    const gridView = document.querySelector<HTMLElement>("[data-grid-view]");
+    const gridLayer = document.querySelector<HTMLElement>("[data-grid-layer]");
+    if (!gridView || !gridLayer) throw new Error("Grid surface not found");
+    const hiddenMutations = { count: 0 };
+    Object.defineProperty(window, "__slipstreamHiddenGridMutations", {
+      value: hiddenMutations,
+    });
+    new MutationObserver((records) => {
+      if (gridView.hidden)
+        hiddenMutations.count += records.filter(
+          (record) => record.type === "childList",
+        ).length;
+    }).observe(gridLayer, { childList: true });
+  });
+
+  let previewMode: "failed" | "unavailable" = "failed";
+  await page.route("**/api/photos/*/preview", async (route) => {
+    if (previewMode === "failed") {
+      await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: '{"state":"unavailable","message":"reopen preview unavailable"}',
+    });
+  });
+
+  let expiredServed = false;
+  let reopenStarted = false;
+  let markReopenStarted: () => void = () => undefined;
+  const reopenStartedGate = new Promise<void>((resolve) => {
+    markReopenStarted = resolve;
+  });
+  let releaseReopen: () => void = () => undefined;
+  const reopenGate = new Promise<void>((resolve) => {
+    releaseReopen = resolve;
+  });
+  await page.route(/\/api\/browse(?:\/|$)/, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname.startsWith("/api/browse/")) {
+      const start = url.searchParams.get("start") ?? "";
+      if (!expiredServed && start === "0") {
+        expiredServed = true;
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: '{"error":"Browse source expired or not found"}',
+        });
+        return;
+      }
+      await route.continue();
+      return;
+    }
+    if (
+      request.method() === "POST" &&
+      url.pathname === "/api/browse" &&
+      expiredServed &&
+      !reopenStarted
+    ) {
+      reopenStarted = true;
+      markReopenStarted();
+      await reopenGate;
+    }
+    await route.continue();
+  });
+
+  try {
+    await page.locator('[data-photo-index="59"]').click();
+    await expect(page.getByText("60 / 130")).toBeVisible();
+    await expect(page.locator("[data-retry-photo]")).toBeVisible();
+    previewMode = "unavailable";
+
+    const replacementOpen = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/browse" &&
+        response.status() === 200,
+    );
+    const replacementWindow = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        response.request().method() === "GET" &&
+        url.pathname.startsWith("/api/browse/") &&
+        url.searchParams.get("start") === "0" &&
+        response.status() === 200
+      );
+    });
+    await page.locator("[data-retry-photo]").click();
+    await reopenStartedGate;
+    await expect(page.locator("[data-review]")).toBeVisible();
+    releaseReopen();
+
+    const opened = (await replacementOpen).json() as Promise<{
+      token: string;
+    }>;
+    const reopenedToken = (await opened).token;
+    await replacementWindow;
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-stage]")).toContainText(
+      "Preview unavailable",
+    );
+
+    const hiddenGridMutations = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __slipstreamHiddenGridMutations: { count: number };
+          }
+        ).__slipstreamHiddenGridMutations.count,
+    );
+    expect(hiddenGridMutations).toBe(0);
+    const hiddenTailAdmissions = await page.evaluate(
+      (token) =>
+        (
+          window as typeof window & {
+            __slipstreamGridAdmissions: Array<{
+              token: string;
+              start: string;
+            }>;
+          }
+        ).__slipstreamGridAdmissions.filter(
+          (admission) => admission.token === token && admission.start === "60",
+        ),
+      reopenedToken,
+    );
+    expect(hiddenTailAdmissions).toEqual([]);
+
+    const visibleTailRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname === `/api/browse/${reopenedToken}` &&
+        url.searchParams.get("start") === "60"
+      );
+    });
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    const tailRequest = await visibleTailRequest;
+    expect(tailRequest.method()).toBe("GET");
+    await expect(page.locator("[data-grid-view]")).toBeVisible();
+    await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
+  } finally {
+    releaseReopen();
+    await page.unroute(/\/api\/browse(?:\/|$)/);
+    await page.unroute("**/api/photos/*/preview");
+  }
+});
+
 test("Photo Retry reloads the current aligned range after an expired reopen prefetch fails", async ({
   page,
 }) => {

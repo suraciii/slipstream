@@ -205,7 +205,11 @@ export interface LibraryBrowserView {
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
-  renderGrid(model: GridViewModel, position?: number): void;
+  renderGrid(
+    model: GridViewModel,
+    position?: number,
+    consumeFocusRequest?: boolean,
+  ): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
   gridVisible(): boolean;
@@ -889,8 +893,15 @@ export function createLibraryBrowserView(
     cancelAnimationFrame(gridRenderFrame);
     gridRenderFrame = undefined;
   };
-  const renderGrid = (model: GridViewModel, position?: number) => {
-    if (!alive) return;
+  const renderGrid = (
+    model: GridViewModel,
+    position?: number,
+    consumeFocusRequest = true,
+  ) => {
+    // Photo View may keep the source Grid state alive while it owns the
+    // visible workflow. Do not let a retained hidden Grid admit window work;
+    // the visible Grid render after showGrid() owns that admission.
+    if (!alive || gridView.hidden) return;
     const count = columns();
     const stride = columnStride(count);
     const viewportHeight = effectiveViewportHeight();
@@ -978,7 +989,7 @@ export function createLibraryBrowserView(
       }
       gridLayer.append(cell);
     }
-    if (gridFocusRequested) {
+    if (consumeFocusRequest && gridFocusRequested) {
       gridFocusRequested = false;
       const cell =
         gridFocusIndex === undefined
@@ -1235,6 +1246,7 @@ export function createLibraryBrowserView(
     });
   };
   const onScroll = () => {
+    if (!alive || gridView.hidden) return;
     scheduleGridRender();
     send({
       kind: "grid-window",

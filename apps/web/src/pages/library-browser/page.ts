@@ -1313,7 +1313,7 @@ export function mountLibraryBrowser(
       updateControls();
     }
   };
-  const renderGrid = (position?: number) => {
+  const renderGrid = (position?: number, consumeFocusRequest = true) => {
     if (!applicationAlive) return;
     sourceGrid.beginGridRender();
     view.renderGrid(
@@ -1322,6 +1322,7 @@ export function mountLibraryBrowser(
         photoAt: (index) => sourceGrid.photoAt(index),
       },
       position,
+      consumeFocusRequest,
     );
     updateControls();
   };
@@ -1603,11 +1604,11 @@ export function mountLibraryBrowser(
     );
     recoveryGate.succeedTransition(photoTransition);
     setConnected(true);
-    renderGrid();
     cancelScheduledGridRender();
     const gridAuthority = sourceGrid.authority;
     const gridPosition = sourceGrid.readGridPosition(gridAuthority);
     view.showGrid(gridPosition);
+    renderGrid(undefined, false);
     updateControls();
   };
   const persistPosition = (
