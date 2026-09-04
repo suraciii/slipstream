@@ -12,7 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type Route,
+} from "@playwright/test";
 
 import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 
@@ -7373,14 +7379,21 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   const running = await server(base, root);
   type RetryTransportEvent = {
     stage:
-      | "playwright-request"
-      | "response"
+      | "playwright-browse-request"
+      | "playwright-preview-request"
+      | "browse-response"
       | "preview-response"
       | "preview-settled";
     at: number;
+    limit?: string;
     method?: string;
     milestone?: string;
+    photoId?: string;
+    priority?: string;
+    retryEpoch?: string;
     status?: number;
+    start?: string;
+    token?: string;
     url: string;
   };
   const retryTransportTrace: RetryTransportEvent[] = [];
@@ -7394,18 +7407,29 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   };
   let retryBrowsePath = "";
   let retryPreviewPath = "";
-  const isRetryTransport = (url: URL) => {
-    const path = `${url.pathname}${url.search}`;
-    return path === retryBrowsePath || path === retryPreviewPath;
-  };
+  let reopenedToken = "";
   let retryStage = "establishing expired-reopen failure";
   let retryTraceArmed = false;
   await page.addInitScript(() => {
+    const retryEpoch = window as typeof window & {
+      __slipstreamRetryHandlerEpoch: number;
+    };
+    retryEpoch.__slipstreamRetryHandlerEpoch = 0;
+    window.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest("[data-retry-photo]"))
+          retryEpoch.__slipstreamRetryHandlerEpoch += 1;
+      },
+      true,
+    );
     const admissions: Array<{
       token: string;
       start: string;
       limit: string;
       priority: RequestInit["priority"];
+      retryEpoch: string;
       url: string;
     }> = [];
     const droppedAdmissions = { count: 0 };
@@ -7419,46 +7443,116 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     window.fetch = ((input, init) => {
       if (typeof input === "string") {
         const url = new URL(input, window.location.href);
-        if (url.pathname.startsWith("/api/browse/") && !init?.method) {
-          if (admissions.length === 64) {
-            admissions.shift();
-            droppedAdmissions.count += 1;
+        const browse = url.pathname.startsWith("/api/browse/");
+        const preview =
+          url.pathname.startsWith("/api/photos/") &&
+          url.pathname.endsWith("/preview");
+        if ((browse || preview) && !init?.method) {
+          if (browse) {
+            if (admissions.length === 64) {
+              admissions.shift();
+              droppedAdmissions.count += 1;
+            }
+            admissions.push({
+              token: url.pathname.split("/").at(-1) ?? "",
+              start: url.searchParams.get("start") ?? "",
+              limit: url.searchParams.get("limit") ?? "",
+              priority: init?.priority,
+              retryEpoch: String(retryEpoch.__slipstreamRetryHandlerEpoch),
+              url: `${url.pathname}${url.search}`,
+            });
           }
-          admissions.push({
-            token: url.pathname.split("/").at(-1) ?? "",
-            start: url.searchParams.get("start") ?? "",
-            limit: url.searchParams.get("limit") ?? "",
-            priority: init?.priority,
-            url: `${url.pathname}${url.search}`,
-          });
+          const headers = new Headers(init?.headers);
+          headers.set(
+            "x-slipstream-test-priority",
+            init?.priority ?? "unspecified",
+          );
+          headers.set(
+            "x-slipstream-test-retry-epoch",
+            String(retryEpoch.__slipstreamRetryHandlerEpoch),
+          );
+          return nativeFetch(input, { ...init, headers });
         }
       }
       return nativeFetch(input, init);
     }) as typeof window.fetch;
   });
   page.on("request", (request) => {
+    if (
+      !retryTraceArmed ||
+      request.method() !== "GET" ||
+      request.headers()["x-slipstream-test-independent-probe"] === "true"
+    )
+      return;
     const url = new URL(request.url());
-    if (request.method() === "GET" && isRetryTransport(url))
+    const priority = request.headers()["x-slipstream-test-priority"];
+    const retryEpoch = request.headers()["x-slipstream-test-retry-epoch"];
+    if (url.pathname.startsWith("/api/browse/")) {
       recordRetryTransport({
-        stage: "playwright-request",
+        stage: "playwright-browse-request",
         at: Date.now(),
+        limit: url.searchParams.get("limit") ?? "",
         method: request.method(),
+        ...(priority !== undefined ? { priority } : {}),
+        ...(retryEpoch !== undefined ? { retryEpoch } : {}),
+        start: url.searchParams.get("start") ?? "",
+        token: url.pathname.split("/").at(-1) ?? "",
         url: `${url.pathname}${url.search}`,
       });
+    } else if (
+      url.pathname.startsWith("/api/photos/") &&
+      url.pathname.endsWith("/preview")
+    ) {
+      recordRetryTransport({
+        stage: "playwright-preview-request",
+        at: Date.now(),
+        method: request.method(),
+        photoId: url.pathname.split("/").at(-2) ?? "",
+        ...(priority !== undefined ? { priority } : {}),
+        ...(retryEpoch !== undefined ? { retryEpoch } : {}),
+        url: `${url.pathname}${url.search}`,
+      });
+    }
   });
   page.on("response", (response) => {
     const request = response.request();
+    if (
+      !retryTraceArmed ||
+      request.method() !== "GET" ||
+      request.headers()["x-slipstream-test-independent-probe"] === "true"
+    )
+      return;
     const url = new URL(response.url());
-    if (request.method() !== "GET" || !isRetryTransport(url)) return;
-    const event = {
-      at: Date.now(),
-      method: request.method(),
-      status: response.status(),
-      url: `${url.pathname}${url.search}`,
-    };
-    recordRetryTransport({ stage: "response", ...event });
-    if (`${url.pathname}${url.search}` === retryPreviewPath)
-      recordRetryTransport({ stage: "preview-response", ...event });
+    const priority = request.headers()["x-slipstream-test-priority"];
+    const retryEpoch = request.headers()["x-slipstream-test-retry-epoch"];
+    if (url.pathname.startsWith("/api/browse/")) {
+      recordRetryTransport({
+        stage: "browse-response",
+        at: Date.now(),
+        limit: url.searchParams.get("limit") ?? "",
+        method: request.method(),
+        ...(priority !== undefined ? { priority } : {}),
+        ...(retryEpoch !== undefined ? { retryEpoch } : {}),
+        start: url.searchParams.get("start") ?? "",
+        status: response.status(),
+        token: url.pathname.split("/").at(-1) ?? "",
+        url: `${url.pathname}${url.search}`,
+      });
+    } else if (
+      url.pathname.startsWith("/api/photos/") &&
+      url.pathname.endsWith("/preview")
+    ) {
+      recordRetryTransport({
+        stage: "preview-response",
+        at: Date.now(),
+        method: request.method(),
+        photoId: url.pathname.split("/").at(-2) ?? "",
+        ...(priority !== undefined ? { priority } : {}),
+        ...(retryEpoch !== undefined ? { retryEpoch } : {}),
+        status: response.status(),
+        url: `${url.pathname}${url.search}`,
+      });
+    }
   });
   let overviewRequests = 0;
   page.on("request", (request) => {
@@ -7509,6 +7603,19 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   const adjacentSettled = new Promise<void>((resolve) => {
     settleAdjacent = resolve;
   });
+  let releaseIndependentHighProbe: () => void = () => undefined;
+  const independentHighProbeGate = new Promise<void>((resolve) => {
+    releaseIndependentHighProbe = resolve;
+  });
+  let observeIndependentHighProbe: () => void = () => undefined;
+  const independentHighProbeObserved = new Promise<void>((resolve) => {
+    observeIndependentHighProbe = resolve;
+  });
+  let settleIndependentHighProbe: () => void = () => undefined;
+  const independentHighProbeSettled = new Promise<void>((resolve) => {
+    settleIndependentHighProbe = resolve;
+  });
+  let independentHighProbeHeld = false;
   let releaseAdjacentSuccessor: () => void = () => undefined;
   const adjacentSuccessorGate = new Promise<void>((resolve) => {
     releaseAdjacentSuccessor = resolve;
@@ -7516,7 +7623,6 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   let holdAdjacentSuccessors = false;
   let boundaryRequests = 0;
   let originalToken = "";
-  let reopenedToken = "";
   let reopenWindowFailed = false;
   let browseAllocations = 0;
   let reopenPhotoId = "";
@@ -7525,35 +7631,32 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     const retryEvents = retryTraceArmed ? retryTransportTrace.slice() : [];
     const browserFetchTrace = retryTraceArmed
       ? await page
-          .evaluate(
-            ({ target, token }) => {
-              const state = window as typeof window & {
-                __slipstreamBrowseAdmissions?: Array<{
-                  limit: string;
-                  priority: RequestInit["priority"];
-                  start: string;
-                  token: string;
-                  url: string;
-                }>;
-                __slipstreamBrowseAdmissionsDropped?: { count: number };
-              };
-              return {
-                dropped: state.__slipstreamBrowseAdmissionsDropped?.count ?? 0,
-                events:
-                  state.__slipstreamBrowseAdmissions
-                    ?.filter(
-                      (admission) =>
-                        admission.token === token && admission.url === target,
-                    )
-                    .map((admission) => ({
-                      stage: "browser-fetch-admission",
-                      priority: admission.priority,
-                      url: admission.url,
-                    })) ?? [],
-              };
-            },
-            { target: retryBrowsePath, token: reopenedToken },
-          )
+          .evaluate(() => {
+            const state = window as typeof window & {
+              __slipstreamBrowseAdmissions?: Array<{
+                limit: string;
+                priority: RequestInit["priority"];
+                retryEpoch: string;
+                start: string;
+                token: string;
+                url: string;
+              }>;
+              __slipstreamBrowseAdmissionsDropped?: { count: number };
+            };
+            return {
+              dropped: state.__slipstreamBrowseAdmissionsDropped?.count ?? 0,
+              events:
+                state.__slipstreamBrowseAdmissions?.map((admission) => ({
+                  stage: "browser-fetch-admission",
+                  limit: admission.limit,
+                  priority: admission.priority,
+                  retryEpoch: admission.retryEpoch,
+                  start: admission.start,
+                  token: admission.token,
+                  url: admission.url,
+                })) ?? [],
+            };
+          })
           .catch(() => ({ dropped: 0, events: [] }))
       : { dropped: 0, events: [] };
     const body = JSON.stringify(
@@ -7573,10 +7676,15 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
         droppedRetryTransportEvents,
         stages: {
           browserFetchAdmission: browserFetchTrace.events,
-          playwrightRequest: retryEvents.filter(
-            (event) => event.stage === "playwright-request",
+          playwrightBrowseRequest: retryEvents.filter(
+            (event) => event.stage === "playwright-browse-request",
           ),
-          response: retryEvents.filter((event) => event.stage === "response"),
+          browseResponse: retryEvents.filter(
+            (event) => event.stage === "browse-response",
+          ),
+          playwrightPreviewRequest: retryEvents.filter(
+            (event) => event.stage === "playwright-preview-request",
+          ),
           preview: retryEvents.filter(
             (event) =>
               event.stage === "preview-response" ||
@@ -7608,7 +7716,8 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     if (
       request.method() !== "GET" ||
       !url.pathname.startsWith("/api/browse/") ||
-      response.status() !== 200
+      response.status() !== 200 ||
+      request.headers()["x-slipstream-test-independent-probe"] === "true"
     )
       return;
     const token = url.pathname.split("/").at(-1)!;
@@ -7616,56 +7725,77 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     starts.add(url.searchParams.get("start") ?? "");
     successfulBrowseStarts.set(token, starts);
   });
-  await page.route(
-    (url) =>
-      url.pathname.startsWith("/api/browse/") &&
-      url.searchParams.get("start") === "10",
-    async (route) => {
-      const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
-      boundaryRequests += 1;
-      if (boundaryRequests === 1) {
+  const retryBoundaryUrl = (url: URL) =>
+    url.pathname.startsWith("/api/browse/") &&
+    url.searchParams.get("start") === "10";
+  const retryBoundaryRoute = async (route: Route) => {
+    const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
+    if (
+      route.request().headers()["x-slipstream-test-independent-probe"] ===
+      "true"
+    ) {
+      independentHighProbeHeld = true;
+      observeIndependentHighProbe();
+      try {
+        await independentHighProbeGate;
         try {
-          await adjacentGate;
-          try {
-            await route.continue();
-          } catch {
-            /* current navigation supersedes this adjacent Photo prefetch */
-          }
-        } finally {
-          settleAdjacent();
+          await route.fulfill({ status: 200, body: "{}" });
+        } catch {
+          /* Test teardown may have canceled the held raw probe. */
         }
-        return;
+      } finally {
+        settleIndependentHighProbe();
       }
-      if (!originalToken) {
-        originalToken = token;
-        await route.fulfill({
-          status: 404,
-          contentType: "application/json",
-          body: '{"error":"Browse source expired or not found"}',
-        });
-        return;
-      }
-      if (token !== originalToken && !reopenWindowFailed) {
-        reopenedToken = token;
-        reopenWindowFailed = true;
-        // Close the gate before exposing the failed response so no successor
-        // request can pass between the failure UI and Retry admission.
-        holdAdjacentSuccessors = true;
-        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
-        return;
-      }
-      if (token === reopenedToken && holdAdjacentSuccessors) {
-        await adjacentSuccessorGate;
+      return;
+    }
+    boundaryRequests += 1;
+    if (boundaryRequests === 1) {
+      try {
+        await adjacentGate;
         try {
           await route.continue();
         } catch {
-          /* Retry supersedes this held adjacent Photo prefetch. */
+          /* current navigation supersedes this adjacent Photo prefetch */
         }
-        return;
+      } finally {
+        settleAdjacent();
       }
-      await route.continue();
-    },
-  );
+      return;
+    }
+    if (!originalToken) {
+      originalToken = token;
+      await route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: '{"error":"Browse source expired or not found"}',
+      });
+      return;
+    }
+    if (token !== originalToken && !reopenWindowFailed) {
+      reopenedToken = token;
+      reopenWindowFailed = true;
+      // Close the gate before exposing the failed response so no successor
+      // request can pass between the failure UI and Retry admission.
+      holdAdjacentSuccessors = true;
+      await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+      return;
+    }
+    if (
+      token === reopenedToken &&
+      holdAdjacentSuccessors &&
+      route.request().headers()["x-slipstream-test-priority"] === "low"
+    ) {
+      await adjacentSuccessorGate;
+      try {
+        await route.continue();
+      } catch {
+        /* Retry supersedes this held adjacent Photo prefetch. */
+      }
+      return;
+    }
+    await route.continue();
+  };
+  await page.route(retryBoundaryUrl, retryBoundaryRoute);
   try {
     await page.locator('[data-photo-index="59"]').click();
     await expect(page.getByText("60 / 70")).toBeVisible();
@@ -7703,6 +7833,65 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     retryPreviewPath = `/api/photos/${reopenPhotoId}/preview`;
     retryTransportTrace.length = 0;
     droppedRetryTransportEvents = 0;
+    retryTraceArmed = true;
+    const retryEpoch = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __slipstreamRetryHandlerEpoch: number;
+          }
+        ).__slipstreamRetryHandlerEpoch + 1,
+    );
+    const retriedHighPriorityBrowse = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        `${url.pathname}${url.search}` === retryBrowsePath &&
+        request.headers()["x-slipstream-test-priority"] === "high" &&
+        request.headers()["x-slipstream-test-retry-epoch"] ===
+          String(retryEpoch)
+      );
+    });
+    const broadHighPriorityBrowse = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return (
+        request.method() === "GET" &&
+        url.pathname.startsWith("/api/browse/") &&
+        request.headers()["x-slipstream-test-priority"] === "high"
+      );
+    });
+    retryStage = "proving the Retry click boundary";
+    const independentHighPriorityBrowse = page.waitForRequest(
+      (request) =>
+        request.headers()["x-slipstream-test-independent-probe"] === "true",
+    );
+    await page.evaluate((path) => {
+      void fetch(path, {
+        priority: "high",
+        headers: { "x-slipstream-test-independent-probe": "true" },
+      }).catch(() => undefined);
+    }, `/api/browse/${reopenedToken}?start=10&limit=60`);
+    await independentHighProbeObserved;
+    const independentHighRequest = await independentHighPriorityBrowse;
+    const broadHighRequest = await broadHighPriorityBrowse;
+    expect(broadHighRequest.url()).toBe(independentHighRequest.url());
+    expect(broadHighRequest.method()).toBe("GET");
+    expect(
+      broadHighRequest.headers()["x-slipstream-test-independent-probe"],
+    ).toBe("true");
+    expect(broadHighRequest.headers()["x-slipstream-test-retry-epoch"]).toBe(
+      "0",
+    );
+    expect(independentHighRequest.headers()["x-slipstream-test-priority"]).toBe(
+      "high",
+    );
+    expect(
+      independentHighRequest.headers()["x-slipstream-test-retry-epoch"],
+    ).toBe("0");
+    const independentHighUrl = new URL(independentHighRequest.url());
+    expect(independentHighUrl.pathname).toBe(`/api/browse/${reopenedToken}`);
+    expect(independentHighUrl.searchParams.get("start")).toBe("10");
+    expect(independentHighUrl.searchParams.get("limit")).toBe("60");
     await page.evaluate(() => {
       const state = window as typeof window & {
         __slipstreamBrowseAdmissions: unknown[];
@@ -7711,15 +7900,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       state.__slipstreamBrowseAdmissions.length = 0;
       state.__slipstreamBrowseAdmissionsDropped.count = 0;
     });
-    retryTraceArmed = true;
-    const retriedPhotoRange = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return (
-        request.method() === "GET" &&
-        url.pathname === `/api/browse/${reopenedToken}` &&
-        `${url.pathname}${url.search}` === retryBrowsePath
-      );
-    });
+    retryStage = "awaiting current-range admission";
     const refreshedPreview = page.waitForResponse((response) => {
       const request = response.request();
       const url = new URL(response.url());
@@ -7733,10 +7914,18 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await photoRetry.click();
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
-    const retriedPhotoRangeRequest = await retriedPhotoRange;
+    const retriedPhotoRangeRequest = await retriedHighPriorityBrowse;
+    releaseIndependentHighProbe();
+    await independentHighProbeSettled;
 
     retryStage = "awaiting refreshed Preview response";
     expect(retriedPhotoRangeRequest.method()).toBe("GET");
+    expect(
+      retriedPhotoRangeRequest.headers()["x-slipstream-test-priority"],
+    ).toBe("high");
+    expect(
+      retriedPhotoRangeRequest.headers()["x-slipstream-test-retry-epoch"],
+    ).toBe(String(retryEpoch));
     const retriedRequest = new URL(retriedPhotoRangeRequest.url());
     expect(retriedRequest.pathname).toBe(`/api/browse/${reopenedToken}`);
     expect(retriedRequest.searchParams.get("start")).toBe("0");
@@ -7750,6 +7939,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
               start: string;
               limit: string;
               priority: RequestInit["priority"];
+              retryEpoch: string;
               url: string;
             }>;
           }
@@ -7763,6 +7953,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "0",
       limit: "60",
       priority: "high",
+      retryEpoch: String(retryEpoch),
       url: retryBrowsePath,
     });
     expect(retryAdmissions).not.toContainEqual({
@@ -7770,6 +7961,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "10",
       limit: "60",
       priority: "high",
+      retryEpoch: String(retryEpoch),
       url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     await refreshedPreview;
@@ -7801,6 +7993,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
               start: string;
               limit: string;
               priority: RequestInit["priority"];
+              retryEpoch: string;
               url: string;
             }>;
           }
@@ -7814,6 +8007,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "10",
       limit: "60",
       priority: "low",
+      retryEpoch: String(retryEpoch),
       url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     expect(completedAdmissions).not.toContainEqual({
@@ -7821,6 +8015,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       start: "10",
       limit: "60",
       priority: "high",
+      retryEpoch: String(retryEpoch),
       url: `/api/browse/${reopenedToken}?start=10&limit=60`,
     });
     expect(browseAllocations).toBe(allocationsBeforeRetry);
@@ -7835,7 +8030,10 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     throw error;
   } finally {
     releaseAdjacent();
+    releaseIndependentHighProbe();
+    if (independentHighProbeHeld) await independentHighProbeSettled;
     releaseAdjacentSuccessor();
+    await page.unroute(retryBoundaryUrl, retryBoundaryRoute);
   }
 });
 
