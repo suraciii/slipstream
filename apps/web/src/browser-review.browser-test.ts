@@ -6968,6 +6968,10 @@ for (const failure of replacementFirstWindowFailures) {
     await expect(tailPhoto).toBeEnabled();
 
     const reopenBodies: Array<Record<string, unknown>> = [];
+    let releaseExpired!: () => void;
+    const expiredReleased = new Promise<void>((resolve) => {
+      releaseExpired = resolve;
+    });
     let releaseReopen!: () => void;
     const reopenReleased = new Promise<void>((resolve) => {
       releaseReopen = resolve;
@@ -6976,10 +6980,7 @@ for (const failure of replacementFirstWindowFailures) {
     const reopenStarted = new Promise<void>((resolve) => {
       markReopenStarted = resolve;
     });
-    let releaseOtherWindows!: () => void;
-    const otherWindowsReleased = new Promise<void>((resolve) => {
-      releaseOtherWindows = resolve;
-    });
+    let expiredRequested = false;
     let expiredServed = false;
     let replacementWindowFailures = 0;
     const replacementWindow = page
@@ -7022,6 +7023,8 @@ for (const failure of replacementFirstWindowFailures) {
         return;
       }
       if (!expiredServed) {
+        expiredRequested = true;
+        await expiredReleased;
         expiredServed = true;
         await route.fulfill({
           status: 404,
@@ -7037,7 +7040,6 @@ for (const failure of replacementFirstWindowFailures) {
           await route.fulfill(failure.response);
           return;
         }
-        await otherWindowsReleased;
         await route.continue();
         return;
       }
@@ -7045,10 +7047,20 @@ for (const failure of replacementFirstWindowFailures) {
     });
 
     try {
+      // Dispatch an unloaded middle window, then restore the tail before its
+      // scheduled Grid frame. Reopen admission can assert a real retained
+      // cell without asking pageBusy to render another virtualized range.
       await viewport.evaluate((element) => {
+        const tailScrollTop = element.scrollTop;
         element.scrollTop = element.scrollHeight / 2;
         element.dispatchEvent(new Event("scroll"));
+        element.scrollTop = tailScrollTop;
       });
+      await expect.poll(() => expiredRequested).toBe(true);
+      await waitForGridFrame(page);
+      await expect(tailPhoto).toBeVisible();
+      await expect(tailPhoto).toBeEnabled();
+      releaseExpired();
       await expect.poll(() => expiredServed).toBe(true);
       await expect
         .poll(() =>
@@ -7061,10 +7073,6 @@ for (const failure of replacementFirstWindowFailures) {
         )
         .toBe(true);
       await reopenStarted;
-      await viewport.evaluate((element) => {
-        element.scrollTop = element.scrollHeight;
-        element.dispatchEvent(new Event("scroll"));
-      });
       await expect(tailPhoto).toBeVisible();
       await expect(tailPhoto).toBeDisabled();
       releaseReopen();
@@ -7076,8 +7084,8 @@ for (const failure of replacementFirstWindowFailures) {
       await expect(tailPhoto).toBeVisible();
       await expect(tailPhoto).toBeDisabled();
     } finally {
+      releaseExpired();
       releaseReopen();
-      releaseOtherWindows();
       await page.unroute(/\/api\/browse/);
     }
   });
