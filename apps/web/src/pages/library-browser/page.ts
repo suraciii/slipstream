@@ -275,6 +275,11 @@ export function mountLibraryBrowser(
   let connectionEstablished = false;
   let pageBusy = false;
   let photoRetryPending = false;
+  const canOpenGridPhoto = () =>
+    sourceGrid.isReady(sourceGrid.authority) &&
+    !pageBusy &&
+    !photoOwner.busy &&
+    !photoOwner.opening;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
@@ -413,7 +418,7 @@ export function mountLibraryBrowser(
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
-    const gridEnabled = !pageBusy && !photoOwner.busy && !photoOwner.opening;
+    const gridEnabled = canOpenGridPhoto();
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
       !pageBusy &&
@@ -1332,7 +1337,7 @@ export function mountLibraryBrowser(
   };
 
   const openPhoto = async (index: number) => {
-    if (pageBusy || photoOwner.busy || photoOwner.opening) return;
+    if (!canOpenGridPhoto()) return;
     const navigation = photoOwner.beginOpen(index);
     if (!navigation) return;
     const photoTransition = recoveryGate.beginTransition(

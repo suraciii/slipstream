@@ -6869,38 +6869,219 @@ test("an expired Album snapshot replaces retired membership memory", async ({
     }
     await route.continue();
   });
-  await viewport.evaluate((element) => {
-    element.scrollTop = element.scrollHeight / 2;
-    element.dispatchEvent(new Event("scroll"));
-  });
-  await expect.poll(() => expiredServed).toBe(true);
-  await expect
-    .poll(() =>
-      reopenBodies.some(
-        (body) =>
-          body.source === "album" &&
-          body.albumId === albumId &&
-          body.photoId === firstId,
-      ),
-    )
-    .toBe(true);
-  await reopenStarted;
-  await viewport.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    element.dispatchEvent(new Event("scroll"));
-  });
-  const tailPhoto = page.getByRole("button", {
-    name: /^Photo 250 of 250/,
-  });
-  await expect(tailPhoto).toBeVisible();
-  await expect(tailPhoto).toBeDisabled();
-  releaseReopen();
-  await expect(tailPhoto).toBeEnabled();
-  await openPhotoAndWaitForProgress(page, albumId, tailPhoto);
-  await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeVisible();
+  try {
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight / 2;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect.poll(() => expiredServed).toBe(true);
+    await expect
+      .poll(() =>
+        reopenBodies.some(
+          (body) =>
+            body.source === "album" &&
+            body.albumId === albumId &&
+            body.photoId === firstId,
+        ),
+      )
+      .toBe(true);
+    await reopenStarted;
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    const tailPhoto = page.getByRole("button", {
+      name: /^Photo 250 of 250/,
+    });
+    await expect(tailPhoto).toBeVisible();
+    await expect(tailPhoto).toBeDisabled();
+    releaseReopen();
+    await expect(tailPhoto).toBeEnabled();
+    await openPhotoAndWaitForProgress(page, albumId, tailPhoto);
+    await expect(
+      page.getByRole("button", { name: "Remove from this Album" }),
+    ).toBeVisible();
+  } finally {
+    releaseReopen();
+    await page.unroute(/\/api\/browse/);
+  }
 });
+
+const replacementFirstWindowFailures = [
+  {
+    name: "returns HTTP 503",
+    status: "could not be loaded (HTTP 503)",
+    response: {
+      status: 503,
+      contentType: "application/json",
+      body: '{"error":"replacement window unavailable"}',
+    },
+  },
+  {
+    name: "returns malformed data",
+    status: "returned an invalid response",
+    response: {
+      status: 200,
+      contentType: "application/json",
+      body: '{"photos":[]}',
+    },
+  },
+] as const;
+
+for (const failure of replacementFirstWindowFailures) {
+  test(`a replacement Album keeps retained Grid cells unavailable when its first window ${failure.name}`, async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 250);
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Replacement failure");
+    await openGrid(page, running.url, "Replacement failure");
+    await openPhotoAndWaitForProgress(
+      page,
+      albumId,
+      page.getByRole("button", { name: /^Photo 1 of 250/ }),
+    );
+    const firstId = (await state(running.url, albumId)).members[0]!.photoId;
+    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await expect(
+      page.getByText(
+        "Removed from the Album. It stays in this open view until reopened.",
+      ),
+    ).toBeVisible();
+    const readded = await post(running.url, `/api/albums/${albumId}/members`, {
+      photoIds: [firstId],
+    });
+    expect(readded.status).toBe(200);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await waitForGridFrame(page);
+
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    const tailPhoto = page.getByRole("button", {
+      name: /^Photo 250 of 250/,
+    });
+    await expect(tailPhoto).toBeVisible();
+    await expect(tailPhoto).toBeEnabled();
+
+    const reopenBodies: Array<Record<string, unknown>> = [];
+    let releaseReopen!: () => void;
+    const reopenReleased = new Promise<void>((resolve) => {
+      releaseReopen = resolve;
+    });
+    let markReopenStarted!: () => void;
+    const reopenStarted = new Promise<void>((resolve) => {
+      markReopenStarted = resolve;
+    });
+    let releaseOtherWindows!: () => void;
+    const otherWindowsReleased = new Promise<void>((resolve) => {
+      releaseOtherWindows = resolve;
+    });
+    let expiredServed = false;
+    let replacementWindowFailures = 0;
+    const replacementWindow = page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/browse" &&
+          response.status() === 200,
+      )
+      .then(async (response) => {
+        const body = (await response.json()) as {
+          position: number;
+          token: string;
+          total: number;
+        };
+        const windowSize = 60;
+        return {
+          token: body.token,
+          start: Math.max(
+            0,
+            Math.min(
+              Math.floor(body.position / windowSize) * windowSize,
+              Math.max(0, body.total - windowSize),
+            ),
+          ),
+        };
+      });
+    await page.route(/\/api\/browse/, async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (request.method() === "POST") {
+        reopenBodies.push(request.postDataJSON() as Record<string, unknown>);
+        markReopenStarted();
+        await reopenReleased;
+        await route.continue();
+        return;
+      }
+      if (request.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (!expiredServed) {
+        expiredServed = true;
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: '{"error":"Browse source expired or not found"}',
+        });
+        return;
+      }
+      const replacement = await replacementWindow;
+      if (url.pathname === `/api/browse/${replacement.token}`) {
+        if (url.searchParams.get("start") === String(replacement.start)) {
+          replacementWindowFailures += 1;
+          await route.fulfill(failure.response);
+          return;
+        }
+        await otherWindowsReleased;
+        await route.continue();
+        return;
+      }
+      await route.continue();
+    });
+
+    try {
+      await viewport.evaluate((element) => {
+        element.scrollTop = element.scrollHeight / 2;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await expect.poll(() => expiredServed).toBe(true);
+      await expect
+        .poll(() =>
+          reopenBodies.some(
+            (body) =>
+              body.source === "album" &&
+              body.albumId === albumId &&
+              body.photoId === firstId,
+          ),
+        )
+        .toBe(true);
+      await reopenStarted;
+      await viewport.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await expect(tailPhoto).toBeVisible();
+      await expect(tailPhoto).toBeDisabled();
+      releaseReopen();
+      await replacementWindow;
+      await expect.poll(() => replacementWindowFailures).toBeGreaterThan(0);
+      await expect(page.locator("[data-grid-status]")).toContainText(
+        failure.status,
+      );
+      await expect(tailPhoto).toBeVisible();
+      await expect(tailPhoto).toBeDisabled();
+    } finally {
+      releaseReopen();
+      releaseOtherWindows();
+      await page.unroute(/\/api\/browse/);
+    }
+  });
+}
 
 test("a failed expired Album reopen retains retired membership memory", async ({
   page,

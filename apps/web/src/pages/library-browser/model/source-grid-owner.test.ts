@@ -481,6 +481,65 @@ describe("SourceGridOwner", () => {
     expect(owner.retryRequired).toBe(false);
   });
 
+  test("keeps a replacement source unready until its required window loads", async () => {
+    let opens = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST") {
+        opens += 1;
+        return Promise.resolve(
+          opened(
+            [
+              "old-token",
+              "unavailable-token",
+              "malformed-token",
+              "ready-token",
+            ][opens - 1]!,
+            60,
+          ),
+        );
+      }
+      if (url.pathname === "/api/browse/old-token")
+        return Promise.resolve(windowResponse(0, 60));
+      if (url.pathname === "/api/browse/unavailable-token")
+        return Promise.resolve(new Response(null, { status: 503 }));
+      if (url.pathname === "/api/browse/malformed-token")
+        return Promise.resolve(new Response('{"photos":[]}', { status: 200 }));
+      if (url.pathname === "/api/browse/ready-token")
+        return Promise.resolve(windowResponse(0, 60));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const initial = await owner.open({ kind: "library" });
+    if (initial.kind !== "opened") throw new Error("expected initial source");
+    await owner.loadWindow(0, { kind: "source", authority: initial.authority });
+    expect(owner.isReady(initial.authority)).toBe(true);
+
+    for (const { expected, ready } of [
+      { expected: { status: 503 }, ready: false },
+      { expected: { malformed: true }, ready: false },
+      { expected: { kind: "loaded" }, ready: true },
+    ] as const) {
+      const replacement = await owner.open(
+        { kind: "library" },
+        { mode: "reopen" },
+      );
+      if (replacement.kind !== "opened")
+        throw new Error("expected replacement source");
+      expect(owner.isReady(initial.authority)).toBe(false);
+      expect(owner.isReady(replacement.authority)).toBe(false);
+      expect(
+        await owner.loadWindow(0, {
+          kind: "source",
+          authority: replacement.authority,
+        }),
+      ).toMatchObject(expected);
+      expect(owner.isReady(replacement.authority)).toBe(ready);
+    }
+  });
+
   test("owns the Grid position and moves its pending anchor only for the current source", async () => {
     let openCount = 0;
     const owner = createSourceGridOwner((input, init) => {

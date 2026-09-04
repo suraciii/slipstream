@@ -128,6 +128,7 @@ export interface SourceGridOwner {
   readonly retainedThumbnailCount: number;
   readonly retainedThumbnailDeliveryFailureCount: number;
   isCurrent(authority: SourceAuthority): boolean;
+  isReady(authority: SourceAuthority): boolean;
   renewPhotoWindow(): PhotoWindowAuthority;
   open(
     source: SourceGridSource,
@@ -243,6 +244,9 @@ export function createSourceGridOwner(
   let total = 0;
   let gridPosition = 0;
   let retryRequired = false;
+  // A replacement's retained Grid DOM stays display-only until its source
+  // window has established current facts.
+  let sourceReady = false;
   let sourceTasks = new TaskScope();
   let gridTasks = new TaskScope();
   let facts = new Map<number, PhotoSummary>();
@@ -361,6 +365,7 @@ export function createSourceGridOwner(
     if (priorToken) releaseToken(priorToken);
     retryRequired = false;
     if (mode === "replace") {
+      sourceReady = false;
       total = 0;
       gridPosition = 0;
       facts = new Map();
@@ -390,6 +395,7 @@ export function createSourceGridOwner(
         );
         gridPosition = position;
         if (mode === "reopen") {
+          sourceReady = false;
           facts = new Map();
           thumbnails = new Map();
           thumbnailDeliveryFailures = new Map();
@@ -491,8 +497,10 @@ export function createSourceGridOwner(
       total === 0 ||
       operationTasks(operation).halted
     ) {
-      if (operationIsCurrent(operation) && total === 0)
+      if (operationIsCurrent(operation) && total === 0) {
+        if (operation.kind === "source") sourceReady = true;
         return { kind: "loaded", authority, owner, start, changed: false };
+      }
       return detachedWindow(operation, start);
     }
     if (windowLoaded(start))
@@ -549,6 +557,7 @@ export function createSourceGridOwner(
         for (const [offset, photo] of result.value.photos.entries())
           facts.set(result.value.start + offset, photo);
         trimFacts(index);
+        if (operation.kind === "source") sourceReady = true;
         return {
           kind: "loaded",
           authority: ownerAuthority,
@@ -735,11 +744,15 @@ export function createSourceGridOwner(
       return thumbnailDeliveryFailures.size;
     },
     isCurrent,
+    isReady(candidate) {
+      return isCurrent(candidate) && sourceReady;
+    },
     renewPhotoWindow,
     open,
     establish(candidate) {
       if (!isCurrent(candidate)) return false;
       retryRequired = false;
+      sourceReady = true;
       return true;
     },
     updateAlbum(album) {
