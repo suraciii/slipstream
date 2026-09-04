@@ -1361,33 +1361,32 @@ export function mountLibraryBrowser(
           photoTransition,
           navigation.authority,
         );
+      if (!photoOwner.isCurrent(navigation.authority) || !windowReady) return;
+      const current = photoOwner.commitOpen(navigation);
+      if (!current) return;
+      const hasKnownPreview = renderPhotoShell(navigation.authority);
+      updateControls();
+      const previewRequest = showPreview(navigation.authority, photoTransition);
+      const previewReady = hasKnownPreview || (await previewRequest);
+      // A superseded open must not persist or touch controls afterwards: the
+      // newer navigation persists its own position.
+      if (!photoOwner.isCurrent(navigation.authority)) return;
+      const positionReady = await persistPosition(navigation.authority);
+      if (
+        previewReady &&
+        positionReady &&
+        photoOwner.isCurrent(navigation.authority)
+      ) {
+        recoveryGate.succeedTransition(photoTransition);
+        setConnected(true);
+      }
     } finally {
       // Back to Grid or a superseding view may end this request while an
-      // unloaded boundary window is still loading. Release the open gate so
-      // the interface can never remain wedged by an abandoned load.
-      photoOwner.finishOpen(navigation.authority);
+      // unloaded boundary window is still loading. A committed navigation has
+      // already cleared this gate; every other path abandons its pending target.
+      photoOwner.cancelOpen(navigation.authority);
       updateControls();
     }
-    if (!photoOwner.isCurrent(navigation.authority) || !windowReady) return;
-    const current = currentPhoto();
-    if (!current) return;
-    const hasKnownPreview = renderPhotoShell(navigation.authority);
-    updateControls();
-    const previewRequest = showPreview(navigation.authority, photoTransition);
-    const previewReady = hasKnownPreview || (await previewRequest);
-    // A superseded open must not persist or touch controls afterwards: the
-    // newer navigation persists its own position.
-    if (!photoOwner.isCurrent(navigation.authority)) return;
-    const positionReady = await persistPosition(navigation.authority);
-    if (
-      previewReady &&
-      positionReady &&
-      photoOwner.isCurrent(navigation.authority)
-    ) {
-      recoveryGate.succeedTransition(photoTransition);
-      setConnected(true);
-    }
-    updateControls();
   };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();

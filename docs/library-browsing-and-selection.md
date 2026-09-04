@@ -245,6 +245,8 @@ If a File Location window fails to load, Slipstream must retain already loaded F
 
 If a Grid or Photo window fails to load, Slipstream must retain already loaded content, identify the failed range, and offer retry without returning to an empty application screen.
 
+Photo navigation must commit a new current Photo only after its bounded Photo facts are available. If navigation cannot commit its target, Slipstream must retain the prior visible current Photo and position as the Photo Retry target. The displayed Photo, recovery target, and retried bounded window must refer to the same Photo.
+
 If the current Preview cannot load, Slipstream must keep the Photo in source order, identify the failure, and allow navigation without forcing a selection decision.
 
 If an Album creation, rename, delete, or membership change cannot persist, Slipstream must identify the affected Album and action. It must retain a recoverable current source and must not present the failed change as complete.
