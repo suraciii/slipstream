@@ -246,7 +246,7 @@ Polling `GET /api/status` at a modest interval is sufficient for one Photographe
 
 Already loaded facts and derivative bytes remain visible after disconnection. Mutations remain disabled until the server confirms current state.
 
-If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use.
+If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use. Browser-local facts scoped to the retired Snapshot, including the temporary memory that keeps a removed Album member visible, are discarded only after the replacement Snapshot commits successfully. A failed reopen retains those facts with the recoverable current view.
 
 The first product does not promise durable `All Photos` or Original Folder position across browser reload. Album saved position remains durable SQLite state.
 
