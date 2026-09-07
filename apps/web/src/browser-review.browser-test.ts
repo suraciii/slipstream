@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
   chmod,
 } from "node:fs/promises";
@@ -206,6 +207,19 @@ async function openPhotoAndWaitForProgress(
       document.body.innerText.includes("Preview unavailable"),
   );
   await confirmed;
+}
+
+async function waitForLoadedReviewImage(page: Page) {
+  const image = page.locator("[data-stage] img");
+  await expect(image).toBeVisible();
+  await page.waitForFunction(() => {
+    const candidate = document.querySelector("[data-stage] img");
+    return (
+      candidate instanceof HTMLImageElement &&
+      candidate.complete &&
+      candidate.naturalWidth > 0
+    );
+  });
 }
 
 async function startReview(
@@ -4577,21 +4591,26 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
 });
 
-test("shows matching JPEG then RAW embedded JPEG through the mobile production Review Session", async ({
+test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile production Review Session", async ({
   page,
 }) => {
   test.skip(!sample, "Set SLIPSTREAM_RAW_SAMPLE for the camera smoke");
   const cameraSample = sample!;
-  const before = await sha256(cameraSample);
+  const sourceBefore = await originalSnapshot(cameraSample);
   const { base, root } = await fixture();
   const raw = join(root, `camera${extname(cameraSample)}`);
   const matching = join(root, "camera.jpg");
   await copyFile(cameraSample, raw);
+  const copiedBefore = await originalSnapshot(raw);
   await writeFile(matching, await jpeg());
   const running = await server(base, root);
   const { albumId } = await createAlbum(running.url);
   await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
   await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Detail Review" }).click();
+  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Exit Detail" }).click();
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
@@ -4602,16 +4621,45 @@ test("shows matching JPEG then RAW embedded JPEG through the mobile production R
     albumId,
     page.getByRole("button", { name: /Photo 1 of/ }),
   );
+  await waitForLoadedReviewImage(page);
   await expect(
     page.getByText("RAW embedded JPEG", { exact: true }),
   ).toBeVisible();
-  expect(await sha256(cameraSample)).toBe(before);
+  await page.getByRole("button", { name: "Detail Review" }).click();
+  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
+  await page.getByRole("button", { name: "Exit Detail" }).click();
+  expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
+  expect(await originalSnapshot(raw)).toEqual(copiedBefore);
 });
 
-async function sha256(path: string): Promise<string> {
-  return createHash("sha256")
-    .update(await readFile(path))
-    .digest("hex");
+type OriginalSnapshot = Readonly<{
+  sha256: string;
+  length: bigint;
+  device: bigint;
+  inode: bigint;
+  mode: bigint;
+  owner: bigint;
+  group: bigint;
+  modifiedNanoseconds: bigint;
+}>;
+
+async function originalSnapshot(path: string): Promise<OriginalSnapshot> {
+  const [bytes, metadata] = await Promise.all([
+    readFile(path),
+    stat(path, { bigint: true }),
+  ]);
+  if (!metadata.isFile())
+    throw new Error(`Original safety sample must be a regular file: ${path}`);
+  return {
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    length: metadata.size,
+    device: metadata.dev,
+    inode: metadata.ino,
+    mode: metadata.mode,
+    owner: metadata.uid,
+    group: metadata.gid,
+    modifiedNanoseconds: metadata.mtimeNs,
+  };
 }
 
 test("Library Review uses server Capture Time order, snapshots it, and stores no progress", async ({
