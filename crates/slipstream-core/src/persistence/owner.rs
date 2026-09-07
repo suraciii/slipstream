@@ -2721,6 +2721,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v4_binary_fence_rejects_canonical_v5_without_changes() {
+        let (_base, library, _state, _name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+
+        let sidecars = ["-journal", "-wal", "-shm"]
+            .map(|suffix| path.with_file_name(format!("library.sqlite{suffix}")));
+        let persisted_paths = std::iter::once(path.clone())
+            .chain(sidecars.iter().cloned())
+            .collect::<Vec<_>>();
+        let before = persisted_paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+
+        assert!(matches!(
+            preflight_schema_for_max_version(
+                &connection,
+                library.canonical_path().to_str().unwrap(),
+                4,
+            ),
+            Err(PersistenceError::NewerSchema)
+        ));
+
+        let after = persisted_paths
+            .iter()
+            .map(|path| fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+    }
+
+    #[test]
     fn legacy_v3_binary_fence_rejects_canonical_v4() {
         let (_base, library, _state, _name, path) = fixture();
         seed(
