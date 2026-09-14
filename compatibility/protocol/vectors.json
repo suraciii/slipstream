@@ -121,7 +121,7 @@
     }
   },
   {
-    "name": "cross-origin-mutation",
+    "name": "foreign-origin-scan-is-admitted",
     "request": {
       "method": "POST",
       "path": "/api/scan",
@@ -130,10 +130,7 @@
       }
     },
     "expected": {
-      "status": 403,
-      "body": {
-        "error": "Cross-origin mutation rejected"
-      }
+      "status": 200
     }
   },
   {

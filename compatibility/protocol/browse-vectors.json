@@ -232,7 +232,7 @@
     }
   },
   {
-    "name": "browse-open-cross-origin",
+    "name": "browse-open-foreign-origin-is-admitted",
     "request": {
       "method": "POST",
       "path": "/api/browse",
@@ -245,14 +245,16 @@
       }
     },
     "expected": {
-      "status": 403,
+      "status": 200,
       "body": {
-        "error": "Cross-origin mutation rejected"
+        "token": "$token",
+        "total": 0,
+        "position": 0
       }
     }
   },
   {
-    "name": "browse-close-cross-origin",
+    "name": "browse-close-foreign-origin-is-admitted",
     "request": {
       "method": "DELETE",
       "path": "/api/browse/$token",
@@ -261,10 +263,7 @@
       }
     },
     "expected": {
-      "status": 403,
-      "body": {
-        "error": "Cross-origin mutation rejected"
-      }
+      "status": 204
     }
   },
   {

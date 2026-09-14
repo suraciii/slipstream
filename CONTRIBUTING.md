@@ -83,19 +83,16 @@ SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
 SLIPSTREAM_WEB_ROOT="$PWD/apps/web/dist" \
 SLIPSTREAM_HOST=127.0.0.1 \
 SLIPSTREAM_PORT=3000 \
-SLIPSTREAM_PUBLIC_ORIGIN=http://127.0.0.1:3000 \
 cargo run --locked -p slipstream-server
 ```
 
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults
-to loopback; set `SLIPSTREAM_HOST` to the listener address. Set the required
-`SLIPSTREAM_PUBLIC_ORIGIN` to the exact browser-visible `http` or `https`
-origin, including a non-default port. It is not inferred from the listener,
-request Host, or forwarded headers. Other than the local `GET /healthz` or
-`HEAD /healthz` readiness probe, normal origin-form requests must use its Host
-authority and absolute targets must match it; browser `POST` and `DELETE`
-requests must also use it as `Origin`. `GET /api/status` separately reports
-Library initialization, scan, and publication state.
+to loopback; set `SLIPSTREAM_HOST` to the listener address. Slipstream 0.1
+has no accounts, authentication, or authorization. `Host`, `Origin`, and
+forwarded headers do not authorize requests. Bind a non-loopback listener only
+to a trusted network because every reachable client can read and mutate the
+Photo Library. `GET /api/status` separately reports Library initialization,
+scan, and publication state.
 
 To expand a stopped schema-v5 Library to an ancestor Folder, first create and
 record a verified consistent backup with the service stopped (see
@@ -110,8 +107,8 @@ cargo run --locked -p slipstream-server -- expand-library
 The offline command rejects a running database, sidecars, non-v5 state, an
 unrelated Folder, descriptor mismatch, invalid remembered Locations, and
 scan-limit failures. It never opens HTTP and does not require
-`SLIPSTREAM_PUBLIC_ORIGIN`. It commits the binding and Location changes once,
-then completes a normal scan before reporting success.
+listener configuration. It commits the binding and Location changes once, then
+completes a normal scan before reporting success.
 
 ## Container verification
 
@@ -124,4 +121,4 @@ fixed container inputs without building an image. The explicit Linux amd64
 digest-only Compose operation are defined by
 [`docs/deployment.md`](docs/deployment.md).
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. Use a host Tailscale address when exposing the application only through Tailscale. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. A LAN or Tailscale binding remains trusted-network-only; it does not add authentication. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).

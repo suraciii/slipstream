@@ -163,7 +163,7 @@ async function fixture(): Promise<Fixture> {
       '  original_arguments=("$@")',
       "  shift 3",
       '  printf \'%s\\n\' "$@" > "$FAKE_DOCKER_COMPOSE_ARGUMENTS"',
-      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_PUBLIC_ORIGIN-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
+      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
       '  printf \'%s\\n\' "${COMPOSE_FILE-}" "${COMPOSE_ENV_FILES-}" "${COMPOSE_PROFILES-}" "${COMPOSE_PROJECT_NAME-}" > "$FAKE_DOCKER_COMPOSE_ENVIRONMENT"',
       '  printf \'%s\\n\' "${SLIPSTREAM_LIBRARY_ROOT-}" "${SLIPSTREAM_STATE_DIRECTORY-}" "${SLIPSTREAM_CACHE_DIRECTORY-}" > "$FAKE_DOCKER_COMPOSE_SOURCES"',
       '  if [[ "${FAKE_DOCKER_REAL_CONFIG:-}" == "1" ]]; then',
@@ -329,7 +329,6 @@ async function writeEnvironment(
       `SLIPSTREAM_IMAGE=${immutableImage}`,
       "SLIPSTREAM_BIND_ADDRESS=127.0.0.2",
       "SLIPSTREAM_PORT=3100",
-      "SLIPSTREAM_PUBLIC_ORIGIN=https://environment-file.invalid",
       "SLIPSTREAM_DATABASE_BASENAME=environment-file.sqlite",
       `SLIPSTREAM_LIBRARY_ROOT=${sources.library}`,
       `SLIPSTREAM_STATE_DIRECTORY=${sources.state}`,
@@ -1396,7 +1395,6 @@ test("environment-file configuration wins over ambient values", async () => {
         SLIPSTREAM_IMAGE: "slipstream:ambient",
         SLIPSTREAM_BIND_ADDRESS: "0.0.0.0",
         SLIPSTREAM_PORT: "3999",
-        SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.invalid",
         SLIPSTREAM_DATABASE_BASENAME: "ambient.sqlite",
         SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
         SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
@@ -1426,9 +1424,7 @@ test("environment-file configuration wins over ambient values", async () => {
         "",
       ].join("\n"),
     );
-    expect(await Bun.file(target.composeConfiguration).text()).toBe(
-      "\n\n\n\n\n",
-    );
+    expect(await Bun.file(target.composeConfiguration).text()).toBe("\n\n\n\n");
     expect(await Bun.file(target.composeEnvironment).text()).toBe("\n\n\n\n");
 
     const canonicalSources = {
@@ -1457,8 +1453,8 @@ test("environment-file configuration wins over ambient values", async () => {
     expect(service.security_opt).toEqual(["no-new-privileges:true"]);
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
-      SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
     });
+    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBeUndefined();
     expect(
       ports.some(
         (port) =>
@@ -1580,7 +1576,7 @@ test("down parses semantic-invalid image and storage values with stop-only senti
         ].join("\n"),
       );
       expect(await Bun.file(target.composeConfiguration).text()).toBe(
-        `${downImageSentinel}\n\n\n\n\n`,
+        `${downImageSentinel}\n\n\n\n`,
       );
       expect(await Bun.file(target.composeSources).text()).toBe(
         `${downStorageSentinels.library}\n${downStorageSentinels.state}\n${downStorageSentinels.cache}\n`,
@@ -1647,8 +1643,8 @@ test("Docker Compose config preserves the digest-only storage contract", async (
     expect(service.build).toBeUndefined();
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
-      SLIPSTREAM_PUBLIC_ORIGIN: "https://environment-file.invalid",
     });
+    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBeUndefined();
     expect(
       ports.some(
         (port) =>
