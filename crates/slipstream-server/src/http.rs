@@ -912,84 +912,8 @@ pub(crate) fn valid_rating(value: &Value) -> Option<u8> {
     (rating <= 5).then_some(rating as u8)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AuthorityAdmission {
-    Invalid,
-    Untrusted,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OriginAdmission {
-    Invalid,
-    CrossOrigin,
-}
-
-fn request_authority_admission(
-    request: &Request<Body>,
-    public_origin: &PublicOrigin,
-) -> Result<(), AuthorityAdmission> {
-    let absolute_target = match (
-        request.uri().scheme_str().is_some(),
-        request.uri().authority().is_some(),
-    ) {
-        (false, false) => false,
-        (true, true) => true,
-        _ => return Err(AuthorityAdmission::Invalid),
-    };
-    if absolute_target {
-        match public_origin.matches_absolute_uri(request.uri()) {
-            Ok(true) => {}
-            Ok(false) => return Err(AuthorityAdmission::Untrusted),
-            Err(PublicOriginError) => return Err(AuthorityAdmission::Invalid),
-        }
-    }
-
-    let mut hosts = request.headers().get_all(header::HOST).iter();
-    let Some(host) = hosts.next() else {
-        return absolute_target
-            .then_some(())
-            .ok_or(AuthorityAdmission::Invalid);
-    };
-    if hosts.next().is_some() {
-        return Err(AuthorityAdmission::Invalid);
-    }
-    let host = host.to_str().map_err(|_| AuthorityAdmission::Invalid)?;
-    match public_origin.matches_authority(host) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(AuthorityAdmission::Untrusted),
-        Err(PublicOriginError) => Err(AuthorityAdmission::Invalid),
-    }
-}
-
-fn mutation_origin_admission(
-    request: &Request<Body>,
-    public_origin: &PublicOrigin,
-) -> Result<(), OriginAdmission> {
-    let mut origins = request.headers().get_all(header::ORIGIN).iter();
-    let Some(origin) = origins.next() else {
-        return Err(OriginAdmission::CrossOrigin);
-    };
-    if origins.next().is_some() {
-        return Err(OriginAdmission::Invalid);
-    }
-    let origin = origin.to_str().map_err(|_| OriginAdmission::Invalid)?;
-    if origin == "null" {
-        return Err(OriginAdmission::CrossOrigin);
-    }
-    let supplied = PublicOrigin::parse(origin).map_err(|_| OriginAdmission::Invalid)?;
-    (supplied == *public_origin)
-        .then_some(())
-        .ok_or(OriginAdmission::CrossOrigin)
-}
-
-fn is_exact_health_request(request: &Request<Body>) -> bool {
-    matches!(request.method().as_str(), "GET" | "HEAD")
-        && request.uri().path() == HEALTH_PATH
-        && request.uri().query().is_none()
-}
-
 pub(crate) async fn request_policy(
-    State(state): State<HttpState>,
+    State(_state): State<HttpState>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
@@ -1003,17 +927,6 @@ pub(crate) async fn request_policy(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "Request headers are too large",
         );
-    }
-    if !is_exact_health_request(&request) {
-        match request_authority_admission(&request, &state.application.public_origin) {
-            Ok(()) => {}
-            Err(AuthorityAdmission::Invalid) => {
-                return api_error(StatusCode::BAD_REQUEST, "Invalid request authority");
-            }
-            Err(AuthorityAdmission::Untrusted) => {
-                return api_error(StatusCode::FORBIDDEN, "Untrusted request authority");
-            }
-        }
     }
     if !matches!(
         request.method().as_str(),
@@ -1029,17 +942,6 @@ pub(crate) async fn request_policy(
             && (!request.method().as_str().eq("DELETE") || path.starts_with("/api/browse/"));
         if !admitted {
             return api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
-        }
-    }
-    if mutation {
-        match mutation_origin_admission(&request, &state.application.public_origin) {
-            Ok(()) => {}
-            Err(OriginAdmission::Invalid) => {
-                return api_error(StatusCode::BAD_REQUEST, "Invalid request origin");
-            }
-            Err(OriginAdmission::CrossOrigin) => {
-                return api_error(StatusCode::FORBIDDEN, "Cross-origin mutation rejected");
-            }
         }
     }
     next.run(request).await

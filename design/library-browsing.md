@@ -131,8 +131,9 @@ cycle within the bounded waiter capacity and each receives the one terminal
 status captured by its leader; the browser suppresses a duplicate Retry
 Library Check while its own command is in flight. Success is `200` with the
 bounded Loading Status shape used by `GET /api/status` and no Photo facts.
-Cross-origin mutation is `403`; an unavailable, saturated, or failed scan is
-`5xx`. Wrong-method handling remains the shared `405` protocol rule.
+`Origin` does not determine scan admission; an unavailable, saturated, or
+failed scan is `5xx`. Wrong-method handling remains the shared `405`
+protocol rule.
 
 ### Scan Cycle Ownership
 

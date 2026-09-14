@@ -51,8 +51,7 @@ pub use app::Application;
 #[cfg(test)]
 pub(crate) use config::BROWSE_SNAPSHOT_IDLE;
 pub use config::{
-    Config, ConfigError, ExpansionConfig, HEALTH_PATH, PublicOrigin, PublicOriginError,
-    ServerConfig, ServerError, StartupConfig,
+    Config, ConfigError, ExpansionConfig, HEALTH_PATH, ServerConfig, ServerError, StartupConfig,
 };
 pub(crate) use config::{
     MAXIMUM_HEADER_BYTES, MAXIMUM_MUTATION_BODY_BYTES, validate_expansion_storage_layout,

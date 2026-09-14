@@ -42,7 +42,6 @@ export async function startBrowserServer({
         SLIPSTREAM_WEB_ROOT: webRoot,
         SLIPSTREAM_HOST: "127.0.0.1",
         SLIPSTREAM_PORT: String(port),
-        SLIPSTREAM_PUBLIC_ORIGIN: url,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

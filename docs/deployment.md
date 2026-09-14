@@ -18,42 +18,21 @@ SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
 SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
 SLIPSTREAM_BIND_ADDRESS=127.0.0.1
 SLIPSTREAM_PORT=3000
-SLIPSTREAM_PUBLIC_ORIGIN=http://127.0.0.1:3000
 ```
 
 `SLIPSTREAM_BIND_ADDRESS` controls the host-side published interface and
 defaults to loopback. Binding topology is the operator's choice; Slipstream
-0.1 ships no accounts or authorization, so protecting an exposed listener is
-the operator's responsibility. The Rust process listens on the container
-network; Docker's host-side publication is the exposure boundary.
+0.1 ships no accounts, authentication, or authorization. The Rust process
+listens on the container network; Docker's host-side publication is the
+exposure boundary.
 
-`SLIPSTREAM_PUBLIC_ORIGIN` is required. It is the exact `http` or `https`
-origin at which the Photographer opens Slipstream, including a non-default
-port. It has no userinfo, path, query, or fragment. A malformed value prevents
-the online server from starting. It is separate from the listener and the
-host-side bind address: a TLS-terminating proxy or Tailscale address must set
-the browser-visible `https` or `http` origin explicitly.
-
-Only an absent port uses the scheme default. An explicit nonnumeric, signed,
-or out-of-range port is malformed and does not fall back to that default.
-
-Except for exact `GET /healthz` and `HEAD /healthz`, Slipstream accepts a
-normal origin-form request only when its Host authority matches
-`SLIPSTREAM_PUBLIC_ORIGIN`. An absolute request target must use the configured
-scheme and authority, and any Host it supplies must match too. A state-changing
-browser request must also send that exact origin in `Origin`. A missing
-origin-form Host, malformed Host or absolute request target, or malformed
-Origin on a state-changing request fails with `400` before static files,
-Library reads, request-body parsing, or state writes. A well-formed authority
-outside the configured origin, or a missing or different Origin on a
-state-changing request, fails with `403`. Authority comparison canonicalizes
-ASCII host case and default `http:80` and `https:443` ports. Forwarded request
-headers never establish trust. The health endpoint is the only authority
-exception so a container-local probe can use `127.0.0.1`; it returns only the
-fixed readiness response and accepts no state change. After the header-size
-limit and health exception, authority admission precedes method and route
-policy: an untrusted authority receives `403` even when that method or route
-would otherwise receive `405` or `404`.
+Slipstream is trusted-network-only. `Host`, `Origin`, absolute request
+targets, and forwarded headers do not establish a trust boundary or authorize
+requests. Any client that can reach a non-loopback listener can browse and
+mutate the Photo Library. Keep the default loopback binding unless every client
+on the selected LAN, Tailscale, or other network is trusted. Do not expose
+Slipstream directly to an untrusted network until a separate authentication
+design exists.
 
 Storage rules:
 
@@ -122,8 +101,7 @@ point fixes the Compose project name as `slipstream` and rejects any
 `COMPOSE_*` or `DOCKER_*` declaration in the environment file.
 For the finite startup Compose configuration surface, the environment file also
 wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
-`SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and
-`SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
+`SLIPSTREAM_PORT`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
 `SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
 `SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
 values.
@@ -247,9 +225,8 @@ The offline command rejects a running database, sidecars, non-v5 state, an
 unrelated Folder, descriptor mismatch, invalid remembered Locations, and
 scan-limit failures. It commits the binding and Location changes in one
 admitted transaction, then completes a normal scan before reporting success.
-It never binds HTTP and does not require `SLIPSTREAM_PUBLIC_ORIGIN`; Compose
-permits an empty value so this offline command can run, while an online server
-still rejects it during startup.
+It never binds HTTP and uses the same storage configuration regardless of
+listener settings.
 
 If preflight or the transaction fails, the prior Folder binding is unchanged.
 If the post-commit scan fails, do not expose the service as ready: correct the
