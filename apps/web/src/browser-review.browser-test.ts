@@ -3930,9 +3930,7 @@ test("file locations show a bounded tree and open recursive folder sources", asy
 
   // File Locations and Albums remain separate sections; a same-name Folder
   // and Album stay distinguishable by section.
-  await expect(
-    page.getByRole("heading", { name: "File Locations" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Folders" })).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Albums" }).first(),
   ).toBeVisible();

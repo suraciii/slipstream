@@ -269,6 +269,7 @@ export function createLibraryBrowserView(
           <div class="source-list" data-source-list></div>
           <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
         </nav>
+        <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
           <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
@@ -295,6 +296,7 @@ export function createLibraryBrowserView(
 
   const browser = required<HTMLElement>(root, "[data-browser]");
   const sourcePanel = required<HTMLElement>(root, "#source-panel");
+  const sourceResizer = required<HTMLElement>(root, "[data-source-resizer]");
   const sourceToggle = required<HTMLButtonElement>(
     root,
     "[data-source-toggle]",
@@ -409,6 +411,35 @@ export function createLibraryBrowserView(
         photoId: string;
       }
     | undefined;
+  let sourceWidth = 224;
+  const setSourceWidth = (width: number) => {
+    sourceWidth = clamp(width, 176, 360);
+    browser.style.setProperty("--source-width", `${sourceWidth}px`);
+  };
+  let resizing = false;
+  sourceResizer.addEventListener("pointerdown", (event) => {
+    if (compactSources.matches) return;
+    resizing = true;
+    sourceResizer.setPointerCapture(event.pointerId);
+    sourceResizer.classList.add("active");
+  });
+  sourceResizer.addEventListener("pointermove", (event) => {
+    if (resizing)
+      setSourceWidth(event.clientX - browser.getBoundingClientRect().left);
+  });
+  const stopResize = () => {
+    resizing = false;
+    sourceResizer.classList.remove("active");
+  };
+  sourceResizer.addEventListener("pointerup", stopResize);
+  sourceResizer.addEventListener("pointercancel", stopResize);
+  sourceResizer.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      setSourceWidth(sourceWidth + (event.key === "ArrowRight" ? 16 : -16));
+    }
+  });
+  setSourceWidth(sourceWidth);
 
   const compactSources = window.matchMedia("(max-width: 760px)");
   const syncSourcePanel = () => {
@@ -750,13 +781,13 @@ export function createLibraryBrowserView(
     );
     sourceList.append(library);
     const fileHeading = document.createElement("h3");
-    fileHeading.textContent = "File Locations";
+    fileHeading.textContent = "Folders";
     sourceList.append(fileHeading);
     for (const failure of model.fileLocationFailures) {
       const retryFolders = document.createElement("button");
       retryFolders.type = "button";
       retryFolders.className = "folder-more";
-      retryFolders.textContent = `Retry File Locations (${failure.range})`;
+      retryFolders.textContent = `Retry Folders (${failure.range})`;
       retryFolders.addEventListener("click", () =>
         send({ kind: "file-location-retry", key: failure.key }),
       );

@@ -49,8 +49,22 @@
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 14rem minmax(0, 1fr);
+  --source-width: 14rem;
+  grid-template-columns: var(--source-width) 0.35rem minmax(0, 1fr);
   overflow: hidden;
+}
+
+.source-resizer {
+  cursor: col-resize;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  touch-action: none;
+}
+.source-resizer:hover,
+.source-resizer.active,
+.source-resizer:focus-visible {
+  background: var(--selected);
+  outline: none;
 }
 
 .source-scrim,
@@ -845,6 +859,9 @@
     box-shadow: 1rem 0 2.5rem rgb(0 0 0 / 45%);
     transform: translateX(-102%);
     transition: transform 160ms ease-out;
+  }
+  .source-resizer {
+    display: none;
   }
 
   .source-close,
