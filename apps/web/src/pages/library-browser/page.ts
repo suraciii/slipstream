@@ -468,6 +468,11 @@ export function mountLibraryBrowser(
       sourceAuthority: SourceAuthority;
     }>;
     createdAlbum?: AlbumSummary;
+    folderAdd?: Readonly<{
+      matchedCount: number;
+      addedCount: number;
+      alreadyMemberCount: number;
+    }>;
   }> => {
     const capturedPhotoStatus = view.photoStatusSurface;
     const sourceOwner = sourceGrid.authority;
@@ -597,6 +602,15 @@ export function mountLibraryBrowser(
             : {}),
           ...(outcome.createdAlbum
             ? { createdAlbum: outcome.createdAlbum }
+            : {}),
+          ...(outcome.folderAdd
+            ? {
+                folderAdd: {
+                  matchedCount: outcome.folderAdd.matchedCount,
+                  addedCount: outcome.folderAdd.addedCount,
+                  alreadyMemberCount: outcome.folderAdd.alreadyMemberCount,
+                },
+              }
             : {}),
         };
       } finally {
@@ -765,6 +779,17 @@ export function mountLibraryBrowser(
 
   const fileLocationFailuresByKey = new Map<string, FileLocationFailure>();
 
+  type FolderAlbumOperation = Readonly<{
+    sourceAuthority: SourceAuthority;
+    albumId: string;
+    folderPath: string;
+    publication: string;
+    pending: boolean;
+    status?: string;
+  }>;
+  let folderAlbumOperation: FolderAlbumOperation | undefined;
+  let selectedFolderAlbumId = "";
+
   const folderPagerModel = (
     retained: FileLocationWindow | undefined,
   ): FolderViewModel["pager"] => {
@@ -830,6 +855,41 @@ export function mountLibraryBrowser(
       })),
     };
     view.renderSources(model);
+    const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
+    const folderPublication =
+      sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
+    const operation =
+      folder &&
+      folderPublication &&
+      folderAlbumOperation?.sourceAuthority === sourceGrid.authority &&
+      folderAlbumOperation.folderPath === folder.location &&
+      folderAlbumOperation.publication === folderPublication
+        ? folderAlbumOperation
+        : undefined;
+    if (!folder || !folderPublication || application.albums.length === 0) {
+      view.renderFolderAlbum({
+        visible: false,
+        folderPath: "",
+        albums: [],
+        selectedAlbumId: "",
+        pending: false,
+      });
+    } else {
+      const firstAlbum = application.albums[0];
+      if (
+        firstAlbum &&
+        !application.albums.some((album) => album.id === selectedFolderAlbumId)
+      )
+        selectedFolderAlbumId = firstAlbum.id;
+      view.renderFolderAlbum({
+        visible: true,
+        folderPath: folder.location,
+        albums: application.albums.map(({ id, name }) => ({ id, name })),
+        selectedAlbumId: selectedFolderAlbumId,
+        pending: operation?.pending ?? false,
+        ...(operation?.status ? { status: operation.status } : {}),
+      });
+    }
   };
 
   const openAlbumForm = (form: AlbumFormReference): void => {
@@ -920,6 +980,70 @@ export function mountLibraryBrowser(
       createdAlbum
     )
       await openSource("album", createdAlbum);
+  };
+
+  const addFolderToAlbum = (albumId: string): void => {
+    const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
+    const publication =
+      sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
+    if (
+      !folder ||
+      !publication ||
+      !application.albums.some((album) => album.id === albumId)
+    )
+      return;
+    if (
+      albumActions.isFolderMembersAdmitted(
+        albumId,
+        folder.location,
+        publication,
+      )
+    )
+      return;
+    selectedFolderAlbumId = albumId;
+    const sourceAuthority = sourceGrid.authority;
+    const folderPath = folder.location;
+    folderAlbumOperation = {
+      sourceAuthority,
+      albumId,
+      folderPath,
+      publication,
+      pending: true,
+    };
+    renderSources();
+    void (async () => {
+      const result = await mutateAlbum(
+        (context) =>
+          albumActions.addFolderMembers(
+            albumId,
+            folderPath,
+            publication,
+            context,
+          ),
+        "summary",
+      );
+      if (
+        !sourceGrid.isCurrent(sourceAuthority) ||
+        sourceGrid.kind !== "folder" ||
+        sourceGrid.folder?.location !== folderPath ||
+        fileLocations.publication !== publication
+      )
+        return;
+      const status = result.ok
+        ? result.folderAdd
+          ? `Added ${result.folderAdd.addedCount.toLocaleString()} Photos. ${result.folderAdd.alreadyMemberCount.toLocaleString()} already in the Album.`
+          : "Folder added to the Album."
+        : "The Folder could not be added to the Album. Try again.";
+      folderAlbumOperation = {
+        sourceAuthority,
+        albumId,
+        folderPath,
+        publication,
+        pending: false,
+        status,
+      };
+      renderSources();
+    })();
   };
 
   const cancelScheduledGridRender = () => {
@@ -2063,6 +2187,9 @@ export function mountLibraryBrowser(
         if (page >= 0) void loadFolderWindow(intent.location, page);
         return;
       }
+      case "folder-album-add":
+        addFolderToAlbum(intent.albumId);
+        return;
       case "album-form-open":
         openAlbumForm(intent.form);
         return;

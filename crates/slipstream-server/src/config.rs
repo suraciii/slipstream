@@ -201,6 +201,7 @@ pub enum ServerError {
     FolderInvalid,
     FolderNotFound,
     FileLocationWindow,
+    FolderAlbumLimit,
 }
 
 impl fmt::Display for ServerError {
@@ -230,6 +231,8 @@ impl fmt::Display for ServerError {
                 formatter.write_str("Original Folder is not part of this publication")
             }
             Self::FileLocationWindow => formatter.write_str("File Location window is invalid"),
+            Self::FolderAlbumLimit => formatter
+                .write_str("This Original Folder contains too many Photos for one Album operation"),
         }
     }
 }

@@ -3979,6 +3979,52 @@ test("file locations show a bounded tree and open recursive folder sources", asy
   await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
 });
 
+test("adds the current recursive Folder to an Album from Grid View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "Trip/day2"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "Trip/one.jpg"), data);
+  await writeFile(join(root, "Trip/day2/two.jpg"), data);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Trip Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find(
+    (album) => album.name === "Trip Picks",
+  )!.id;
+
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await page.getByRole("button", { name: /Trip · Subfolders/ }).click();
+  await expect(
+    page.getByText("Ready · 2 Photos", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .getByLabel("Add Folder to", { exact: true })
+    .selectOption({ label: "Trip Picks" });
+  const added = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/api/albums/${albumId}/folder-members`) &&
+      response.request().method() === "POST" &&
+      response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Add Folder", exact: true }).click();
+  await added;
+  await expect(
+    page.getByText("Added 2 Photos. 0 already in the Album.", { exact: true }),
+  ).toBeVisible();
+
+  const persisted = await state(running.url, albumId);
+  expect(persisted.members).toHaveLength(2);
+});
+
 test("an empty Library still shows and opens the Library Folder root", async ({
   page,
 }) => {

@@ -92,6 +92,20 @@ pub struct AlbumSummaryListResponse {
     pub albums: Vec<AlbumSummaryWire>,
 }
 
+/// Result of adding every Photo projected into one Original Folder to an
+/// Album. The Photo IDs stay server-side; the response only reports bounded
+/// operation facts and refreshed Album summaries.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderAlbumMutationResponse {
+    pub album_id: String,
+    pub folder_path: String,
+    pub matched_count: usize,
+    pub added_count: usize,
+    pub already_member_count: usize,
+    pub albums: Vec<AlbumSummaryWire>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhotoSummary {

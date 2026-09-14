@@ -164,11 +164,25 @@ The Photographer must be able to rename an Album and delete an Album after a con
 
 Photo View must let the Photographer add the current Photo to one or more Albums. Adding a Photo that already belongs to an Album must not create a duplicate membership. When the current source is an Album, Photo View must let the Photographer remove the current Photo from that Album.
 
+When the current source is an Original Folder, the Grid header must offer one
+explicit **Add Folder** action. The Photographer chooses an Album and confirms
+the action. Slipstream adds every Photo in that Folder and its descendants in
+the same order as the open Folder source. The browser sends the Folder
+Location and its Published Library value, not the complete Photo list.
+
+The action is one bounded, idempotent operation. A Photo already in the Album
+is skipped without changing its membership position. The response must report
+the matched, added, and already-member counts. While it is running, the
+action is disabled and reports that the Folder is being added. A failed or
+expired operation must remain visibly incomplete and may be retried after the
+current Folder source is refreshed. A Folder with more than the server's
+bounded operation limit is rejected before any membership is committed.
+
 A confirmed membership addition appends the Photo after existing members. Removing a Photo must compact later membership positions without changing their relative order. Removing the saved or current Photo must apply the saved-position rules before the Album is next opened.
 
 Album mutations must persist before Slipstream presents them as complete. Changing source or Photo must not cancel an admitted persistence operation, but a late response from an obsolete UI generation must not overwrite the current source, current Photo, or current error state.
 
-The first Album-management interface does not require Grid multi-select, drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums.
+The first Album-management interface does not require Grid multi-select, drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums. Adding an entire current Folder is supported separately from Grid multi-select.
 
 ## Selection State
 

@@ -892,6 +892,71 @@ impl Application {
         self.albums().await
     }
 
+    /// Adds all Photos projected into one Folder from the exact Published
+    /// Library generation supplied by the browser. The Folder index is
+    /// already ordered like the corresponding recursive Folder source, so the
+    /// resulting Album append is deterministic and does not require sending
+    /// the Photo IDs through the browser.
+    pub async fn add_folder_to_album(
+        &self,
+        album_id: &str,
+        folder_path: &str,
+        publication: &str,
+    ) -> Result<FolderAlbumMutationResponse, ServerError> {
+        if !valid_id(album_id) || !crate::folders::valid_folder_location(folder_path) {
+            return Err(ServerError::FolderInvalid);
+        }
+        let photo_ids = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let Some(published) = guard.as_ref() else {
+                return Err(ServerError::NotPublished);
+            };
+            if published.publication_value() != publication {
+                return Err(ServerError::FileLocationsExpired);
+            }
+            let index = published.folder_index();
+            if !index.is_known(folder_path) {
+                return Err(ServerError::FolderNotFound);
+            }
+            let photo_ids = index.filter_photo_ids(
+                &published.snapshot.photos,
+                &published.originals_by_id,
+                &published.snapshot.originals,
+                folder_path,
+            );
+            if photo_ids.len() > slipstream_core::MAXIMUM_FOLDER_ALBUM_PHOTOS {
+                return Err(ServerError::FolderAlbumLimit);
+            }
+            photo_ids
+        };
+        let result = self
+            .library
+            .mutate_album(slipstream_core::AlbumMutation::AddFolderMembers {
+                album_id: album_id.to_owned(),
+                photo_ids,
+            })
+            .await?;
+        let albums = self
+            .library
+            .list_album_summaries()
+            .await?
+            .into_iter()
+            .map(album_summary)
+            .collect();
+        Ok(FolderAlbumMutationResponse {
+            album_id: result.album_id,
+            folder_path: folder_path.to_owned(),
+            matched_count: result.added_count + result.already_member_count,
+            added_count: result.added_count,
+            already_member_count: result.already_member_count,
+            albums,
+        })
+    }
+
     pub async fn mutate_photo_state(
         &self,
         mutation: slipstream_core::PhotoStateMutation,

@@ -29,6 +29,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
+  | Readonly<{ kind: "folder-album-add"; albumId: string }>
   | Readonly<{ kind: "album-form-open"; form: AlbumFormReference }>
   | Readonly<{ kind: "album-form-close"; formId: string }>
   | Readonly<{
@@ -127,6 +128,15 @@ export type SourceListViewModel = Readonly<{
   >;
 }>;
 
+export type FolderAlbumViewModel = Readonly<{
+  visible: boolean;
+  folderPath: string;
+  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+  selectedAlbumId: string;
+  pending: boolean;
+  status?: string;
+}>;
+
 type GridPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
@@ -203,6 +213,7 @@ export interface LibraryBrowserView {
   setGridStatus(text: string): void;
   setGridEmpty(text?: string, libraryCheck?: boolean): void;
   renderSources(model: SourceListViewModel): void;
+  renderFolderAlbum(model: FolderAlbumViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
@@ -271,7 +282,7 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -315,6 +326,22 @@ export function createLibraryBrowserView(
   const gridView = required<HTMLElement>(root, "[data-grid-view]");
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
   const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
+  const folderAlbumControls = required<HTMLElement>(
+    root,
+    "[data-folder-album-controls]",
+  );
+  const folderAlbumSelect = required<HTMLSelectElement>(
+    root,
+    "[data-folder-album-select]",
+  );
+  const addFolderToAlbum = required<HTMLButtonElement>(
+    root,
+    "[data-add-folder-to-album]",
+  );
+  const folderAlbumStatus = required<HTMLElement>(
+    root,
+    "[data-folder-album-status]",
+  );
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
@@ -390,6 +417,7 @@ export function createLibraryBrowserView(
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   let selectedAlbumId = "";
+  let folderAlbumSelection = "";
   let zoomed = false;
   let panX = 0;
   let panY = 0;
@@ -1319,6 +1347,34 @@ export function createLibraryBrowserView(
     removeFromAlbum.disabled = !model.inOpenAlbum || model.removing;
   };
 
+  const renderFolderAlbum = (model: FolderAlbumViewModel) => {
+    if (!alive) return;
+    folderAlbumControls.hidden = !model.visible;
+    if (!model.visible) {
+      folderAlbumSelect.replaceChildren();
+      folderAlbumStatus.textContent = "";
+      folderAlbumSelection = "";
+      return;
+    }
+    const selectedStillExists = model.albums.some(
+      (album) => album.id === folderAlbumSelection,
+    );
+    if (!selectedStillExists)
+      folderAlbumSelection = model.selectedAlbumId || model.albums[0]?.id || "";
+    folderAlbumSelect.replaceChildren();
+    for (const album of model.albums) {
+      const option = document.createElement("option");
+      option.value = album.id;
+      option.textContent = album.name;
+      option.selected = album.id === folderAlbumSelection;
+      folderAlbumSelect.append(option);
+    }
+    folderAlbumSelect.disabled = model.pending || !model.albums.length;
+    addFolderToAlbum.disabled =
+      model.pending || !model.albums.length || !folderAlbumSelection;
+    folderAlbumStatus.textContent = model.status ?? "";
+  };
+
   compactSources.addEventListener("change", onSourceViewportChange);
   sourceToggle.addEventListener("click", () => openSources("grid"));
   photoSourceToggle.addEventListener("click", () => openSources("photo"));
@@ -1380,9 +1436,18 @@ export function createLibraryBrowserView(
     selectedAlbumId = albumSelect.value;
     if (membershipModel) renderMembership(membershipModel);
   });
+  folderAlbumSelect.addEventListener("change", () => {
+    if (!alive) return;
+    folderAlbumSelection = folderAlbumSelect.value;
+    addFolderToAlbum.disabled = !folderAlbumSelection;
+  });
   addToAlbum.addEventListener("click", () => {
     if (selectedAlbumId)
       send({ kind: "membership-add", albumId: selectedAlbumId });
+  });
+  addFolderToAlbum.addEventListener("click", () => {
+    if (folderAlbumSelection)
+      send({ kind: "folder-album-add", albumId: folderAlbumSelection });
   });
   removeFromAlbum.addEventListener("click", () =>
     send({ kind: "membership-remove" }),
@@ -1461,6 +1526,7 @@ export function createLibraryBrowserView(
       gridEmpty.hidden = !text;
     },
     renderSources,
+    renderFolderAlbum,
     setControls(model) {
       if (!alive) return;
       gridInteractionEnabled = model.gridEnabled;
@@ -1499,6 +1565,9 @@ export function createLibraryBrowserView(
       closeSources(false);
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
+      folderAlbumControls.hidden = true;
+      folderAlbumSelect.replaceChildren();
+      folderAlbumStatus.textContent = "";
       gridStatus.textContent = "Preparing Library order…";
       gridEmpty.hidden = true;
       gridEmptyMessage.textContent = "";

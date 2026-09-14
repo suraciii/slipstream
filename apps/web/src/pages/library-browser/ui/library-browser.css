@@ -332,6 +332,43 @@
   min-width: 0;
 }
 
+.folder-album-controls {
+  min-width: min(24rem, 42%);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.folder-album-controls label,
+.folder-album-controls p {
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.folder-album-controls select {
+  min-width: 7rem;
+  min-height: 2.25rem;
+  flex: 1;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.folder-album-controls button {
+  min-height: 2.25rem;
+  white-space: nowrap;
+}
+
+.folder-album-controls p {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .grid-header h2,
 .photo-header h2 {
   min-width: 0;
@@ -930,6 +967,16 @@
 
   .grid-header p {
     font-size: 0.68rem;
+  }
+
+  .folder-album-controls {
+    min-width: 100%;
+    margin-left: 0;
+  }
+
+  .folder-album-controls select,
+  .folder-album-controls button {
+    min-height: 2.75rem;
   }
 
   .source-toggle {

@@ -182,6 +182,11 @@ pub struct AlbumBrowseTarget {
     pub saved_photo_id: Option<String>,
 }
 
+/// Maximum number of Photos admitted by one server-resolved Folder add.
+/// Keeping the operation bounded prevents one request from monopolizing the
+/// SQLite owner while still covering a substantial ordinary shoot folder.
+pub const MAXIMUM_FOLDER_ALBUM_PHOTOS: usize = 100_000;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AlbumMutation {
     Create {
@@ -195,6 +200,16 @@ pub enum AlbumMutation {
         album_id: String,
     },
     AddMembers {
+        album_id: String,
+        photo_ids: Vec<String>,
+    },
+    /// Adds the server-resolved Photos for one validated Original Folder.
+    ///
+    /// The HTTP layer resolves the Folder against one Published Library and
+    /// supplies the resulting ordered identities. Keeping this as a distinct
+    /// mutation preserves the small 100-member limit on the ordinary API
+    /// while allowing one atomic folder operation.
+    AddFolderMembers {
         album_id: String,
         photo_ids: Vec<String>,
     },
@@ -215,6 +230,8 @@ pub enum AlbumMutation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlbumMutationResult {
     pub album_id: String,
+    pub added_count: usize,
+    pub already_member_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

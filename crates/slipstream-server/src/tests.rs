@@ -1378,6 +1378,103 @@ async fn folder_sources_filter_ancestry_and_expire_with_publication() {
 }
 
 #[tokio::test]
+async fn folder_album_add_uses_recursive_publication_and_is_idempotent() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("shoot/nested")).unwrap();
+    jpeg_fixture(&root.join("shoot/first.JPG"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("shoot/nested/second.JPG"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("outside.JPG"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.rescan().await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let publication = application
+        .file_locations(None, "", 0, 60)
+        .await
+        .unwrap()
+        .publication;
+    let folder_ids = browse_photo_ids(
+        &application,
+        BrowseSourceRequest::Folder {
+            location: "shoot".to_owned(),
+            publication: publication.clone(),
+        },
+    )
+    .await;
+    assert_eq!(folder_ids.len(), 2);
+
+    let created: serde_json::Value = response_json(
+        post_json(
+            &router,
+            "/api/albums",
+            serde_json::json!({"name": "Folder Picks"}),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let album_id = created["albums"][0]["id"].as_str().unwrap().to_owned();
+    let first: serde_json::Value = response_json(
+        post_json(
+            &router,
+            &format!("/api/albums/{album_id}/folder-members"),
+            serde_json::json!({
+                "folderPath": "shoot",
+                "publication": publication.clone(),
+            }),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(first["albumId"], album_id);
+    assert_eq!(first["folderPath"], "shoot");
+    assert_eq!(first["matchedCount"], 2);
+    assert_eq!(first["addedCount"], 2);
+    assert_eq!(first["alreadyMemberCount"], 0);
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Album(album_id.clone()),).await,
+        folder_ids
+    );
+
+    let repeated: serde_json::Value = response_json(
+        post_json(
+            &router,
+            &format!("/api/albums/{album_id}/folder-members"),
+            serde_json::json!({
+                "folderPath": "shoot",
+                "publication": publication.clone(),
+            }),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(repeated["matchedCount"], 2);
+    assert_eq!(repeated["addedCount"], 0);
+    assert_eq!(repeated["alreadyMemberCount"], 2);
+    let stale = post_json(
+        &router,
+        &format!("/api/albums/{album_id}/folder-members"),
+        serde_json::json!({
+            "folderPath": "shoot",
+            "publication": "0000000000000000",
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Album(album_id)).await,
+        folder_ids
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn empty_album_opens_lists_and_accepts_first_member() {
     let (base, config) = prepare_fixture();
     jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);

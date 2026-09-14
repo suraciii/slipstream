@@ -160,6 +160,10 @@ pub(crate) fn create_router_with_web_root(
             get(method_not_allowed).post(add_album_members),
         )
         .route(
+            "/api/albums/{id}/folder-members",
+            get(method_not_allowed).post(add_folder_members),
+        )
+        .route(
             "/api/albums/{id}/members/remove",
             get(method_not_allowed).post(remove_album_member),
         )
@@ -524,6 +528,37 @@ pub(crate) async fn add_album_members(
             .ok_or("Invalid membership batch")
     })
     .await
+}
+
+pub(crate) async fn add_folder_members(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    let Some(folder_path) = body.get("folderPath").and_then(Value::as_str) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    let Some(publication) = body.get("publication").and_then(Value::as_str) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    if !valid_id(&id) || publication.is_empty() || !valid_folder_location(folder_path) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    }
+    match state
+        .application
+        .add_folder_to_album(&id, folder_path, publication)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
 }
 
 pub(crate) async fn remove_album_member(
@@ -997,6 +1032,10 @@ impl From<ServerError> for ApiError {
             ServerError::FileLocationWindow => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "File Location window is invalid",
+            },
+            ServerError::FolderAlbumLimit => Self {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: "Original Folder contains too many Photos for one Album operation",
             },
             ServerError::NotPublished => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,

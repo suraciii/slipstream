@@ -94,6 +94,23 @@ New members append in supplied order. Adding an existing member is an idempotent
 
 The browser may update presentation after confirmation. It must not abort an admitted Album or Photo-state persistence operation solely because the current source or Photo changes. UI continuation still belongs to the generation that initiated it and cannot overwrite a newer current source or error.
 
+### Folder-to-Album Add
+
+The Folder source owns the input set for an explicit bulk membership action.
+The browser supplies the validated relative Folder Location and the exact
+Published Library value used to open that source. The server resolves the
+Folder recursively from that publication and appends the resulting ordered
+Photo IDs in one SQLite transaction. The browser never materializes or sends
+the complete Folder membership list.
+
+The operation is bounded at 100,000 Photos. It validates the Album, every
+resolved Photo identity, and the publication before committing any membership.
+Existing members are skipped without changing their positions. The operation
+returns matched, added, and already-member counts. An expired publication,
+unknown Folder, unknown Album, or limit violation fails without changing Album
+membership. A successful operation does not bind the Album to the Folder;
+later scans do not add future Photos automatically.
+
 ### Empty Albums
 
 An empty Album remains a valid source with total count zero and position zero. The Web application must not disable it. Opening it creates an ordinary empty Browse Snapshot and displays a usable empty Grid with Album management controls.
@@ -120,7 +137,7 @@ Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures a
 
 Wide and narrow navigation both use separate `File Locations` and `Albums` sections. A same-name Folder and Album remain distinguishable by section and current-source labeling. Folder sources identify that they include subfolders. Album deletion confirmation identifies that Photos and Original Files remain unchanged.
 
-The first management surface supports Album create, rename, delete, current-Photo add, and current-Album removal. Grid multi-select, drag-and-drop, visual bulk reorder, Album covers, sharing, Album Groups, and Smart Albums are not required.
+The first management surface supports Album create, rename, delete, current-Photo add, current-Album removal, and adding the current recursive Folder to an Album. Grid multi-select, drag-and-drop, visual bulk reorder, Album covers, sharing, Album Groups, and Smart Albums are not required.
 
 ## Failure Behavior
 
@@ -181,6 +198,7 @@ Verification must prove:
 - exact v4-to-v5 migration and rollback preservation;
 - absence of active `Photo Set` names outside legacy migration inputs;
 - Album identity, unique names, empty state, order, saved position, idempotent add, removal compaction, and deletion safety;
+- recursive Folder-to-Album add preserves Folder-source order, is atomic and idempotent, reports counts, and rejects stale publications or over-limit Folders before mutation;
 - empty-Library root, root-level Photos, nested, Unicode, same-prefix, paired, JPEG-only, ambiguous, and remembered unavailable Folder projection;
 - bounded direct-child Folder windows, single-publication pagination, expiration refresh, and rejection of malformed or absolute Locations;
 - no complete Folder tree or complete Folder membership route;
