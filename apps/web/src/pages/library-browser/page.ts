@@ -1124,7 +1124,7 @@ export function mountLibraryBrowser(
         )
           claimPublicationLocationNotice(
             `publication:${fileLocations.publication}`,
-          "Library changed. Reopen this folder.",
+            "Library changed. Reopen this folder.",
           );
         throw new Error("source open failed");
       }
