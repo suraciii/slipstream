@@ -710,7 +710,7 @@ export function mountLibraryBrowser(
       )
         claimPublicationLocationNotice(
           `publication:${fileLocations.publication}`,
-          "Scan results changed File Locations. Reloaded the current Folders.",
+          "Library changed. Reloaded folders.",
         );
       return;
     }
@@ -1124,7 +1124,7 @@ export function mountLibraryBrowser(
         )
           claimPublicationLocationNotice(
             `publication:${fileLocations.publication}`,
-            "Scan results changed File Locations. Reopen the current Folder.",
+          "Library changed. Reopen this folder.",
           );
         throw new Error("source open failed");
       }
@@ -1287,7 +1287,7 @@ export function mountLibraryBrowser(
           )
             claimPublicationLocationNotice(
               `publication:${fileLocations.publication}`,
-              "Scan results changed File Locations. Reopen the current Folder.",
+              "Library changed. Reopen this folder.",
             );
         }
         throw new Error("browse reopen failed");
