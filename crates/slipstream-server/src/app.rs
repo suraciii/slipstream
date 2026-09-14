@@ -834,6 +834,34 @@ impl Application {
         })
     }
 
+    /// Resolves one stable Photo identity against an immutable Browse Snapshot
+    /// without transferring Photo facts or materializing the source.
+    pub fn browse_position(
+        &self,
+        token: &str,
+        photo_id: &str,
+    ) -> Result<BrowsePositionResponse, ServerError> {
+        let mut snapshots = self
+            .browse_snapshots
+            .lock()
+            .expect("browse snapshots poisoned");
+        let now = Instant::now();
+        if snapshots
+            .get(token)
+            .is_some_and(|snapshot| now.duration_since(snapshot.last_used) >= BROWSE_SNAPSHOT_IDLE)
+        {
+            snapshots.remove(token);
+            return Err(ServerError::BrowseNotFound);
+        }
+        let snapshot = snapshots
+            .get_mut(token)
+            .ok_or(ServerError::BrowseNotFound)?;
+        snapshot.last_used = now;
+        Ok(BrowsePositionResponse {
+            position: snapshot.photo_ids.iter().position(|id| id == photo_id),
+        })
+    }
+
     pub fn browse_close(&self, token: &str) {
         self.browse_snapshots
             .lock()

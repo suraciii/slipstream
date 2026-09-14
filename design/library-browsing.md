@@ -65,6 +65,12 @@ A Browse Window is a bounded consecutive range within one Browse Snapshot. Each 
 
 A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library.
 
+The position lookup accepts one stable Photo ID through
+`GET /api/browse/{token}/position?photoId={id}`. It returns that Photo's
+position in the same immutable Browse Snapshot, or `null` when the Photo is
+not in the source. It returns no Photo facts and has no unbounded form. An
+expired or unknown Snapshot remains a distinct not-found failure.
+
 ### Published Library
 
 The Published Library is the most recent complete scan committed by the Library owner. The browser may use it while an ordinary rescan builds a replacement. A root binding, schema, confinement, or state admission failure remains fail-closed and prevents service admission.
@@ -108,6 +114,7 @@ POST   /api/scan
 GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}&limit={count}
 POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
+GET    /api/browse/{token}/position?photoId={id}
 DELETE /api/browse/{token}
 ```
 

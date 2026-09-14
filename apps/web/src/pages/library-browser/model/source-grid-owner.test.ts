@@ -275,6 +275,44 @@ describe("SourceGridOwner", () => {
     });
   });
 
+  test("resolves retained and remote Photo positions without loading the source", async () => {
+    const positions: string[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(windowResponse(0, 180));
+      if (url.pathname === "/api/browse/browse-1/position") {
+        const photoId = url.searchParams.get("photoId");
+        if (!photoId) throw new Error("missing Photo ID");
+        positions.push(photoId);
+        return Promise.resolve(
+          Response.json({
+            position: photoId === "remote-photo" ? 123 : null,
+          }),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "source", authority });
+    expect(
+      await owner.resolvePhotoPosition(authority, "photo-5"),
+    ).toMatchObject({ kind: "resolved", position: 5 });
+    expect(
+      await owner.resolvePhotoPosition(authority, "remote-photo"),
+    ).toMatchObject({ kind: "resolved", position: 123 });
+    expect(
+      await owner.resolvePhotoPosition(authority, "removed-photo"),
+    ).toMatchObject({ kind: "missing" });
+    expect(positions).toEqual(["remote-photo", "removed-photo"]);
+    owner.dispose();
+  });
+
   test("does not commit a stale window into a replacement source", async () => {
     const oldWindow = deferred<Response>();
     let openCount = 0;

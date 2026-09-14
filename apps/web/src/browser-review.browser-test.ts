@@ -276,7 +276,7 @@ async function openGrid(page: Page, url: string, name: string) {
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
-  await page.getByText(/^Ready · \d[\d,]* Photos?$/).waitFor();
+  await page.getByText(/^(?:Ready · \d[\d,]* Photos?|0 Photos)$/).waitFor();
   await waitForGridFrame(page);
 }
 async function openSources(page: Page) {
@@ -1217,6 +1217,137 @@ test("Album names and management actions do not overlap", async ({ page }) => {
       separated: true,
       labelFits: true,
     });
+  }
+});
+
+test("a valid 120-character Album name stays contained in Grid and Photo View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const emptyAlbumName = "a".repeat(120);
+  const populatedAlbumName = "b".repeat(120);
+  const createdEmpty = await post(running.url, "/api/albums", {
+    name: emptyAlbumName,
+  });
+  expect(createdEmpty.ok).toBe(true);
+  const { albumId } = await createAlbum(running.url, populatedAlbumName);
+  const viewports = [
+    { width: 1440, height: 900 },
+    { width: 900, height: 900 },
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+  ];
+  const emptyMessage =
+    "This Album contains no Photos. Add Photos from another source's Photo View.";
+
+  await openGrid(page, running.url, emptyAlbumName);
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await waitForGridFrame(page);
+    await expect(page.locator("[data-grid-title]")).toHaveText(emptyAlbumName);
+    await expect(
+      page.getByRole("heading", { name: emptyAlbumName, exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+    await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+      emptyMessage,
+    );
+    await expect(page.locator("[data-grid-empty-message]")).toBeVisible();
+
+    const gridLayout = await page
+      .locator("[data-grid-view]")
+      .evaluate((view) => {
+        if (!(view instanceof HTMLElement))
+          throw new Error("Grid View is missing");
+        const browser = view.closest<HTMLElement>("[data-browser]");
+        if (!browser) throw new Error("Library Browser is missing");
+        const browserBox = browser.getBoundingClientRect();
+        const contained = (element: HTMLElement) => {
+          const box = element.getBoundingClientRect();
+          return (
+            box.left >= browserBox.left - 0.5 &&
+            box.right <= browserBox.right + 0.5 &&
+            box.top >= browserBox.top - 0.5 &&
+            box.bottom <= browserBox.bottom + 0.5
+          );
+        };
+        const elements = [
+          view,
+          view.querySelector<HTMLElement>(".grid-header"),
+          view.querySelector<HTMLElement>("[data-grid-title]"),
+          view.querySelector<HTMLElement>("[data-grid-status]"),
+          view.querySelector<HTMLElement>("[data-grid-viewport]"),
+          view.querySelector<HTMLElement>("[data-grid-empty]"),
+          view.querySelector<HTMLElement>("[data-grid-empty-message]"),
+        ];
+        if (elements.some((element) => !element))
+          throw new Error("Grid layout is incomplete");
+        return {
+          browserClientWidth: browser.clientWidth,
+          browserScrollWidth: browser.scrollWidth,
+          gridClientWidth: view.clientWidth,
+          gridScrollWidth: view.scrollWidth,
+          contained: elements.every((element) => contained(element!)),
+        };
+      });
+    expect(gridLayout.browserScrollWidth).toBe(gridLayout.browserClientWidth);
+    expect(gridLayout.gridScrollWidth).toBe(gridLayout.gridClientWidth);
+    expect(gridLayout.contained).toBe(true);
+  }
+
+  await startReview(page, running.url, populatedAlbumName, albumId);
+  const photoView = page.locator("[data-photo-view]");
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await expect(photoView).toBeVisible();
+    await expect(page.locator("[data-photo-title]")).toHaveText(
+      populatedAlbumName,
+    );
+    await expect(
+      page.getByRole("heading", { name: populatedAlbumName, exact: true }),
+    ).toBeVisible();
+
+    const photoLayout = await photoView.evaluate((view) => {
+      if (!(view instanceof HTMLElement))
+        throw new Error("Photo View is missing");
+      const browser = view.closest<HTMLElement>("[data-browser]");
+      if (!browser) throw new Error("Library Browser is missing");
+      const browserBox = browser.getBoundingClientRect();
+      const horizontallyContained = (element: HTMLElement) => {
+        const box = element.getBoundingClientRect();
+        return (
+          box.left >= browserBox.left - 0.5 &&
+          box.right <= browserBox.right + 0.5
+        );
+      };
+      const elements = [
+        view,
+        view.querySelector<HTMLElement>(".photo-header"),
+        view.querySelector<HTMLElement>("[data-photo-title]"),
+        view.querySelector<HTMLElement>("[data-position]"),
+        view.querySelector<HTMLElement>(".photo-header-actions"),
+        view.querySelector<HTMLElement>(".review-bar"),
+        view.querySelector<HTMLElement>(".review-tools"),
+      ];
+      if (elements.some((element) => !element))
+        throw new Error("Photo layout is incomplete");
+      return {
+        clientWidth: view.clientWidth,
+        scrollWidth: view.scrollWidth,
+        contained: elements.every((element) => horizontallyContained(element!)),
+      };
+    });
+    expect(photoLayout.scrollWidth).toBe(photoLayout.clientWidth);
+    expect(photoLayout.contained).toBe(true);
+
+    const targets = await interactiveGeometry(photoView);
+    expect(targets.filter(({ contained }) => !contained)).toEqual([]);
+    if (viewport.width <= 760 || viewport.height <= 480)
+      expect(
+        targets.filter(({ width, height }) => width < 44 || height < 44),
+      ).toEqual([]);
   }
 });
 

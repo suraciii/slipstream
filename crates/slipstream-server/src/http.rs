@@ -138,6 +138,7 @@ pub(crate) fn create_router_with_web_root(
         .route("/api/status", get(status))
         .route("/api/file-locations", get(get_file_locations))
         .route("/api/browse", post(open_browse))
+        .route("/api/browse/{token}/position", get(get_browse_position))
         .route(
             "/api/browse/{token}",
             get(get_browse_window).delete(close_browse),
@@ -308,6 +309,25 @@ pub(crate) async fn get_browse_window(
     }
 }
 
+pub(crate) async fn get_browse_position(
+    State(state): State<HttpState>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some(photo_id) =
+        browse_position_query(request.uri().query()).and_then(|value| percent_decode(&value))
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "Browse position is invalid");
+    };
+    if !valid_id(&photo_id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+    }
+    match state.application.browse_position(&token, &photo_id) {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn get_file_locations(
     State(state): State<HttpState>,
     request: Request<Body>,
@@ -404,6 +424,20 @@ pub(crate) fn browse_query(query: Option<&str>) -> Option<(usize, usize)> {
         }
     }
     Some((start?, limit?))
+}
+
+pub(crate) fn browse_position_query(query: Option<&str>) -> Option<String> {
+    let mut photo_id = None;
+    for part in query?.split('&') {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "photoId" if photo_id.is_none() && !value.is_empty() => {
+                photo_id = Some(value.to_owned())
+            }
+            _ => {}
+        }
+    }
+    photo_id
 }
 
 pub(crate) async fn retired_album_list() -> Response<Body> {

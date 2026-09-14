@@ -41,6 +41,12 @@ pub struct BrowseOpenResponse {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BrowsePositionResponse {
+    pub position: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowseWindowResponse {
     pub start: usize,
     pub total: usize,

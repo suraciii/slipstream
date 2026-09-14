@@ -33,6 +33,10 @@ export type BrowseOpenResponse = Readonly<{
   position: number;
 }>;
 
+export type BrowsePositionResponse = Readonly<{
+  position: number | null;
+}>;
+
 export type PhotoSummary = Readonly<{
   id: string;
   available: boolean;
