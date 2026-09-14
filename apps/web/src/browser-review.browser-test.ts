@@ -4296,9 +4296,7 @@ test("delayed File Location responses from a superseded publication are discarde
   await rootToggle.click();
   await rootToggle.click();
   await expect(
-    page.getByText(
-      "Scan results changed File Locations. Reloaded the current Folders.",
-    ),
+    page.getByText("Library changed. Reloaded folders."),
   ).toBeVisible();
 
   // The delayed superseded window must not expand `a`: if it had been
@@ -4339,14 +4337,14 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   ).toBeVisible();
   await page.getByRole("button", { name: "Toggle shoot subfolders" }).click();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /^Library Folder/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: /^Retry File Locations \(shoot items 1–60\)/,
+      name: /^Retry folders \(shoot items 1–60\)/,
     }),
   ).toBeVisible();
 
@@ -4365,7 +4363,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await rootReloaded;
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
 
   // A lower-priority admitted Album failure settles behind the actionable
@@ -4375,14 +4373,14 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await page.getByLabel("Album name").fill("Existing");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
   await expect(
     page.getByText("An Album with this name already exists."),
   ).toBeHidden();
 
   failing = false;
-  await page.getByRole("button", { name: /^Retry File Locations/ }).click();
+  await page.getByRole("button", { name: /^Retry folders/ }).click();
   // Retrying loads only the failed range: the sibling child appears while
   // the already loaded root navigation stays intact.
   await expect(
@@ -4391,7 +4389,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await expect(
     page.getByRole("button", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
-  await expect(page.getByText(/Could not load File Locations/)).toBeHidden();
+  await expect(page.getByText(/Could not load folders/)).toBeHidden();
   await expect(
     page.getByText("An Album with this name already exists."),
   ).toBeVisible();
@@ -4431,10 +4429,10 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   await page.getByRole("button", { name: "Toggle a subfolders" }).click();
   await page.getByRole("button", { name: "Toggle b subfolders" }).click();
   const retryA = page.getByRole("button", {
-    name: /^Retry File Locations \(a items 1–60\)/,
+    name: /^Retry folders \(a items 1–60\)/,
   });
   const retryB = page.getByRole("button", {
-    name: /^Retry File Locations \(b items 1–60\)/,
+    name: /^Retry folders \(b items 1–60\)/,
   });
   await expect(retryA).toBeVisible();
   await expect(retryB).toBeVisible();
@@ -4489,9 +4487,7 @@ test("file locations reload coherently when a scan replaces the publication", as
   await rootToggle.click();
   await rootToggle.click();
   await expect(
-    page.getByText(
-      "Scan results changed File Locations. Reloaded the current Folders.",
-    ),
+    page.getByText("Library changed. Reloaded folders."),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /later 1 Photo/ }),
