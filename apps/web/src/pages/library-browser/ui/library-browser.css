@@ -306,6 +306,7 @@
 }
 
 .grid-header {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -315,6 +316,14 @@
 
 .grid-header > div {
   min-width: 0;
+}
+
+.grid-header h2,
+.photo-header h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .grid-header p {
@@ -329,6 +338,7 @@
 
 .grid-viewport {
   position: relative;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   background: #0d0f12;
@@ -491,6 +501,10 @@
 
 .photo-header > :first-child {
   justify-self: start;
+}
+
+.photo-header > :nth-child(2) {
+  min-width: 0;
 }
 
 .photo-header > :last-child {
@@ -925,9 +939,6 @@
 
   .photo-header h2 {
     max-width: 9rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .preview {

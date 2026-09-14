@@ -101,6 +101,11 @@ class FakeSource implements PhotoSourcePort {
   photoAt(authority: SourceAuthority, index: number): PhotoSummary | undefined {
     return this.isSourceCurrent(authority) ? this.facts.get(index) : undefined;
   }
+  findPhotoIndex(photoId: string): number | undefined {
+    for (const [index, photo] of this.facts)
+      if (photo.id === photoId) return index;
+    return undefined;
+  }
   movePosition(authority: SourceAuthority, index: number): boolean {
     if (!this.isSourceCurrent(authority)) return false;
     this.moved.push(index);
@@ -330,6 +335,63 @@ describe("PhotoOwner", () => {
     expect(owner.canUndo).toBe(true);
     expect(source.facts.get(0)?.selectionState).toBe("selected");
     expect(requests[0]).toContain('"albumId":"album-1"');
+    owner.dispose();
+  });
+
+  test("resolves an Undo target by Photo identity after a source replacement", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-a"));
+    source.facts.set(1, fact("photo-b"));
+    source.facts.set(2, fact("photo-c"));
+    let writes = 0;
+    const { owner } = bind(source, () => {
+      writes += 1;
+      return writes === 1
+        ? Promise.resolve(
+            mutationBody({
+              photoId: "photo-a",
+              field: "selectionState",
+              priorValue: "undecided",
+              expectedCurrent: "selected",
+            }),
+          )
+        : Promise.resolve(new Response(null, { status: 204 }));
+    });
+    const mutation = await owner.mutate("selectionState", "selected", true)!
+      .settlement;
+    expect(mutation.kind).toBe("persisted");
+    const next = owner.beginOpen(1)!;
+    owner.commitOpen(next);
+    owner.leave();
+
+    const replacementAuthority = sourceAuthority();
+    source.authority = replacementAuthority;
+    source.facts = new Map([
+      [0, fact("photo-b")],
+      [1, fact("photo-c")],
+      [2, { ...fact("photo-a"), selectionState: "selected" }],
+    ]);
+    owner.rebindSource({
+      sourceAuthority: replacementAuthority,
+      total: 3,
+      index: 0,
+      preferredPhotoId: "photo-b",
+    });
+
+    const preparation = owner.prepareUndo();
+    expect(preparation).toMatchObject({
+      photoId: "photo-a",
+      index: 2,
+      needsWindow: false,
+      needsPosition: false,
+    });
+    const outcome = await owner.performUndo(preparation!);
+    expect(outcome.kind).toBe("persisted");
+    expect(outcome.photoId).toBe("photo-a");
+    expect(owner.currentIndex).toBe(2);
+    expect(owner.current?.id).toBe("photo-a");
+    expect(owner.current?.selectionState).toBe("undecided");
+    expect(owner.canUndo).toBe(false);
     owner.dispose();
   });
 

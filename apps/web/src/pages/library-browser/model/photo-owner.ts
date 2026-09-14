@@ -46,6 +46,7 @@ export interface PhotoSourcePort {
     sourceAuthority: SourceAuthority,
     index: number,
   ): PhotoSummary | undefined;
+  findPhotoIndex(photoId: string): number | undefined;
   movePosition(sourceAuthority: SourceAuthority, index: number): boolean;
   patchPreview(
     sourceAuthority: SourceAuthority,
@@ -132,6 +133,7 @@ export type PhotoUndoPreparation = PhotoOperation &
   Readonly<{
     operation: UndoOperation;
     needsWindow: boolean;
+    needsPosition: boolean;
   }>;
 
 export type PhotoUndoOutcome =
@@ -160,6 +162,7 @@ export interface PhotoOwner {
   readonly opening: boolean;
   readonly active: boolean;
   readonly canUndo: boolean;
+  readonly undoPhotoId: string | undefined;
   isCurrent(authority: PhotoAuthority): boolean;
   ownsWindow(
     authority: PhotoAuthority,
@@ -185,7 +188,8 @@ export interface PhotoOwner {
     value: PhotoValue,
     advance: boolean,
   ): PhotoMutationAdmission | undefined;
-  prepareUndo(): PhotoUndoPreparation | undefined;
+  prepareUndo(resolvedIndex?: number): PhotoUndoPreparation | undefined;
+  discardUndo(): void;
   cancelUndo(preparation: PhotoUndoPreparation): void;
   performUndo(preparation: PhotoUndoPreparation): Promise<PhotoUndoOutcome>;
   beginRetry(): PhotoRetry | undefined;
@@ -367,6 +371,9 @@ export function createPhotoOwner(
     },
     get canUndo() {
       return undo !== undefined;
+    },
+    get undoPhotoId() {
+      return undo?.photoId;
     },
     isCurrent,
     ownsWindow: (authority, windowAuthority) =>
@@ -677,18 +684,20 @@ export function createPhotoOwner(
       })();
       return Object.freeze({ authority: record.authority, settlement });
     },
-    prepareUndo: () => {
+    prepareUndo: (resolvedIndex) => {
       const record = lifetime;
       const action = undo;
       if (!record || !action || owner.busy) return undefined;
+      const retainedIndex = source.findPhotoIndex(action.photoId);
+      const index = resolvedIndex ?? retainedIndex ?? action.snapshotIndex;
+      const target = source.photoAt(record.sourceAuthority, index);
       const prep = Object.freeze({
-        ...operation(record, action.snapshotIndex),
+        ...operation(record, index),
         photoId: action.photoId,
         operation: Object.freeze({}) as UndoOperation,
-        needsWindow: !source.photoAt(
-          record.sourceAuthority,
-          action.snapshotIndex,
-        ),
+        needsWindow: !target || target.id !== action.photoId,
+        needsPosition:
+          resolvedIndex === undefined && retainedIndex === undefined,
       });
       busyAuthority = record.authority;
       undoRecord = Object.freeze({
@@ -697,6 +706,10 @@ export function createPhotoOwner(
         action,
       });
       return prep;
+    },
+    discardUndo: () => {
+      undo = undefined;
+      undoRecord = undefined;
     },
     cancelUndo: (preparation) => {
       if (undoRecord?.operation !== preparation.operation) return;

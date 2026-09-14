@@ -1,6 +1,7 @@
 import type { PhotoSummary } from "../api/contracts.js";
 import {
   fetchBrowseWindow,
+  fetchBrowsePosition,
   fetchThumbnail,
   openBrowse,
   releaseBrowse,
@@ -102,6 +103,37 @@ export type SourceWindowOutcome =
       start: number;
     }>;
 
+export type SourcePositionOutcome =
+  | Readonly<{
+      kind: "resolved";
+      authority: SourceAuthority;
+      photoId: string;
+      position: number;
+    }>
+  | Readonly<{
+      kind: "missing";
+      authority: SourceAuthority;
+      photoId: string;
+    }>
+  | Readonly<{
+      kind: "expired";
+      authority: SourceAuthority;
+      photoId: string;
+    }>
+  | Readonly<{
+      kind: "failed";
+      authority: SourceAuthority;
+      photoId: string;
+      transportLost: boolean;
+      status?: number;
+      malformed?: true;
+    }>
+  | Readonly<{
+      kind: "detached";
+      authority: SourceAuthority;
+      photoId: string;
+    }>;
+
 export interface GridThumbnailImage {
   complete: boolean;
   isConnected: boolean;
@@ -140,6 +172,11 @@ export interface SourceGridOwner {
   establish(authority: SourceAuthority): boolean;
   updateAlbum(album: Readonly<{ id: string; name: string }>): void;
   photoAt(index: number): PhotoSummary | undefined;
+  findPhotoIndex(photoId: string): number | undefined;
+  resolvePhotoPosition(
+    authority: SourceAuthority,
+    photoId: string,
+  ): Promise<SourcePositionOutcome>;
   readGridPosition(authority: SourceAuthority): number | undefined;
   moveGridPosition(authority: SourceAuthority, index: number): boolean;
   setPhotoPreview(
@@ -570,6 +607,91 @@ export function createSourceGridOwner(
     return shared.promise;
   }
 
+  const findPhotoIndex = (photoId: string): number | undefined => {
+    if (closed || !photoId) return undefined;
+    for (const [index, photo] of facts) if (photo.id === photoId) return index;
+    return undefined;
+  };
+
+  const detachedPosition = (
+    ownerAuthority: SourceAuthority,
+    photoId: string,
+  ): SourcePositionOutcome => ({
+    kind: "detached",
+    authority: ownerAuthority,
+    photoId,
+  });
+
+  async function resolvePhotoPosition(
+    ownerAuthority: SourceAuthority,
+    photoId: string,
+  ): Promise<SourcePositionOutcome> {
+    if (!isCurrent(ownerAuthority) || !token)
+      return detachedPosition(ownerAuthority, photoId);
+    const retained = findPhotoIndex(photoId);
+    if (retained !== undefined)
+      return {
+        kind: "resolved",
+        authority: ownerAuthority,
+        photoId,
+        position: retained,
+      };
+    const capturedToken = token;
+    let task: ReturnType<TaskScope["beginLatest"]>;
+    try {
+      task = sourceTasks.beginLatest(`position:${photoId}`, {
+        abortTransport: true,
+      });
+    } catch {
+      return detachedPosition(ownerAuthority, photoId);
+    }
+    try {
+      const result = await fetchBrowsePosition(fetcher, {
+        token: capturedToken,
+        photoId,
+        signal: task.signal!,
+      });
+      if (
+        !task.isCurrent() ||
+        !isCurrent(ownerAuthority) ||
+        token !== capturedToken
+      )
+        return detachedPosition(ownerAuthority, photoId);
+      if (result.kind === "failed") {
+        if (result.status === 404)
+          return { kind: "expired", authority: ownerAuthority, photoId };
+        return {
+          kind: "failed",
+          authority: ownerAuthority,
+          photoId,
+          transportLost:
+            result.status === undefined && result.malformed !== true,
+          ...(result.status !== undefined ? { status: result.status } : {}),
+          ...(result.malformed ? { malformed: true as const } : {}),
+        };
+      }
+      const position = result.value.position;
+      if (position === null)
+        return { kind: "missing", authority: ownerAuthority, photoId };
+      if (position < 0 || position >= total)
+        return {
+          kind: "failed",
+          authority: ownerAuthority,
+          photoId,
+          transportLost: false,
+          malformed: true,
+        };
+      return {
+        kind: "resolved",
+        authority: ownerAuthority,
+        photoId,
+        position,
+      };
+    } finally {
+      task.finish();
+    }
+  }
+
   const finishImage = (photoId: string, image: GridThumbnailImage) => {
     const current = imageTransfers.get(photoId);
     if (current?.image === image) imageTransfers.delete(photoId);
@@ -764,6 +886,8 @@ export function createSourceGridOwner(
     photoAt(index) {
       return facts.get(index);
     },
+    findPhotoIndex,
+    resolvePhotoPosition,
     readGridPosition(candidate) {
       return isCurrent(candidate) ? gridPosition : undefined;
     },

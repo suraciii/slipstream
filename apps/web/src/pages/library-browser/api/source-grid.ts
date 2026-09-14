@@ -1,5 +1,6 @@
 import type {
   BrowseOpenResponse,
+  BrowsePositionResponse,
   BrowseWindowResponse,
   PhotoSummary,
 } from "./contracts.js";
@@ -177,6 +178,43 @@ export async function fetchBrowseWindow(
     )
       return { kind: "failed", malformed: true };
     return { kind: "ok", value: value as BrowseWindowResponse };
+  } catch {
+    return { kind: "failed", malformed: true };
+  }
+}
+
+export async function fetchBrowsePosition(
+  fetcher: SourceGridFetch,
+  input: Readonly<{
+    token: string;
+    photoId: string;
+    signal: AbortSignal;
+  }>,
+): Promise<SourceGridApiResult<BrowsePositionResponse>> {
+  let response: Response;
+  try {
+    response = await fetcher(
+      `/api/browse/${encodeURIComponent(input.token)}/position?photoId=${encodeURIComponent(input.photoId)}`,
+      { signal: input.signal, priority: "high" },
+    );
+  } catch {
+    return { kind: "failed" };
+  }
+  if (!response.ok) return { kind: "failed", status: response.status };
+  try {
+    const value: unknown = await response.json();
+    if (
+      !isRecord(value) ||
+      !(
+        value.position === null ||
+        (Number.isInteger(value.position) && Number(value.position) >= 0)
+      )
+    )
+      return { kind: "failed", malformed: true };
+    return {
+      kind: "ok",
+      value: value as BrowsePositionResponse,
+    };
   } catch {
     return { kind: "failed", malformed: true };
   }

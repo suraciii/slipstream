@@ -62,9 +62,10 @@ pub(crate) use config::{
 pub(crate) use http::{HttpState, healthz, open_web_root, static_web};
 pub use http::{RunningServer, create_router, expand_library, start_server};
 pub use wire::{
-    AlbumSummaryListResponse, AlbumSummaryWire, BrowseOpenResponse, BrowseSourceRequest,
-    BrowseWindowResponse, DerivativeDelivery, FileLocationsResponse, FolderChildWire,
-    LibraryOverviewResponse, OriginalWire, PhotoSummary, PreviewResponse, ScanStatusWire,
+    AlbumSummaryListResponse, AlbumSummaryWire, BrowseOpenResponse, BrowsePositionResponse,
+    BrowseSourceRequest, BrowseWindowResponse, DerivativeDelivery, FileLocationsResponse,
+    FolderChildWire, LibraryOverviewResponse, OriginalWire, PhotoSummary, PreviewResponse,
+    ScanStatusWire,
 };
 pub(crate) use wire::{album_summary, photo_summary_indexed_with_url, selection_state};
 

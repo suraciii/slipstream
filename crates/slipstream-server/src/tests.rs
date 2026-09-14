@@ -1686,6 +1686,73 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
 }
 
 #[tokio::test]
+async fn browse_position_resolves_identity_within_one_snapshot() {
+    let (base, config) = prepare_fixture();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let token = opened["token"].as_str().unwrap().to_owned();
+    let get_position = |photo_id: String| {
+        let uri = format!("http://camera.local/api/browse/{token}/position?photoId={photo_id}");
+        let router = &router;
+        async move {
+            response_json(
+                send(
+                    router,
+                    Request::builder().uri(uri).body(Body::empty()).unwrap(),
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    assert_eq!(get_position(ids[1].clone()).await["position"], 1);
+    assert!(get_position("f".repeat(64)).await["position"].is_null());
+
+    let invalid = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/browse/{token}/position?photoId=bad"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    application.browse_close(&token);
+    let expired = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/browse/{token}/position?photoId={}",
+                ids[0]
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(expired.status(), StatusCode::NOT_FOUND);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
     let (base, config) = prepare_fixture();
     for name in ["a.jpg", "b.jpg"] {

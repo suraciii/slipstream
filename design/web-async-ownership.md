@@ -195,6 +195,14 @@ and starts a foreground request instead of coalescing with the aborted work.
 A source change aborts every window request from the old source. A response
 commits only to its captured source generation and token.
 
+`GET /api/browse/{token}/position?photoId={id}` is a source-owned bounded
+read. It captures the current source generation and token, returns one
+position or `null` from that immutable Snapshot, and never transfers Photo
+facts. A source change or application teardown detaches the lookup. An
+expired Snapshot follows the existing source-reopen recovery path; another
+answered or transport failure leaves the current view intact and keeps a
+stable-identity Undo available for retry.
+
 Photo navigation keeps its target index pending while a required window is
 unavailable. The Photo owner commits that index and the source's Grid position
 only after the target fact is available under the same current owner. A failed
@@ -295,6 +303,15 @@ Photo interaction (`busy` permits one at a time). Their settlement ownership
 key is `(sourceGeneration, photoId, field)`. They always settle after send.
 If source generation or Photo identity changes, their success and failure
 continuations are silent; they do not fallback to the Library summary.
+
+The browser stores an Undo target by stable `photoId`; a Snapshot index is only
+an optimization hint and never establishes identity. After a same-source
+Snapshot replacement, the Photo owner resolves that ID through the current
+Snapshot position lookup before requesting a bounded window or sending the
+compare-and-set Undo write. A `null` position means that the target no longer
+belongs to the source, so the browser retires the one-level Undo description
+without a write. A failed lookup retains the description and current Photo so
+the Photographer can retry.
 
 For a current Selection or Rating write, answered `409` reports a concurrent
 change on the Photo surface and changes connectivity to disconnected so Retry

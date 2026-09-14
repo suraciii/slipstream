@@ -44,6 +44,8 @@ Required information must meet WCAG AA text contrast against its rendered backgr
 
 Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards.
 
+A valid Album name must not widen Grid View or Photo View beyond the Library Browser at a supported viewport. Its visible current-source title may be visually truncated, but assistive technology must retain the complete Album name.
+
 Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Detail Review, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
 
 When a short viewport cannot show a usable Preview and every control at once, Photo View must preserve a usable Preview and provide a vertical path to every existing control. It must not clip controls without a way to reach them. At supported narrow widths, Grid cells must divide each complete row evenly across the available Grid width, leaving no more than the ordinary inter-cell gap at the trailing edge. The `Library Folder` source label must remain fully readable.
@@ -222,6 +224,10 @@ Slipstream must provide undo for the most recent Selection State or Rating chang
 Undo must restore the previous value and return to the affected Photo when the original action advanced away from it.
 
 The first product requires one-level undo. Undo remains available until another Selection State or Rating change occurs, the Photographer changes source, or the browser reloads. The browser holds the one undo description; the server does not persist undo history.
+
+The undo description must identify its affected Photo by stable Photo ID. Any position retained with that description is only a hint for the current Browse Snapshot. When the same source is reopened with a replacement Snapshot, Slipstream must resolve the Photo ID against that Snapshot before loading or applying Undo. The resolution must use one bounded position lookup and must not transfer the complete source or create browser-global state.
+
+If the affected Photo is no longer in the current source, Slipstream must clear the undo description and identify that Undo is no longer available. If the bounded lookup fails, Slipstream must keep the undo description and current Photo unchanged, identify that the target could not be located, and allow the Photographer to retry. It must not send the Undo mutation until the target identity and current position are confirmed.
 
 Undo must fail without changing state when the Photo's current value no longer matches the value produced by the action being undone.
 

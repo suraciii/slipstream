@@ -99,6 +99,7 @@ export function mountLibraryBrowser(
           : undefined,
       photoAt: (authority, index) =>
         sourceGrid.isCurrent(authority) ? sourceGrid.photoAt(index) : undefined,
+      findPhotoIndex: (photoId) => sourceGrid.findPhotoIndex(photoId),
       movePosition: (authority, index) =>
         sourceGrid.moveGridPosition(authority, index),
       patchPreview: (authority, index, photoId, preview) =>
@@ -1718,7 +1719,61 @@ export function mountLibraryBrowser(
   };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
-    const preparation = photoOwner.prepareUndo();
+    const targetPhotoId = photoOwner.undoPhotoId;
+    if (!targetPhotoId) return;
+    const sourceAuthority = sourceGrid.authority;
+    let targetIndex = sourceGrid.findPhotoIndex(targetPhotoId);
+    if (targetIndex === undefined) {
+      pageBusy = true;
+      updateControls();
+      const resolution = await sourceGrid.resolvePhotoPosition(
+        sourceAuthority,
+        targetPhotoId,
+      );
+      if (sourceGrid.isCurrent(sourceAuthority)) pageBusy = false;
+      if (
+        !sourceGrid.isCurrent(sourceAuthority) ||
+        photoOwner.sourceAuthority !== sourceAuthority
+      ) {
+        updateControls();
+        return;
+      }
+      if (resolution.kind === "detached") {
+        updateControls();
+        return;
+      }
+      if (resolution.kind === "expired") {
+        // A position lookup is bound to the opaque Snapshot. Reuse the
+        // existing source-reopen recovery so the replacement Snapshot can be
+        // opened with the current Photo as its anchor while retaining the
+        // stable-identity Undo description.
+        await reopenExpired(photoOwner.currentIndex, sourceGrid.generation);
+        return;
+      }
+      if (resolution.kind === "missing") {
+        photoOwner.discardUndo();
+        view.setPhotoStatus(
+          "Undo is no longer available because that Photo is no longer in this source.",
+        );
+        updateControls();
+        return;
+      }
+      if (resolution.kind === "failed") {
+        view.setPhotoStatus(
+          resolution.transportLost
+            ? "Connection lost while locating the Photo for Undo. Retry to refresh."
+            : resolution.malformed
+              ? "Undo target lookup returned an invalid response. Try Undo again."
+              : `Undo target could not be located (HTTP ${resolution.status}). Try Undo again.`,
+        );
+        if (resolution.transportLost)
+          failPhotoRecovery(photoOwner.authority, "undo-target");
+        updateControls();
+        return;
+      }
+      targetIndex = resolution.position;
+    }
+    const preparation = photoOwner.prepareUndo(targetIndex);
     if (!preparation) return;
     updateControls();
     if (preparation.needsWindow) {
