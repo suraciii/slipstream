@@ -110,9 +110,15 @@ Photo View must show one current Photo as the primary content. It must also show
 - Preview Source;
 - controls for select, reject, clear, undo, and Rating;
 - previous and next navigation; and
-- whether Preview detail is limited.
+- whether Preview detail is limited; and
+- review-relevant capture metadata when available: Capture Time, Aperture,
+  ISO, Shutter Speed, and Focal Length.
 
-The first product does not display Capture Time, timezone availability, missing metadata, or RAW/JPEG capture disagreement in Photo View. These facts affect deterministic Library order only. They must not disable selection, Rating, navigation, or Preview behavior.
+Capture metadata is read-only. A missing or unreadable field must display an
+explicit `—` value. The displayed values follow the same RAW-first, JPEG
+fallback authority used for Capture Time. Metadata loading failure must not
+disable selection, Rating, navigation, or Preview behavior. Slipstream does
+not provide a general EXIF editor or an unbounded metadata browser.
 
 The next and previous Photos must remain reachable without recording a decision.
 

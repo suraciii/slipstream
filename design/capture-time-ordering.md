@@ -150,7 +150,11 @@ Rollback stops the v3 process and restores the pre-upgrade v2 backup. There is n
 
 The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](library-browsing.md). The protocol must not expose one unbounded complete-Library response. Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
 
-The first browser protocol does not expose Capture Time, offset, inspection state, or pair disagreement. The user-visible contract is deterministic Library order. Capture failures must not disable selection, Rating, navigation, or Preview behavior.
+Browse Windows do not expose Capture Time, offset, inspection state, or pair
+disagreement in every Grid item. Photo View may request the bounded review
+metadata view defined by [Scalable Library Browsing](library-browsing.md),
+which exposes Capture Time for the current Photo when available. Capture
+failures must not disable selection, Rating, navigation, or Preview behavior.
 
 ## Options
 

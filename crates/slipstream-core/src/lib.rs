@@ -29,8 +29,8 @@ pub use cache::{
     manifest_identity,
 };
 pub use capture::{
-    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureTimeField,
-    MAXIMUM_CAPTURE_METADATA_BYTES,
+    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
+    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
 pub use derivative::{

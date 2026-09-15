@@ -3285,6 +3285,39 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
 }
 
 #[tokio::test]
+async fn photo_metadata_protocol_returns_capture_time_when_available() {
+    let (base, config) = prepare_fixture();
+    capture_metadata_fixture(
+        &config.library_root.join("metadata.jpg"),
+        "2026:02:03 04:05:06",
+    );
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let response = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/photos/{photo_id}/metadata"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let metadata = response_json(response).await;
+    assert_eq!(metadata["captureTime"], "2026-02-03T04:05:06.000000000");
+    assert!(metadata["aperture"].is_null());
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
     let (base, config) = prepare_fixture();
     let original = config.library_root.join("photo.jpg");

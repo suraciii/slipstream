@@ -145,6 +145,7 @@ pub(crate) fn create_router_with_web_root(
         )
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
+        .route("/api/photos/{id}/metadata", get(get_photo_metadata))
         // The complete-membership list is retired; the path only creates Albums.
         .route("/api/albums", get(retired_album_list).post(create_album))
         .route(
@@ -748,6 +749,19 @@ pub(crate) async fn get_thumbnail(
     }
 }
 
+pub(crate) async fn get_photo_metadata(
+    State(state): State<HttpState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+) -> Response<Body> {
+    if !valid_id(&photo_id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+    }
+    match state.application.photo_metadata(&photo_id).await {
+        Ok(metadata) => json_response(StatusCode::OK, &PhotoMetadataWire::from(metadata)),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn get_preview(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1012,6 +1026,10 @@ impl From<ServerError> for ApiError {
             ServerError::BrowseNotFound => Self {
                 status: StatusCode::NOT_FOUND,
                 message: "Browse source expired or not found",
+            },
+            ServerError::PhotoNotFound => Self {
+                status: StatusCode::NOT_FOUND,
+                message: "Photo not found",
             },
             ServerError::BrowseLimit => Self {
                 status: StatusCode::BAD_REQUEST,

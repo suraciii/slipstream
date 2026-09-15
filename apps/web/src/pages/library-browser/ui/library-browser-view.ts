@@ -161,6 +161,14 @@ type PhotoFactsViewModel = Readonly<{
   rating?: number | undefined;
 }>;
 
+type PhotoMetadataViewModel = Readonly<{
+  captureTime?: string;
+  aperture?: string;
+  iso?: number;
+  shutterSpeed?: string;
+  focalLength?: string;
+}>;
+
 type PhotoShellViewModel = PhotoFactsViewModel &
   Readonly<{
     sourceName: string;
@@ -229,6 +237,7 @@ export interface LibraryBrowserView {
   showGrid(index?: number): void;
   enterPhoto(): void;
   renderPhotoFacts(model: PhotoFactsViewModel): void;
+  renderPhotoMetadata(model?: PhotoMetadataViewModel): void;
   renderPhotoShell(
     model: PhotoShellViewModel,
   ): ReviewImagePresentation | undefined;
@@ -297,7 +306,7 @@ export function createLibraryBrowserView(
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
           <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div>
+            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
           </section>
           <section class="review-tools" aria-label="Review tools">
@@ -374,6 +383,23 @@ export function createLibraryBrowserView(
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
+  const metadataCaptureTime = required<HTMLElement>(
+    root,
+    "[data-metadata-capture-time]",
+  );
+  const metadataAperture = required<HTMLElement>(
+    root,
+    "[data-metadata-aperture]",
+  );
+  const metadataIso = required<HTMLElement>(root, "[data-metadata-iso]");
+  const metadataShutterSpeed = required<HTMLElement>(
+    root,
+    "[data-metadata-shutter-speed]",
+  );
+  const metadataFocalLength = required<HTMLElement>(
+    root,
+    "[data-metadata-focal-length]",
+  );
   const status = required<HTMLElement>(root, "[data-status]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
@@ -1102,6 +1128,14 @@ export function createLibraryBrowserView(
         String(Number(button.dataset.ratingValue) === value),
       );
   };
+  const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
+    if (!alive) return;
+    metadataCaptureTime.textContent = model.captureTime ?? "—";
+    metadataAperture.textContent = model.aperture ?? "—";
+    metadataIso.textContent = model.iso === undefined ? "—" : String(model.iso);
+    metadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
+    metadataFocalLength.textContent = model.focalLength ?? "—";
+  };
   const presentReviewImage = (
     url: string,
     index: number,
@@ -1150,6 +1184,7 @@ export function createLibraryBrowserView(
     currentPhotoId = model.photoId;
     photoSurface = {};
     renderPhotoFacts(model);
+    renderPhotoMetadata();
     previewSource.textContent = sourceLabel(model.previewSource);
     limited.hidden = !model.limitedDetail;
     let image: ReviewImagePresentation | undefined;
@@ -1653,6 +1688,7 @@ export function createLibraryBrowserView(
       photoSurface = {};
     },
     renderPhotoFacts,
+    renderPhotoMetadata,
     renderPhotoShell,
     presentReviewImage,
     reviewImageMatches(url) {

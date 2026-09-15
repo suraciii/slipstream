@@ -255,6 +255,7 @@ impl SharedLibrary {
 
 pub struct Application {
     pub(crate) library: Arc<Library>,
+    library_root: PathBuf,
     pub(crate) preview: PreviewService,
     pub(crate) shared: Arc<SharedLibrary>,
     scan_cycle: ScanCycle,
@@ -396,6 +397,7 @@ impl Application {
             ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
         let application = Arc::new(Self {
             library,
+            library_root: config.library_root.clone(),
             preview,
             shared,
             scan_cycle: ScanCycle::new(),
@@ -411,6 +413,78 @@ impl Application {
             .expect("a new Application admits its startup scan");
         drop(startup);
         Ok(application)
+    }
+
+    /// Reads the small review metadata view from the Original that owns the
+    /// authoritative Capture Time. This is intentionally on demand so the
+    /// existing persisted state and scan contract do not grow a second EXIF
+    /// schema just to support Photo View details.
+    pub async fn photo_metadata(
+        &self,
+        photo_id: &str,
+    ) -> Result<slipstream_core::CaptureReviewMetadata, ServerError> {
+        let candidates = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let published = guard.as_ref().ok_or(ServerError::NotPublished)?;
+            let position = published
+                .photos_by_id
+                .get(photo_id)
+                .copied()
+                .ok_or(ServerError::PhotoNotFound)?;
+            let photo = published
+                .snapshot
+                .photos
+                .get(position)
+                .ok_or(ServerError::PhotoNotFound)?;
+            let mut candidates = Vec::new();
+            for id in [
+                photo.raw_original_id.as_ref(),
+                photo.jpeg_original_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let Some(position) = published.originals_by_id.get(id).copied() else {
+                    continue;
+                };
+                let Some(original) = published.snapshot.originals.get(position) else {
+                    continue;
+                };
+                candidates.push((
+                    original.relative_path.clone(),
+                    original.kind,
+                    original.facts,
+                    original.capture.state,
+                ));
+            }
+            candidates
+        };
+        let root = self.library_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = slipstream_core::LibraryRoot::open(root)
+                .map_err(|error| ServerError::Join(error.to_string()))?;
+            let selected = candidates
+                .iter()
+                .find(|(_, _, _, state)| *state == slipstream_core::CaptureMetadataState::Known)
+                .or_else(|| candidates.first());
+            let Some((path, kind, _, _)) = selected else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            let capability = root
+                .original(path.clone())
+                .map_err(|error| ServerError::Join(error.to_string()))?;
+            let facts = capability
+                .facts()
+                .map_err(|error| ServerError::Join(error.to_string()))?;
+            slipstream_core::inspect_review_metadata(&capability, *kind, facts)
+                .or_else(|_| Ok(slipstream_core::CaptureReviewMetadata::default()))
+        })
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))?
     }
 
     /// Truthful Library status: the scanner owns measurable phases and

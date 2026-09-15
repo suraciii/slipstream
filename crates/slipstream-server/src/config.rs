@@ -194,6 +194,7 @@ pub enum ServerError {
     Io(io::Error),
     Cache(String),
     BrowseNotFound,
+    PhotoNotFound,
     BrowseLimit,
     Join(String),
     NotPublished,
@@ -218,6 +219,7 @@ impl fmt::Display for ServerError {
             Self::Io(error) => error.fmt(formatter),
             Self::Cache(error) => formatter.write_str(error),
             Self::BrowseNotFound => formatter.write_str("Browse source is no longer available"),
+            Self::PhotoNotFound => formatter.write_str("Photo is no longer available"),
             Self::BrowseLimit => formatter.write_str("Browse window is invalid"),
             Self::Join(error) => formatter.write_str(error),
             Self::NotPublished => formatter.write_str(

@@ -65,6 +65,21 @@ A Browse Window is a bounded consecutive range within one Browse Snapshot. Each 
 
 A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library.
 
+### Photo Review Metadata
+
+Photo View obtains a bounded, Photo-scoped metadata view through
+`GET /api/photos/{id}/metadata`. The response contains only Capture Time,
+Aperture, ISO, Shutter Speed, and Focal Length when the authoritative
+Original provides them. The server selects the RAW Original when it owns the
+authoritative Capture Time and falls back to the paired JPEG when RAW does
+not. Missing fields are omitted from the response and are rendered as `—` by
+the browser. Reading metadata is read-only and failure does not make the Photo
+unavailable or block review actions.
+
+This metadata is intentionally loaded on demand instead of being added to
+every bounded Grid window. The first product does not expose a general EXIF
+tree, metadata editor, or unbounded metadata response.
+
 The position lookup accepts one stable Photo ID through
 `GET /api/browse/{token}/position?photoId={id}`. It returns that Photo's
 position in the same immutable Browse Snapshot, or `null` when the Photo is

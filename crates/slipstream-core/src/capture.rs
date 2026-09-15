@@ -58,6 +58,17 @@ pub struct CaptureFact {
     pub source_revision: Option<String>,
 }
 
+/// The camera facts needed during Photo review. This is intentionally a
+/// small, read-only view rather than a general EXIF model.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CaptureReviewMetadata {
+    pub capture_time: Option<String>,
+    pub aperture: Option<String>,
+    pub iso: Option<u32>,
+    pub shutter_speed: Option<String>,
+    pub focal_length: Option<String>,
+}
+
 impl CaptureFact {
     pub fn pending() -> Self {
         Self {
@@ -178,6 +189,7 @@ pub(crate) fn inspect_capture(
             order_key,
             field,
             offset_minutes,
+            ..
         } => CaptureFact::completed(
             CaptureMetadataState::Known,
             Some(order_key),
@@ -185,20 +197,49 @@ pub(crate) fn inspect_capture(
             offset_minutes,
             expected_source_revision.clone(),
         ),
-        ParseOutcome::Missing => CaptureFact::completed(
+        ParseOutcome::Missing { .. } => CaptureFact::completed(
             CaptureMetadataState::Missing,
             None,
             None,
             None,
             expected_source_revision.clone(),
         ),
-        ParseOutcome::Invalid => CaptureFact::completed(
+        ParseOutcome::Invalid { .. } => CaptureFact::completed(
             CaptureMetadataState::Invalid,
             None,
             None,
             None,
             expected_source_revision,
         ),
+    })
+}
+
+/// Inspects review facts from one already-confined Original descriptor. A
+/// malformed or absent metadata block yields empty fields; only confinement
+/// and resource failures are returned as errors.
+pub fn inspect_review_metadata(
+    capability: &OriginalCapability,
+    kind: OriginalKind,
+    expected_facts: OriginalFacts,
+) -> Result<CaptureReviewMetadata, CaptureInspectionError> {
+    let opened = capability
+        .open_revision_checked()
+        .map_err(CaptureInspectionError::Confinement)?;
+    let result =
+        MetadataReader::new(&opened).and_then(|mut reader| parse_metadata(&mut reader, kind));
+    let facts = opened
+        .verify_unchanged()
+        .map_err(CaptureInspectionError::Confinement)?;
+    if facts != expected_facts {
+        return Err(CaptureInspectionError::Confinement(
+            ConfinementError::Changed,
+        ));
+    }
+    let outcome = result.map_err(CaptureInspectionError::from)?;
+    Ok(match outcome {
+        ParseOutcome::Known { review, .. }
+        | ParseOutcome::Missing { review }
+        | ParseOutcome::Invalid { review } => review,
     })
 }
 
@@ -274,9 +315,14 @@ enum ParseOutcome {
         order_key: String,
         field: CaptureTimeField,
         offset_minutes: Option<i16>,
+        review: CaptureReviewMetadata,
     },
-    Missing,
-    Invalid,
+    Missing {
+        review: CaptureReviewMetadata,
+    },
+    Invalid {
+        review: CaptureReviewMetadata,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +340,11 @@ struct ExifFields {
     subsec_digitized: TagValue,
     offset_original: TagValue,
     offset_digitized: TagValue,
+    aperture: TagValue,
+    iso: TagValue,
+    exposure_time: TagValue,
+    focal_length: TagValue,
+    order: Option<ByteOrder>,
 }
 
 impl Default for ExifFields {
@@ -305,6 +356,11 @@ impl Default for ExifFields {
             subsec_digitized: TagValue::Absent,
             offset_original: TagValue::Absent,
             offset_digitized: TagValue::Absent,
+            aperture: TagValue::Absent,
+            iso: TagValue::Absent,
+            exposure_time: TagValue::Absent,
+            focal_length: TagValue::Absent,
+            order: None,
         }
     }
 }
@@ -314,9 +370,12 @@ fn parse_metadata(
     kind: OriginalKind,
 ) -> Result<ParseOutcome, MetadataError> {
     match kind {
-        OriginalKind::Jpeg => Ok(parse_jpeg_exif(reader)?
-            .as_ref()
-            .map_or(ParseOutcome::Missing, select_capture_fact)),
+        OriginalKind::Jpeg => Ok(parse_jpeg_exif(reader)?.as_ref().map_or(
+            ParseOutcome::Missing {
+                review: CaptureReviewMetadata::default(),
+            },
+            select_capture_fact,
+        )),
         OriginalKind::Raw => match parse_raw_tiff(reader)? {
             // TIFF fields retain selected EXIF field, subseconds, and camera
             // offset exactly. LibRaw is never consulted for a TIFF container.
@@ -339,16 +398,29 @@ fn parse_non_tiff_raw_capture_time(opened: &OpenedOriginal) -> Result<ParseOutco
             // LibRaw's timestamp does not identify original versus digitized.
             field: CaptureTimeField::DateTimeOriginal,
             offset_minutes: None,
+            review: CaptureReviewMetadata {
+                capture_time: Some(format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000000000",
+                    time.year, time.month, time.day, time.hour, time.minute, time.second
+                )),
+                ..CaptureReviewMetadata::default()
+            },
         }),
-        Ok(None) | Err(crate::NativePreviewError::Unsupported) => Ok(ParseOutcome::Missing),
-        Err(crate::NativePreviewError::Malformed) => Ok(ParseOutcome::Invalid),
+        Ok(None) | Err(crate::NativePreviewError::Unsupported) => Ok(ParseOutcome::Missing {
+            review: CaptureReviewMetadata::default(),
+        }),
+        Err(crate::NativePreviewError::Malformed) => Ok(ParseOutcome::Invalid {
+            review: CaptureReviewMetadata::default(),
+        }),
         Err(crate::NativePreviewError::ResourceLimit) => Err(MetadataError::Resource),
         Err(crate::NativePreviewError::Io | crate::NativePreviewError::Internal) => {
             Err(MetadataError::Confinement(ConfinementError::Io(
                 "RAW Capture Time metadata could not be inspected",
             )))
         }
-        Err(crate::NativePreviewError::NoUsablePreview) => Ok(ParseOutcome::Missing),
+        Err(crate::NativePreviewError::NoUsablePreview) => Ok(ParseOutcome::Missing {
+            review: CaptureReviewMetadata::default(),
+        }),
     }
 }
 
@@ -422,7 +494,7 @@ fn parse_raw_tiff(reader: &mut MetadataReader<'_>) -> Result<Option<ExifFields>,
     parse_tiff(reader, 0, reader.size())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ByteOrder {
     Little,
     Big,
@@ -479,7 +551,10 @@ fn parse_tiff(
     }
     let mut tiff = TiffReader { reader, start, end };
     let entries = read_directory(&mut tiff, read_u32(&header[4..8], order), order)?;
-    let mut fields = ExifFields::default();
+    let mut fields = ExifFields {
+        order: Some(order),
+        ..ExifFields::default()
+    };
     collect_capture_tags(&mut tiff, order, &entries, &mut fields)?;
     if let Some(exif_offset) = single_exif_offset(&mut tiff, order, &entries)? {
         let entries = read_directory(&mut tiff, exif_offset, order)?;
@@ -555,17 +630,21 @@ fn collect_capture_tags(
     fields: &mut ExifFields,
 ) -> Result<(), MetadataError> {
     for entry in entries {
-        let target = match entry.tag {
-            0x9003 => Some(&mut fields.original),
-            0x9004 => Some(&mut fields.digitized),
-            0x9291 => Some(&mut fields.subsec_original),
-            0x9292 => Some(&mut fields.subsec_digitized),
-            0x9011 => Some(&mut fields.offset_original),
-            0x9012 => Some(&mut fields.offset_digitized),
-            _ => None,
+        let (target, expected_types): (Option<&mut TagValue>, &[u16]) = match entry.tag {
+            0x9003 => (Some(&mut fields.original), &[2]),
+            0x9004 => (Some(&mut fields.digitized), &[2]),
+            0x9291 => (Some(&mut fields.subsec_original), &[2]),
+            0x9292 => (Some(&mut fields.subsec_digitized), &[2]),
+            0x9011 => (Some(&mut fields.offset_original), &[2]),
+            0x9012 => (Some(&mut fields.offset_digitized), &[2]),
+            0x829d => (Some(&mut fields.aperture), &[5]),
+            0x8827 | 0x8833 => (Some(&mut fields.iso), &[3, 4]),
+            0x829a => (Some(&mut fields.exposure_time), &[5]),
+            0x920a => (Some(&mut fields.focal_length), &[5]),
+            _ => (None, &[]),
         };
         let Some(target) = target else { continue };
-        if !matches!(target, TagValue::Absent) || entry.field_type != 2 {
+        if !matches!(target, TagValue::Absent) || !expected_types.contains(&entry.field_type) {
             *target = TagValue::Invalid;
             continue;
         }
@@ -603,6 +682,7 @@ fn field_bytes(
 }
 
 fn select_capture_fact(fields: &ExifFields) -> ParseOutcome {
+    let review = review_metadata(fields);
     for (base, subsecond, offset, field) in [
         (
             &fields.original,
@@ -627,6 +707,12 @@ fn select_capture_fact(fields: &ExifFields) -> ParseOutcome {
                     ),
                     field,
                     offset_minutes: parse_offset(offset),
+                    review: CaptureReviewMetadata {
+                        capture_time: Some(format!(
+                            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{fraction:09}"
+                        )),
+                        ..review.clone()
+                    },
                 };
             }
         }
@@ -634,9 +720,77 @@ fn select_capture_fact(fields: &ExifFields) -> ParseOutcome {
     if matches!(fields.original, TagValue::Invalid | TagValue::Valid(_))
         || matches!(fields.digitized, TagValue::Invalid | TagValue::Valid(_))
     {
-        ParseOutcome::Invalid
+        ParseOutcome::Invalid { review }
     } else {
-        ParseOutcome::Missing
+        ParseOutcome::Missing { review }
+    }
+}
+
+fn review_metadata(fields: &ExifFields) -> CaptureReviewMetadata {
+    let Some(order) = fields.order else {
+        return CaptureReviewMetadata::default();
+    };
+    CaptureReviewMetadata {
+        capture_time: None,
+        aperture: parse_rational(&fields.aperture, order).map(|(numerator, denominator)| {
+            format!("f/{}", format_decimal(numerator, denominator))
+        }),
+        iso: parse_integer(&fields.iso, order),
+        shutter_speed: parse_rational(&fields.exposure_time, order).map(
+            |(numerator, denominator)| format!("{} s", format_fraction(numerator, denominator)),
+        ),
+        focal_length: parse_rational(&fields.focal_length, order).map(
+            |(numerator, denominator)| format!("{} mm", format_decimal(numerator, denominator)),
+        ),
+    }
+}
+
+fn parse_integer(value: &TagValue, order: ByteOrder) -> Option<u32> {
+    let TagValue::Valid(value) = value else {
+        return None;
+    };
+    match value.len() {
+        2 => Some(u32::from(read_u16(value, order))),
+        4 => Some(read_u32(value, order)),
+        _ => None,
+    }
+}
+
+fn parse_rational(value: &TagValue, order: ByteOrder) -> Option<(u32, u32)> {
+    let TagValue::Valid(value) = value else {
+        return None;
+    };
+    if value.len() != 8 {
+        return None;
+    }
+    let numerator = read_u32(&value[..4], order);
+    let denominator = read_u32(&value[4..], order);
+    (denominator != 0).then_some((numerator, denominator))
+}
+
+fn format_fraction(numerator: u32, denominator: u32) -> String {
+    if numerator == 0 {
+        return "0".to_owned();
+    }
+    if numerator % denominator == 0 {
+        return (numerator / denominator).to_string();
+    }
+    format!("{numerator}/{denominator}")
+}
+
+fn format_decimal(numerator: u32, denominator: u32) -> String {
+    if numerator % denominator == 0 {
+        return (numerator / denominator).to_string();
+    }
+    let scaled = (u64::from(numerator) * 100 + u64::from(denominator) / 2) / u64::from(denominator);
+    let whole = scaled / 100;
+    let fraction = scaled % 100;
+    if fraction == 0 {
+        whole.to_string()
+    } else if fraction % 10 == 0 {
+        format!("{whole}.{}", fraction / 10)
+    } else {
+        format!("{whole}.{fraction:02}")
     }
 }
 
@@ -834,15 +988,48 @@ mod tests {
         result
     }
 
+    fn inspect_review_bytes(
+        kind: OriginalKind,
+        bytes: &[u8],
+    ) -> Result<CaptureReviewMetadata, CaptureInspectionError> {
+        let tree = TempTree::new();
+        let name = match kind {
+            OriginalKind::Raw => "fixture.ARW",
+            OriginalKind::Jpeg => "fixture.JPG",
+        };
+        fs::write(tree.0.join(name), bytes).unwrap();
+        let root = LibraryRoot::open(&tree.0).unwrap();
+        let capability = root
+            .original(RelativeOriginalPath::parse(name).unwrap())
+            .unwrap();
+        let facts = capability.facts().unwrap();
+        let result = inspect_review_metadata(&capability, kind, facts);
+        drop(root);
+        result
+    }
+
     fn tiff(tags: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let typed = tags
+            .iter()
+            .map(|(tag, value)| (*tag, 2_u16, value.clone()))
+            .collect::<Vec<_>>();
+        tiff_typed(&typed)
+    }
+
+    fn tiff_typed(tags: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
         let data_start = 8 + 2 + tags.len() * 12 + 4;
         let mut bytes = b"II*\0\x08\0\0\0".to_vec();
         bytes.extend_from_slice(&(tags.len() as u16).to_le_bytes());
         let mut data = Vec::new();
-        for (tag, value) in tags {
+        for (tag, field_type, value) in tags {
             bytes.extend_from_slice(&tag.to_le_bytes());
-            bytes.extend_from_slice(&2_u16.to_le_bytes());
-            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&field_type.to_le_bytes());
+            let count = if matches!(field_type, 3 | 5) {
+                1
+            } else {
+                value.len() as u32
+            };
+            bytes.extend_from_slice(&count.to_le_bytes());
             if value.len() <= 4 {
                 let mut inline = [0; 4];
                 inline[..value.len()].copy_from_slice(value);
@@ -995,6 +1182,29 @@ mod tests {
         );
         assert_eq!(fact.field, Some(CaptureTimeField::DateTimeOriginal));
         assert_eq!(fact.offset_minutes, Some(90));
+    }
+
+    #[test]
+    fn parses_review_metadata_with_camera_display_values() {
+        let rational = |numerator: u32, denominator: u32| {
+            [numerator.to_le_bytes(), denominator.to_le_bytes()].concat()
+        };
+        let bytes = jpeg(&tiff_typed(&[
+            (0x9003, 2, b"2026:02:03 04:05:06\0".to_vec()),
+            (0x829d, 5, rational(28, 10)),
+            (0x8827, 3, 400_u16.to_le_bytes().to_vec()),
+            (0x829a, 5, rational(1, 125)),
+            (0x920a, 5, rational(50, 1)),
+        ]));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(
+            metadata.capture_time.as_deref(),
+            Some("2026-02-03T04:05:06.000000000")
+        );
+        assert_eq!(metadata.aperture.as_deref(), Some("f/2.8"));
+        assert_eq!(metadata.iso, Some(400));
+        assert_eq!(metadata.shutter_speed.as_deref(), Some("1/125 s"));
+        assert_eq!(metadata.focal_length.as_deref(), Some("50 mm"));
     }
 
     #[test]

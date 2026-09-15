@@ -145,6 +145,33 @@ pub struct PreviewWire {
     pub message: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoMetadataWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aperture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iso: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shutter_speed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_length: Option<String>,
+}
+
+impl From<slipstream_core::CaptureReviewMetadata> for PhotoMetadataWire {
+    fn from(value: slipstream_core::CaptureReviewMetadata) -> Self {
+        Self {
+            capture_time: value.capture_time,
+            aperture: value.aperture,
+            iso: value.iso,
+            shutter_speed: value.shutter_speed,
+            focal_length: value.focal_length,
+        }
+    }
+}
+
 pub(crate) fn photo_summary_indexed_with_url(
     photo: &slipstream_core::PhotoRecord,
     originals: &[slipstream_core::OriginalRecord],

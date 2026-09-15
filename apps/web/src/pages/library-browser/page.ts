@@ -8,6 +8,7 @@ import type {
   FolderChild,
   SelectionState,
 } from "./api/contracts.js";
+import { fetchPhotoMetadata } from "./api/photo.js";
 import {
   createFileLocationOwner,
   type FileLocationAuthority,
@@ -72,6 +73,7 @@ export function mountLibraryBrowser(
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher);
+  let photoMetadataAbort: AbortController | undefined;
   const view: LibraryBrowserView = createLibraryBrowserView(
     root,
     handleViewIntent,
@@ -1646,6 +1648,30 @@ export function mountLibraryBrowser(
     })();
   };
 
+  const loadPhotoMetadata = async (
+    authority: PhotoAuthority,
+    photoId: string | undefined,
+  ): Promise<void> => {
+    photoMetadataAbort?.abort();
+    photoMetadataAbort = undefined;
+    view.renderPhotoMetadata();
+    if (!photoId) return;
+    const controller = new AbortController();
+    photoMetadataAbort = controller;
+    const result = await fetchPhotoMetadata(
+      fetcher,
+      photoId,
+      controller.signal,
+    );
+    if (
+      controller.signal.aborted ||
+      !photoOwner.isCurrent(authority) ||
+      currentPhoto()?.id !== photoId
+    )
+      return;
+    view.renderPhotoMetadata(result.kind === "ok" ? result.value : undefined);
+  };
+
   const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
     renderMembershipControls();
@@ -1661,6 +1687,7 @@ export function mountLibraryBrowser(
       limitedDetail: photo?.preview.limitedDetail,
       previewUrl: photo?.preview.url,
     });
+    void loadPhotoMetadata(authority, photo?.id);
     if (image)
       photoOwner.attachReviewImage(
         authority,
@@ -2254,6 +2281,7 @@ export function mountLibraryBrowser(
   return () => {
     if (!applicationAlive) return;
     applicationAlive = false;
+    photoMetadataAbort?.abort();
     view.dispose();
     cancelScheduledGridRender();
     albumRecovery = undefined;
