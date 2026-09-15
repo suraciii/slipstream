@@ -772,14 +772,14 @@ fn format_fraction(numerator: u32, denominator: u32) -> String {
     if numerator == 0 {
         return "0".to_owned();
     }
-    if numerator % denominator == 0 {
+    if numerator.is_multiple_of(denominator) {
         return (numerator / denominator).to_string();
     }
     format!("{numerator}/{denominator}")
 }
 
 fn format_decimal(numerator: u32, denominator: u32) -> String {
-    if numerator % denominator == 0 {
+    if numerator.is_multiple_of(denominator) {
         return (numerator / denominator).to_string();
     }
     let scaled = (u64::from(numerator) * 100 + u64::from(denominator) / 2) / u64::from(denominator);
