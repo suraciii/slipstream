@@ -288,6 +288,10 @@ export function createLibraryBrowserView(
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
+            <div class="preview-mode-controls" data-preview-mode-controls role="group" aria-label="Preview mode">
+              <button type="button" class="preview-mode" data-preview-fit aria-pressed="true">Fit</button>
+              <button type="button" class="preview-mode" data-preview-fill aria-pressed="false">Fill</button>
+            </div>
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
@@ -360,6 +364,12 @@ export function createLibraryBrowserView(
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
+  const previewModeControls = required<HTMLElement>(
+    root,
+    "[data-preview-mode-controls]",
+  );
+  const previewFit = required<HTMLButtonElement>(root, "[data-preview-fit]");
+  const previewFill = required<HTMLButtonElement>(root, "[data-preview-fill]");
   const selection = required<HTMLElement>(root, "[data-selection]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
@@ -418,7 +428,8 @@ export function createLibraryBrowserView(
   let gridRenderFrame: number | undefined;
   let selectedAlbumId = "";
   let folderAlbumSelection = "";
-  let zoomed = false;
+  type PreviewMode = "fit" | "fill" | "detail";
+  let previewMode: PreviewMode = "fit";
   let panX = 0;
   let panY = 0;
   let photoSurface: object = {};
@@ -525,21 +536,33 @@ export function createLibraryBrowserView(
     rejectFeedback.classList.remove("pending");
   };
   const applyTransform = () => {
+    preview.classList.toggle("fit", previewMode === "fit");
+    preview.classList.toggle("fill", previewMode === "fill");
+    preview.classList.toggle("detail", previewMode === "detail");
     const image = stage.querySelector<HTMLImageElement>("img");
     if (!image) return;
-    image.style.transform = zoomed
-      ? `translate(${panX}px, ${panY}px) scale(2)`
-      : "translate(0, 0) scale(1)";
-    preview.classList.toggle("detail", zoomed);
+    image.style.transform =
+      previewMode === "detail"
+        ? `translate(${panX}px, ${panY}px) scale(2)`
+        : "translate(0, 0) scale(1)";
   };
-  const resetTransform = () => {
+  const updatePreviewModeControls = () => {
+    previewFit.setAttribute("aria-pressed", String(previewMode === "fit"));
+    previewFill.setAttribute("aria-pressed", String(previewMode === "fill"));
+    detail.setAttribute("aria-pressed", String(previewMode === "detail"));
+    detail.textContent =
+      previewMode === "detail" ? "Exit Detail" : "Detail Review";
+    applyTransform();
+  };
+  const setPreviewMode = (mode: PreviewMode) => {
     if (!alive) return;
-    zoomed = false;
+    previewMode = mode;
     panX = 0;
     panY = 0;
-    detail.setAttribute("aria-pressed", "false");
-    detail.textContent = "Detail Review";
-    applyTransform();
+    updatePreviewModeControls();
+  };
+  const resetTransform = () => {
+    setPreviewMode("fit");
   };
 
   const createSourceButton = (
@@ -1085,6 +1108,7 @@ export function createLibraryBrowserView(
     total: number,
   ): ReviewImagePresentation | undefined => {
     if (!alive) return undefined;
+    setPreviewMode("fit");
     const surface = photoStatusSurface;
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
@@ -1131,10 +1155,12 @@ export function createLibraryBrowserView(
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
-    else
+    else {
+      setPreviewMode("fit");
       stage.replaceChildren(
         paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
       );
+    }
     setPhotoStatus(
       model.photoId && model.available === false
         ? "Original File is unavailable. Decisions remain available."
@@ -1151,19 +1177,15 @@ export function createLibraryBrowserView(
 
   const toggleDetail = () => {
     if (!alive || !stage.querySelector("img")) return;
-    zoomed = !zoomed;
-    panX = 0;
-    panY = 0;
-    detail.setAttribute("aria-pressed", String(zoomed));
-    detail.textContent = zoomed ? "Exit Detail" : "Detail Review";
-    applyTransform();
+    setPreviewMode(previewMode === "detail" ? "fit" : "detail");
   };
   const pointerDown = (event: PointerEvent) => {
     if (
       !alive ||
       pointer ||
       !event.isPrimary ||
-      (!zoomed && !decisionInteractionEnabled) ||
+      (previewMode !== "detail" &&
+        (previewMode !== "fit" || !decisionInteractionEnabled)) ||
       !currentPhotoId
     )
       return;
@@ -1188,7 +1210,7 @@ export function createLibraryBrowserView(
     const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
-    if (zoomed) {
+    if (previewMode === "detail") {
       panX = clamp(panX + stepX, -stage.clientWidth / 2, stage.clientWidth / 2);
       panY = clamp(
         panY + stepY,
@@ -1210,7 +1232,7 @@ export function createLibraryBrowserView(
     const active = pointer;
     clearPointer();
     if (
-      zoomed ||
+      previewMode !== "fit" ||
       cancelled ||
       active.vertical ||
       !decisionInteractionEnabled ||
@@ -1262,7 +1284,13 @@ export function createLibraryBrowserView(
     if (modifier || event.shiftKey || photoView.hidden) return;
     if (event.key === "ArrowLeft") send({ kind: "previous" });
     else if (event.key === "ArrowRight") send({ kind: "next" });
-    else if (event.key.toLowerCase() === "p")
+    else if (event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      setPreviewMode("fill");
+    } else if (event.key.toLowerCase() === "d") {
+      event.preventDefault();
+      toggleDetail();
+    } else if (event.key.toLowerCase() === "p")
       send({
         kind: "photo-mutation",
         field: "selectionState",
@@ -1395,6 +1423,17 @@ export function createLibraryBrowserView(
   undo.addEventListener("click", () => send({ kind: "undo" }));
   detail.addEventListener("click", toggleDetail);
   stage.addEventListener("dblclick", toggleDetail);
+  previewFit.addEventListener("click", () => setPreviewMode("fit"));
+  previewFill.addEventListener("click", () => setPreviewMode("fill"));
+  previewModeControls.addEventListener("pointerdown", (event) =>
+    event.stopPropagation(),
+  );
+  previewModeControls.addEventListener("pointermove", (event) =>
+    event.stopPropagation(),
+  );
+  previewModeControls.addEventListener("pointerup", (event) =>
+    event.stopPropagation(),
+  );
   select.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -1551,7 +1590,10 @@ export function createLibraryBrowserView(
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
-      detail.disabled = !stage.querySelector("img");
+      const hasPreviewImage = Boolean(stage.querySelector("img"));
+      previewFit.disabled = !hasPreviewImage;
+      previewFill.disabled = !hasPreviewImage;
+      detail.disabled = !hasPreviewImage;
     },
     renderMembership,
     prepareSourceOpen(name) {
@@ -1588,6 +1630,7 @@ export function createLibraryBrowserView(
     },
     showGrid(index) {
       if (!alive) return;
+      resetTransform();
       photoView.hidden = true;
       gridView.hidden = false;
       closeSources(false);

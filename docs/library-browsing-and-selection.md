@@ -118,6 +118,12 @@ The next and previous Photos must remain reachable without recording a decision.
 
 Slipstream must prioritize the current Photo's Preview. After the current Preview is ready, it may prepare the immediately next and previous Previews in the background. This preparation must not change saved position or selection state.
 
+Photo View must keep the Preview inside the available viewport width. The
+Preview area may be shorter than the full Photo View when the remaining
+controls need more room, but it must remain large enough to inspect the image
+and must never create horizontal overflow. The Photo View may scroll
+vertically on a short viewport so every existing control remains reachable.
+
 ## Loading Feedback
 
 Slipstream must distinguish these user-visible states:
@@ -209,17 +215,35 @@ A committed swipe advances to the next Photo after the decision is accepted.
 
 Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, when the Preview fits within Photo View, a vertical gesture that begins on the Preview must scroll Photo View naturally. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
 
-## Detail Review
+## Preview Modes and Detail Review
 
-Double activation or a pinch gesture may enter Detail Review. The Photographer may zoom and pan within the resolution supplied by the Preview.
+Photo View must expose an explicit Preview mode control with these modes:
 
-While zoomed beyond fit:
+- **Fit** is the default. It shows the complete Preview without cropping and
+  restores fit-mode touch behavior.
+- **Fill** scales the Preview to cover the available Preview area. The edges
+  may be cropped, but the image must remain contained by the area and must not
+  create page overflow.
+- **Detail Review** magnifies the Preview by a bounded amount for focus,
+  motion, or expression inspection. The interface must identify this mode as
+  active and must provide a clear way to return to Fit.
 
-- one-finger dragging must pan the Preview;
-- horizontal dragging must not select or reject the Photo; and
-- select and reject remain available through explicit controls.
+Changing Photo or returning to Grid View must reset the mode to Fit. Fit and
+Fill reset any Detail Review pan. The browser must not upscale a Preview for
+Detail Review when doing so would imply that the source contains additional
+detail.
 
-Returning to fit restores swipe selection. Slipstream must not upscale a Preview and imply that added pixels reveal real focus detail.
+While Preview mode is not Fit:
+
+- one-finger dragging must not select or reject the Photo;
+- in Detail Review, one-finger dragging pans the Preview within its bounded
+  overflow; and
+- Select and Reject remain available through explicit controls.
+
+In Fit mode, horizontal touch dragging retains the existing selection gesture
+and vertical dragging scrolls a short Photo View naturally. Keyboard users
+must be able to choose Fit, Fill, and Detail Review through the visible mode
+controls; the controls must expose their current mode programmatically.
 
 ## Rating
 

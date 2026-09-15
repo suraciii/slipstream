@@ -853,6 +853,79 @@ test("wide desktop Preview retains fit gesture ownership", async ({ page }) => {
   );
 });
 
+test("Preview Fit and Fill are explicit, bounded, and Fill does not select", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const preview = page.locator("[data-preview]");
+  const fit = page.getByRole("button", { name: "Fit", exact: true });
+  const fill = page.getByRole("button", { name: "Fill", exact: true });
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(fill).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveClass(/fit/);
+  await expect(preview).toHaveCSS("touch-action", "pan-y");
+
+  await fill.click();
+  await expect(fill).toHaveAttribute("aria-pressed", "true");
+  await expect(fit).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveClass(/fill/);
+  await expect(preview.locator("[data-stage] img")).toHaveCSS(
+    "object-fit",
+    "cover",
+  );
+  await expect(preview).toHaveCSS("touch-action", "none");
+
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+  await swipe(page, 100, 220);
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  await page.keyboard.press("f");
+  await expect(fill).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("d");
+  await expect(
+    page.getByRole("button", { name: "Exit Detail" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview).toHaveClass(/detail/);
+  await fit.click();
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toHaveAttribute("aria-pressed", "false");
+
+  const layout = await page.locator("[data-photo-view]").evaluate((view) => {
+    const preview = view.querySelector<HTMLElement>("[data-preview]");
+    if (!preview) throw new Error("Preview is missing");
+    return {
+      viewWidth: view.clientWidth,
+      viewScrollWidth: view.scrollWidth,
+      previewWidth: preview.getBoundingClientRect().width,
+    };
+  });
+  expect(layout.viewScrollWidth).toBe(layout.viewWidth);
+  expect(layout.previewWidth).toBeLessThanOrEqual(layout.viewWidth);
+
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(fill).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toHaveAttribute("aria-pressed", "false");
+});
+
 function touchQualification(viewport: { width: number; height: number }) {
   return async ({ page }: { page: Page }) => {
     const { base, root } = await fixture();

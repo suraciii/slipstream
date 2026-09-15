@@ -214,6 +214,8 @@ The first-slice gate must prove:
 - a low-resolution source is not upscaled or misrepresented;
 - selection and Rating transactions survive restart;
 - swipe actions do not fire while Detail Review is zoomed;
+- Preview Fit, Fill, and bounded Detail Review modes remain contained by the
+  Photo View viewport and expose their current state programmatically;
 - failed mutations do not silently advance;
 - cache invalidation follows current Original Location, source revision, and derivative version;
 - the complete path runs through the real browser-server protocol.
