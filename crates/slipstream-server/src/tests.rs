@@ -3313,6 +3313,19 @@ async fn photo_metadata_protocol_returns_capture_time_when_available() {
     let metadata = response_json(response).await;
     assert_eq!(metadata["captureTime"], "2026-02-03T04:05:06.000000000");
     assert!(metadata["aperture"].is_null());
+    fs::remove_file(config.library_root.join("metadata.jpg")).unwrap();
+    let unavailable = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/photos/{photo_id}/metadata"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::OK);
+    assert_eq!(response_json(unavailable).await, serde_json::json!({}));
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }

@@ -465,8 +465,9 @@ impl Application {
         };
         let root = self.library_root.clone();
         tokio::task::spawn_blocking(move || {
-            let root = slipstream_core::LibraryRoot::open(root)
-                .map_err(|error| ServerError::Join(error.to_string()))?;
+            let Ok(root) = slipstream_core::LibraryRoot::open(root) else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
             let selected = candidates
                 .iter()
                 .find(|(_, _, _, state)| *state == slipstream_core::CaptureMetadataState::Known)
@@ -474,12 +475,12 @@ impl Application {
             let Some((path, kind, _, _)) = selected else {
                 return Ok(slipstream_core::CaptureReviewMetadata::default());
             };
-            let capability = root
-                .original(path.clone())
-                .map_err(|error| ServerError::Join(error.to_string()))?;
-            let facts = capability
-                .facts()
-                .map_err(|error| ServerError::Join(error.to_string()))?;
+            let Ok(capability) = root.original(path.clone()) else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            let Ok(facts) = capability.facts() else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
             slipstream_core::inspect_review_metadata(&capability, *kind, facts)
                 .or_else(|_| Ok(slipstream_core::CaptureReviewMetadata::default()))
         })
