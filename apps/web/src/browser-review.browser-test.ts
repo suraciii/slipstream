@@ -926,6 +926,40 @@ test("Preview Fit and Fill are explicit, bounded, and Fill does not select", asy
   ).toHaveAttribute("aria-pressed", "false");
 });
 
+test("Photo View shows review capture metadata and explicit missing values", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  await page.route("**/api/photos/*/metadata", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        captureTime: "2026-02-03T04:05:06.000000000",
+        aperture: "f/2.8",
+        iso: 400,
+        shutterSpeed: "1/125 s",
+        focalLength: "50 mm",
+      }),
+    }),
+  );
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await expect(page.locator("[data-metadata]")).toContainText("Details");
+  await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
+    "2026-02-03T04:05:06.000000000",
+  );
+  await expect(page.locator("[data-metadata-aperture]")).toHaveText("f/2.8");
+  await expect(page.locator("[data-metadata-iso]")).toHaveText("400");
+  await expect(page.locator("[data-metadata-shutter-speed]")).toHaveText(
+    "1/125 s",
+  );
+  await expect(page.locator("[data-metadata-focal-length]")).toHaveText(
+    "50 mm",
+  );
+});
+
 function touchQualification(viewport: { width: number; height: number }) {
   return async ({ page }: { page: Page }) => {
     const { base, root } = await fixture();
