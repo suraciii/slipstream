@@ -1085,6 +1085,8 @@ export function mountLibraryBrowser(
     pageBusy = true;
     updateControls();
     cancelScheduledGridRender();
+    photoMetadataAbort?.abort();
+    photoMetadataAbort = undefined;
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
     });
@@ -1757,6 +1759,8 @@ export function mountLibraryBrowser(
     await photoOwner.prefetchAdjacent(authority, index);
   };
   const showGrid = () => {
+    photoMetadataAbort?.abort();
+    photoMetadataAbort = undefined;
     const authority = photoOwner.leave();
     const photoTransition = recoveryGate.beginTransition(
       "photo",
