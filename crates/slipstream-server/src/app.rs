@@ -255,6 +255,7 @@ impl SharedLibrary {
 
 pub struct Application {
     pub(crate) library: Arc<Library>,
+    library_root: PathBuf,
     pub(crate) preview: PreviewService,
     pub(crate) shared: Arc<SharedLibrary>,
     scan_cycle: ScanCycle,
@@ -396,6 +397,7 @@ impl Application {
             ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
         let application = Arc::new(Self {
             library,
+            library_root: config.library_root.clone(),
             preview,
             shared,
             scan_cycle: ScanCycle::new(),
@@ -411,6 +413,79 @@ impl Application {
             .expect("a new Application admits its startup scan");
         drop(startup);
         Ok(application)
+    }
+
+    /// Reads the small review metadata view from the Original that owns the
+    /// authoritative Capture Time. This is intentionally on demand so the
+    /// existing persisted state and scan contract do not grow a second EXIF
+    /// schema just to support Photo View details.
+    pub async fn photo_metadata(
+        &self,
+        photo_id: &str,
+    ) -> Result<slipstream_core::CaptureReviewMetadata, ServerError> {
+        let candidates = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let published = guard.as_ref().ok_or(ServerError::NotPublished)?;
+            let position = published
+                .photos_by_id
+                .get(photo_id)
+                .copied()
+                .ok_or(ServerError::PhotoNotFound)?;
+            let photo = published
+                .snapshot
+                .photos
+                .get(position)
+                .ok_or(ServerError::PhotoNotFound)?;
+            let mut candidates = Vec::new();
+            for id in [
+                photo.raw_original_id.as_ref(),
+                photo.jpeg_original_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let Some(position) = published.originals_by_id.get(id).copied() else {
+                    continue;
+                };
+                let Some(original) = published.snapshot.originals.get(position) else {
+                    continue;
+                };
+                candidates.push((
+                    original.relative_path.clone(),
+                    original.kind,
+                    original.facts,
+                    original.capture.state,
+                ));
+            }
+            candidates
+        };
+        let root = self.library_root.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(root) = slipstream_core::LibraryRoot::open(root) else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            let selected = candidates
+                .iter()
+                .find(|(_, _, _, state)| *state == slipstream_core::CaptureMetadataState::Known)
+                .or_else(|| candidates.first());
+            let Some((path, kind, _, _)) = selected else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            let Ok(capability) = root.original(path.clone()) else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            let Ok(facts) = capability.facts() else {
+                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            };
+            slipstream_core::inspect_review_metadata(&capability, *kind, facts)
+                .or_else(|_| Ok(slipstream_core::CaptureReviewMetadata::default()))
+        })
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))?
     }
 
     /// Truthful Library status: the scanner owns measurable phases and
@@ -890,6 +965,71 @@ impl Application {
     ) -> Result<AlbumSummaryListResponse, ServerError> {
         self.library.mutate_album(mutation).await?;
         self.albums().await
+    }
+
+    /// Adds all Photos projected into one Folder from the exact Published
+    /// Library generation supplied by the browser. The Folder index is
+    /// already ordered like the corresponding recursive Folder source, so the
+    /// resulting Album append is deterministic and does not require sending
+    /// the Photo IDs through the browser.
+    pub async fn add_folder_to_album(
+        &self,
+        album_id: &str,
+        folder_path: &str,
+        publication: &str,
+    ) -> Result<FolderAlbumMutationResponse, ServerError> {
+        if !valid_id(album_id) || !crate::folders::valid_folder_location(folder_path) {
+            return Err(ServerError::FolderInvalid);
+        }
+        let photo_ids = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let Some(published) = guard.as_ref() else {
+                return Err(ServerError::NotPublished);
+            };
+            if published.publication_value() != publication {
+                return Err(ServerError::FileLocationsExpired);
+            }
+            let index = published.folder_index();
+            if !index.is_known(folder_path) {
+                return Err(ServerError::FolderNotFound);
+            }
+            let photo_ids = index.filter_photo_ids(
+                &published.snapshot.photos,
+                &published.originals_by_id,
+                &published.snapshot.originals,
+                folder_path,
+            );
+            if photo_ids.len() > slipstream_core::MAXIMUM_FOLDER_ALBUM_PHOTOS {
+                return Err(ServerError::FolderAlbumLimit);
+            }
+            photo_ids
+        };
+        let result = self
+            .library
+            .mutate_album(slipstream_core::AlbumMutation::AddFolderMembers {
+                album_id: album_id.to_owned(),
+                photo_ids,
+            })
+            .await?;
+        let albums = self
+            .library
+            .list_album_summaries()
+            .await?
+            .into_iter()
+            .map(album_summary)
+            .collect();
+        Ok(FolderAlbumMutationResponse {
+            album_id: result.album_id,
+            folder_path: folder_path.to_owned(),
+            matched_count: result.added_count + result.already_member_count,
+            added_count: result.added_count,
+            already_member_count: result.already_member_count,
+            albums,
+        })
     }
 
     pub async fn mutate_photo_state(

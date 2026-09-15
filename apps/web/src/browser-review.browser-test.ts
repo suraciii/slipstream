@@ -853,6 +853,113 @@ test("wide desktop Preview retains fit gesture ownership", async ({ page }) => {
   );
 });
 
+test("Preview Fit and Fill are explicit, bounded, and Fill does not select", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  const preview = page.locator("[data-preview]");
+  const fit = page.getByRole("button", { name: "Fit", exact: true });
+  const fill = page.getByRole("button", { name: "Fill", exact: true });
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(fill).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveClass(/fit/);
+  await expect(preview).toHaveCSS("touch-action", "pan-y");
+
+  await fill.click();
+  await expect(fill).toHaveAttribute("aria-pressed", "true");
+  await expect(fit).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveClass(/fill/);
+  await expect(preview.locator("[data-stage] img")).toHaveCSS(
+    "object-fit",
+    "cover",
+  );
+  await expect(preview).toHaveCSS("touch-action", "none");
+
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+  await swipe(page, 100, 220);
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  await page.keyboard.press("f");
+  await expect(fill).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("d");
+  await expect(
+    page.getByRole("button", { name: "Exit Detail" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(preview).toHaveClass(/detail/);
+  await fit.click();
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toHaveAttribute("aria-pressed", "false");
+
+  const layout = await page.locator("[data-photo-view]").evaluate((view) => {
+    const preview = view.querySelector<HTMLElement>("[data-preview]");
+    if (!preview) throw new Error("Preview is missing");
+    return {
+      viewWidth: view.clientWidth,
+      viewScrollWidth: view.scrollWidth,
+      previewWidth: preview.getBoundingClientRect().width,
+    };
+  });
+  expect(layout.viewScrollWidth).toBe(layout.viewWidth);
+  expect(layout.previewWidth).toBeLessThanOrEqual(layout.viewWidth);
+
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(fill).toHaveAttribute("aria-pressed", "false");
+  await expect(
+    page.getByRole("button", { name: "Detail Review" }),
+  ).toHaveAttribute("aria-pressed", "false");
+});
+
+test("Photo View shows review capture metadata and explicit missing values", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  await page.route("**/api/photos/*/metadata", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        captureTime: "2026-02-03T04:05:06.000000000",
+        aperture: "f/2.8",
+        iso: 400,
+        shutterSpeed: "1/125 s",
+        focalLength: "50 mm",
+      }),
+    }),
+  );
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await expect(page.locator("[data-metadata]")).toContainText("Details");
+  await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
+    "2026-02-03T04:05:06.000000000",
+  );
+  await expect(page.locator("[data-metadata-aperture]")).toHaveText("f/2.8");
+  await expect(page.locator("[data-metadata-iso]")).toHaveText("400");
+  await expect(page.locator("[data-metadata-shutter-speed]")).toHaveText(
+    "1/125 s",
+  );
+  await expect(page.locator("[data-metadata-focal-length]")).toHaveText(
+    "50 mm",
+  );
+});
+
 function touchQualification(viewport: { width: number; height: number }) {
   return async ({ page }: { page: Page }) => {
     const { base, root } = await fixture();
@@ -3979,6 +4086,52 @@ test("file locations show a bounded tree and open recursive folder sources", asy
   await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
 });
 
+test("adds the current recursive Folder to an Album from Grid View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "Trip/day2"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "Trip/one.jpg"), data);
+  await writeFile(join(root, "Trip/day2/two.jpg"), data);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Trip Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find(
+    (album) => album.name === "Trip Picks",
+  )!.id;
+
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await page.getByRole("button", { name: /Trip · Subfolders/ }).click();
+  await expect(
+    page.getByText("Ready · 2 Photos", { exact: true }),
+  ).toBeVisible();
+
+  await page
+    .getByLabel("Add Folder to", { exact: true })
+    .selectOption({ label: "Trip Picks" });
+  const added = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/api/albums/${albumId}/folder-members`) &&
+      response.request().method() === "POST" &&
+      response.status() === 200,
+  );
+  await page.getByRole("button", { name: "Add Folder", exact: true }).click();
+  await added;
+  await expect(
+    page.getByText("Added 2 Photos. 0 already in the Album.", { exact: true }),
+  ).toBeVisible();
+
+  const persisted = await state(running.url, albumId);
+  expect(persisted.members).toHaveLength(2);
+});
+
 test("an empty Library still shows and opens the Library Folder root", async ({
   page,
 }) => {
@@ -4250,9 +4403,7 @@ test("delayed File Location responses from a superseded publication are discarde
   await rootToggle.click();
   await rootToggle.click();
   await expect(
-    page.getByText(
-      "Scan results changed File Locations. Reloaded the current Folders.",
-    ),
+    page.getByText("Library changed. Reloaded folders."),
   ).toBeVisible();
 
   // The delayed superseded window must not expand `a`: if it had been
@@ -4293,14 +4444,14 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   ).toBeVisible();
   await page.getByRole("button", { name: "Toggle shoot subfolders" }).click();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /^Library Folder/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: /^Retry File Locations \(shoot items 1–60\)/,
+      name: /^Retry Folders \(shoot items 1–60\)/,
     }),
   ).toBeVisible();
 
@@ -4319,7 +4470,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await rootReloaded;
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
 
   // A lower-priority admitted Album failure settles behind the actionable
@@ -4329,14 +4480,14 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await page.getByLabel("Album name").fill("Existing");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByText(/Could not load File Locations \(shoot items 1–60\)/),
+    page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
   await expect(
     page.getByText("An Album with this name already exists."),
   ).toBeHidden();
 
   failing = false;
-  await page.getByRole("button", { name: /^Retry File Locations/ }).click();
+  await page.getByRole("button", { name: /^Retry Folders/ }).click();
   // Retrying loads only the failed range: the sibling child appears while
   // the already loaded root navigation stays intact.
   await expect(
@@ -4345,7 +4496,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await expect(
     page.getByRole("button", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
-  await expect(page.getByText(/Could not load File Locations/)).toBeHidden();
+  await expect(page.getByText(/Could not load folders/)).toBeHidden();
   await expect(
     page.getByText("An Album with this name already exists."),
   ).toBeVisible();
@@ -4385,10 +4536,10 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   await page.getByRole("button", { name: "Toggle a subfolders" }).click();
   await page.getByRole("button", { name: "Toggle b subfolders" }).click();
   const retryA = page.getByRole("button", {
-    name: /^Retry File Locations \(a items 1–60\)/,
+    name: /^Retry Folders \(a items 1–60\)/,
   });
   const retryB = page.getByRole("button", {
-    name: /^Retry File Locations \(b items 1–60\)/,
+    name: /^Retry Folders \(b items 1–60\)/,
   });
   await expect(retryA).toBeVisible();
   await expect(retryB).toBeVisible();
@@ -4443,9 +4594,7 @@ test("file locations reload coherently when a scan replaces the publication", as
   await rootToggle.click();
   await rootToggle.click();
   await expect(
-    page.getByText(
-      "Scan results changed File Locations. Reloaded the current Folders.",
-    ),
+    page.getByText("Library changed. Reloaded folders."),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: /later 1 Photo/ }),

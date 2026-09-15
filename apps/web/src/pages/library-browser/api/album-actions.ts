@@ -7,7 +7,17 @@ export type AlbumActionFetch = (
 
 export type AlbumWriteResult =
   | Readonly<{ kind: "persisted" }>
+  | AlbumFolderAddResult
   | Readonly<{ kind: "rejected"; status: number }>;
+
+export type AlbumFolderAddResult = Readonly<{
+  kind: "persisted";
+  folderPath: string;
+  matchedCount: number;
+  addedCount: number;
+  alreadyMemberCount: number;
+  albums: ReadonlyArray<AlbumSummary>;
+}>;
 
 export type AlbumCreateResult =
   | Readonly<{ kind: "persisted"; createdAlbum: AlbumSummary }>
@@ -28,6 +38,21 @@ const isAlbumSummary = (value: unknown): value is AlbumSummary =>
 
 const albumNameKey = (name: string): string =>
   name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+
+const validCount = (value: unknown): value is number =>
+  Number.isInteger(value) && Number(value) >= 0;
+
+const validAlbumSummaries = (
+  value: unknown,
+): value is ReadonlyArray<AlbumSummary> => {
+  if (!Array.isArray(value) || !value.every(isAlbumSummary)) return false;
+  if (new Set(value.map((album) => album.id)).size !== value.length)
+    return false;
+  return (
+    new Set(value.map((album) => albumNameKey(album.name))).size ===
+    value.length
+  );
+};
 
 const requestAlbumAction = (
   fetcher: AlbumActionFetch,
@@ -112,6 +137,48 @@ export const addAlbumMember = (
   postAlbumAction(fetcher, `/api/albums/${albumId}/members`, {
     photoIds: [photoId],
   });
+
+export const addFolderToAlbum = async (
+  fetcher: AlbumActionFetch,
+  albumId: string,
+  folderPath: string,
+  publication: string,
+): Promise<AlbumWriteResult> => {
+  const response = await requestAlbumAction(
+    fetcher,
+    `/api/albums/${albumId}/folder-members`,
+    { folderPath, publication },
+  );
+  if (!response.ok)
+    return Object.freeze({ kind: "rejected", status: response.status });
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return Object.freeze({ kind: "rejected", status: 502 });
+  }
+  if (
+    !isRecord(body) ||
+    body.albumId !== albumId ||
+    body.folderPath !== folderPath ||
+    !validCount(body.matchedCount) ||
+    !validCount(body.addedCount) ||
+    !validCount(body.alreadyMemberCount) ||
+    body.matchedCount !== body.addedCount + body.alreadyMemberCount ||
+    !validAlbumSummaries(body.albums)
+  )
+    return Object.freeze({ kind: "rejected", status: 502 });
+  return Object.freeze({
+    kind: "persisted",
+    folderPath,
+    matchedCount: body.matchedCount,
+    addedCount: body.addedCount,
+    alreadyMemberCount: body.alreadyMemberCount,
+    albums: Object.freeze(
+      body.albums.map((album) => Object.freeze({ ...album })),
+    ),
+  });
+};
 
 export const removeAlbumMember = (
   fetcher: AlbumActionFetch,

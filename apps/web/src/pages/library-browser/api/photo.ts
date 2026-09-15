@@ -1,4 +1,5 @@
 import type {
+  PhotoMetadataResponse,
   PreviewResponse,
   SelectionState,
   UndoDescription,
@@ -26,6 +27,10 @@ export type PhotoStateResult =
   | Readonly<{ kind: "persisted"; undo?: UndoDescription }>
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
+
+export type PhotoMetadataResult =
+  | Readonly<{ kind: "ok"; value: PhotoMetadataResponse }>
+  | Readonly<{ kind: "failed"; status?: number }>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
@@ -66,6 +71,40 @@ const validUndo = (value: unknown): value is UndoDescription =>
   (value.field === "selectionState" || value.field === "rating") &&
   validStateValue(value.field, value.priorValue) &&
   validStateValue(value.field, value.expectedCurrent);
+
+const validMetadata = (value: unknown): value is PhotoMetadataResponse =>
+  isRecord(value) &&
+  optional(value.captureTime, (item) => typeof item === "string") &&
+  optional(value.aperture, (item) => typeof item === "string") &&
+  optional(value.iso, (item) => Number.isInteger(item) && Number(item) >= 0) &&
+  optional(value.shutterSpeed, (item) => typeof item === "string") &&
+  optional(value.focalLength, (item) => typeof item === "string");
+
+export async function fetchPhotoMetadata(
+  fetcher: PhotoFetch,
+  photoId: string,
+  signal: AbortSignal,
+): Promise<PhotoMetadataResult> {
+  let response: Response;
+  try {
+    response = await fetcher(`/api/photos/${photoId}/metadata`, {
+      signal,
+      priority: "high",
+    });
+  } catch {
+    return Object.freeze({ kind: "failed" });
+  }
+  if (!response.ok)
+    return Object.freeze({ kind: "failed", status: response.status });
+  try {
+    const value: unknown = await response.json();
+    return validMetadata(value)
+      ? Object.freeze({ kind: "ok", value: Object.freeze(value) })
+      : Object.freeze({ kind: "failed" });
+  } catch {
+    return Object.freeze({ kind: "failed" });
+  }
+}
 
 export async function fetchPreview(
   fetcher: PhotoFetch,

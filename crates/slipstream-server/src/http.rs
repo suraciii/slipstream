@@ -145,6 +145,7 @@ pub(crate) fn create_router_with_web_root(
         )
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
+        .route("/api/photos/{id}/metadata", get(get_photo_metadata))
         // The complete-membership list is retired; the path only creates Albums.
         .route("/api/albums", get(retired_album_list).post(create_album))
         .route(
@@ -158,6 +159,10 @@ pub(crate) fn create_router_with_web_root(
         .route(
             "/api/albums/{id}/members",
             get(method_not_allowed).post(add_album_members),
+        )
+        .route(
+            "/api/albums/{id}/folder-members",
+            get(method_not_allowed).post(add_folder_members),
         )
         .route(
             "/api/albums/{id}/members/remove",
@@ -526,6 +531,37 @@ pub(crate) async fn add_album_members(
     .await
 }
 
+pub(crate) async fn add_folder_members(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    let Some(folder_path) = body.get("folderPath").and_then(Value::as_str) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    let Some(publication) = body.get("publication").and_then(Value::as_str) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    };
+    if !valid_id(&id) || publication.is_empty() || !valid_folder_location(folder_path) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Folder Album body");
+    }
+    match state
+        .application
+        .add_folder_to_album(&id, folder_path, publication)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn remove_album_member(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -709,6 +745,19 @@ pub(crate) async fn get_thumbnail(
             };
             json_response(status, &result)
         }
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn get_photo_metadata(
+    State(state): State<HttpState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+) -> Response<Body> {
+    if !valid_id(&photo_id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+    }
+    match state.application.photo_metadata(&photo_id).await {
+        Ok(metadata) => json_response(StatusCode::OK, &PhotoMetadataWire::from(metadata)),
         Err(error) => ApiError::from(error).into_response(),
     }
 }
@@ -978,6 +1027,10 @@ impl From<ServerError> for ApiError {
                 status: StatusCode::NOT_FOUND,
                 message: "Browse source expired or not found",
             },
+            ServerError::PhotoNotFound => Self {
+                status: StatusCode::NOT_FOUND,
+                message: "Photo not found",
+            },
             ServerError::BrowseLimit => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "Browse window is invalid",
@@ -997,6 +1050,10 @@ impl From<ServerError> for ApiError {
             ServerError::FileLocationWindow => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "File Location window is invalid",
+            },
+            ServerError::FolderAlbumLimit => Self {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                message: "Original Folder contains too many Photos for one Album operation",
             },
             ServerError::NotPublished => Self {
                 status: StatusCode::SERVICE_UNAVAILABLE,

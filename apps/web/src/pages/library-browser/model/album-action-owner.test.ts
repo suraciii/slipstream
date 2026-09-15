@@ -123,6 +123,73 @@ describe("AlbumActionOwner", () => {
     owner.dispose();
   });
 
+  test("owns one bounded Folder-to-Album action and preserves its counts", async () => {
+    const requests: Array<Readonly<{ path: string; init?: RequestInit }>> = [];
+    const fetcher: AlbumActionFetch = (path, init) => {
+      requests.push({ path, ...(init ? { init } : {}) });
+      return Promise.resolve(
+        jsonResponse({
+          albumId: "album-1",
+          folderPath: "shoot",
+          matchedCount: 12,
+          addedCount: 9,
+          alreadyMemberCount: 3,
+          albums: [
+            {
+              id: "album-1",
+              name: "Picks",
+              photoCount: 12,
+              hasSavedPosition: false,
+            },
+          ],
+        }),
+      );
+    };
+    const owner = createAlbumActionOwner(fetcher);
+    const contextValue = context();
+    const action = owner.addFolderMembers(
+      "album-1",
+      "shoot",
+      "publication-1",
+      contextValue,
+    );
+    if (!action) throw new Error("expected Folder Album admission");
+    expect(
+      owner.isFolderMembersAdmitted("album-1", "shoot", "publication-1"),
+    ).toBe(true);
+    expect(
+      owner.addFolderMembers("album-1", "shoot", "publication-1", contextValue),
+    ).toBeUndefined();
+    const outcome = await action.settlement;
+    expect(outcome.kind).toBe("persisted");
+    if (outcome.kind !== "persisted") throw new Error("expected persistence");
+    expect(outcome.folderAdd).toEqual({
+      kind: "persisted",
+      folderPath: "shoot",
+      matchedCount: 12,
+      addedCount: 9,
+      alreadyMemberCount: 3,
+      albums: [
+        {
+          id: "album-1",
+          name: "Picks",
+          photoCount: 12,
+          hasSavedPosition: false,
+        },
+      ],
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.path).toBe("/api/albums/album-1/folder-members");
+    expect(requests[0]?.init?.body).toBe(
+      JSON.stringify({ folderPath: "shoot", publication: "publication-1" }),
+    );
+    owner.finish(action.mutation);
+    expect(
+      owner.isFolderMembersAdmitted("album-1", "shoot", "publication-1"),
+    ).toBe(false);
+    owner.dispose();
+  });
+
   test("returns only an exact, unambiguous created Album identity", async () => {
     const created = {
       id: "album-created",

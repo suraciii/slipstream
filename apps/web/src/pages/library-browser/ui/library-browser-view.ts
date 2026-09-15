@@ -29,6 +29,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
+  | Readonly<{ kind: "folder-album-add"; albumId: string }>
   | Readonly<{ kind: "album-form-open"; form: AlbumFormReference }>
   | Readonly<{ kind: "album-form-close"; formId: string }>
   | Readonly<{
@@ -127,6 +128,15 @@ export type SourceListViewModel = Readonly<{
   >;
 }>;
 
+export type FolderAlbumViewModel = Readonly<{
+  visible: boolean;
+  folderPath: string;
+  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+  selectedAlbumId: string;
+  pending: boolean;
+  status?: string;
+}>;
+
 type GridPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
@@ -149,6 +159,14 @@ type PhotoFactsViewModel = Readonly<{
   total: number;
   selectionState?: ViewSelectionState | undefined;
   rating?: number | undefined;
+}>;
+
+type PhotoMetadataViewModel = Readonly<{
+  captureTime?: string;
+  aperture?: string;
+  iso?: number;
+  shutterSpeed?: string;
+  focalLength?: string;
 }>;
 
 type PhotoShellViewModel = PhotoFactsViewModel &
@@ -203,6 +221,7 @@ export interface LibraryBrowserView {
   setGridStatus(text: string): void;
   setGridEmpty(text?: string, libraryCheck?: boolean): void;
   renderSources(model: SourceListViewModel): void;
+  renderFolderAlbum(model: FolderAlbumViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
@@ -218,6 +237,7 @@ export interface LibraryBrowserView {
   showGrid(index?: number): void;
   enterPhoto(): void;
   renderPhotoFacts(model: PhotoFactsViewModel): void;
+  renderPhotoMetadata(model?: PhotoMetadataViewModel): void;
   renderPhotoShell(
     model: PhotoShellViewModel,
   ): ReviewImagePresentation | undefined;
@@ -271,18 +291,22 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
+            <div class="preview-mode-controls" data-preview-mode-controls role="group" aria-label="Preview mode">
+              <button type="button" class="preview-mode" data-preview-fit aria-pressed="true">Fit</button>
+              <button type="button" class="preview-mode" data-preview-fill aria-pressed="false">Fill</button>
+            </div>
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
           <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div>
+            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
           </section>
           <section class="review-tools" aria-label="Review tools">
@@ -315,6 +339,22 @@ export function createLibraryBrowserView(
   const gridView = required<HTMLElement>(root, "[data-grid-view]");
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
   const gridStatus = required<HTMLElement>(root, "[data-grid-status]");
+  const folderAlbumControls = required<HTMLElement>(
+    root,
+    "[data-folder-album-controls]",
+  );
+  const folderAlbumSelect = required<HTMLSelectElement>(
+    root,
+    "[data-folder-album-select]",
+  );
+  const addFolderToAlbum = required<HTMLButtonElement>(
+    root,
+    "[data-add-folder-to-album]",
+  );
+  const folderAlbumStatus = required<HTMLElement>(
+    root,
+    "[data-folder-album-status]",
+  );
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
@@ -333,10 +373,33 @@ export function createLibraryBrowserView(
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
+  const previewModeControls = required<HTMLElement>(
+    root,
+    "[data-preview-mode-controls]",
+  );
+  const previewFit = required<HTMLButtonElement>(root, "[data-preview-fit]");
+  const previewFill = required<HTMLButtonElement>(root, "[data-preview-fill]");
   const selection = required<HTMLElement>(root, "[data-selection]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
   const limited = required<HTMLElement>(root, "[data-limited]");
+  const metadataCaptureTime = required<HTMLElement>(
+    root,
+    "[data-metadata-capture-time]",
+  );
+  const metadataAperture = required<HTMLElement>(
+    root,
+    "[data-metadata-aperture]",
+  );
+  const metadataIso = required<HTMLElement>(root, "[data-metadata-iso]");
+  const metadataShutterSpeed = required<HTMLElement>(
+    root,
+    "[data-metadata-shutter-speed]",
+  );
+  const metadataFocalLength = required<HTMLElement>(
+    root,
+    "[data-metadata-focal-length]",
+  );
   const status = required<HTMLElement>(root, "[data-status]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
@@ -390,7 +453,9 @@ export function createLibraryBrowserView(
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   let selectedAlbumId = "";
-  let zoomed = false;
+  let folderAlbumSelection = "";
+  type PreviewMode = "fit" | "fill" | "detail";
+  let previewMode: PreviewMode = "fit";
   let panX = 0;
   let panY = 0;
   let photoSurface: object = {};
@@ -497,21 +562,33 @@ export function createLibraryBrowserView(
     rejectFeedback.classList.remove("pending");
   };
   const applyTransform = () => {
+    preview.classList.toggle("fit", previewMode === "fit");
+    preview.classList.toggle("fill", previewMode === "fill");
+    preview.classList.toggle("detail", previewMode === "detail");
     const image = stage.querySelector<HTMLImageElement>("img");
     if (!image) return;
-    image.style.transform = zoomed
-      ? `translate(${panX}px, ${panY}px) scale(2)`
-      : "translate(0, 0) scale(1)";
-    preview.classList.toggle("detail", zoomed);
+    image.style.transform =
+      previewMode === "detail"
+        ? `translate(${panX}px, ${panY}px) scale(2)`
+        : "translate(0, 0) scale(1)";
   };
-  const resetTransform = () => {
+  const updatePreviewModeControls = () => {
+    previewFit.setAttribute("aria-pressed", String(previewMode === "fit"));
+    previewFill.setAttribute("aria-pressed", String(previewMode === "fill"));
+    detail.setAttribute("aria-pressed", String(previewMode === "detail"));
+    detail.textContent =
+      previewMode === "detail" ? "Exit Detail" : "Detail Review";
+    applyTransform();
+  };
+  const setPreviewMode = (mode: PreviewMode) => {
     if (!alive) return;
-    zoomed = false;
+    previewMode = mode;
     panX = 0;
     panY = 0;
-    detail.setAttribute("aria-pressed", "false");
-    detail.textContent = "Detail Review";
-    applyTransform();
+    updatePreviewModeControls();
+  };
+  const resetTransform = () => {
+    setPreviewMode("fit");
   };
 
   const createSourceButton = (
@@ -1051,12 +1128,21 @@ export function createLibraryBrowserView(
         String(Number(button.dataset.ratingValue) === value),
       );
   };
+  const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
+    if (!alive) return;
+    metadataCaptureTime.textContent = model.captureTime ?? "—";
+    metadataAperture.textContent = model.aperture ?? "—";
+    metadataIso.textContent = model.iso === undefined ? "—" : String(model.iso);
+    metadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
+    metadataFocalLength.textContent = model.focalLength ?? "—";
+  };
   const presentReviewImage = (
     url: string,
     index: number,
     total: number,
   ): ReviewImagePresentation | undefined => {
     if (!alive) return undefined;
+    setPreviewMode("fit");
     const surface = photoStatusSurface;
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
@@ -1098,15 +1184,18 @@ export function createLibraryBrowserView(
     currentPhotoId = model.photoId;
     photoSurface = {};
     renderPhotoFacts(model);
+    renderPhotoMetadata();
     previewSource.textContent = sourceLabel(model.previewSource);
     limited.hidden = !model.limitedDetail;
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
-    else
+    else {
+      setPreviewMode("fit");
       stage.replaceChildren(
         paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
       );
+    }
     setPhotoStatus(
       model.photoId && model.available === false
         ? "Original File is unavailable. Decisions remain available."
@@ -1123,19 +1212,15 @@ export function createLibraryBrowserView(
 
   const toggleDetail = () => {
     if (!alive || !stage.querySelector("img")) return;
-    zoomed = !zoomed;
-    panX = 0;
-    panY = 0;
-    detail.setAttribute("aria-pressed", String(zoomed));
-    detail.textContent = zoomed ? "Exit Detail" : "Detail Review";
-    applyTransform();
+    setPreviewMode(previewMode === "detail" ? "fit" : "detail");
   };
   const pointerDown = (event: PointerEvent) => {
     if (
       !alive ||
       pointer ||
       !event.isPrimary ||
-      (!zoomed && !decisionInteractionEnabled) ||
+      (previewMode !== "detail" &&
+        (previewMode !== "fit" || !decisionInteractionEnabled)) ||
       !currentPhotoId
     )
       return;
@@ -1160,7 +1245,7 @@ export function createLibraryBrowserView(
     const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
-    if (zoomed) {
+    if (previewMode === "detail") {
       panX = clamp(panX + stepX, -stage.clientWidth / 2, stage.clientWidth / 2);
       panY = clamp(
         panY + stepY,
@@ -1182,7 +1267,7 @@ export function createLibraryBrowserView(
     const active = pointer;
     clearPointer();
     if (
-      zoomed ||
+      previewMode !== "fit" ||
       cancelled ||
       active.vertical ||
       !decisionInteractionEnabled ||
@@ -1234,7 +1319,13 @@ export function createLibraryBrowserView(
     if (modifier || event.shiftKey || photoView.hidden) return;
     if (event.key === "ArrowLeft") send({ kind: "previous" });
     else if (event.key === "ArrowRight") send({ kind: "next" });
-    else if (event.key.toLowerCase() === "p")
+    else if (event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      setPreviewMode("fill");
+    } else if (event.key.toLowerCase() === "d") {
+      event.preventDefault();
+      toggleDetail();
+    } else if (event.key.toLowerCase() === "p")
       send({
         kind: "photo-mutation",
         field: "selectionState",
@@ -1319,6 +1410,34 @@ export function createLibraryBrowserView(
     removeFromAlbum.disabled = !model.inOpenAlbum || model.removing;
   };
 
+  const renderFolderAlbum = (model: FolderAlbumViewModel) => {
+    if (!alive) return;
+    folderAlbumControls.hidden = !model.visible;
+    if (!model.visible) {
+      folderAlbumSelect.replaceChildren();
+      folderAlbumStatus.textContent = "";
+      folderAlbumSelection = "";
+      return;
+    }
+    const selectedStillExists = model.albums.some(
+      (album) => album.id === folderAlbumSelection,
+    );
+    if (!selectedStillExists)
+      folderAlbumSelection = model.selectedAlbumId || model.albums[0]?.id || "";
+    folderAlbumSelect.replaceChildren();
+    for (const album of model.albums) {
+      const option = document.createElement("option");
+      option.value = album.id;
+      option.textContent = album.name;
+      option.selected = album.id === folderAlbumSelection;
+      folderAlbumSelect.append(option);
+    }
+    folderAlbumSelect.disabled = model.pending || !model.albums.length;
+    addFolderToAlbum.disabled =
+      model.pending || !model.albums.length || !folderAlbumSelection;
+    folderAlbumStatus.textContent = model.status ?? "";
+  };
+
   compactSources.addEventListener("change", onSourceViewportChange);
   sourceToggle.addEventListener("click", () => openSources("grid"));
   photoSourceToggle.addEventListener("click", () => openSources("photo"));
@@ -1339,6 +1458,17 @@ export function createLibraryBrowserView(
   undo.addEventListener("click", () => send({ kind: "undo" }));
   detail.addEventListener("click", toggleDetail);
   stage.addEventListener("dblclick", toggleDetail);
+  previewFit.addEventListener("click", () => setPreviewMode("fit"));
+  previewFill.addEventListener("click", () => setPreviewMode("fill"));
+  previewModeControls.addEventListener("pointerdown", (event) =>
+    event.stopPropagation(),
+  );
+  previewModeControls.addEventListener("pointermove", (event) =>
+    event.stopPropagation(),
+  );
+  previewModeControls.addEventListener("pointerup", (event) =>
+    event.stopPropagation(),
+  );
   select.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
@@ -1380,9 +1510,18 @@ export function createLibraryBrowserView(
     selectedAlbumId = albumSelect.value;
     if (membershipModel) renderMembership(membershipModel);
   });
+  folderAlbumSelect.addEventListener("change", () => {
+    if (!alive) return;
+    folderAlbumSelection = folderAlbumSelect.value;
+    addFolderToAlbum.disabled = !folderAlbumSelection;
+  });
   addToAlbum.addEventListener("click", () => {
     if (selectedAlbumId)
       send({ kind: "membership-add", albumId: selectedAlbumId });
+  });
+  addFolderToAlbum.addEventListener("click", () => {
+    if (folderAlbumSelection)
+      send({ kind: "folder-album-add", albumId: folderAlbumSelection });
   });
   removeFromAlbum.addEventListener("click", () =>
     send({ kind: "membership-remove" }),
@@ -1461,6 +1600,7 @@ export function createLibraryBrowserView(
       gridEmpty.hidden = !text;
     },
     renderSources,
+    renderFolderAlbum,
     setControls(model) {
       if (!alive) return;
       gridInteractionEnabled = model.gridEnabled;
@@ -1485,7 +1625,10 @@ export function createLibraryBrowserView(
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
-      detail.disabled = !stage.querySelector("img");
+      const hasPreviewImage = Boolean(stage.querySelector("img"));
+      previewFit.disabled = !hasPreviewImage;
+      previewFill.disabled = !hasPreviewImage;
+      detail.disabled = !hasPreviewImage;
     },
     renderMembership,
     prepareSourceOpen(name) {
@@ -1499,6 +1642,9 @@ export function createLibraryBrowserView(
       closeSources(false);
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
+      folderAlbumControls.hidden = true;
+      folderAlbumSelect.replaceChildren();
+      folderAlbumStatus.textContent = "";
       gridStatus.textContent = "Preparing Library order…";
       gridEmpty.hidden = true;
       gridEmptyMessage.textContent = "";
@@ -1519,6 +1665,7 @@ export function createLibraryBrowserView(
     },
     showGrid(index) {
       if (!alive) return;
+      resetTransform();
       photoView.hidden = true;
       gridView.hidden = false;
       closeSources(false);
@@ -1541,6 +1688,7 @@ export function createLibraryBrowserView(
       photoSurface = {};
     },
     renderPhotoFacts,
+    renderPhotoMetadata,
     renderPhotoShell,
     presentReviewImage,
     reviewImageMatches(url) {

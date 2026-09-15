@@ -1,11 +1,13 @@
 import {
   addAlbumMember,
+  addFolderToAlbum,
   createAlbum,
   deleteAlbum,
   removeAlbumMember,
   renameAlbum,
   type AlbumActionFetch,
   type AlbumCreateResult,
+  type AlbumFolderAddResult,
   type AlbumWriteResult,
 } from "../api/album-actions.js";
 import type { AlbumSummary } from "../api/contracts.js";
@@ -61,6 +63,7 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
           photoId: string;
           sourceAuthority: SourceAuthority;
         }>;
+        folderAdd?: AlbumFolderAddResult;
       }>
     | Readonly<{
         kind: "failed";
@@ -102,6 +105,12 @@ export interface AlbumActionOwner {
     photoId: string,
     context: AlbumActionContext,
   ): AlbumActionAdmission | undefined;
+  addFolderMembers(
+    albumId: string,
+    folderPath: string,
+    publication: string,
+    context: AlbumActionContext,
+  ): AlbumActionAdmission | undefined;
   removeMembership(
     albumId: string,
     photoId: string,
@@ -111,6 +120,11 @@ export interface AlbumActionOwner {
     verb: "add" | "remove",
     albumId: string,
     photoId: string,
+  ): boolean;
+  isFolderMembersAdmitted(
+    albumId: string,
+    folderPath: string,
+    publication: string,
   ): boolean;
   isLatest(mutation: AlbumMutation): boolean;
   canPresent(surface: AlbumSurfaceAuthority): boolean;
@@ -137,6 +151,12 @@ const membershipKey = (
   albumId: string,
   photoId: string,
 ): string => `${verb}:${albumId}:${photoId}`;
+
+const folderMembershipKey = (
+  albumId: string,
+  folderPath: string,
+  publication: string,
+): string => `folder:${albumId}:${publication}:${folderPath}`;
 
 export function createAlbumActionOwner(
   fetcher: AlbumActionFetch,
@@ -203,6 +223,10 @@ export function createAlbumActionOwner(
         result.kind === "persisted" && "createdAlbum" in result
           ? result.createdAlbum
           : undefined;
+      const folderAdd =
+        result.kind === "persisted" && "folderPath" in result
+          ? result
+          : undefined;
       const owner = {
         mutation,
         surface,
@@ -217,6 +241,7 @@ export function createAlbumActionOwner(
             connectivity: "unchanged",
             ...(createdAlbum ? { createdAlbum } : {}),
             ...(removed ? { removedFromCurrentAlbum: removed } : {}),
+            ...(folderAdd ? { folderAdd } : {}),
           })
         : Object.freeze({
             ...owner,
@@ -288,6 +313,16 @@ export function createAlbumActionOwner(
         () => "The Photo could not be added to the Album.",
         { admissionKey: membershipKey("add", albumId, photoId) },
       ),
+    addFolderMembers: (albumId, folderPath, publication, context) =>
+      start(
+        folderMembershipKey(albumId, folderPath, publication),
+        context,
+        () => addFolderToAlbum(fetcher, albumId, folderPath, publication),
+        () => "The Folder could not be added to the Album.",
+        {
+          admissionKey: folderMembershipKey(albumId, folderPath, publication),
+        },
+      ),
     removeMembership: (albumId, photoId, context) =>
       start(
         membershipKey("remove", albumId, photoId),
@@ -302,6 +337,10 @@ export function createAlbumActionOwner(
       ),
     isMembershipAdmitted: (verb, albumId, photoId) =>
       settlements.isAdmitted(membershipKey(verb, albumId, photoId)),
+    isFolderMembersAdmitted: (albumId, folderPath, publication) =>
+      settlements.isAdmitted(
+        folderMembershipKey(albumId, folderPath, publication),
+      ),
     isLatest: (mutation) =>
       !closed && Boolean(records.get(mutation)?.handle.isNewest()),
     canPresent: (surface) =>

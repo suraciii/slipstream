@@ -29,8 +29,8 @@ pub use cache::{
     manifest_identity,
 };
 pub use capture::{
-    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureTimeField,
-    MAXIMUM_CAPTURE_METADATA_BYTES,
+    CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
+    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
 pub use derivative::{
@@ -38,11 +38,11 @@ pub use derivative::{
 };
 pub use domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
-    AlbumRecord, AlbumSummary, DiscoveredOriginal, OriginalErrorCategory, OriginalFacts,
-    OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
-    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
-    ScanResult, ScanSnapshot, SelectionState,
+    AlbumRecord, AlbumSummary, DiscoveredOriginal, MAXIMUM_FOLDER_ALBUM_PHOTOS,
+    OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
+    PhotoRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
+    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState,
+    RelativeOriginalPath, ScanResult, ScanSnapshot, SelectionState,
 };
 pub use identity::{
     InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,

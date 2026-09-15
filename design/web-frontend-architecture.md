@@ -165,6 +165,28 @@ The source structure does not introduce a global frontend store. Browser-local
 state stays with the lifetime that invalidates it, while server-authoritative
 state continues to converge through the existing API and ordering contracts.
 
+### Preview presentation state
+
+The page UI owns one transient Preview mode for the current Photo. It is
+presentation state, not Photo state, and is reset when the current Photo or
+view changes. The page UI exposes the mode through a small segmented control
+and keeps its state available to assistive technology.
+
+Two implementation shapes were considered:
+
+- A continuous zoom slider would offer finer control, but it adds a new
+  numeric state, touch/pan edge cases, and a larger control on the already
+  constrained Photo View surface.
+- Three bounded modes, `Fit`, `Fill`, and `Detail Review`, make the important
+  viewing choices explicit while keeping gesture ownership deterministic.
+
+The bounded modes are selected because they solve the current viewport and
+inspection problem without introducing a general image editor. `Fit` owns
+the existing horizontal decision and vertical scrolling gestures. `Fill`
+disables swipe decisions and crops only inside the Preview area. `Detail
+Review` additionally owns one-finger pan at a fixed bounded magnification.
+Both non-Fit modes leave explicit Select and Reject controls available.
+
 ### Styling
 
 Global tokens, reset rules, and the application mount surface belong to `app`.

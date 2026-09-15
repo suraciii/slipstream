@@ -207,7 +207,7 @@ export function createFileLocationOwner(
         parent,
         page,
         range: describeRange(parent, page),
-        message: `Could not load File Locations (${describeRange(parent, page)}). Retry to continue.`,
+        message: `Could not load folders (${describeRange(parent, page)}). Retry to continue.`,
         order: (failureOrder += 1),
       });
       failures.set(key, failure);

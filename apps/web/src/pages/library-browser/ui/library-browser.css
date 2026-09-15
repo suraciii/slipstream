@@ -332,6 +332,43 @@
   min-width: 0;
 }
 
+.folder-album-controls {
+  min-width: min(24rem, 42%);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.folder-album-controls label,
+.folder-album-controls p {
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.folder-album-controls select {
+  min-width: 7rem;
+  min-height: 2.25rem;
+  flex: 1;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.folder-album-controls button {
+  min-height: 2.25rem;
+  white-space: nowrap;
+}
+
+.folder-album-controls p {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .grid-header h2,
 .photo-header h2 {
   min-width: 0;
@@ -556,6 +593,39 @@
   user-select: none;
 }
 
+.preview-mode-controls {
+  position: absolute;
+  z-index: 2;
+  top: 0.65rem;
+  right: 0.65rem;
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: rgb(14 16 19 / 92%);
+}
+
+.preview-mode {
+  min-width: 3rem;
+  min-height: 2.1rem;
+  padding: 0.25rem 0.5rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.preview-mode[aria-pressed="true"] {
+  border-color: var(--focus);
+  background: var(--raised);
+  color: var(--text);
+}
+
+.preview-mode:disabled {
+  opacity: 0.55;
+}
+
 .preview.detail {
   touch-action: none;
 }
@@ -576,11 +646,19 @@
 
 .image-stage img {
   display: block;
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   transform-origin: center;
   transition: transform 120ms ease-out;
+}
+
+.preview.fill .image-stage img {
+  max-width: none;
+  max-height: none;
+  object-fit: cover;
 }
 
 .preview.detail .image-stage img {
@@ -651,6 +729,38 @@
 }
 
 .facts dd {
+  color: var(--text);
+}
+
+.metadata {
+  margin-top: 0.45rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.metadata > strong {
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.metadata dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.9rem;
+  margin: 0.2rem 0 0;
+}
+
+.metadata dl div {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.metadata dt {
+  color: var(--muted);
+}
+
+.metadata dd {
   color: var(--text);
 }
 
@@ -814,7 +924,7 @@
     min-height: 2.75rem;
   }
 
-  .preview:not(.detail) {
+  .preview.fit {
     touch-action: pan-y;
   }
 }
@@ -932,6 +1042,16 @@
     font-size: 0.68rem;
   }
 
+  .folder-album-controls {
+    min-width: 100%;
+    margin-left: 0;
+  }
+
+  .folder-album-controls select,
+  .folder-album-controls button {
+    min-height: 2.75rem;
+  }
+
   .source-toggle {
     flex: none;
   }
@@ -960,6 +1080,15 @@
 
   .preview {
     grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem;
+  }
+
+  .preview-mode-controls {
+    top: 0.45rem;
+    right: 0.45rem;
+  }
+
+  .preview-mode {
+    min-height: 2.75rem;
   }
 
   .review-bar {

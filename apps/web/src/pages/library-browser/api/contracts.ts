@@ -75,6 +75,14 @@ export type PreviewResponse = Readonly<{
   message?: string;
 }>;
 
+export type PhotoMetadataResponse = Readonly<{
+  captureTime?: string;
+  aperture?: string;
+  iso?: number;
+  shutterSpeed?: string;
+  focalLength?: string;
+}>;
+
 export type FolderChild = Readonly<{
   location: string;
   name: string;
