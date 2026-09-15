@@ -4344,7 +4344,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: /^Retry folders \(shoot items 1–60\)/,
+      name: /^Retry Folders \(shoot items 1–60\)/,
     }),
   ).toBeVisible();
 
@@ -4380,7 +4380,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   ).toBeHidden();
 
   failing = false;
-  await page.getByRole("button", { name: /^Retry folders/ }).click();
+  await page.getByRole("button", { name: /^Retry Folders/ }).click();
   // Retrying loads only the failed range: the sibling child appears while
   // the already loaded root navigation stays intact.
   await expect(
@@ -4429,10 +4429,10 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   await page.getByRole("button", { name: "Toggle a subfolders" }).click();
   await page.getByRole("button", { name: "Toggle b subfolders" }).click();
   const retryA = page.getByRole("button", {
-    name: /^Retry folders \(a items 1–60\)/,
+    name: /^Retry Folders \(a items 1–60\)/,
   });
   const retryB = page.getByRole("button", {
-    name: /^Retry folders \(b items 1–60\)/,
+    name: /^Retry Folders \(b items 1–60\)/,
   });
   await expect(retryA).toBeVisible();
   await expect(retryB).toBeVisible();
