@@ -6564,6 +6564,366 @@ test("a sort open superseded by a newer source open leaves the newer order commi
   await expect(sort).toHaveValue("source-default");
 });
 
+test("a Folder sort change waits for the File Location binding before reopening", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"));
+  const source = await jpeg();
+  await writeFile(
+    join(root, "shoot/one.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "root.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "shoot · Folder" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+
+  // A completed Library check resets the File Location binding; while that
+  // route fails, the open Folder snapshot stays visible but unbound.
+  await page.route(/\/api\/file-locations/, (route) => route.abort());
+  const bindingAttempted = page.waitForRequest(/\/api\/file-locations/);
+  await writeFile(
+    join(root, "shoot/two.jpg"),
+    withCaptureTime(source, "2026:01:03 10:00:00"),
+  );
+  await post(running.url, "/api/scan", {});
+  await page.waitForFunction(async () => {
+    const response = await fetch("/api/overview");
+    const overview = (await response.json()) as { scan: { state: string } };
+    return overview.scan.state === "idle";
+  });
+  await bindingAttempted;
+
+  const browseBodies = recordBrowseBodies(page);
+  const sort = page.locator("[data-sort-select]");
+  await expect(sort).toBeEnabled();
+  // The Folder tree failure is what the user sees first; the order change
+  // must not add a second, different failure on top of it.
+  const connectionBefore = await page.locator("[data-connection]").innerText();
+  await sort.selectOption("capture-time-desc");
+
+  // The guard defers the order change instead of sending a Folder open with
+  // the superseded publication, so no Browse is attempted at all.
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  expect(browseBodies).toEqual([]);
+  // The retained snapshot stays truthful, the connection state is unchanged,
+  // and the control still reports the open snapshot's order.
+  await expect(
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.locator("[data-connection]").innerText())
+    .toBe(connectionBefore);
+  await expect(sort).toHaveValue("source-default");
+
+  // Once the binding route recovers, a fresh open uses the current
+  // publication and the selected order applies to the reopened Folder.
+  await page.unroute(/\/api\/file-locations/);
+  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+  const publication = (
+    (await (await fetch(`${running.url}/api/status`)).json()) as {
+      publication: string;
+    }
+  ).publication;
+  await sort.selectOption("capture-time-desc");
+  const expected = await browseOrderedIds(running.url, {
+    source: "folder",
+    folderPath: "shoot",
+    publication,
+    order: "capture-time-desc",
+  });
+  expect(expected).toHaveLength(2);
+  await expectGridOrder(page, expected);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "folder",
+    folderPath: "shoot",
+    publication,
+    order: "capture-time-desc",
+  });
+});
+
+test("an Album sort change keeps the current Photo and its resume identity", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 4; index += 1)
+    await writeFile(
+      join(root, `member-${index}.jpg`),
+      withCaptureTime(source, `2026:01:0${index + 1} 10:00:00`),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(4);
+  const { albumId } = await createAlbum(running.url, "Anchored");
+  // Persist an Album order that matches neither Capture Time direction.
+  const albumOrder = [
+    ascending[2]!,
+    ascending[0]!,
+    ascending[3]!,
+    ascending[1]!,
+  ];
+  await post(running.url, `/api/albums/${albumId}/order`, {
+    photoIds: albumOrder,
+  });
+  const descending = [...ascending].reverse();
+  const anchorId = albumOrder[1]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(3);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Anchored");
+  await expectGridOrder(page, albumOrder);
+
+  // Open the second Album member, then change the order from the Grid.
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 2 of 4/ }),
+  );
+  await expect(page.getByText("2 / 4")).toBeVisible();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).position)
+    .toBe(1);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  const sort = page.locator("[data-sort-select]");
+  await sort.selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  // The Album reopen carries the Album identity and the current Photo anchor.
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+
+  // The same Photo stays current at its new position in the changed order.
+  await page.locator(`[data-photo-index="${anchorPosition}"]`).click();
+  await expect(page.getByText(`${anchorPosition + 1} / 4`)).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  // A time view never rewrites the persisted Album positions.
+  const persisted = await state(running.url, albumId);
+  expect(persisted.members.map((member) => member.photoId)).toEqual(albumOrder);
+  expect(persisted.members.map((member) => member.position)).toEqual([
+    0, 1, 2, 3,
+  ]);
+
+  // Leaving and reopening the Album resumes by Photo identity under its own
+  // default order instead of by the last view position index.
+  await openSources(page);
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await openSources(page);
+  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expectGridOrder(page, albumOrder);
+  await expect(
+    page.getByRole("button", { name: /^Photo 2 of 4/ }),
+  ).toBeVisible();
+});
+
+test("Previous and Next follow the order selected from the Grid", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 5; index += 1)
+    await writeFile(
+      join(root, `step-${index}.jpg`),
+      withCaptureTime(source, `2026:02:0${index + 1} 10:00:00`),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(5);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(descending).toEqual([...ascending].reverse());
+  const anchorId = ascending[3]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(1);
+
+  // The displayed Preview's URL names the current Photo, so navigation can be
+  // checked by identity instead of by request arrival order.
+  const currentPreviewId = () =>
+    page
+      .locator("[data-stage] img")
+      .evaluate((image) =>
+        new URL(image.getAttribute("src") ?? "", location.origin).pathname
+          .split("/")
+          .at(-3),
+      );
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  const anchorCell = page.locator('[data-photo-index="3"]');
+  await anchorCell.click();
+  await expect(page.getByText("4 / 5")).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(anchorId);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+
+  // Reopening the anchored Photo uses the new order's position, and the
+  // navigation steps through the new order's identity sequence.
+  await page.locator(`[data-photo-index="${anchorPosition}"]`).click();
+  await expect(page.getByText(`${anchorPosition + 1} / 5`)).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(anchorId);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText(`${anchorPosition + 2} / 5`)).toBeVisible();
+  const nextId = descending[anchorPosition + 1]!;
+  await expect.poll(currentPreviewId).toBe(nextId);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText(`${anchorPosition + 3} / 5`)).toBeVisible();
+  const finalId = descending[anchorPosition + 2]!;
+  await expect.poll(currentPreviewId).toBe(finalId);
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByText(`${anchorPosition + 2} / 5`)).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(nextId);
+});
+
+test("a Library order switch aligns windows beyond the first Grid window", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  const count = 70;
+  for (let index = 0; index < count; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      withCaptureTime(
+        source,
+        `2026:03:01 ${String(Math.floor(index / 60)).padStart(2, "0")}:${String(
+          index % 60,
+        ).padStart(2, "0")}:00`,
+      ),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(count);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(descending).toEqual([...ascending].reverse());
+
+  // The current Photo sits in the first window before the switch and in the
+  // second one after it, so the reopened snapshot must realign its window.
+  const anchorIndex = 5;
+  const anchorId = ascending[anchorIndex]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(count - 1 - anchorIndex);
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+  const anchorCell = page.locator(`[data-photo-index="${anchorIndex}"]`);
+  await expect(anchorCell).toBeVisible();
+  await anchorCell.click();
+  await expect(page.getByText(`${anchorIndex + 1} / 70`)).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+  // The reopened snapshot renders the anchor's region of the new order
+  // instead of restarting at its first position: every rendered cell carries
+  // the new order's Photo at its own index, contiguously, and the anchor
+  // stays current inside the viewport.
+  const renderedCells = () =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>(".photo-cell")).map(
+        (cell) => ({
+          index: Number(cell.dataset.photoIndex),
+          id:
+            new URL(
+              cell.querySelector("img")?.getAttribute("src") ?? "",
+              location.origin,
+            ).pathname
+              .split("/")
+              .at(-3) ?? "",
+        }),
+      ),
+    );
+  await expect
+    .poll(async () => {
+      const cells = await renderedCells();
+      return cells.length > 0 && cells.every((cell) => cell.id !== "");
+    })
+    .toBe(true);
+  const rendered = await renderedCells();
+  expect(rendered[0]!.index).toBeGreaterThan(0);
+  expect(rendered.map((cell) => cell.index)).toEqual(
+    Array.from(
+      { length: rendered.length },
+      (_, offset) => rendered[0]!.index + offset,
+    ),
+  );
+  for (const cell of rendered) expect(cell.id).toBe(descending[cell.index]);
+  // The anchored Photo is the current one again and is scrolled into view.
+  const anchored = page.locator(`[data-photo-index="${anchorPosition}"]`);
+  await expect(anchored).toBeVisible();
+  expect(await renderedCells()).toContainEqual({
+    index: anchorPosition,
+    id: anchorId,
+  });
+  expect(
+    await anchored.evaluate((cell) => {
+      const viewport = cell.closest("[data-grid-viewport]");
+      if (!(viewport instanceof HTMLElement)) return false;
+      const cellBox = cell.getBoundingClientRect();
+      const viewportBox = viewport.getBoundingClientRect();
+      return (
+        cellBox.bottom > viewportBox.top && cellBox.top < viewportBox.bottom
+      );
+    }),
+  ).toBe(true);
+});
+
 test("active Library Review keeps its Capture Time snapshot until the next Session", async ({
   page,
 }) => {
