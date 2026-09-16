@@ -1218,9 +1218,7 @@ export function mountLibraryBrowser(
       const bound = await awaitRootBinding();
       if (!applicationAlive || !bound) {
         if (applicationAlive)
-          view.setGridStatus(
-            "Could not load this source. Retry to continue.",
-          );
+          view.setGridStatus("Could not load this source. Retry to continue.");
         return;
       }
     }
