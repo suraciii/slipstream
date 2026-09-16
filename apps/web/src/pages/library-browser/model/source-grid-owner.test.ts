@@ -1119,7 +1119,11 @@ describe("SourceGridOwner", () => {
       owner.ensureRange(range.start, range.end, { kind: "grid", authority });
       await flushTasks();
       const missing: number[] = [];
-      for (let index = range.start; index < Math.min(range.end, total); index += 1)
+      for (
+        let index = range.start;
+        index < Math.min(range.end, total);
+        index += 1
+      )
         if (owner.photoAt(index) === undefined) missing.push(index);
       const result = { requested: requested.slice(before), missing };
       owner.dispose();
