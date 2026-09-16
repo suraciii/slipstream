@@ -57,8 +57,8 @@ export type LibraryBrowserIntent =
       value: ViewSelectionState | number;
       advance: boolean;
     }>
-  | Readonly<{ kind: "membership-add"; albumId: string }>
-  | Readonly<{ kind: "membership-remove" }>;
+  | Readonly<{ kind: "membership-toggle"; albumId: string; member: boolean }>
+  | Readonly<{ kind: "membership-retry" }>;
 
 type GridThumbnailBinding = Readonly<{
   photoId: string;
@@ -179,12 +179,18 @@ type PhotoShellViewModel = PhotoFactsViewModel &
     previewUrl?: string | undefined;
   }>;
 
+type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
+
 type MembershipViewModel = Readonly<{
-  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
   photoPresent: boolean;
-  addingAlbumIds: ReadonlyArray<string>;
-  inOpenAlbum: boolean;
-  removing: boolean;
+  loading: boolean;
+  failed: boolean;
+  message?: string;
+  containing: ReadonlyArray<MembershipAlbumViewModel>;
+  options: ReadonlyArray<
+    Readonly<{ id: string; name: string; member: boolean }>
+  >;
+  pendingAlbumIds: ReadonlyArray<string>;
 }>;
 
 type ControlsViewModel = Readonly<{
@@ -311,7 +317,7 @@ export function createLibraryBrowserView(
           </section>
           <section class="review-tools" aria-label="Review tools">
             <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-            <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
+            <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>
             <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-detail aria-pressed="false">Detail Review</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
           </section>
         </section>
@@ -406,11 +412,30 @@ export function createLibraryBrowserView(
   const previous = required<HTMLButtonElement>(root, "[data-previous]");
   const next = required<HTMLButtonElement>(root, "[data-next]");
   const select = required<HTMLButtonElement>(root, "[data-select]");
-  const albumSelect = required<HTMLSelectElement>(root, "[data-album-select]");
-  const addToAlbum = required<HTMLButtonElement>(root, "[data-add-to-album]");
-  const removeFromAlbum = required<HTMLButtonElement>(
+  const membershipStatus = required<HTMLElement>(
     root,
-    "[data-remove-from-album]",
+    "[data-membership-status]",
+  );
+  const membershipList = required<HTMLElement>(root, "[data-membership-list]");
+  const membershipMessage = required<HTMLElement>(
+    root,
+    "[data-membership-message]",
+  );
+  const membershipManage = required<HTMLButtonElement>(
+    root,
+    "[data-membership-manage]",
+  );
+  const membershipRetry = required<HTMLButtonElement>(
+    root,
+    "[data-membership-retry]",
+  );
+  const membershipPanel = required<HTMLElement>(
+    root,
+    "[data-membership-panel]",
+  );
+  const membershipOptions = required<HTMLElement>(
+    root,
+    "[data-membership-options]",
   );
   const reject = required<HTMLButtonElement>(root, "[data-reject]");
   const clear = required<HTMLButtonElement>(root, "[data-clear]");
@@ -452,7 +477,8 @@ export function createLibraryBrowserView(
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
-  let selectedAlbumId = "";
+  let membershipManageOpen = false;
+  let membershipFocusAlbumId: string | undefined;
   let folderAlbumSelection = "";
   type PreviewMode = "fit" | "fill" | "detail";
   let previewMode: PreviewMode = "fit";
@@ -1382,32 +1408,115 @@ export function createLibraryBrowserView(
   const renderMembership = (model: MembershipViewModel) => {
     if (!alive) return;
     membershipModel = model;
-    albumSelect.replaceChildren();
-    if (!model.albums.some((album) => album.id === selectedAlbumId))
-      selectedAlbumId = "";
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = model.albums.length
-      ? "Choose Album…"
-      : "No Albums yet";
-    placeholder.disabled = true;
-    placeholder.selected = selectedAlbumId === "";
-    albumSelect.append(placeholder);
-    for (const album of model.albums) {
-      const option = document.createElement("option");
-      option.value = album.id;
-      option.textContent = album.name;
-      option.selected = album.id === selectedAlbumId;
-      albumSelect.append(option);
+    const pending = new Set(model.pendingAlbumIds);
+    const renderFacts = () => {
+      membershipList.replaceChildren();
+      membershipMessage.hidden = true;
+      membershipMessage.textContent = "";
+      membershipRetry.hidden = true;
+      if (!model.photoPresent) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "No current Photo.";
+        membershipList.hidden = true;
+        return;
+      }
+      if (model.loading) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Loading Albums…";
+        membershipList.hidden = true;
+        return;
+      }
+      if (model.failed) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Albums could not be loaded.";
+        membershipList.hidden = true;
+        membershipRetry.hidden = false;
+      } else if (model.containing.length === 0) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Not in any Album yet";
+        membershipList.hidden = true;
+      } else {
+        membershipStatus.hidden = true;
+        membershipStatus.textContent = "";
+        membershipList.hidden = false;
+        for (const album of model.containing) {
+          const item = document.createElement("li");
+          item.className = "membership-item";
+          item.textContent = album.name;
+          membershipList.append(item);
+        }
+      }
+      if (model.message) {
+        membershipMessage.hidden = false;
+        membershipMessage.textContent = model.message;
+      }
+    };
+    const renderOptions = () => {
+      // Rebuilding the options must not drop keyboard focus from a checkbox
+      // the visitor is operating, even while that checkbox is disabled for
+      // its in-flight toggle.
+      const focused = document.activeElement;
+      const focusedAlbumId =
+        focused instanceof HTMLInputElement &&
+        membershipOptions.contains(focused)
+          ? focused.dataset.membershipAlbumId
+          : undefined;
+      if (focusedAlbumId !== undefined && pending.has(focusedAlbumId))
+        membershipFocusAlbumId = focusedAlbumId;
+      membershipOptions.replaceChildren();
+      if (!model.options.length) {
+        const empty = paragraph(
+          model.photoPresent ? "No Albums yet." : "No current Photo.",
+        );
+        empty.className = "membership-empty";
+        membershipOptions.append(empty);
+        return;
+      }
+      for (const album of model.options) {
+        const option = document.createElement("label");
+        option.className = "membership-option";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.dataset.membershipAlbumId = album.id;
+        input.checked = album.member;
+        input.disabled = !model.photoPresent || pending.has(album.id);
+        input.addEventListener("change", () => {
+          if (!alive) return;
+          send({
+            kind: "membership-toggle",
+            albumId: album.id,
+            member: input.checked,
+          });
+        });
+        const name = document.createElement("span");
+        name.textContent = album.name;
+        option.append(input, name);
+        membershipOptions.append(option);
+      }
+      const targetId = focusedAlbumId ?? membershipFocusAlbumId;
+      if (targetId !== undefined) {
+        const restored = Array.from(
+          membershipOptions.querySelectorAll("input"),
+        ).find((input) => input.dataset.membershipAlbumId === targetId);
+        if (!restored) membershipFocusAlbumId = undefined;
+        else if (!restored.disabled) {
+          if (document.activeElement === document.body) restored.focus();
+          membershipFocusAlbumId = undefined;
+        }
+      }
+    };
+    renderFacts();
+    membershipManage.disabled = !model.photoPresent;
+    membershipManage.setAttribute(
+      "aria-expanded",
+      String(membershipManageOpen),
+    );
+    membershipPanel.hidden = !membershipManageOpen;
+    if (membershipManageOpen) renderOptions();
+    else {
+      membershipFocusAlbumId = undefined;
+      membershipOptions.replaceChildren();
     }
-    albumSelect.disabled = !model.albums.length;
-    addToAlbum.disabled =
-      !model.albums.length ||
-      !model.photoPresent ||
-      !selectedAlbumId ||
-      model.addingAlbumIds.includes(selectedAlbumId);
-    removeFromAlbum.hidden = !model.inOpenAlbum;
-    removeFromAlbum.disabled = !model.inOpenAlbum || model.removing;
   };
 
   const renderFolderAlbum = (model: FolderAlbumViewModel) => {
@@ -1505,27 +1614,23 @@ export function createLibraryBrowserView(
         advance: false,
       });
   });
-  albumSelect.addEventListener("change", () => {
+  membershipManage.addEventListener("click", () => {
     if (!alive) return;
-    selectedAlbumId = albumSelect.value;
+    membershipManageOpen = !membershipManageOpen;
     if (membershipModel) renderMembership(membershipModel);
   });
+  membershipRetry.addEventListener("click", () =>
+    send({ kind: "membership-retry" }),
+  );
   folderAlbumSelect.addEventListener("change", () => {
     if (!alive) return;
     folderAlbumSelection = folderAlbumSelect.value;
     addFolderToAlbum.disabled = !folderAlbumSelection;
   });
-  addToAlbum.addEventListener("click", () => {
-    if (selectedAlbumId)
-      send({ kind: "membership-add", albumId: selectedAlbumId });
-  });
   addFolderToAlbum.addEventListener("click", () => {
     if (folderAlbumSelection)
       send({ kind: "folder-album-add", albumId: folderAlbumSelection });
   });
-  removeFromAlbum.addEventListener("click", () =>
-    send({ kind: "membership-remove" }),
-  );
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
