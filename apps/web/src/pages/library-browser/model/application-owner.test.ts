@@ -353,7 +353,7 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
-  test("reports one transport loss while the probe cannot reach the server and restores reachability when it answers", async () => {
+  test("reports the transport outcome of every status probe to the application", async () => {
     let statusRequests = 0;
     const { owner, events, nextScheduled } = harness((input) => {
       if (input === "/api/overview")
@@ -361,6 +361,8 @@ describe("ApplicationOwner", () => {
       statusRequests += 1;
       if (statusRequests === 2 || statusRequests === 3)
         return Promise.reject(new Error("offline"));
+      if (statusRequests === 4)
+        return Promise.resolve(new Response(null, { status: 503 }));
       return Promise.resolve(response(scan("idle", "publication-1")));
     });
     const transportEvents = () =>
@@ -377,17 +379,63 @@ describe("ApplicationOwner", () => {
       "transport-lost",
     ]);
 
-    // A repeated unreachable observation reports no new transition.
+    // The probe owns no reachability state: it reports what it observed, and
+    // the application decides whether that changes the shared connection.
     await nextScheduled().run();
     expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+      "transport-lost",
+    ]);
+
+    // An answered error is a server-side condition, not a transport outcome.
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
       "transport-lost",
     ]);
 
     await nextScheduled().run();
     expect(transportEvents().map((event) => event.kind)).toEqual([
       "transport-lost",
+      "transport-lost",
       "mark-reachable",
     ]);
+    owner.dispose();
+  });
+
+  test("keeps probing reachability while the Library check stays failed", async () => {
+    let statusRequests = 0;
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(response(overview("publication-1", "Album")));
+      statusRequests += 1;
+      if (statusRequests === 1)
+        return Promise.resolve(response(scan("idle", "publication-1")));
+      if (statusRequests === 2 || statusRequests === 3)
+        return Promise.resolve(response(scan("failed", "publication-1")));
+      return Promise.reject(new Error("offline"));
+    });
+    const failureClaims = () =>
+      summaryEvents(events).filter(
+        (event) => event.summary.action?.kind === "retry-library-check",
+      );
+
+    await owner.refreshOverview();
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // A failed Library check is a resting surface, not the end of the
+    // monitor: the same failure is claimed once and the resting cadence
+    // applies while the monitor keeps probing the server.
+    expect(nextScheduled().delayMs).toBe(2_000);
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // A server that stops answering is still reported from that surface.
+    await nextScheduled().run();
+    expect(
+      events.filter((event) => event.kind === "transport-lost"),
+    ).toHaveLength(1);
     owner.dispose();
   });
 
