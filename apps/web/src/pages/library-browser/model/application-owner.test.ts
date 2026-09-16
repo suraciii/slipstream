@@ -320,13 +320,14 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
-  test("uses idle and active poll cadence while status failures stay silent", async () => {
+  test("uses idle and active poll cadence while an answered status failure stays silent", async () => {
     let statusRequests = 0;
     const { owner, events, nextScheduled } = harness((input) => {
       if (input === "/api/overview")
         return Promise.resolve(response(overview("publication-1", "Album")));
       statusRequests += 1;
-      if (statusRequests === 2) return Promise.reject(new Error("offline"));
+      if (statusRequests === 2)
+        return Promise.resolve(new Response(null, { status: 503 }));
       return Promise.resolve(
         response(
           statusRequests === 1
@@ -341,6 +342,7 @@ describe("ApplicationOwner", () => {
     expect(firstPoll.delayMs).toBe(2_000);
     const beforeFailure = events.length;
     await firstPoll.run();
+    // The server answered without a usable status, so the transport is intact.
     expect(events).toHaveLength(beforeFailure);
 
     const secondPoll = nextScheduled();
@@ -348,6 +350,44 @@ describe("ApplicationOwner", () => {
     await secondPoll.run();
     expect(latestSummary(events)?.text).toBe("Checking Library Folder…");
     expect(nextScheduled().delayMs).toBe(500);
+    owner.dispose();
+  });
+
+  test("reports one transport loss while the probe cannot reach the server and restores reachability when it answers", async () => {
+    let statusRequests = 0;
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(response(overview("publication-1", "Album")));
+      statusRequests += 1;
+      if (statusRequests === 2 || statusRequests === 3)
+        return Promise.reject(new Error("offline"));
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+    const transportEvents = () =>
+      events.filter(
+        (event) =>
+          event.kind === "transport-lost" || event.kind === "mark-reachable",
+      );
+
+    await owner.refreshOverview();
+    expect(transportEvents()).toHaveLength(0);
+
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+    ]);
+
+    // A repeated unreachable observation reports no new transition.
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+    ]);
+
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+      "mark-reachable",
+    ]);
     owner.dispose();
   });
 

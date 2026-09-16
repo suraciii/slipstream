@@ -428,6 +428,10 @@ If a selection or Rating change cannot persist, Slipstream must identify the aff
 
 A disconnected browser may continue displaying already loaded thumbnails and Previews. An already loaded Preview must remain available for local Detail Review zoom and pan while disconnected, but the browser must stop accepting new decisions until the server confirms the connection and current Photo state. Fit-mode decision gestures and persisted controls remain unavailable while disconnected. Success from an unrelated request, such as another File Location range, does not confirm that state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
 
+Slipstream must not present the Library Browser as connected while the server is unreachable. The browser must probe server reachability while the Photographer is idle, and it must report a lost connection within a bounded delay and without a Photographer action. A probe that cannot reach the server must mark the browser disconnected and withhold new decisions.
+
+A probe that receives a usable status answer may confirm the connection again. A status answer that arrives without usable content reports neither outcome: the server is reachable, and the condition belongs to the server rather than to connectivity. Confirming the connection must not clear an unfinished recovery or release a decision that still waits for its own confirmation.
+
 If an ephemeral server-side browse snapshot expires or is lost after server restart, Slipstream must reopen the current source from the latest published Library and identify that newly completed scans may affect its order. A successful replacement snapshot also replaces browser-local Album membership facts from the retired snapshot; a failed reopen retains the recoverable current view.
 
 ## Examples

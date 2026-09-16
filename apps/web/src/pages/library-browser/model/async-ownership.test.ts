@@ -255,6 +255,31 @@ describe("RecoveryGate", () => {
     expect(gate.decisionReady).toBe(true);
   });
 
+  test("a lost transport probe withholds readiness without owning a claim", () => {
+    const gate = new RecoveryGate();
+    gate.setOwner("photo", "photo-1");
+    const photo = gate.issue("preview", "photo-1", {
+      owner: { scope: "photo", generation: "photo-1" },
+    });
+    expect(gate.decisionReady).toBe(true);
+
+    // The probe reports the transport, not an operation failure, so it must
+    // neither add a claim nor clear another owner's claim.
+    gate.markTransportLost();
+    expect(gate.transportReachable).toBe(false);
+    expect(gate.decisionReady).toBe(false);
+    expect(gate.fail(photo, { transportLost: true })).toBe(true);
+    gate.markReachable();
+    expect(gate.isActive(photo)).toBe(true);
+    expect(gate.decisionReady).toBe(false);
+
+    gate.markTransportLost();
+    expect(gate.decisionReady).toBe(false);
+    // Recovering the claim is its own transport evidence.
+    expect(gate.recover(photo)).toBe(true);
+    expect(gate.decisionReady).toBe(true);
+  });
+
   test("A to B success retires predecessor claims without touching independent ranges", () => {
     const gate = new RecoveryGate();
     gate.setOwner("photo", "A");

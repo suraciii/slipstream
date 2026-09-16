@@ -188,6 +188,11 @@ export function mountLibraryBrowser(
       setConnected(true);
       return;
     }
+    if (coordination.kind === "transport-lost") {
+      recoveryGate.markTransportLost();
+      syncConnection();
+      return;
+    }
     if (coordination.kind === "fail-application-recovery") {
       let claim = applicationRecoveries.get(coordination.recovery);
       if (!claim) {

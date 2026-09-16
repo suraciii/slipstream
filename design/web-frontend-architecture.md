@@ -149,9 +149,12 @@ to that owner through the page controller; they do not mutate its state or call
 it through reverse imports.
 
 Cross-owner connectivity and decision readiness are derived once from transport
-reachability, Recovery claims, and active interaction ownership. Local Preview
-inspection readiness is separate: an already loaded Preview may zoom and pan
-without transport or persistence readiness, while fit-mode decision gestures
+reachability, Recovery claims, and active interaction ownership. The
+application-lifetime owner reports the status probe's transport outcome, and the
+page controller applies it to that shared reachability state; a probe answer
+without usable content reports neither a reachable nor a lost transport. Local
+Preview inspection readiness is separate: an already loaded Preview may zoom and
+pan without transport or persistence readiness, while fit-mode decision gestures
 remain governed by decision readiness. Individual owners cannot independently
 declare the page connected or clear another owner's busy state. A presentation
 surface that must reject late settlement is represented by an opaque ownership

@@ -301,6 +301,10 @@ Polling `GET /api/status` at a modest interval is sufficient for one Photographe
 
 Already loaded facts and derivative bytes remain visible after disconnection. Mutations remain disabled until the server confirms current state.
 
+The status poll is also the browser's continuous reachability probe. A poll that cannot reach the server marks transport lost, so connectivity and decision readiness stop claiming a live server without a Photographer action. A poll that returns a usable status answer may restore transport reachability, because this probe is the designated reachability signal rather than an unrelated request. A poll that receives an answer without a usable status reports neither transition: the server is reachable, and that answer is a server-side condition.
+
+Restoring transport reachability is not itself a recovery. It does not retire an active Recovery claim, so a decision that still waits for its own confirmation stays unavailable after the probe answers again. Reachability and operation recovery remain separate axes: reachability follows transport evidence, and claims follow operation outcomes.
+
 If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use. Browser-local facts scoped to the retired Snapshot, including the temporary memory that keeps a removed Album member visible, are discarded only after the replacement Snapshot commits successfully. A failed reopen retains those facts with the recoverable current view.
 
 The first product does not promise durable `All Photos` or Original Folder position across browser reload. Album saved position remains durable SQLite state.
@@ -363,7 +367,7 @@ Serial transfer would leave connection capacity available, but it would unnecess
 
 ### Selected: Status Polling
 
-A small status query is sufficient for one local Photographer and keeps process lifecycle simple.
+A small status query is sufficient for one local Photographer and keeps process lifecycle simple. One poll carries both the Library scan phase and the browser's reachability signal, so connectivity needs no second timer, channel, or lifecycle.
 
 ### Rejected: WebSocket, Message Broker, or Separate Worker Service
 
