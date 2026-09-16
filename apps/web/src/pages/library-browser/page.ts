@@ -8,7 +8,7 @@ import type {
   FolderChild,
   SelectionState,
 } from "./api/contracts.js";
-import { fetchPhotoMetadata } from "./api/photo.js";
+import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
 import {
   createFileLocationOwner,
   type FileLocationAuthority,
@@ -175,6 +175,7 @@ export function mountLibraryBrowser(
       }
     }
     renderMembershipControls();
+    refreshMembershipFacts();
     renderSources();
   };
 
@@ -1547,106 +1548,196 @@ export function mountLibraryBrowser(
   // open snapshot separately remembers members removed until reopen.
   const removedFromCurrentAlbum = new Set<string>();
 
+  type MembershipFacts =
+    | Readonly<{ kind: "loading" }>
+    | Readonly<{
+        kind: "ready";
+        albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+      }>
+    | Readonly<{ kind: "failed" }>;
+  let membershipFacts: MembershipFacts = { kind: "loading" };
+  let membershipPhotoId: string | undefined;
+  let membershipMessage: string | undefined;
+  let membershipAbort: AbortController | undefined;
+  let membershipRevision = 0;
+  const membershipAlbumName = (albumId: string): string =>
+    application.albums.find((album) => album.id === albumId)?.name ?? "Album";
+
   const renderMembershipControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
+    const photoId = photo?.id;
+    const facts: MembershipFacts =
+      photoId !== undefined && membershipPhotoId === photoId
+        ? membershipFacts
+        : { kind: "loading" };
+    const containing = facts.kind === "ready" ? facts.albums : [];
+    const memberIds = new Set(containing.map((album) => album.id));
+    const pending = photoId
+      ? application.albums
+          .filter(
+            (album) =>
+              albumActions.isMembershipAdmitted("add", album.id, photoId) ||
+              albumActions.isMembershipAdmitted("remove", album.id, photoId),
+          )
+          .map((album) => album.id)
+      : [];
     view.renderMembership({
-      albums: application.albums.map(({ id, name }) => ({ id, name })),
       photoPresent: Boolean(photo),
-      addingAlbumIds: photo
-        ? application.albums
-            .filter((album) =>
-              albumActions.isMembershipAdmitted("add", album.id, photo.id),
-            )
-            .map((album) => album.id)
-        : [],
-      inOpenAlbum:
-        sourceGrid.kind === "album" &&
-        Boolean(sourceGrid.albumId) &&
-        Boolean(photo) &&
-        !removedFromCurrentAlbum.has(photo!.id),
-      removing:
-        Boolean(photo && sourceGrid.albumId) &&
-        albumActions.isMembershipAdmitted(
-          "remove",
-          sourceGrid.albumId!,
-          photo!.id,
-        ),
+      loading: Boolean(photo) && facts.kind === "loading",
+      failed: Boolean(photo) && facts.kind === "failed",
+      ...(membershipMessage ? { message: membershipMessage } : {}),
+      containing,
+      options: application.albums.map((album) => ({
+        id: album.id,
+        name: album.name,
+        member: memberIds.has(album.id),
+      })),
+      pendingAlbumIds: pending,
     });
   };
 
-  const addMembership = (albumId: string): void => {
+  /// Loads the current Photo's Album membership. The read is fenced to the
+  /// Photo and generation like capture metadata: a response that arrives
+  /// after its Photo stopped being current is discarded. A revalidation keeps
+  /// the stated facts while it runs so the panel does not flicker.
+  const loadPhotoAlbums = async (
+    authority: PhotoAuthority,
+    photoId: string | undefined,
+    options: Readonly<{ force?: boolean; keepFacts?: boolean }> = {},
+  ): Promise<void> => {
+    if (
+      !options.force &&
+      photoId !== undefined &&
+      photoId === membershipPhotoId &&
+      membershipFacts.kind !== "failed"
+    )
+      return;
+    const showLoading = !options.keepFacts || photoId !== membershipPhotoId;
+    membershipAbort?.abort();
+    membershipAbort = undefined;
+    membershipPhotoId = photoId;
+    membershipMessage = undefined;
+    membershipRevision += 1;
+    if (!photoId) {
+      membershipFacts = { kind: "loading" };
+      renderMembershipControls();
+      return;
+    }
+    if (showLoading) {
+      membershipFacts = { kind: "loading" };
+      renderMembershipControls();
+    }
+    const controller = new AbortController();
+    membershipAbort = controller;
+    const result = await fetchPhotoAlbums(fetcher, photoId, controller.signal);
+    if (
+      controller.signal.aborted ||
+      !photoOwner.isCurrent(authority) ||
+      currentPhoto()?.id !== photoId
+    )
+      return;
+    membershipFacts =
+      result.kind === "ok"
+        ? { kind: "ready", albums: result.value.albums }
+        : { kind: "failed" };
+    renderMembershipControls();
+  };
+
+  const refreshMembershipFacts = (): void => {
+    if (!applicationAlive) return;
+    const photo = currentPhoto();
+    if (!photo) return;
+    void loadPhotoAlbums(photoOwner.authority, photo.id, {
+      force: true,
+      keepFacts: true,
+    });
+  };
+
+  /// Sends one admitted membership toggle for the current Photo. The
+  /// checkbox shows the intended state while the mutation is in flight, and
+  /// a failed mutation restores the prior true state and names the action.
+  const toggleMembership = (albumId: string, member: boolean): void => {
     const photo = currentPhoto();
     if (!photo || !albumId) return;
     const photoId = photo.id;
-    if (albumActions.isMembershipAdmitted("add", albumId, photoId)) return;
+    const kind = member ? "add" : "remove";
+    if (albumActions.isMembershipAdmitted(kind, albumId, photoId)) return;
     const photoAuthority = photoOwner.authority;
     const snapshotAuthority = sourceGrid.authority;
-    void (async () => {
-      const settlement = mutateAlbum(
-        (context) => albumActions.addMembership(albumId, photoId, context),
-        "photo",
-        photoAuthority,
+    const revision = ++membershipRevision;
+    const prior = membershipFacts;
+    if (membershipFacts.kind === "ready") {
+      const others = membershipFacts.albums.filter(
+        (album) => album.id !== albumId,
       );
-      renderMembershipControls();
-      const { ok: added, announce } = await settlement;
-      if (
-        added &&
-        sourceGrid.isCurrent(snapshotAuthority) &&
-        albumId === sourceGrid.albumId
-      )
-        removedFromCurrentAlbum.delete(photoId);
-      renderMembershipControls();
-      if (
-        added &&
-        photoOwner.isCurrent(photoAuthority) &&
-        currentPhoto()?.id === photoId
-      )
-        announce("Added to the Album.");
-    })();
-  };
-
-  const removeMembership = (): void => {
-    const photo = currentPhoto();
-    if (
-      !photo ||
-      sourceGrid.kind !== "album" ||
-      !sourceGrid.albumId ||
-      removedFromCurrentAlbum.has(photo.id)
-    )
-      return;
-    const albumId = sourceGrid.albumId;
-    const photoId = photo.id;
-    if (albumActions.isMembershipAdmitted("remove", albumId, photoId)) return;
-    const photoAuthority = photoOwner.authority;
+      membershipFacts = {
+        kind: "ready",
+        albums: member
+          ? [...others, { id: albumId, name: membershipAlbumName(albumId) }]
+          : others,
+      };
+    }
+    membershipMessage = undefined;
+    renderMembershipControls();
     void (async () => {
-      const settlement = mutateAlbum(
-        (context) => albumActions.removeMembership(albumId, photoId, context),
-        "photo",
-        photoAuthority,
-      );
+      const settlement = member
+        ? mutateAlbum(
+            (context) => albumActions.addMembership(albumId, photoId, context),
+            "photo",
+            photoAuthority,
+          )
+        : mutateAlbum(
+            (context) =>
+              albumActions.removeMembership(albumId, photoId, context),
+            "photo",
+            photoAuthority,
+          );
+      // The admission is registered now: show the checkbox as in flight.
       renderMembershipControls();
       const {
-        ok: removed,
+        ok,
         announce,
         removedFromCurrentAlbum: removedFact,
       } = await settlement;
-      if (
-        removed &&
-        removedFact !== undefined &&
-        sourceGrid.isCurrent(removedFact.sourceAuthority) &&
-        removedFact.albumId === sourceGrid.albumId
-      )
-        removedFromCurrentAlbum.add(photoId);
+      const stillCurrent =
+        photoOwner.isCurrent(photoAuthority) && currentPhoto()?.id === photoId;
+      if (ok) {
+        if (
+          !member &&
+          removedFact !== undefined &&
+          sourceGrid.isCurrent(removedFact.sourceAuthority) &&
+          removedFact.albumId === sourceGrid.albumId
+        )
+          removedFromCurrentAlbum.add(photoId);
+        if (
+          member &&
+          sourceGrid.isCurrent(snapshotAuthority) &&
+          albumId === sourceGrid.albumId
+        )
+          removedFromCurrentAlbum.delete(photoId);
+        if (stillCurrent) {
+          announce(
+            member
+              ? "Added to the Album."
+              : albumId === sourceGrid.albumId
+                ? "Removed from the Album. It stays in this open view until reopened."
+                : "Removed from the Album.",
+          );
+          void loadPhotoAlbums(photoAuthority, photoId, {
+            force: true,
+            keepFacts: true,
+          });
+        }
+        return;
+      }
+      if (stillCurrent && membershipRevision === revision)
+        membershipFacts = prior;
+      if (!stillCurrent) return;
+      membershipMessage = member
+        ? `Could not add this Photo to “${membershipAlbumName(albumId)}”.`
+        : `Could not remove this Photo from “${membershipAlbumName(albumId)}”.`;
       renderMembershipControls();
-      if (
-        removed &&
-        photoOwner.isCurrent(photoAuthority) &&
-        currentPhoto()?.id === photoId
-      )
-        announce(
-          "Removed from the Album. It stays in this open view until reopened.",
-        );
     })();
   };
 
@@ -1690,6 +1781,7 @@ export function mountLibraryBrowser(
       previewUrl: photo?.preview.url,
     });
     void loadPhotoMetadata(authority, photo?.id);
+    void loadPhotoAlbums(authority, photo?.id);
     if (image)
       photoOwner.attachReviewImage(
         authority,
@@ -2273,11 +2365,11 @@ export function mountLibraryBrowser(
       case "photo-mutation":
         void mutate(intent.field, intent.value, intent.advance);
         return;
-      case "membership-add":
-        addMembership(intent.albumId);
+      case "membership-toggle":
+        toggleMembership(intent.albumId, intent.member);
         return;
-      case "membership-remove":
-        removeMembership();
+      case "membership-retry":
+        refreshMembershipFacts();
     }
   }
 
@@ -2286,6 +2378,7 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     applicationAlive = false;
     photoMetadataAbort?.abort();
+    membershipAbort?.abort();
     view.dispose();
     cancelScheduledGridRender();
     albumRecovery = undefined;

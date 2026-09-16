@@ -83,6 +83,11 @@ export type PhotoMetadataResponse = Readonly<{
   focalLength?: string;
 }>;
 
+/** Bounded per-Photo Album membership: Album identities only. */
+export type PhotoAlbumsResponse = Readonly<{
+  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+}>;
+
 export type FolderChild = Readonly<{
   location: string;
   name: string;

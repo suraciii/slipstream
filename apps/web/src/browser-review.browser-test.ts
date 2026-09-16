@@ -415,6 +415,23 @@ async function openSources(page: Page) {
     }
   }
 }
+
+/// Album membership is read and managed in one panel: the facts list names the
+/// Albums this Photo is in, and the Manage panel holds one checkbox per Album.
+async function openMembershipPanel(page: Page) {
+  const manage = page.getByRole("button", { name: "Manage", exact: true });
+  if ((await manage.getAttribute("aria-expanded")) !== "true")
+    await manage.click();
+}
+
+function membershipCheckbox(page: Page, albumName: string) {
+  return page.getByRole("checkbox", { name: albumName, exact: true });
+}
+
+async function toggleAlbumMembership(page: Page, albumName: string) {
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, albumName).click();
+}
 function contrastRatio(foreground: string, background: string) {
   const luminance = (value: string) => {
     const channels = value
@@ -858,7 +875,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       const controlGroups = [
         ".decision-controls",
         ".rating-controls",
-        ".membership-controls",
+        ".membership",
         ".photo-controls",
       ].map((selector) => bounds(selector).height);
       return {
@@ -895,8 +912,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
     const controls = [
       page.getByRole("button", { name: "Back to Grid" }),
       page.getByRole("button", { name: `Rate ${index + 3} stars` }),
-      page.getByLabel("Album", { exact: true }),
-      page.getByRole("button", { name: "Add to Album" }),
+      page.getByRole("button", { name: "Manage", exact: true }),
       page.getByRole("button", { name: "Previous" }),
       page.getByRole("button", { name: "Next" }),
     ];
@@ -916,6 +932,14 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       });
       expect(contained).toBe(true);
     }
+    await openMembershipPanel(page);
+    const optionTargets = await interactiveGeometry(
+      page.locator("[data-membership-panel]"),
+    );
+    expect(
+      optionTargets.filter(({ width, height }) => width < 44 || height < 44),
+    ).toEqual([]);
+    expect(optionTargets.filter(({ contained }) => !contained)).toEqual([]);
 
     const ratingSaved = page.waitForResponse(
       (response) =>
@@ -929,16 +953,27 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       page.getByText(`${index + 3} stars`, { exact: true }),
     ).toBeVisible();
 
-    await page
-      .getByLabel("Album", { exact: true })
-      .selectOption({ label: "Destination" });
+    // Every viewport proves the membership toggle is operable, so the first
+    // step normalizes the membership the previous viewport left behind.
+    const destination = membershipCheckbox(page, "Destination");
+    await expect(destination).toBeVisible();
+    if (await destination.isChecked()) {
+      const membershipRemoved = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname.endsWith("/members/remove") &&
+          response.status() === 200,
+      );
+      await destination.uncheck();
+      await membershipRemoved;
+    }
     const membershipSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname.endsWith("/members") &&
         response.status() === 200,
     );
-    await page.getByRole("button", { name: "Add to Album" }).click();
+    await destination.check();
     await membershipSaved;
     await expect(page.getByText("Added to the Album.")).toBeVisible();
 
@@ -1854,7 +1889,7 @@ test("Clear is available only for a decided Photo", async ({ page }) => {
     .evaluate((view) =>
       Array.from(
         view.querySelectorAll<HTMLElement>(
-          ".facts dt, .rating-controls legend, .membership-controls label",
+          ".facts dt, .rating-controls legend, .membership-heading",
         ),
         (node) => {
           const surface = node.closest<HTMLElement>(
@@ -2687,41 +2722,41 @@ test("the current photo joins and leaves albums from the photo view", async ({
   const albumId = created.albums.find((album) => album.name === "Picks")!.id;
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  const [photoId] = await browseIds(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
 
-  // Adding the current Photo to an Album updates the bounded counts.
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
+  // A Photo that belongs to no Album states that plainly.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+
+  // Adding the current Photo to an Album updates the listed membership and
+  // the bounded counts.
   const firstAdd = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname.endsWith("/members") &&
       response.status() === 200,
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await toggleAlbumMembership(page, "Picks");
   await firstAdd;
   await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.getByText("Not in any Album yet")).toBeHidden();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /Picks 1 Photo/ }),
   ).toBeVisible();
 
-  // Adding an existing member is idempotent.
+  // A repeated add for an existing member stays one membership: the panel
+  // lists the Album once and the counts stay at one Photo.
+  await post(running.url, `/api/albums/${albumId}/members`, { photoId });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
-  const idempotentAdd = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname.endsWith("/members") &&
-      response.status() === 200,
-  );
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await idempotentAdd;
-  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Picks")).toBeChecked();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).members)
+    .toHaveLength(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /Picks 1 Photo/ }),
@@ -2736,13 +2771,15 @@ test("the current photo joins and leaves albums from the photo view", async ({
     albumId,
     page.getByRole("button", { name: /^Photo 1 of 1/ }),
   );
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
+  await toggleAlbumMembership(page, "Picks");
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
   await expect(page.getByText("1 / 1")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /^Picks 0 Photos$/ }),
@@ -2750,6 +2787,284 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(
     page.getByRole("button", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
+});
+
+test("the membership panel lists the current Photo's Albums across sources and reloads", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const longName = "Summer Trip ".repeat(10).trim().slice(0, 120);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Alpha" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const alphaId = created.albums.find((album) => album.name === "Alpha")!.id;
+  await post(running.url, "/api/albums", { name: "Beta" });
+  await post(running.url, "/api/albums", { name: longName });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  // A Photo in no Album states that plainly.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+
+  // Managing several Albums lists every one in Album-list order.
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Alpha").check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Alpha"]);
+  await membershipCheckbox(page, "Beta").check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+  ]);
+  await membershipCheckbox(page, longName).check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+
+  // A long Album name truncates visually, keeps its full text, and stays
+  // inside its control group.
+  const longest = page.locator("[data-membership-list] li").nth(2);
+  const clipped = await longest.evaluate((element) => ({
+    text: element.textContent,
+    textOverflow: getComputedStyle(element).textOverflow,
+    clipped: element.scrollWidth > element.clientWidth,
+    right: element.getBoundingClientRect().right,
+    containerRight: element.parentElement!.getBoundingClientRect().right,
+  }));
+  expect(clipped.text).toBe(longName);
+  expect(clipped.textOverflow).toBe("ellipsis");
+  expect(clipped.clipped).toBe(true);
+  expect(clipped.right).toBeLessThanOrEqual(clipped.containerRight + 0.5);
+
+  // The same facts hold in an Album source and after a reload.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Alpha 1 Photo/ }).click();
+  await openPhotoAndWaitForProgress(
+    page,
+    alphaId,
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  );
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+  await expect(membershipCheckbox(page, "Alpha")).toBeChecked();
+  await expect(membershipCheckbox(page, "Beta")).toBeChecked();
+
+  await page.reload();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Alpha")).toBeChecked();
+  await expect(membershipCheckbox(page, "Beta")).toBeChecked();
+  await expect(membershipCheckbox(page, longName)).toBeChecked();
+});
+
+test("a failed membership read stays retryable without blocking decisions", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Picks" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  await page.route("**/api/photos/*/albums", (route) => route.abort());
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openMembershipPanel(page);
+  await expect(page.getByText("Albums could not be loaded.")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry Albums" });
+  await expect(retry).toBeVisible();
+
+  // Membership being down leaves Preview, selection, Rating, and navigation
+  // usable and never claims a disconnection.
+  await expect(page.getByText("Disconnected", { exact: true })).toBeHidden();
+  await waitForLoadedReviewImage(page);
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Rate 3 stars" }).click();
+  await expect(page.getByText("3 stars", { exact: true })).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+
+  // Retrying reloads only the membership facts.
+  await page.unroute("**/api/photos/*/albums");
+  await retry.click();
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
+  await expect(retry).toBeHidden();
+});
+
+test("a held membership read is discarded when the Photo changes", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "First Only" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find(
+    (album) => album.name === "First Only",
+  )!.id;
+  const [firstId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${albumId}/members`, {
+    photoIds: [firstId],
+  });
+
+  // Record when an aborted membership read settles, so the discard is
+  // observed deterministically instead of by elapsed time.
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const input = args[0];
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      try {
+        return await nativeFetch(...args);
+      } catch (error) {
+        if (url.endsWith("/albums"))
+          setTimeout(() => {
+            document.documentElement.dataset.membershipAborted = "true";
+          }, 0);
+        throw error;
+      }
+    }) as typeof window.fetch;
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let releaseFirst!: () => void;
+  const firstReleased = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let heldOnce = false;
+  await page.route("**/api/photos/*/albums", async (route) => {
+    if (heldOnce) {
+      await route.continue();
+      return;
+    }
+    heldOnce = true;
+    await firstReleased;
+    // The client aborted this read when the Photo changed.
+    await route
+      .fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          albums: [{ id: albumId, name: "First Only" }],
+        }),
+      })
+      .catch(() => {});
+  });
+  try {
+    await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+    await expect(page.getByText("Loading Albums…")).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText("2 / 2")).toBeVisible();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    // The superseded read has settled; its Album must never paint.
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-membership-aborted",
+      "true",
+    );
+    releaseFirst();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
+    await expect(page.getByText("First Only", { exact: true })).toBeHidden();
+  } finally {
+    releaseFirst();
+    await page.unroute("**/api/photos/*/albums");
+  }
+});
+
+test("deleting an Album re-verifies the current Photo's membership", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Keep" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const keepId = created.albums.find((album) => album.name === "Keep")!.id;
+  const doomed = (await (
+    await post(running.url, "/api/albums", { name: "Doomed" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const doomedId = doomed.albums.find((album) => album.name === "Doomed")!.id;
+  const [photoId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${keepId}/members`, {
+    photoIds: [photoId],
+  });
+  await post(running.url, `/api/albums/${doomedId}/members`, {
+    photoIds: [photoId],
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Keep",
+    "Doomed",
+  ]);
+
+  // Deleting an Album the Photo belongs to re-verifies the current facts.
+  await openSources(page);
+  await page.getByRole("button", { name: "Delete Doomed" }).click();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Keep"]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Keep")).toBeChecked();
+  await expect(membershipCheckbox(page, "Doomed")).toHaveCount(0);
+});
+
+test("the membership panel is operable by keyboard", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Keyboard" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  const manage = page.getByRole("button", { name: "Manage", exact: true });
+  await manage.focus();
+  await page.keyboard.press("Enter");
+  await expect(manage).toHaveAttribute("aria-expanded", "true");
+
+  const membership = membershipCheckbox(page, "Keyboard");
+  await membership.focus();
+  const added = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/members") &&
+      response.status() === 200,
+  );
+  await page.keyboard.press("Space");
+  await added;
+  await expect(membership).toBeChecked();
+  // The re-render keeps keyboard focus on the operated checkbox.
+  await expect(membership).toBeFocused();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Keyboard",
+  ]);
 });
 
 test("an older saved-position response cannot supersede a newer Album removal", async ({
@@ -2835,7 +3150,7 @@ test("an older saved-position response cannot supersede a newer Album removal", 
     const savedPositionResponse = progressResponse(page, albumId);
     await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
     await progressPersisted;
-    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await toggleAlbumMembership(page, "Picks");
     await overviewCaptured;
     releaseProgress();
     const deliveredProgress = await savedPositionResponse;
@@ -2884,14 +3199,14 @@ test("a successful membership retry recovers its exact Album connection", async 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
 
   await page.route("**/api/albums/*/members", (route) => route.abort());
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await toggleAlbumMembership(page, "Picks");
   await expect(
     page.getByText("The Photo could not be added to the Album."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Could not add this Photo to “Picks”."),
   ).toBeVisible();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
@@ -2903,15 +3218,16 @@ test("a successful membership retry recovers its exact Album connection", async 
       new URL(response.url()).pathname === `/api/albums/${albumId}/members` &&
       response.status() === 200,
   );
-  await expect(
-    page.getByRole("button", { name: "Add to Album" }),
-  ).toBeEnabled();
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  // The failed toggle restored the true state instead of wedging the control.
+  await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+  await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+  await membershipCheckbox(page, "Picks").check();
   await retried;
 
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeChecked();
   await openSources(page);
   await expect(
     page.getByRole("button", { name: /^Picks 1 Photo$/ }),
@@ -2937,6 +3253,7 @@ test("different Album membership keys admit independently", async ({
   const albumB = createdB.albums.find((album) => album.name === "B")!.id;
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openMembershipPanel(page);
 
   let releaseA!: () => void;
   const heldA = new Promise<void>((resolve) => {
@@ -2946,22 +3263,19 @@ test("different Album membership keys admit independently", async ({
     await heldA;
     await route.continue();
   });
-  const picker = page.getByLabel("Album", { exact: true });
-  await picker.selectOption(albumA);
   const requestA = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumA}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await expect(picker).toBeEnabled();
+  await membershipCheckbox(page, "A").check();
+  // Only the Album with an in-flight toggle is disabled; the other Album
+  // stays operable.
+  await expect(membershipCheckbox(page, "A")).toBeDisabled();
 
-  await picker.selectOption(albumB);
-  await expect(
-    page.getByRole("button", { name: "Add to Album" }),
-  ).toBeEnabled();
+  await expect(membershipCheckbox(page, "B")).toBeEnabled();
   const requestB = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumB}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "B").check();
   await requestB;
   releaseA();
   await requestA;
@@ -3057,7 +3371,10 @@ test("creating an album from the photo view opens it and makes it available for 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByLabel("Album", { exact: true })).toBeDisabled();
+  // With no Albums at all the panel says so instead of offering a control.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+  await openMembershipPanel(page);
+  await expect(page.getByText("No Albums yet.")).toBeVisible();
 
   await openSources(page);
   await page.getByRole("button", { name: "New Album" }).click();
@@ -3073,11 +3390,9 @@ test("creating an album from the photo view opens it and makes it available for 
   await openSources(page);
   await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Fresh" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Fresh")).toBeVisible();
+  await membershipCheckbox(page, "Fresh").check();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -3102,16 +3417,18 @@ test("a failed removal stays retryable from the photo view", async ({
   );
 
   await page.route("**/api/albums/*/members/remove", (route) => route.abort());
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await toggleAlbumMembership(page, "Retry");
   await expect(
     page.getByText("The Photo could not be removed from the Album."),
   ).toBeVisible();
-  // The failed control is re-enabled, not wedged.
   await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeEnabled();
+    page.getByText("Could not remove this Photo from “Retry”."),
+  ).toBeVisible();
+  // The failed toggle restored the true state and stays retryable.
+  await expect(membershipCheckbox(page, "Retry")).toBeEnabled();
+  await expect(membershipCheckbox(page, "Retry")).toBeChecked();
   await page.unroute("**/api/albums/*/members/remove");
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await membershipCheckbox(page, "Retry").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -3207,11 +3524,9 @@ test("a late album success cannot overwrite a newer removal notice", async ({
     await released;
     await route.continue();
   });
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Other" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Other").check();
+  await membershipCheckbox(page, "Hold").uncheck();
   const removedNotice = page.getByText(
     "Removed from the Album. It stays in this open view until reopened.",
   );
@@ -3249,11 +3564,9 @@ test("a superseded album failure surfaces in the library summary", async ({
     if (fail) await route.abort();
     else await route.continue();
   });
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Other" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Other").check();
+  await membershipCheckbox(page, "Hold").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -3964,14 +4277,15 @@ test("in-flight membership and delete operations stay disabled across re-renders
     await route.continue();
     folderDelivered();
   });
-  const removeButton = page.locator("[data-remove-from-album]");
+  const slowMembership = membershipCheckbox(page, "Slow");
   const removalSettled = page.waitForResponse(
     (response) =>
       response.url().includes("/members/remove") &&
       response.request().method() === "POST",
   );
-  await removeButton.click();
-  await expect(removeButton).toBeDisabled();
+  await openMembershipPanel(page);
+  await slowMembership.click();
+  await expect(slowMembership).toBeDisabled();
   // A routine Preview completion must not silently take ownership from the
   // user-initiated removal while that mutation is still in flight.
   releasePreview();
@@ -3983,7 +4297,7 @@ test("in-flight membership and delete operations stay disabled across re-renders
   // Deterministically wait until the delayed folder response has been
   // delivered and its re-render landed, then verify the in-flight guard.
   await folderDeliveredSettled;
-  await expect(removeButton).toBeDisabled();
+  await expect(slowMembership).toBeDisabled();
   release!();
   await removalSettled;
   await expect(page.locator("[data-status]")).toContainText(
@@ -3994,8 +4308,9 @@ test("in-flight membership and delete operations stay disabled across re-renders
     page.getByRole("button", { name: /^Slow 1 Photo/ }),
   ).toBeVisible();
   expect(calls).toBe(1);
-  // The removed member is no longer removable within the open snapshot.
-  await expect(removeButton).toBeHidden();
+  // The removed member is no longer a member within the open snapshot.
+  await expect(slowMembership).toBeEnabled();
+  await expect(slowMembership).not.toBeChecked();
 });
 
 test("a current saved-position failure blocks decisions until Photo Retry confirms it", async ({
@@ -4335,9 +4650,7 @@ test("an admitted album add completes after switching sources", async ({
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
+  await openMembershipPanel(page);
 
   // Hold the membership response while the source changes underneath.
   let release: (() => void) | undefined;
@@ -4356,7 +4669,7 @@ test("an admitted album add completes after switching sources", async ({
     }
     await route.continue();
   });
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "Picks").check();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   release!();
   // The admitted mutation still updates the bounded Album list.
@@ -5818,7 +6131,7 @@ test("an admitted Album write settles after application teardown without present
   const albumId = created.albums.find((album) => album.name === "Detached")!.id;
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page.getByLabel("Album", { exact: true }).selectOption(albumId);
+  await openMembershipPanel(page);
 
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -5831,7 +6144,7 @@ test("an admitted Album write settles after application teardown without present
   const settled = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumId}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "Detached").check();
   await page.evaluate(() =>
     window.dispatchEvent(new PageTransitionEvent("pagehide")),
   );
@@ -7827,15 +8140,14 @@ test("an expired Album snapshot replaces retired membership memory", async ({
   );
   await expect(page.getByText("1 / 250")).toBeVisible();
   const firstId = (await state(running.url, albumId)).members[0]!.photoId;
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Expiry").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeHidden();
+  await expect(membershipCheckbox(page, "Expiry")).not.toBeChecked();
   const readded = await post(running.url, `/api/albums/${albumId}/members`, {
     photoIds: [firstId],
   });
@@ -7911,9 +8223,8 @@ test("an expired Album snapshot replaces retired membership memory", async ({
     releaseReopen();
     await expect(tailPhoto).toBeEnabled();
     await openPhotoAndWaitForProgress(page, albumId, tailPhoto);
-    await expect(
-      page.getByRole("button", { name: "Remove from this Album" }),
-    ).toBeVisible();
+    await openMembershipPanel(page);
+    await expect(membershipCheckbox(page, "Expiry")).toBeChecked();
   } finally {
     releaseReopen();
     await page.unroute(/\/api\/browse/);
@@ -7956,7 +8267,8 @@ for (const failure of replacementFirstWindowFailures) {
       page.getByRole("button", { name: /^Photo 1 of 250/ }),
     );
     const firstId = (await state(running.url, albumId)).members[0]!.photoId;
-    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await openMembershipPanel(page);
+    await membershipCheckbox(page, "Replacement failure").uncheck();
     await expect(
       page.getByText(
         "Removed from the Album. It stays in this open view until reopened.",
@@ -8117,7 +8429,8 @@ test("a failed expired Album reopen retains retired membership memory", async ({
     albumId,
     page.getByRole("button", { name: /^Photo 1 of 70/ }),
   );
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Expiry failure").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -8165,9 +8478,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 70/ }).click();
   await expect(page.locator("[data-review]")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeHidden();
+  await expect(membershipCheckbox(page, "Expiry failure")).not.toBeChecked();
 });
 
 test("Photo View recovery defers Grid windows until Grid is visible", async ({
