@@ -1210,10 +1210,23 @@ export function mountLibraryBrowser(
   /// An explicit order change reopens the same source with the new order,
   /// keeping the browser-local current Photo by identity. A source with no
   /// current Photo yet starts at the first Photo of the new order.
-  const changeSort = (order: SourceViewOrder): void => {
+  const changeSort = async (order: SourceViewOrder): Promise<void> => {
     if (!applicationAlive || pageBusy || photoOwner.busy) return;
     if (order === sourceGrid.order) return;
-    void openSourceDescriptor(
+    // A Folder reopen needs the current File Location binding: without it a
+    // sort change can only send a stale publication and fail as a false
+    // disconnection. Match the refresh/reopen precondition.
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive || !bound) {
+        if (applicationAlive)
+          view.setGridStatus(
+            "Could not load this source. Retry to continue.",
+          );
+        return;
+      }
+    }
+    await openSourceDescriptor(
       sourceGrid.source,
       photoOwner.lastCurrentPhotoId,
       order,
@@ -2322,7 +2335,7 @@ export function mountLibraryBrowser(
         return;
       }
       case "sort-change":
-        changeSort(intent.order);
+        void changeSort(intent.order);
         return;
       case "source-open": {
         const source = intent.source;
