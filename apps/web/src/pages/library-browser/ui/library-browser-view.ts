@@ -1041,11 +1041,19 @@ export function createLibraryBrowserView(
       const photo = model.photoAt(index);
       if (!photo) {
         cell.disabled = true;
-        cell.textContent = "Loading…";
+        const placeholder = document.createElement("span");
+        placeholder.className = "cell-placeholder";
+        placeholder.textContent = "Loading…";
+        cell.append(placeholder);
         send({ kind: "grid-window", index });
       } else {
         cell.dataset.photoIndex = String(index);
         cell.disabled = !gridInteractionEnabled;
+        // The image keeps its own media area so the complete Photo displays
+        // at its true aspect ratio; state, rating, and fact indicators render
+        // in the footer beneath it instead of over the image.
+        const media = document.createElement("span");
+        media.className = "cell-media";
         const image = document.createElement("img");
         image.alt = `Photo ${index + 1} of ${model.total}`;
         image.loading = "lazy";
@@ -1053,6 +1061,9 @@ export function createLibraryBrowserView(
         image.decoding = "async";
         image.draggable = false;
         image.className = "thumbnail";
+        media.append(image);
+        const footer = document.createElement("span");
+        footer.className = "cell-footer";
         const badge = document.createElement("span");
         badge.className = `cell-state ${photo.selectionState}`;
         badge.textContent =
@@ -1084,7 +1095,8 @@ export function createLibraryBrowserView(
           );
         };
         presentFacts();
-        cell.append(image, badge, facts, caption);
+        footer.append(badge, caption, facts);
+        cell.append(media, footer);
         cell.addEventListener("click", () =>
           send({ kind: "open-photo", index }),
         );
