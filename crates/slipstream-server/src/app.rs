@@ -88,12 +88,14 @@ fn published_capture_key<'a>(
     published: &'a Published,
     photo: &'a slipstream_core::PhotoRecord,
 ) -> Option<&'a str> {
-    let original_key = |id: &'a Option<String>| -> Option<&'a str> {\n        published
-            .originals_by_id
-            .get(id.as_deref()?)
-            .map(|position| &published.snapshot.originals[*position])
-            .and_then(|original| original.capture.order_key.as_deref())
-    };
+    let original_key =
+        |id: &'a Option<String>| -> Option<&'a str> {
+            published
+                .originals_by_id
+                .get(id.as_deref()?)
+                .map(|position| &published.snapshot.originals[*position])
+                .and_then(|original| original.capture.order_key.as_deref())
+        };
     original_key(&photo.raw_original_id).or_else(|| original_key(&photo.jpeg_original_id))
 }
 
@@ -772,9 +774,8 @@ impl Application {
                     &published.snapshot.originals,
                     &location,
                 );
+                let photo_ids = order_ids_by_capture_time(published, photo_ids, order);
                 drop(guard);
-                let photo_ids =
-                    order_ids_by_capture_time(published, photo_ids, order);
                 let position = preferred_photo_id
                     .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
                     .unwrap_or(0);
@@ -786,12 +787,13 @@ impl Application {
                     .album_browse_target(&id)
                     .await?
                     .ok_or(ServerError::BrowseNotFound)?;
+                let member_ids: Vec<String> = target
+                    .members
+                    .iter()
+                    .map(|member| member.photo_id.clone())
+                    .collect();
                 let photo_ids = if matches!(order, BrowseViewOrder::AlbumOrder) {
-                    target
-                        .members
-                        .into_iter()
-                        .map(|member| member.photo_id)
-                        .collect()
+                    member_ids
                 } else {
                     let guard = self
                         .shared
@@ -801,16 +803,22 @@ impl Application {
                     let Some(published) = guard.as_ref() else {
                         return Err(ServerError::NotPublished);
                     };
-                    order_ids_by_capture_time(
-                        published,
-                        target
-                            .members
-                            .iter()
-                            .map(|member| member.photo_id.clone())
-                            .collect(),
-                        order,
-                    )
+                    order_ids_by_capture_time(published, member_ids, order)
                 };
+                // Saved-position fallback resolves availability through the
+                // open view's order, so a time view wraps in that same order.
+                let available_by_id: std::collections::HashMap<&str, bool> = target
+                    .members
+                    .iter()
+                    .map(|member| (member.photo_id.as_str(), member.available))
+                    .collect();
+                let is_available =
+                    |index: usize| {
+                        available_by_id
+                            .get(photo_ids[index].as_str())
+                            .copied()
+                            .unwrap_or(false)
+                    };
                 let preferred = preferred_photo_id.and_then(|preferred| {
                     photo_ids.iter().position(|id| id == preferred)
                 });
@@ -819,17 +827,15 @@ impl Application {
                 });
                 let position = preferred.unwrap_or_else(|| {
                     saved
-                        .filter(|saved| target.members[*saved].available)
+                        .filter(|&saved| is_available(saved))
                         .or_else(|| {
                             saved.and_then(|saved| {
                                 (1..=photo_ids.len())
                                     .map(|offset| (saved + offset) % photo_ids.len())
-                                    .find(|index| target.members[*index].available)
+                                    .find(|&index| is_available(index))
                             })
                         })
-                        .or_else(|| {
-                            target.members.iter().position(|member| member.available)
-                        })
+                        .or_else(|| (0..photo_ids.len()).find(|&index| is_available(index)))
                         .or(saved)
                         .unwrap_or(0)
                 });
