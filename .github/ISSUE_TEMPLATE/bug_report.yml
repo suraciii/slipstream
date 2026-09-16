@@ -1,0 +1,37 @@
+name: Bug Report
+description: Report incorrect behavior or a regression.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Follow the project's [Language and Writing](https://github.com/suraciii/slipstream/blob/main/CONTRIBUTING.md#language-and-writing) and [Issue guidelines](https://github.com/suraciii/slipstream/blob/main/CONTRIBUTING.md#issues).
+        Use English for the title and body. Search existing Issues first. Remove secrets and private photo data from evidence.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, what did you expect, and how does it affect your work?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest sequence that shows the problem. If it is intermittent, describe the circumstances and frequency.
+      placeholder: |
+        1. Open ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Include the version or commit, installation method, OS, and browser when relevant. State which details are unknown.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and related work
+      description: Optional logs, screenshots, measurements, regression history, or related Issues. Distinguish observations from suspected causes.

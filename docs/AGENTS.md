@@ -11,7 +11,7 @@
 - State observable behavior, boundaries, ordering, invalid states, and failure outcomes explicitly.
 - Keep terms consistent with [`../CONTEXT.md`](../CONTEXT.md).
 - Keep temporary implementation state, experiments, measurements, and known divergence out of Product Specs. Record them in the governing Issue or change review.
-- Write active prose in English. Use short sentences, active voice, American spelling, and stable terms.
+- Follow [Language and Writing](../CONTRIBUTING.md#language-and-writing).
 - Use `must`, `may`, and `must not` for requirements, options, and prohibitions. Preserve exact product names and identifiers.
 - Give each section one purpose. Prefer a short list to a dense paragraph. Do not use tables.
 - Use `text diagram` for ASCII diagrams and `text literal` for other preformatted text. Do not use bare `text` fences.

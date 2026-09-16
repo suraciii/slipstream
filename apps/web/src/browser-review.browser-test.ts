@@ -10039,6 +10039,24 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
   const retryBoundaryUrl = (url: URL) =>
     url.pathname.startsWith("/api/browse/") &&
     url.searchParams.get("start") === "10";
+  // Keep Retry pending until the disabled-control assertions have observed it.
+  // A fast response must not race these assertions on a slower browser.
+  let releaseCurrentRange: () => void = () => undefined;
+  const currentRangeGate = new Promise<void>((resolve) => {
+    releaseCurrentRange = resolve;
+  });
+  const currentRangeUrl = (url: URL) =>
+    url.pathname.startsWith("/api/browse/") &&
+    url.searchParams.get("start") === "0";
+  const currentRangeRoute = async (route: Route) => {
+    if (
+      expectedRetryEpoch &&
+      route.request().headers()["x-slipstream-test-retry-epoch"] ===
+        expectedRetryEpoch
+    )
+      await currentRangeGate;
+    await route.continue();
+  };
   const retryBoundaryRoute = async (route: Route) => {
     const token = new URL(route.request().url()).pathname.split("/").at(-1)!;
     if (
@@ -10061,6 +10079,9 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     }
     boundaryRequests += 1;
     if (boundaryRequests === 1) {
+      expect(route.request().headers()["x-slipstream-test-priority"]).toBe(
+        "low",
+      );
       try {
         await adjacentGate;
         try {
@@ -10107,8 +10128,13 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await route.continue();
   };
   await page.route(retryBoundaryUrl, retryBoundaryRoute);
+  await page.route(currentRangeUrl, currentRangeRoute);
   try {
-    await page.locator('[data-photo-index="59"]').click();
+    // This fixture mounts Photo 60 with synthetic Grid dimensions. A pointer
+    // click scrolls it into the real viewport and admits an unrelated Grid
+    // window before Photo View opens. Dispatch only the opening action so the
+    // held boundary request belongs to the adjacent Photo prefetch under test.
+    await page.locator('[data-photo-index="59"]').dispatchEvent("click");
     await expect(page.getByText("60 / 70")).toBeVisible();
     await expect.poll(() => boundaryRequests).toBe(1);
 
@@ -10229,6 +10255,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     await expect(photoRetry).toBeDisabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
     const retriedPhotoRangeRequest = await retriedHighPriorityBrowse;
+    releaseCurrentRange();
     releaseIndependentHighProbe();
     await independentHighProbeSettled;
 
@@ -10349,6 +10376,8 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     releaseIndependentHighProbe();
     if (independentHighProbeHeld) await independentHighProbeSettled;
     releaseAdjacentSuccessor();
+    releaseCurrentRange();
+    await page.unroute(currentRangeUrl, currentRangeRoute);
     await page.unroute(retryBoundaryUrl, retryBoundaryRoute);
   }
 });

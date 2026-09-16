@@ -21,6 +21,7 @@ Slipstream is in initial product definition.
 
 ## Context Management
 
+- Follow [Language and Writing](CONTRIBUTING.md#language-and-writing) for project artifacts, including Issues, pull requests, and commits.
 - Read this file first, then `CONTEXT.md`.
 - Follow the scoped `AGENTS.md` in `docs/` or `design/` when working in those directories.
 - Read the governing Issue and affected specifications before implementing a change.
