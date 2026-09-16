@@ -13,6 +13,11 @@ import { TaskScope } from "./async-ownership.js";
 
 const WINDOW_SIZE = 60;
 const MAX_RETAINED_FACTS = WINDOW_SIZE * 3;
+/// The largest Photo range the Grid presents at a supported large viewport,
+/// with one window of buffer on each side.
+const MAX_VIEWPORT_RANGE = MAX_RETAINED_FACTS + WINDOW_SIZE * 2;
+/// Cap for the retained-fact bound: that range and its buffer again.
+const MAX_RETAINED_FACTS_CAP = MAX_VIEWPORT_RANGE + WINDOW_SIZE * 2;
 const MAX_RETAINED_THUMBNAILS = WINDOW_SIZE * 4;
 
 declare const sourceAuthorityBrand: unique symbol;
@@ -403,14 +408,27 @@ export function createSourceGridOwner(
 
   const trimFacts = (anchor?: number) => {
     if (visibleRange) {
-      const span = Math.max(0, visibleRange.end - visibleRange.start);
-      // Cover the latest range span plus one window of buffer on each side,
-      // floored at the former fixed cap and at most 3x the span plus two
-      // windows of buffer, so the bound follows the reported viewport and
-      // never the Library total.
-      const bound = Math.max(MAX_RETAINED_FACTS, span + WINDOW_SIZE * 2);
+      // The protected span is the largest range the Grid presents at a
+      // supported viewport, anchored at the reported range start: a
+      // whole-source report cannot pin every loaded fact. The bound covers the
+      // reported range with one window of buffer on each side plus two windows
+      // of settlement slack, so a window that settles cannot evict the facts
+      // it just committed, capped so retention never follows the Library
+      // total.
+      const span = Math.max(
+        0,
+        Math.min(visibleRange.end, visibleRange.start + MAX_VIEWPORT_RANGE) -
+          visibleRange.start,
+      );
+      const bound = Math.max(
+        MAX_RETAINED_FACTS,
+        Math.min(span + WINDOW_SIZE * 3, MAX_RETAINED_FACTS_CAP),
+      );
       const protectedStart = Math.max(0, visibleRange.start - WINDOW_SIZE);
-      const protectedEnd = Math.min(total, visibleRange.end + WINDOW_SIZE);
+      const protectedEnd = Math.min(
+        total,
+        visibleRange.start + span + WINDOW_SIZE,
+      );
       for (const index of [...facts.keys()]) {
         if (facts.size <= bound) break;
         if (index < protectedStart || index >= protectedEnd)

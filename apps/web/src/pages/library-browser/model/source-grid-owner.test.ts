@@ -1064,6 +1064,46 @@ describe("SourceGridOwner", () => {
     owner.dispose();
   });
 
+  test("a settled Photo window keeps its own facts under the retention bound", async () => {
+    const requested: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 600));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requested.push(start);
+        return Promise.resolve(windowResponse(start, 600));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "source", authority });
+    for (const range of [
+      { start: 60, end: 76 },
+      { start: 120, end: 136 },
+      { start: 100, end: 116 },
+    ])
+      owner.ensureRange(range.start, range.end, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 60, 120]);
+    expect(owner.retainedFactCount).toBe(180);
+
+    // The Photo window the caller awaited commits the newest facts; its own
+    // settlement must not evict them for the older Grid range.
+    const photoAuthority = owner.renewPhotoWindow();
+    const outcome = await owner.loadWindow(180, {
+      kind: "photo",
+      authority: photoAuthority,
+    });
+    expect(outcome).toMatchObject({ kind: "loaded", changed: true });
+    expect(owner.photoAt(180)?.id).toBe("photo-180");
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(196);
+    owner.dispose();
+  });
+
   test("clamps pathological range reports and keeps the fixed floor", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);
@@ -1082,14 +1122,20 @@ describe("SourceGridOwner", () => {
     owner.ensureRange(-100_000, 100_000, { kind: "grid", authority });
     owner.ensureRange(Number.NaN, 100, { kind: "grid", authority });
     await flushTasks();
-    expect(owner.retainedFactCount).toBe(600);
+    // One supported large-viewport range is retained with its buffer, not the
+    // whole reported source.
+    expect(owner.retainedFactCount).toBe(420);
     expect(owner.photoAt(0)?.id).toBe("photo-0");
-    expect(owner.photoAt(599)?.id).toBe("photo-599");
+    expect(owner.photoAt(359)?.id).toBe("photo-359");
+    expect(owner.photoAt(420)).toBeUndefined();
 
     owner.ensureRange(300, 360, { kind: "grid", authority });
-    expect(owner.retainedFactCount).toBe(180);
+    // The reported range and its buffer stay protected while the oldest facts
+    // leave until the bound holds.
+    expect(owner.retainedFactCount).toBe(240);
     expect(owner.photoAt(300)?.id).toBe("photo-300");
-    expect(owner.photoAt(239)).toBeUndefined();
+    expect(owner.photoAt(359)?.id).toBe("photo-359");
+    expect(owner.photoAt(179)).toBeUndefined();
     expect(owner.photoAt(420)).toBeUndefined();
     owner.dispose();
   });
