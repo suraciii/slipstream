@@ -1253,10 +1253,9 @@ export function mountLibraryBrowser(
       setConnected(true);
       // A source replacement empties the snapshot while its open is in
       // flight, and any render during that window clamps the Grid to the
-      // top. Position the reopened Grid only once the loaded window can
-      // hold the scroll the server resolved for the preferred Photo.
-      view.scrollToGridIndex(gridPosition);
-      renderGrid();
+      // top. Position the reopened Grid through the render that restores the
+      // scroll height, so a clamped scroll cannot survive it.
+      renderGrid(gridPosition);
       if (sourceGrid.total) {
         presentRangeStatus();
       } else {
@@ -1439,9 +1438,10 @@ export function mountLibraryBrowser(
         sourceTransition,
       );
       if (!sourceGrid.isCurrent(authority) || !windowReady) return;
-      view.scrollToGridIndex(gridPosition);
-      view.clearGridCells();
-      renderGrid();
+      // A hidden Grid keeps its retained cells: the next visible render
+      // rebuilds them, and only the visible Grid may touch its DOM.
+      if (view.gridVisible()) view.clearGridCells();
+      renderGrid(gridPosition);
       setGridStatusText(
         "Source reopened using the latest published Library order.",
       );
@@ -1597,7 +1597,7 @@ export function mountLibraryBrowser(
             operationKind: sourceGrid.isReady(outcome.authority)
               ? "grid"
               : "source",
-            anchorIndex: outcome.start,
+            anchorIndex: windowAnchorIndex(outcome.start),
             start: outcome.start,
             quiet: false,
             priority: "high",
@@ -2260,6 +2260,18 @@ export function mountLibraryBrowser(
     await openSourceDescriptor(sourceGrid.source, undefined, sourceGrid.order);
   };
 
+  /// The Grid index a retry replays a failed window with. `loadWindow` and
+  /// `invalidateWindow` align an index back to its window, and the clamped tail
+  /// window starts before the first index that aligns to it (a 70-Photo range
+  /// requests [10, 70) while index 10 still aligns to [0, 60)), so the anchor
+  /// is the first index the Grid can report for that window.
+  const windowAnchorIndex = (windowStart: number): number => {
+    if (sourceGrid.alignedStart(windowStart) === windowStart)
+      return windowStart;
+    for (let index = windowStart + 1; index < sourceGrid.total; index += 1)
+      if (sourceGrid.alignedStart(index) === windowStart) return index;
+    return windowStart;
+  };
   const currentSourceRangeRetries = (
     alignedStart?: number,
   ): Array<Readonly<{ claim: RecoveryClaim; retry: GridRangeRetry }>> => {

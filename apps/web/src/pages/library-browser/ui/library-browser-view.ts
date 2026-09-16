@@ -1449,12 +1449,14 @@ export function createLibraryBrowserView(
         renderedCells.delete(index);
       }
     let anchor: ChildNode | null = null;
+    let incomplete = false;
     for (let index = end - 1; index >= start; index -= 1) {
       const photo = model.photoAt(index);
       const existing = renderedCells.get(index);
       const signature = photo
         ? gridCellSignature(index, photo, existing?.deliveryFailed ?? false)
         : LOADING_CELL_SIGNATURE;
+      if (!photo) incomplete = true;
       let rendered: RenderedGridCell;
       if (existing && existing.signature === signature) {
         rendered = existing;
@@ -1490,9 +1492,15 @@ export function createLibraryBrowserView(
       gridFocusIndex = undefined;
       (cell ?? gridViewport).focus();
     }
+    // Report the presented range whenever it changes, and keep reporting it
+    // while part of it still has no Photo: the owner recomputes the windows
+    // it is missing for that range, coalesces them with any request already in
+    // flight, and retries a window that failed while the Grid presents it.
     if (
       end > start &&
-      (reportedGridRange?.start !== start || reportedGridRange.end !== end)
+      (incomplete ||
+        reportedGridRange?.start !== start ||
+        reportedGridRange.end !== end)
     ) {
       reportedGridRange = { start, end };
       send({ kind: "grid-range", start, end });
@@ -2176,11 +2184,11 @@ export function createLibraryBrowserView(
       if (!alive) return;
       const returnFocus = browser.classList.contains("sources-open");
       cancelGridRender();
-      clearGridCells();
       stage.replaceChildren();
       resetZoomForImage();
       gridView.hidden = false;
       photoView.hidden = true;
+      clearGridCells();
       closeSources(false);
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
