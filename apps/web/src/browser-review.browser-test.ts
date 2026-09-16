@@ -772,11 +772,16 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await startReview(page, running.url, "Picks", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
-  await expect(page.getByText("0 stars", { exact: true })).toBeVisible();
-  await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
+  await expect(page.getByText("No rating", { exact: true })).toBeVisible();
   await expect(
-    page.getByText("Limited by camera Preview resolution"),
+    page.getByText("JPEG · limited detail", { exact: true }),
   ).toBeVisible();
+  await expect(page.locator("[data-source]")).toHaveAttribute(
+    "title",
+    "Limited by camera Preview resolution",
+  );
+  // Limited detail rides with the Preview fact, not a fact row of its own.
+  await expect(page.locator("[data-limited]")).toHaveCount(0);
   for (const name of [
     "Select",
     "Reject",
@@ -1725,8 +1730,10 @@ test("Photo View shows review capture metadata and explicit missing values", asy
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
   await expect(page.locator("[data-metadata]")).toContainText("Details");
+  // Capture Time is camera-local time with no timezone. The display keeps
+  // the recorded date and minute and drops transport precision.
   await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
-    "2026-02-03T04:05:06.000000000",
+    "2026-02-03 04:05",
   );
   await expect(page.locator("[data-metadata-aperture]")).toHaveText("f/2.8");
   await expect(page.locator("[data-metadata-iso]")).toHaveText("400");
@@ -1736,6 +1743,45 @@ test("Photo View shows review capture metadata and explicit missing values", asy
   await expect(page.locator("[data-metadata-focal-length]")).toHaveText(
     "50 mm",
   );
+});
+
+test("Photo View reshapes Capture Time without reinterpreting it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const cases: ReadonlyArray<readonly [string | undefined, string]> = [
+    ["2026-02-03T04:05:06.000000000", "2026-02-03 04:05"],
+    // An unrecognized value is shown unchanged instead of an invented time.
+    ["not-a-capture-time", "not-a-capture-time"],
+    ["2026-02-03T04:05", "2026-02-03 04:05"],
+    ["2026-02", "2026-02"],
+    [undefined, "—"],
+  ];
+  const captureTimes = new Map(
+    ids.map((id, index) => [id, cases[index]![0]] as const),
+  );
+  await page.route("**/api/photos/*/metadata", (route) => {
+    const photoId = new URL(route.request().url()).pathname.split("/")[3];
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ captureTime: captureTimes.get(photoId ?? "") }),
+    });
+  });
+  await startReview(page, running.url, "All Photos");
+  for (const [index, [, displayed]] of cases.entries()) {
+    await expect(
+      page.getByText(`${index + 1} / ${cases.length}`),
+    ).toBeVisible();
+    await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
+      displayed,
+    );
+    if (index < cases.length - 1)
+      await page.getByRole("button", { name: "Next" }).click();
+  }
 });
 
 function touchQualification(viewport: { width: number; height: number }) {
@@ -2061,13 +2107,18 @@ test("Album names and management actions do not overlap", async ({ page }) => {
   const running = await server(base, root);
   await createAlbum(running.url, "26春节");
 
+  const rename = () =>
+    page.getByRole("button", { name: "Rename 26春节", exact: true });
+
   for (const viewport of [
     { width: 1440, height: 900 },
+    { width: 761, height: 800 },
+    { width: 760, height: 800 },
     { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
     await page.goto(running.url);
-    if (viewport.width === 390)
+    if (viewport.width <= 760)
       await page.locator("[data-source-toggle]").click();
 
     const row = page.locator(".album-row").filter({
@@ -2104,6 +2155,21 @@ test("Album names and management actions do not overlap", async ({ page }) => {
       separated: true,
       labelFits: true,
     });
+
+    // A wide hover-capable layout keeps the supporting actions concealed
+    // until the row is hovered or focused; narrow layouts always show them.
+    const concealed = viewport.width > 760;
+    await expect(rename()).toHaveCSS("opacity", concealed ? "0" : "1");
+    await expect(rename()).toHaveCount(1);
+    if (concealed) {
+      await row.hover();
+      await expect(rename()).toHaveCSS("opacity", "1");
+      await page.mouse.move(0, 0);
+      await expect(rename()).toHaveCSS("opacity", "0");
+    }
+    await rename().focus();
+    await expect(rename()).toHaveCSS("opacity", "1");
+    await expect(rename()).toBeFocused();
   }
 });
 
@@ -2482,6 +2548,68 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
   expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "rejected",
   );
+});
+
+test("swipe direction labels stay out of sight until a drag is pending on a hover-capable pointer", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  const selectFeedback = page.locator("[data-select-feedback]");
+  const rejectFeedback = page.locator("[data-reject-feedback]");
+
+  // The labels are a touch affordance, so a mouse-driven session hides them
+  // instead of parking them at the Preview edges.
+  await expect(selectFeedback).toHaveCSS("visibility", "hidden");
+  await expect(rejectFeedback).toHaveCSS("visibility", "hidden");
+
+  const preview = page.locator("[data-preview]");
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: 120,
+    clientY: 320,
+    pointerType: "mouse",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: 160,
+    clientY: 322,
+    pointerType: "mouse",
+  });
+  await expect(selectFeedback).toHaveClass(/pending/);
+  await expect(selectFeedback).toHaveCSS("visibility", "visible");
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: 120,
+    clientY: 320,
+    pointerType: "mouse",
+  });
+  await expect(selectFeedback).not.toHaveClass(/pending/);
+  await expect(selectFeedback).toHaveCSS("visibility", "hidden");
+});
+
+test.describe("touch swipe direction labels", () => {
+  test.use({ hasTouch: true });
+
+  test("stay visible for a touch pointer without a drag", async ({ page }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await startReview(page, running.url, "All Photos");
+    await expect(page.locator("[data-select-feedback]")).toHaveCSS(
+      "visibility",
+      "visible",
+    );
+    await expect(page.locator("[data-reject-feedback]")).toHaveCSS(
+      "visibility",
+      "visible",
+    );
+  });
 });
 
 test("persistence failure and disconnect do not advance or lie, and explicit Retry recovers in place", async ({
@@ -3216,14 +3344,20 @@ test("the membership panel lists the current Photo's Albums across sources and r
 
   // A long Album name truncates visually, keeps its full text, and stays
   // inside its control group.
-  const longest = page.locator("[data-membership-list] li").nth(2);
-  const clipped = await longest.evaluate((element) => ({
-    text: element.textContent,
-    textOverflow: getComputedStyle(element).textOverflow,
-    clipped: element.scrollWidth > element.clientWidth,
-    right: element.getBoundingClientRect().right,
-    containerRight: element.parentElement!.getBoundingClientRect().right,
-  }));
+  const clipped = await page.evaluate(() => {
+    // Query inside the evaluation so a membership re-render cannot detach
+    // the measured element between resolution and measurement.
+    const element = document.querySelectorAll<HTMLElement>(
+      "[data-membership-list] li",
+    )[2]!;
+    return {
+      text: element.textContent,
+      textOverflow: getComputedStyle(element).textOverflow,
+      clipped: element.scrollWidth > element.clientWidth,
+      right: element.getBoundingClientRect().right,
+      containerRight: element.parentElement!.getBoundingClientRect().right,
+    };
+  });
   expect(clipped.text).toBe(longName);
   expect(clipped.textOverflow).toBe("ellipsis");
   expect(clipped.clipped).toBe(true);
@@ -5811,6 +5945,87 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 });
 
+test("a leaf Folder renders no expand control and keeps its row aligned", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "leaf"), { recursive: true });
+  await mkdir(join(root, "parent", "nested"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "leaf", "one.jpg"), data);
+  await writeFile(join(root, "parent", "two.jpg"), data);
+  await writeFile(join(root, "parent/nested/three.jpg"), data);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /^leaf 1 Photo/ }),
+  ).toBeVisible();
+
+  // The leaf has no subfolders, so it must not offer a dead disclosure.
+  await expect(
+    page.getByRole("button", { name: "Toggle leaf subfolders" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Toggle parent subfolders" }),
+  ).toHaveCount(1);
+
+  // Both rows keep the same card left edge, and the complete name stays
+  // available on hover even when the label is visually truncated.
+  const rows = await page.evaluate(() =>
+    Array.from(document.querySelectorAll<HTMLElement>(".folder-child")).map(
+      (row) => ({
+        name: row.querySelector(".source-card strong")?.textContent ?? "",
+        left: row.querySelector(".source-card")!.getBoundingClientRect().left,
+        title: row.querySelector(".source-card")!.getAttribute("title"),
+      }),
+    ),
+  );
+  expect(rows.map((row) => row.name)).toEqual(["leaf", "parent · Subfolders"]);
+  expect(Math.abs(rows[0]!.left - rows[1]!.left)).toBeLessThan(0.5);
+  expect(rows[0]!.title).toBe("leaf");
+  expect(rows[1]!.title).toBe("parent · Subfolders");
+});
+
+test("Library refresh stays reachable without owning the sidebar footer slot", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+
+  const refresh = page.getByRole("button", { name: "Refresh Source" });
+  await expect(refresh).toBeVisible();
+  await expect(refresh).toBeEnabled();
+  // The recovery action no longer fills the panel width like a primary
+  // action, but it still works and stays keyboard reachable.
+  const widths = await page.evaluate(() => {
+    const button = document.querySelector<HTMLElement>("[data-refresh]");
+    const panel = document.querySelector<HTMLElement>("#source-panel")!;
+    if (!button) throw new Error("Refresh Source is missing");
+    return {
+      button: button.getBoundingClientRect().width,
+      panel: panel.getBoundingClientRect().width,
+      focusable: !button.hasAttribute("disabled"),
+    };
+  });
+  expect(widths.button).toBeLessThan(widths.panel);
+  expect(widths.focusable).toBe(true);
+
+  await refresh.focus();
+  await expect(refresh).toBeFocused();
+  await refresh.click();
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+});
+
 test("file locations reload coherently when a scan replaces the publication", async ({
   page,
 }) => {
@@ -6142,7 +6357,7 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   const { albumId } = await createAlbum(running.url);
   await startReview(page, running.url, "Review", albumId);
   await waitForLoadedReviewImage(page);
-  await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-source]")).toContainText("JPEG");
   await page.keyboard.press("d");
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",
@@ -6164,9 +6379,9 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
     page.getByRole("button", { name: /Photo 1 of/ }),
   );
   await waitForLoadedReviewImage(page);
-  await expect(
-    page.getByText("RAW embedded JPEG", { exact: true }),
-  ).toBeVisible();
+  await expect(page.locator("[data-source]")).toContainText(
+    "RAW embedded JPEG",
+  );
   await page.keyboard.press("d");
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",
@@ -8591,6 +8806,46 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
   }
 });
 
+test("Grid cells badge only recorded Selection States", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+
+  const stateBadge = (index: number) =>
+    page.locator(`[data-photo-index="${index}"] .cell-state`);
+  // Every Photo starts undecided, so no cell claims a decision.
+  await expect(stateBadge(0)).toHaveCount(0);
+  await expect(stateBadge(1)).toHaveCount(0);
+  expect(await page.locator("[data-photo-index] .cell-media").count()).toBe(3);
+
+  await page.locator('[data-photo-index="1"]').click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  await page.keyboard.press("p");
+  // The decision at index 1 commits and advances to the last Photo.
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(stateBadge(1)).toHaveText("✓");
+  await expect(stateBadge(1)).toHaveClass(/selected/);
+  await expect(stateBadge(0)).toHaveCount(0);
+  await expect(stateBadge(2)).toHaveCount(0);
+
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  await page.keyboard.press("x");
+  // The last Photo cannot advance, so it stays and reports its decision.
+  await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(stateBadge(2)).toHaveText("×");
+  await expect(stateBadge(2)).toHaveClass(/rejected/);
+  await expect(stateBadge(0)).toHaveCount(0);
+});
+
 test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
   page,
 }) => {
@@ -10680,7 +10935,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
       "Connected. Current state refreshed.",
     );
     await expect(page.getByText("60 / 70")).toBeVisible();
-    await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-source]")).toContainText("JPEG");
     await expect(
       page.getByRole("img", { name: "Photo 60 of 70" }),
     ).toBeVisible();

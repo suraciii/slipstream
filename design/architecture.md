@@ -140,7 +140,7 @@ The initial codebase has these logical modules:
 - **Album** owns virtual group identity, ordering, and membership.
 - **File Locations** derives read-only Original Folder navigation from Published Library Locations.
 - **Protocol** owns browser-server schemas.
-- **Web** owns presentation, gestures, Detail Review, and one-level undo.
+- **Web** owns presentation, gestures, Preview zoom, and one-level undo.
 
 These are ownership boundaries, not required packages or services. The first implementation uses a modular monolith and one process unless native-library isolation proves necessary for process safety.
 

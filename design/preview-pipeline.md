@@ -8,7 +8,7 @@ Slipstream must turn large, mostly browser-incompatible Original Files into trus
 - Most RAW files contain one or more embedded JPEG images, but dimensions and metadata vary by camera.
 - Selection must begin before the whole Photo Library is processed.
 - Mobile browsers should not download RAW files or perform RAW decoding.
-- Detail Review must disclose the real resolution limit.
+- Magnified inspection must disclose the real resolution limit.
 - Cache generation may fail or be interrupted without damaging a valid prior derivative.
 - The implementation should integrate maintained open-source libraries, not shell out to user-facing CLI tools.
 
@@ -168,7 +168,7 @@ Metadata libraries can expose Preview offsets for many formats, but RAW containe
 
 ### Rejected: Returning Embedded JPEG Bytes Without Normalization
 
-Direct return is attractive, but camera JPEG metadata, orientation, profiles, very large dimensions, and browser behavior vary. A small normalization step provides predictable delivery and bounded resource use. The original embedded bytes may later be an explicit Detail Review optimization after compatibility evidence.
+Direct return is attractive, but camera JPEG metadata, orientation, profiles, very large dimensions, and browser behavior vary. A small normalization step provides predictable delivery and bounded resource use. The original embedded bytes may later be an explicit magnified-inspection optimization after compatibility evidence.
 
 ### Rejected: Precompute Every Derivative During Indexing
 
@@ -194,6 +194,6 @@ Implementation tests must prove:
 - interrupted generation does not publish a partial file;
 - malformed inputs remain within resource limits;
 - failures stay isolated to one Photo;
-- actual camera samples provide sufficient normal-review and Detail Review dimensions.
+- actual camera samples provide sufficient normal-review and magnified-inspection dimensions.
 
 Tests should compare decoded output properties and representative pixels where stable. They must not use compressed JPEG byte equality as a visual correctness assertion.

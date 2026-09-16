@@ -60,4 +60,4 @@ The JPEG shown in Grid View or Photo View. It comes from a matching JPEG Origina
 The content used for a Preview: `matching-jpeg` or `embedded-raw-jpeg`.
 
 **Detail Review**:
-Magnified Preview inspection for focus, motion, or expression, performed through Photo View zoom. Its detail is limited by the Preview resolution.
+Magnified Preview inspection for focus, motion, or expression. It is a Preview Zoom state in Photo View, not a separate mode. Its detail is limited by the Preview resolution.

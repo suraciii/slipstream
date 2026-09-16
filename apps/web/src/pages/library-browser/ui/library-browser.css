@@ -165,13 +165,19 @@
 }
 
 .folder-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--folder-toggle-width, 2rem) minmax(0, 1fr);
   align-items: stretch;
   gap: 0.15rem;
 }
 
 .folder-row .source-card {
-  flex: 1;
+  min-width: 0;
+}
+
+/* A leaf Folder renders no toggle button, so CSS keeps its row aligned. */
+.folder-row:not(:has(.folder-expand))::before {
+  content: "";
 }
 
 .folder-root .source-card {
@@ -198,8 +204,7 @@
 }
 
 .folder-expand {
-  flex: none;
-  width: 2rem;
+  width: 100%;
 }
 
 .folder-pager,
@@ -246,6 +251,20 @@
 .album-tools {
   min-width: 0;
   justify-content: flex-end;
+}
+
+/* Rename and delete are supporting actions. On a device whose primary pointer
+   can hover they wait for the row to be hovered or focused, and stay visible
+   everywhere else. Opacity keeps them focusable from the keyboard. */
+@media (hover: hover) and (min-width: 761px) {
+  .album-tool {
+    opacity: 0;
+  }
+
+  .album-row:hover .album-tool,
+  .album-row:focus-within .album-tool {
+    opacity: 1;
+  }
 }
 
 .album-tools:has(.album-form),
@@ -302,13 +321,25 @@
 
 .source-footer {
   display: grid;
+  justify-items: start;
   gap: 0.4rem;
   padding-top: 0.6rem;
   border-top: 1px solid var(--border);
 }
 
-.source-footer button {
-  width: 100%;
+/* Library refresh is a recovery action, so it stays reachable but quiet
+   instead of owning the sidebar's primary slot. */
+.source-footer [data-refresh] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.source-footer [data-refresh]:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--raised);
+  color: var(--text);
 }
 
 .grid-view {
@@ -546,6 +577,11 @@
   white-space: nowrap;
 }
 
+/* An undecided cell has no badge, so the caption starts the footer row. */
+.cell-caption-wide {
+  grid-column: 1 / -1;
+}
+
 .cell-facts {
   grid-column: 1 / -1;
   min-width: 0;
@@ -773,6 +809,19 @@
   background: var(--rejected-bg);
 }
 
+/* The direction labels are a touch affordance. On a device whose primary
+   pointer can hover, they stay out of sight until a drag shows the pending
+   direction. The reserved columns are kept so nothing shifts mid-drag. */
+@media (hover: hover) {
+  .swipe-feedback {
+    visibility: hidden;
+  }
+
+  .swipe-feedback.pending {
+    visibility: visible;
+  }
+}
+
 .review-bar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(24rem, 0.9fr);
@@ -861,7 +910,7 @@
 }
 
 .photo-controls {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .photo-controls button {
@@ -1129,8 +1178,11 @@
   }
 
   .folder-expand {
-    width: 2.75rem;
     min-height: 2.75rem;
+  }
+
+  .folder-row {
+    --folder-toggle-width: 2.75rem;
   }
 
   .sources-open .source-scrim {
@@ -1286,7 +1338,7 @@
   }
 
   .photo-controls {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .photo-controls button {
