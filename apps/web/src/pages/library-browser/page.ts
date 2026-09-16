@@ -1556,6 +1556,10 @@ export function mountLibraryBrowser(
         return false;
       }
       recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
+      // A window this caller awaited changes what the Grid presents, and the
+      // merged notification does not report it, so the caller owns the render
+      // request too.
+      if (outcome.changed && view.gridVisible()) view.scheduleGridRender();
       if (!quiet) {
         if (admittedRange && sourceGrid.isCurrent(admittedRange.authority))
           presentRangeStatus();

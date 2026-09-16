@@ -1312,12 +1312,10 @@ describe("SourceGridOwner", () => {
       changed: true,
     });
     await flushTasks();
-    expect(settled).toHaveLength(1);
-    expect(settled[0]).toMatchObject({
-      kind: "loaded",
-      start: 0,
-      changed: true,
-    });
+    // The awaiting caller settles this window: one completion is presented,
+    // by the caller, and the merged notification reports only the windows no
+    // caller joined.
+    expect(settled).toHaveLength(0);
     owner.dispose();
   });
 
@@ -1337,9 +1335,11 @@ describe("SourceGridOwner", () => {
       throw new Error(`unexpected request ${url.pathname}`);
     });
     const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled((outcome) => settled.push(outcome));
 
     // A Grid range admission and the source open that awaits the same aligned
-    // window share one in-flight request.
+    // window share one in-flight request, and the caller settles it.
     owner.ensureRange(0, 60, { kind: "grid", authority });
     const awaiting = owner.loadWindow(0, { kind: "source", authority });
     await flushTasks();
@@ -1351,6 +1351,8 @@ describe("SourceGridOwner", () => {
       start: 0,
       changed: true,
     });
+    await flushTasks();
+    expect(settled).toHaveLength(0);
     owner.dispose();
   });
 

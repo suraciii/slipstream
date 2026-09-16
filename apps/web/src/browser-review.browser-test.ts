@@ -9682,6 +9682,97 @@ test("repeated failure of one source range keeps one exact Recovery owner", asyn
   }
 });
 
+test("a source establishment failure retires the claim it replaces", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Second Source");
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  let libraryToken = "";
+  let albumPhase = false;
+  let failLibraryRange = true;
+  let failAlbumWindow = true;
+  let albumWindowFailures = 0;
+  await page.route(/\/api\/browse\//, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const start = url.searchParams.get("start");
+    if (request.method() === "GET" && url.pathname.endsWith(libraryToken)) {
+      if (failLibraryRange && start === "60") {
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+    }
+    if (
+      request.method() === "GET" &&
+      albumPhase &&
+      url.pathname !== `/api/browse/${libraryToken}` &&
+      start === "0"
+    ) {
+      albumWindowFailures += 1;
+      if (failAlbumWindow) {
+        await route.fulfill({ status: 503, body: '{"error":"failed"}' });
+        return;
+      }
+    }
+    await route.continue();
+  });
+
+  try {
+    const openedResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/browse",
+    );
+    await page.goto(running.url);
+    libraryToken = ((await (await openedResponse).json()) as { token: string })
+      .token;
+    await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+
+    // The first source owns a blocking range failure.
+    await page.locator("[data-grid-viewport]").evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    // Opening the second source fails on its establishing window, which
+    // replaces the first source's claim with its own.
+    await openSources(page);
+    const albumOpen = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/browse" &&
+        (response.request().postDataJSON() as { albumId?: string }).albumId ===
+          albumId,
+    );
+    albumPhase = true;
+    await page.getByRole("button", { name: /^Second Source/ }).click();
+    await expect.poll(() => albumWindowFailures).toBeGreaterThan(0);
+    albumPhase = false;
+    await albumOpen;
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+    // Retrying the second source releases its claim and the predecessor
+    // claim the transition replaced.
+    failAlbumWindow = false;
+    failLibraryRange = false;
+    await openSources(page);
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.locator("[data-sources]")).toBeHidden();
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.getByText(/^1 \/ 120$/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  } finally {
+    await page.unroute(/\/api\/browse\//);
+  }
+});
+
 test("Grid Retry replays a clamped tail range from its original Photo anchor", async ({
   page,
 }) => {

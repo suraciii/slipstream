@@ -394,6 +394,21 @@ export function createSourceGridOwner(
     return start < end;
   };
 
+  /// Aligned window starts a control-flow caller is awaiting. Their outcome
+  /// settles through that caller, which presents it with the recovery
+  /// transition it owns, so the merged notification reports only demanded
+  /// windows no caller joined - the range-driven admissions.
+  const awaitedWindowStarts = new Map<number, number>();
+
+  const beginAwaitWindow = (start: number) => {
+    awaitedWindowStarts.set(start, (awaitedWindowStarts.get(start) ?? 0) + 1);
+    return () => {
+      const remaining = (awaitedWindowStarts.get(start) ?? 0) - 1;
+      if (remaining <= 0) awaitedWindowStarts.delete(start);
+      else awaitedWindowStarts.set(start, remaining);
+    };
+  };
+
   const notifyWindowSettled = (outcome: SourceWindowOutcome) => {
     // A subscriber that throws owns its own failure: it must not silence the
     // other subscribers or surface as an unhandled rejection on the shared
@@ -688,10 +703,19 @@ export function createSourceGridOwner(
         };
       },
     );
-    // One notification per completed window, however many consumers joined
-    // the shared task. Joined awaiters still receive their own outcome.
+    // One notification per completed window however many consumers joined the
+    // shared task, and only when no control-flow caller awaits it: a window
+    // the open, reopen, retry, or Photo path awaits settles through that
+    // caller, whose recovery transition a notification would consume first
+    // and strand.
     if (shared.started)
-      void shared.promise.then(notifyWindowSettled, () => undefined);
+      void shared.promise.then(
+        (outcome) => {
+          if (awaitedWindowStarts.has(start)) return;
+          notifyWindowSettled(outcome);
+        },
+        () => undefined,
+      );
     return shared.promise;
   };
 
@@ -716,7 +740,12 @@ export function createSourceGridOwner(
     }
     if (windowLoaded(start))
       return { kind: "loaded", authority, owner, start, changed: false };
-    return startWindowLoad(operation, index, start, options);
+    const releaseAwait = beginAwaitWindow(start);
+    try {
+      return await startWindowLoad(operation, index, start, options);
+    } finally {
+      releaseAwait();
+    }
   }
 
   const ensureRange = (
