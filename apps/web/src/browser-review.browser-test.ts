@@ -149,6 +149,7 @@ type BrowsePhoto = {
   available: boolean;
   selectionState: string;
   rating: number;
+  originals?: ReadonlyArray<Readonly<{ kind: string }>>;
 };
 type AlbumMember = BrowsePhoto & { photoId: string; position: number };
 type AlbumState = { id: string; position: number; members: AlbumMember[] };
@@ -7478,7 +7479,8 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
 /**
  * Geometry for one rendered Grid cell. The image box is the rendered Photo,
  * not the media area, because .thumbnail sizes itself from the derivative's
- * natural pixels inside the cell media area.
+ * natural pixels inside the cell media area. `facts` carries the visible fact
+ * text so a caller can prove which cell renders a Photo-state indicator.
  */
 type GridCellGeometry = Readonly<{
   index: number;
@@ -7490,6 +7492,7 @@ type GridCellGeometry = Readonly<{
   imageHeight: number;
   naturalWidth: number;
   naturalHeight: number;
+  facts: string | null;
   indicatorsOverlapImage: boolean;
   imageInsideMedia: boolean;
 }>;
@@ -7524,6 +7527,9 @@ async function gridCellGeometry(page: Page): Promise<GridCellGeometry[]> {
           ".cell-state, .cell-caption, .cell-facts",
         ),
       ).filter((element) => !element.hidden && element.offsetParent !== null);
+      const facts = indicators.find((element) =>
+        element.classList.contains("cell-facts"),
+      );
       return {
         index: Number(cell.dataset.photoIndex),
         cellWidth: cellBox.width,
@@ -7534,6 +7540,7 @@ async function gridCellGeometry(page: Page): Promise<GridCellGeometry[]> {
         imageHeight: imageBox.height,
         naturalWidth: image.naturalWidth,
         naturalHeight: image.naturalHeight,
+        facts: facts?.textContent ?? null,
         indicatorsOverlapImage: indicators.some((element) =>
           overlaps(imageBox, element.getBoundingClientRect()),
         ),
@@ -7585,6 +7592,32 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
       await jpegWithSize(page, sample.width, sample.height),
     );
   const running = await server(base, root);
+  // One sample also carries a Photo-state indicator, so the footer grows and
+  // the media area shrinks inside the very same uniform card. Samples sort by
+  // path, so index 1 is b-portrait.jpg; the assertions below fail loudly if
+  // that ordering changes.
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(samples.length);
+  const factPhotoId = ids[1]!;
+  await page.route("**/api/browse/**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      photos: Array<{ id: string; ambiguous: boolean }>;
+    };
+    await route.fulfill({
+      response,
+      json: {
+        ...body,
+        photos: body.photos.map((photo) =>
+          photo.id === factPhotoId ? { ...photo, ambiguous: true } : photo,
+        ),
+      },
+    });
+  });
   const loadedThumbnails = () =>
     page.evaluate(
       () =>
@@ -7625,6 +7658,11 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
       landscape && portrait && square && panorama,
       "each sample aspect class renders one cell",
     ).toBeTruthy();
+    // Exactly one cell renders the Photo-state indicator, and it is the
+    // portrait whose thumbnail is loaded.
+    expect(cells.filter((cell) => cell.facts !== null)).toHaveLength(1);
+    expect(portrait!.facts).toBe("Ambiguous pairing");
+    expect(landscape!.facts).toBeNull();
     // Sources below the bounded derivative target keep their exact pixels.
     expect([landscape!.naturalWidth, landscape!.naturalHeight]).toEqual([
       320, 180,
@@ -7650,6 +7688,12 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
     expect(portrait!.imageHeight).toBeGreaterThan(portrait!.imageWidth);
     expect(portrait!.imageHeight).toBeGreaterThanOrEqual(
       portrait!.mediaHeight - 1,
+    );
+    // The fact-bearing cell grew its footer and shrank its media area without
+    // changing the uniform card box or the Photo's rendered ratio.
+    expect(portrait!.mediaHeight).toBeLessThan(landscape!.mediaHeight);
+    expect(Math.abs(portrait!.cellHeight - landscape!.cellHeight)).toBeLessThan(
+      0.5,
     );
     expect(Math.abs(square!.imageWidth - square!.imageHeight)).toBeLessThan(
       1.5,
@@ -7687,6 +7731,65 @@ test("EXIF-rotated thumbnails display the corrected orientation exactly once", a
   expect(cell!.naturalHeight).toBe(320);
   expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
   expectAspectRatio(cell!);
+  expect(cell!.indicatorsOverlapImage).toBe(false);
+});
+
+test("a RAW and JPEG pair renders one Grid cell with the JPEG's single rotation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  // Same stem, two Originals, so the pair forms one Photo. The JPEG claims EXIF
+  // orientation 6 (320x180 displayed as 180x320) and the RAW bytes are
+  // deliberately unreadable, so the Preview comes from the matching JPEG.
+  await writeFile(
+    join(root, "a.jpg"),
+    withExifOrientation(await jpegWithSize(page, 320, 180), 6),
+  );
+  await writeFile(join(root, "a.ARW"), "raw-bytes-a");
+  const running = await server(base, root);
+  const opened = (await (
+    await post(running.url, "/api/browse", { source: "library" })
+  ).json()) as { token: string; total: number };
+  const paired = await browseWindow(running.url, opened.token, 0);
+  await fetch(`${running.url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: running.url },
+  });
+  // Pairing is name-based and independent of byte validity: the RAW and the
+  // JPEG are one Photo with both members, not two Photos.
+  expect(paired.total).toBe(1);
+  expect(
+    paired.photos[0]!.originals?.map((original) => original.kind).sort(),
+  ).toEqual(["jpeg", "raw"]);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await waitForGridFrame(page);
+  await expect(page.locator(".photo-cell[data-photo-index]")).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page
+        .locator(".photo-cell img")
+        .first()
+        .evaluate((image: HTMLImageElement) =>
+          image.complete && image.naturalWidth > 0
+            ? `${image.naturalWidth}x${image.naturalHeight}`
+            : "pending",
+        ),
+    )
+    .toBe("180x320");
+  const [cell] = await gridCellGeometry(page);
+  expect(cell).toBeDefined();
+  // Orientation 6 is baked once for the pair too: a second rotation would
+  // render 320x180.
+  expect(cell!.naturalWidth).toBe(180);
+  expect(cell!.naturalHeight).toBe(320);
+  expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
+  // The complete composition displays: the ratio survives, nothing crops, and
+  // no indicator covers the image.
+  expectAspectRatio(cell!);
+  expect(cell!.imageInsideMedia).toBe(true);
+  expect(cell!.imageWidth).toBeLessThanOrEqual(cell!.mediaWidth + 1);
+  expect(cell!.imageHeight).toBeLessThanOrEqual(cell!.mediaHeight + 1);
   expect(cell!.indicatorsOverlapImage).toBe(false);
 });
 
