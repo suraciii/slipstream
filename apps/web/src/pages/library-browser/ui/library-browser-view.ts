@@ -1723,9 +1723,7 @@ export function createLibraryBrowserView(
         membershipStatus.hidden = false;
         membershipStatus.textContent = "Loading Albums…";
         membershipList.hidden = true;
-        return;
-      }
-      if (model.failed) {
+      } else if (model.failed) {
         membershipStatus.hidden = false;
         membershipStatus.textContent = "Albums could not be loaded.";
         membershipList.hidden = true;

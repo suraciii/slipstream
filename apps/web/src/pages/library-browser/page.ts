@@ -1130,8 +1130,6 @@ export function mountLibraryBrowser(
     syncConnection();
     view.prepareSourceOpen(sourceGrid.name);
     renderSortControl();
-    // A new open snapshot ends the previous source's removal memory.
-    removedFromCurrentAlbum.clear();
     try {
       const opened = await pendingOpen;
       if (opened.kind === "detached") return;
@@ -1351,9 +1349,6 @@ export function mountLibraryBrowser(
       if (opened.kind === "failed") throw new Error("browse reopen failed");
       const gridPosition = sourceGrid.readGridPosition(authority);
       if (gridPosition === undefined) return;
-      // The replacement Snapshot is now authoritative. Retain this memory when
-      // reopen fails so the old recoverable view remains truthful.
-      removedFromCurrentAlbum.clear();
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,
@@ -1595,10 +1590,6 @@ export function mountLibraryBrowser(
     );
   };
 
-  // Album action ownership suppresses duplicate membership admissions. The
-  // open snapshot separately remembers members removed until reopen.
-  const removedFromCurrentAlbum = new Set<string>();
-
   type MembershipFacts =
     | Readonly<{ kind: "loading" }>
     | Readonly<{
@@ -1649,8 +1640,9 @@ export function mountLibraryBrowser(
   };
 
   /// Loads the current Photo's Album membership. The read is fenced to the
-  /// Photo and generation like capture metadata: a response that arrives
-  /// after its Photo stopped being current is discarded. A revalidation keeps
+  /// Photo, to the generation, and to any membership toggle admitted while it
+  /// runs: a response that arrives after its Photo stopped being current, or
+  /// after a toggle took over the panel, is discarded. A revalidation keeps
   /// the stated facts while it runs so the panel does not flicker.
   const loadPhotoAlbums = async (
     authority: PhotoAuthority,
@@ -1670,6 +1662,7 @@ export function mountLibraryBrowser(
     membershipPhotoId = photoId;
     membershipMessage = undefined;
     membershipRevision += 1;
+    const revision = membershipRevision;
     if (!photoId) {
       membershipFacts = { kind: "loading" };
       renderMembershipControls();
@@ -1684,6 +1677,7 @@ export function mountLibraryBrowser(
     const result = await fetchPhotoAlbums(fetcher, photoId, controller.signal);
     if (
       controller.signal.aborted ||
+      membershipRevision !== revision ||
       !photoOwner.isCurrent(authority) ||
       currentPhoto()?.id !== photoId
     )
@@ -1707,7 +1701,7 @@ export function mountLibraryBrowser(
 
   /// Sends one admitted membership toggle for the current Photo. The
   /// checkbox shows the intended state while the mutation is in flight, and
-  /// a failed mutation restores the prior true state and names the action.
+  /// a failed mutation keeps the panel truthful and names the action.
   const toggleMembership = (albumId: string, member: boolean): void => {
     const photo = currentPhoto();
     if (!photo || !albumId) return;
@@ -1715,7 +1709,6 @@ export function mountLibraryBrowser(
     const kind = member ? "add" : "remove";
     if (albumActions.isMembershipAdmitted(kind, albumId, photoId)) return;
     const photoAuthority = photoOwner.authority;
-    const snapshotAuthority = sourceGrid.authority;
     const revision = ++membershipRevision;
     const prior = membershipFacts;
     if (membershipFacts.kind === "ready") {
@@ -1746,27 +1739,10 @@ export function mountLibraryBrowser(
           );
       // The admission is registered now: show the checkbox as in flight.
       renderMembershipControls();
-      const {
-        ok,
-        announce,
-        removedFromCurrentAlbum: removedFact,
-      } = await settlement;
+      const { ok, announce } = await settlement;
       const stillCurrent =
         photoOwner.isCurrent(photoAuthority) && currentPhoto()?.id === photoId;
       if (ok) {
-        if (
-          !member &&
-          removedFact !== undefined &&
-          sourceGrid.isCurrent(removedFact.sourceAuthority) &&
-          removedFact.albumId === sourceGrid.albumId
-        )
-          removedFromCurrentAlbum.add(photoId);
-        if (
-          member &&
-          sourceGrid.isCurrent(snapshotAuthority) &&
-          albumId === sourceGrid.albumId
-        )
-          removedFromCurrentAlbum.delete(photoId);
         if (stillCurrent) {
           announce(
             member
@@ -1782,8 +1758,11 @@ export function mountLibraryBrowser(
         }
         return;
       }
+      // A failed toggle restores the prior true state. Facts that were still
+      // loading are not a true state: they become a load failure that offers
+      // the membership retry instead of stranding the panel on loading.
       if (stillCurrent && membershipRevision === revision)
-        membershipFacts = prior;
+        membershipFacts = prior.kind === "ready" ? prior : { kind: "failed" };
       if (!stillCurrent) return;
       membershipMessage = member
         ? `Could not add this Photo to “${membershipAlbumName(albumId)}”.`
