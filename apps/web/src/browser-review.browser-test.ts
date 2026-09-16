@@ -8456,6 +8456,40 @@ test("a large viewport loads only covering windows and stays bounded", async ({
   expect(await page.locator(".photo-cell").count()).toBeLessThan(300);
 });
 
+test("a source switch rebuilds the Grid range for the replacement source", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 80);
+  const running = await server(base, root);
+  const windows = recordWindowRequests(page);
+  await openGrid(page, running.url, "All Photos");
+  const previousImage = await page
+    .locator('[data-photo-index="0"] img')
+    .elementHandle();
+  expect(await previousImage!.getAttribute("src")).toMatch(/\/thumbnail\//);
+  const sourceRequests = windows.requested.length;
+
+  // The replacement source presents the same Photos, so it must rebuild the
+  // cells and re-attach their thumbnails instead of reusing the previous
+  // source's DOM, and admit its own covering windows.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText(
+    "Library Folder · Folder",
+  );
+  await expect(page.locator('[data-photo-index="0"] img')).toHaveAttribute(
+    "src",
+    /\/thumbnail\//,
+  );
+  expect(await previousImage!.evaluate((node) => node.isConnected)).toBe(false);
+  await expectGridConverged(page, windows);
+  const visible = await renderedGridSpan(page);
+  expect(windows.requested.slice(sourceRequests)).toEqual(
+    coveringWindowStarts(visible.start, visible.end, 80),
+  );
+});
+
 test("Back to Grid restoration supersedes a queued scroll render", async ({
   page,
 }) => {
