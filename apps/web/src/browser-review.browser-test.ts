@@ -8101,17 +8101,43 @@ test("scroll events coalesce Grid rendering to one animation frame", async ({
 
   const frameBatches = await page.evaluate(
     () =>
-      new Promise<number[]>((resolve) => {
+      new Promise<
+        Array<{
+          mutatingCallbacks: number;
+          records: number;
+          repeatedNodes: number;
+        }>
+      >((resolve) => {
         const layer = document.querySelector<HTMLElement>("[data-grid-layer]");
         const viewport = document.querySelector<HTMLElement>(
           "[data-grid-viewport]",
         );
         if (!layer || !viewport) throw new Error("Grid elements are missing");
-        const batches: number[] = [];
-        let current = 0;
+        // One merged render per frame is more than "one observer callback":
+        // a callback may carry the records of several renders, so the frame
+        // also counts the childList records and the nodes it touched twice.
+        const batches: Array<{
+          mutatingCallbacks: number;
+          records: number;
+          repeatedNodes: number;
+        }> = [];
+        let seen = new Set<Node>();
+        let current = { mutatingCallbacks: 0, records: 0, repeatedNodes: 0 };
         const observer = new MutationObserver((records) => {
-          if (records.some((record) => record.type === "childList"))
-            current += 1;
+          const childLists = records.filter(
+            (record) => record.type === "childList",
+          );
+          if (childLists.length === 0) return;
+          current.mutatingCallbacks += 1;
+          current.records += childLists.length;
+          for (const record of childLists) {
+            const touched = new Set<Node>();
+            record.addedNodes.forEach((node) => touched.add(node));
+            record.removedNodes.forEach((node) => touched.add(node));
+            for (const node of touched)
+              if (seen.has(node)) current.repeatedNodes += 1;
+              else seen.add(node);
+          }
         });
         observer.observe(layer, { childList: true });
         viewport.scrollTop = 30 * 178;
@@ -8120,7 +8146,8 @@ test("scroll events coalesce Grid rendering to one animation frame", async ({
         const collect = (remaining: number) =>
           requestAnimationFrame(() => {
             batches.push(current);
-            current = 0;
+            current = { mutatingCallbacks: 0, records: 0, repeatedNodes: 0 };
+            seen = new Set<Node>();
             if (remaining > 1) collect(remaining - 1);
             else {
               observer.disconnect();
@@ -8130,10 +8157,16 @@ test("scroll events coalesce Grid rendering to one animation frame", async ({
         collect(3);
       }),
   );
-  // Eight scroll events in one frame merge into exactly one Grid DOM update,
-  // and no frame mutates the Grid more than once.
-  expect(frameBatches[0]).toBe(1);
-  expect(frameBatches.every((count) => count <= 1)).toBe(true);
+  // Eight scroll events in one frame merge into exactly one Grid DOM update:
+  // one mutating callback carrying the records of one render, and no cell node
+  // is inserted or removed twice in any frame.
+  expect(frameBatches[0]?.mutatingCallbacks).toBe(1);
+  expect(frameBatches[0]?.records).toBeGreaterThan(0);
+  expect(frameBatches[0]?.repeatedNodes).toBe(0);
+  expect(frameBatches.every((batch) => batch.mutatingCallbacks <= 1)).toBe(
+    true,
+  );
+  expect(frameBatches.every((batch) => batch.repeatedNodes === 0)).toBe(true);
 });
 
 /// Opens the default library source without changing the viewport, so a test
@@ -8274,24 +8307,51 @@ test("a fast multi-window scroll mutates the Grid at most once per frame", async
 
   const frameBatches = await page.evaluate(
     () =>
-      new Promise<number[]>((resolve) => {
+      new Promise<
+        Array<{
+          mutatingCallbacks: number;
+          records: number;
+          repeatedNodes: number;
+        }>
+      >((resolve) => {
         const layer = document.querySelector<HTMLElement>("[data-grid-layer]");
         const viewport = document.querySelector<HTMLElement>(
           "[data-grid-viewport]",
         );
         if (!layer || !viewport) throw new Error("Grid elements are missing");
-        const batches: number[] = [];
-        let current = 0;
+        // One merged render per frame is more than "one observer callback":
+        // a callback may carry the records of several renders, so the frame
+        // also counts the childList records and the nodes it touched twice.
+        const batches: Array<{
+          mutatingCallbacks: number;
+          records: number;
+          repeatedNodes: number;
+        }> = [];
+        let seen = new Set<Node>();
+        let current = { mutatingCallbacks: 0, records: 0, repeatedNodes: 0 };
         const observer = new MutationObserver((records) => {
-          if (records.some((record) => record.type === "childList"))
-            current += 1;
+          const childLists = records.filter(
+            (record) => record.type === "childList",
+          );
+          if (childLists.length === 0) return;
+          current.mutatingCallbacks += 1;
+          current.records += childLists.length;
+          for (const record of childLists) {
+            const touched = new Set<Node>();
+            record.addedNodes.forEach((node) => touched.add(node));
+            record.removedNodes.forEach((node) => touched.add(node));
+            for (const node of touched)
+              if (seen.has(node)) current.repeatedNodes += 1;
+              else seen.add(node);
+          }
         });
         observer.observe(layer, { childList: true });
         let step = 0;
         const advance = () =>
           requestAnimationFrame(() => {
             batches.push(current);
-            current = 0;
+            current = { mutatingCallbacks: 0, records: 0, repeatedNodes: 0 };
+            seen = new Set<Node>();
             step += 1;
             if (step < 8) {
               viewport.scrollTop = step * 6 * 178;
@@ -8309,10 +8369,15 @@ test("a fast multi-window scroll mutates the Grid at most once per frame", async
         advance();
       }),
   );
-  // Data-driven updates merge into the scroll render: no frame touches the
-  // Grid more than once while windows arrive under a fast scroll.
-  expect(frameBatches.every((count) => count <= 1)).toBe(true);
-  expect(frameBatches.some((count) => count === 1)).toBe(true);
+  // Data-driven updates merge into the scroll render: no frame runs more than
+  // one Grid mutation batch, and no frame touches a cell node twice.
+  expect(frameBatches.every((batch) => batch.mutatingCallbacks <= 1)).toBe(
+    true,
+  );
+  expect(frameBatches.some((batch) => batch.mutatingCallbacks === 1)).toBe(
+    true,
+  );
+  expect(frameBatches.every((batch) => batch.repeatedNodes === 0)).toBe(true);
 });
 
 test("a scroll reversal converges without churn or repeat requests", async ({
