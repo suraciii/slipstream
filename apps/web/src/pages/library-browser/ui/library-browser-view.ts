@@ -303,13 +303,13 @@ export function createLibraryBrowserView(
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
-            <div class="preview-mode-controls" data-preview-mode-controls role="group" aria-label="Preview zoom">
-              <button type="button" class="preview-mode" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
-              <button type="button" class="preview-mode zoom-step" data-zoom-out aria-label="Zoom out">−</button>
+            <div class="zoom-controls" data-zoom-controls role="group" aria-label="Preview zoom">
+              <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
+              <button type="button" class="zoom-control zoom-step" data-zoom-out aria-label="Zoom out">−</button>
               <input class="zoom-slider" type="range" data-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
-              <button type="button" class="preview-mode zoom-step" data-zoom-in aria-label="Zoom in">+</button>
-              <span class="zoom-level" data-zoom-level>100%</span>
-              <button type="button" class="preview-mode" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
+              <button type="button" class="zoom-control zoom-step" data-zoom-in aria-label="Zoom in">+</button>
+              <span class="zoom-level" data-zoom-level>—</span>
+              <button type="button" class="zoom-control" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
             </div>
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
@@ -383,10 +383,7 @@ export function createLibraryBrowserView(
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
-  const previewZoomControls = required<HTMLElement>(
-    root,
-    "[data-preview-mode-controls]",
-  );
+  const zoomControls = required<HTMLElement>(root, "[data-zoom-controls]");
   const zoomFit = required<HTMLButtonElement>(root, "[data-zoom-fit]");
   const zoomOut = required<HTMLButtonElement>(root, "[data-zoom-out]");
   const zoomIn = required<HTMLButtonElement>(root, "[data-zoom-in]");
@@ -491,6 +488,9 @@ export function createLibraryBrowserView(
   const MAX_ZOOM_PERCENT = 800;
   const ZOOM_STEP = 1.25;
   const DETAIL_ZOOM_PERCENT = 200;
+  // Reported while no Preview image has measurable pixels, so the live
+  // percentage never claims a value the stage cannot show.
+  const ZOOM_LEVEL_UNMEASURED = "—";
   // Preview zoom is presentation state: `zoomManual` distinguishes Fit
   // from a manual percentage anchored to the Preview's own pixels, so
   // `zoomPercent` maps 1 image pixel to `zoomPercent / 100` CSS pixels.
@@ -523,6 +523,9 @@ export function createLibraryBrowserView(
         lastY: number;
         startedAt: number;
         vertical: boolean;
+        // The zoom mode the gesture started in; it owns the drag until
+        // release even if Fit returns mid-gesture.
+        pan: boolean;
         surface: object;
         photoId: string;
       }
@@ -644,8 +647,22 @@ export function createLibraryBrowserView(
     panX = clamp(panX, -panLimitX(), panLimitX());
     panY = clamp(panY, -panLimitY(), panLimitY());
   };
+  // Zoom acts on the Preview's own pixels. A retained Preview can be shown
+  // again without a new load event, so the size is measured from the image
+  // element whenever the cached measurement is missing, and a Preview whose
+  // bytes never arrived has no pixels to measure at all.
+  const loadedPreviewImage = () => {
+    const image = stage.querySelector<HTMLImageElement>("img");
+    if (!image || !image.complete || image.naturalWidth === 0) return undefined;
+    if (!imageNaturalWidth || !imageNaturalHeight) {
+      imageNaturalWidth = image.naturalWidth;
+      imageNaturalHeight = image.naturalHeight;
+    }
+    return image;
+  };
+  const measurableImage = () => Boolean(loadedPreviewImage());
   const syncZoomControls = () => {
-    const enabled = alive && Boolean(stage.querySelector("img"));
+    const enabled = alive && measurableImage();
     zoomFit.disabled = !enabled;
     zoomOut.disabled = !enabled;
     zoomIn.disabled = !enabled;
@@ -656,9 +673,14 @@ export function createLibraryBrowserView(
     if (!alive) return;
     preview.dataset.zoomState = zoomManual ? "manual" : "fit";
     zoomFit.setAttribute("aria-pressed", String(!zoomManual));
-    const image = stage.querySelector<HTMLImageElement>("img");
+    const image = loadedPreviewImage();
     const scale = currentScale();
     if (!image || !imageNaturalWidth || !imageNaturalHeight || scale <= 0) {
+      // Without measurable pixels there is no percentage to report: the
+      // presentation returns to Fit instead of keeping a stale manual value.
+      zoomLevel.textContent = ZOOM_LEVEL_UNMEASURED;
+      zoomSlider.value = String(MIN_ZOOM_PERCENT);
+      zoomSlider.setAttribute("aria-valuetext", "Fit");
       syncZoomControls();
       return;
     }
@@ -668,11 +690,12 @@ export function createLibraryBrowserView(
     // the origin that pan and pointer-anchored zoom are measured from.
     image.style.transform = `translate(${panX}px, ${panY}px)`;
     const percent = Math.round(scale * 100);
+    // A Fit can land below the manual floor on a large derivative: the label
+    // reports it truthfully while the slider keeps the value it can hold.
+    const sliderPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
     zoomLevel.textContent = `${percent}%`;
-    zoomSlider.value = String(
-      clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT),
-    );
-    zoomSlider.setAttribute("aria-valuetext", `${percent}%`);
+    zoomSlider.value = String(sliderPercent);
+    zoomSlider.setAttribute("aria-valuetext", `${sliderPercent}%`);
     syncZoomControls();
   };
   const applyFit = () => {
@@ -690,10 +713,14 @@ export function createLibraryBrowserView(
     applyZoom();
   };
   const zoomBy = (factor: number) => {
-    const base = zoomManual
-      ? zoomPercent
-      : Math.max(MIN_ZOOM_PERCENT, currentPercent());
-    applyManualZoom(base * factor);
+    const current = currentPercent();
+    const base = zoomManual ? zoomPercent : Math.max(MIN_ZOOM_PERCENT, current);
+    const target = clamp(base * factor, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    // Stepping stays monotonic: the manual floor cannot magnify a Fit that
+    // sits below it by zooming out, and it cannot shrink a 800% manual zoom
+    // by zooming in.
+    if (factor < 1 ? target >= current : target <= current) return;
+    applyManualZoom(target);
   };
   /// Changes zoom while keeping the image point under `anchor` (client
   /// coordinates) stationary, then re-clamps the bounded pan.
@@ -723,7 +750,7 @@ export function createLibraryBrowserView(
     applyZoom();
   };
   const toggleDetail = () => {
-    if (!alive || !stage.querySelector("img")) return;
+    if (!alive || !measurableImage()) return;
     if (zoomManual && Math.abs(zoomPercent - DETAIL_ZOOM_PERCENT) < 0.5)
       applyFit();
     else applyManualZoom(DETAIL_ZOOM_PERCENT);
@@ -1453,6 +1480,7 @@ export function createLibraryBrowserView(
       lastY: event.clientY,
       startedAt: event.timeStamp,
       vertical: false,
+      pan: zoomManual,
       surface: photoSurface,
       photoId: currentPhotoId,
     };
@@ -1476,7 +1504,7 @@ export function createLibraryBrowserView(
     const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
-    if (zoomManual) {
+    if (pointer.pan || zoomManual) {
       panX = clamp(panX + stepX, -panLimitX(), panLimitX());
       panY = clamp(panY + stepY, -panLimitY(), panLimitY());
       applyZoom();
@@ -1504,6 +1532,7 @@ export function createLibraryBrowserView(
     const active = pointer;
     clearPointer();
     if (
+      active.pan ||
       zoomManual ||
       cancelled ||
       active.vertical ||
@@ -1557,11 +1586,13 @@ export function createLibraryBrowserView(
     }
     if (modifier || photoView.hidden) return;
     if (event.key === "+" || event.key === "=") {
+      if (!measurableImage()) return;
       event.preventDefault();
       zoomBy(ZOOM_STEP);
       return;
     }
     if (event.key === "-" || event.key === "_") {
+      if (!measurableImage()) return;
       event.preventDefault();
       zoomBy(1 / ZOOM_STEP);
       return;
@@ -1810,13 +1841,13 @@ export function createLibraryBrowserView(
     applyManualZoom(Number(zoomSlider.value)),
   );
   preview.addEventListener("wheel", wheelZoom, { passive: false });
-  previewZoomControls.addEventListener("pointerdown", (event) =>
+  zoomControls.addEventListener("pointerdown", (event) =>
     event.stopPropagation(),
   );
-  previewZoomControls.addEventListener("pointermove", (event) =>
+  zoomControls.addEventListener("pointermove", (event) =>
     event.stopPropagation(),
   );
-  previewZoomControls.addEventListener("pointerup", (event) =>
+  zoomControls.addEventListener("pointerup", (event) =>
     event.stopPropagation(),
   );
   select.addEventListener("click", () =>

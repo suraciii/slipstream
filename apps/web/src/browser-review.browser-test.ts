@@ -1315,6 +1315,300 @@ test("window resize recomputes Fit and keeps a manual percentage", async ({
   expect(resized.width).toBeCloseTo(resized.naturalWidth, 0);
 });
 
+test("a pan that began while zoomed never becomes a decision", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
+
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+
+  // The drag starts as a pan; restoring Fit mid-drag must not hand the
+  // gesture back to the decision swipe that Fit owns.
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 130, center.y + 10);
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await page.mouse.up();
+
+  // The release handler runs before this navigation settles, so neither the
+  // request count nor the durable Album fact can race it.
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 3")).toBeVisible();
+  expect(stateRequests).toBe(0);
+  expect(
+    (await state(running.url, albumId)).members.map(
+      (member) => member.selectionState,
+    ),
+  ).toEqual(["undecided", "undecided", "undecided"]);
+});
+
+test("zoom controls are disabled while no Preview image is measurable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  // The Preview state stays ready while its bytes never arrive, which
+  // leaves an image element on the stage without any pixels to measure.
+  await page.route("**/api/derivatives/*/review/*", (route) => route.abort());
+  await startReview(page, running.url, "All Photos");
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Preview could not be loaded. You can continue browsing.",
+  );
+
+  const preview = page.locator("[data-preview]");
+  const fit = page.getByRole("button", { name: "Fit Window", exact: true });
+  const zoomOut = page.getByRole("button", { name: "Zoom out", exact: true });
+  const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+  const hundred = page.getByRole("button", {
+    name: "Zoom to 100 percent",
+    exact: true,
+  });
+  await expect(fit).toBeDisabled();
+  await expect(zoomOut).toBeDisabled();
+  await expect(zoomIn).toBeDisabled();
+  await expect(hundred).toBeDisabled();
+  await expect(page.locator("[data-zoom-slider]")).toBeDisabled();
+  await expect(page.locator("[data-zoom-level]")).toHaveText("—");
+
+  // Keyboard zoom is ignored without measurable pixels.
+  await page.keyboard.press("+");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+
+  // A healthy Photo restores zoom control.
+  await page.unroute("**/api/derivatives/*/review/*");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await expect(hundred).toBeEnabled();
+  await expect(fit).toBeEnabled();
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
+});
+
+test("a Photo without usable Preview bytes reports no zoom percentage", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  let healthyPhotoId: string | undefined;
+  await page.route("**/api/derivatives/*/review/*", async (route) => {
+    const photoId = new URL(route.request().url()).pathname.split("/")[3]!;
+    healthyPhotoId ??= photoId;
+    if (photoId === healthyPhotoId) {
+      await route.continue();
+      return;
+    }
+    await route.abort();
+  });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expect(level).toHaveText("300%");
+
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Preview could not be loaded. You can continue browsing.",
+  );
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await expect(
+    page.getByRole("button", { name: "Fit Window", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(level).toHaveText("—");
+  await expect(slider).toBeDisabled();
+});
+
+test("a Fit below the manual floor keeps stepping monotonic", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  // A 2560 px derivative in a narrow Preview area puts Fit below the 10%
+  // manual floor, which the stepping controls must never exceed.
+  await writeFile(
+    join(root, "large.jpg"),
+    await jpegWithSize(page, 2560, 2560),
+  );
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+  const slider = page.locator("[data-zoom-slider]");
+  await page.setViewportSize({ width: 300, height: 844 });
+  await waitForFit(page);
+
+  const fitted = await previewImageGeometry(page);
+  const fitPercent = Math.round((fitted.width / fitted.naturalWidth) * 100);
+  expect(fitPercent).toBeLessThan(10);
+  await expect(level).toHaveText(`${fitPercent}%`);
+  // The slider spans the manual range only, and it must not contradict the
+  // value it reports to assistive technology.
+  expect(await slider.inputValue()).toBe("10");
+  await expect(slider).toHaveAttribute("aria-valuetext", "10%");
+
+  // Zooming out below the floor must not magnify the Preview.
+  await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  const unzoomed = await previewImageGeometry(page);
+  expect(unzoomed.width).toBeCloseTo(fitted.width, 1);
+  await expect(level).toHaveText(`${fitPercent}%`);
+
+  // Zooming in enters manual zoom above the Fit it started from.
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const zoomed = await previewImageGeometry(page);
+  expect(zoomed.width).toBeGreaterThan(fitted.width);
+  expect(zoomed.width).toBeCloseTo(zoomed.naturalWidth * 0.125, 0);
+  await expect(level).toHaveText("13%");
+});
+
+test("keyboard zoom-in steps the Preview without deciding", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+
+  await waitForFit(page);
+  const fitted = await previewImageGeometry(page);
+  await page.keyboard.press("+");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const stepped = await previewImageGeometry(page);
+  expect(stepped.width).toBeCloseTo(fitted.width * 1.25, 0);
+  const first = await zoomLevel(page);
+  await page.keyboard.press("=");
+  expect(await zoomLevel(page)).toBeGreaterThan(first);
+  expect((await previewImageGeometry(page)).width).toBeCloseTo(
+    fitted.width * 1.5625,
+    0,
+  );
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 2")).toBeVisible();
+});
+
+test("returning to Grid View resets the zoom state to Fit", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
+
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-view]")).toBeVisible();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await waitForFit(page);
+  const stage = await previewStageGeometry(page);
+  const refitted = await previewImageGeometry(page);
+  expect(refitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(refitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+  // The live percentage reports the composition this Photo's Fit produces.
+  await expect(page.locator("[data-zoom-level]")).toHaveText(
+    `${Math.round((refitted.width / refitted.naturalWidth) * 100)}%`,
+  );
+});
+
+test("a manual pan is re-clamped after the Preview area grows", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("200");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 2);
+
+  // Panning past the bound stops at the bound.
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 900, center.y);
+  await page.mouse.up();
+  const narrowStage = await previewStageGeometry(page);
+  const panned = await previewImageGeometry(page);
+  const narrowLimit = Math.max(0, (panned.width - narrowStage.width) / 2);
+  expect(narrowLimit).toBeGreaterThan(0);
+  expect(
+    panned.left + panned.width / 2 - (narrowStage.left + narrowStage.width / 2),
+  ).toBeCloseTo(narrowLimit, 0);
+
+  // The wider Preview area holds the whole Photo again, so the manual pan is
+  // re-clamped to zero instead of keeping the stale offset.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect
+    .poll(async () => {
+      const stage = await previewStageGeometry(page);
+      const image = await previewImageGeometry(page);
+      const limit = Math.max(0, (image.width - stage.width) / 2);
+      const offset =
+        image.left + image.width / 2 - (stage.left + stage.width / 2);
+      return Math.abs(offset) - limit;
+    })
+    .toBeLessThanOrEqual(0.5);
+  await expect(page.locator("[data-zoom-level]")).toHaveText("200%");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+});
+
 test("Photo View shows review capture metadata and explicit missing values", async ({
   page,
 }) => {
