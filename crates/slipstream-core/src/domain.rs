@@ -169,6 +169,14 @@ pub struct AlbumSummary {
     pub has_saved_position: bool,
 }
 
+/// One Album that contains a Photo, for the bounded per-Photo membership
+/// query. It carries Album identity only, never member lists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoAlbumMembership {
+    pub album_id: String,
+    pub album_name: String,
+}
+
 /// Ordered Album membership identity for Browse Snapshot construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AlbumBrowseMember {

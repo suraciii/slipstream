@@ -23,8 +23,44 @@ export type AlbumFormReference = Readonly<{
   name: string;
 }>;
 
+export type ViewSourceOrder =
+  | "source-default"
+  | "capture-time-asc"
+  | "capture-time-desc";
+
+type ViewSourceKind = "library" | "album" | "folder";
+
+type SortOption = Readonly<{ value: ViewSourceOrder; label: string }>;
+
+/// Capture Time is ascending by default, so only the reversed direction needs
+/// its own option.
+const CAPTURE_TIME_OPTIONS: ReadonlyArray<SortOption> = [
+  { value: "source-default", label: "Capture Time, earliest first" },
+  { value: "capture-time-desc", label: "Capture Time, latest first" },
+];
+
+/// The Grid's explicit order selection for the open source. Option labels are
+/// presentation: `source-default` names the order the server applies when no
+/// explicit order is requested (Capture Time earliest first, or Album order).
+const SORT_OPTIONS: Record<ViewSourceKind, ReadonlyArray<SortOption>> = {
+  library: CAPTURE_TIME_OPTIONS,
+  folder: CAPTURE_TIME_OPTIONS,
+  album: [
+    { value: "source-default", label: "Album order" },
+    { value: "capture-time-asc", label: "Capture Time, earliest first" },
+    { value: "capture-time-desc", label: "Capture Time, latest first" },
+  ],
+};
+
+export type GridSortViewModel = Readonly<{
+  kind: ViewSourceKind;
+  value: ViewSourceOrder;
+  enabled: boolean;
+}>;
+
 export type LibraryBrowserIntent =
   | Readonly<{ kind: "summary-action"; presentationId: number }>
+  | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
@@ -57,8 +93,8 @@ export type LibraryBrowserIntent =
       value: ViewSelectionState | number;
       advance: boolean;
     }>
-  | Readonly<{ kind: "membership-add"; albumId: string }>
-  | Readonly<{ kind: "membership-remove" }>;
+  | Readonly<{ kind: "membership-toggle"; albumId: string; member: boolean }>
+  | Readonly<{ kind: "membership-retry" }>;
 
 type GridThumbnailBinding = Readonly<{
   photoId: string;
@@ -179,12 +215,18 @@ type PhotoShellViewModel = PhotoFactsViewModel &
     previewUrl?: string | undefined;
   }>;
 
+type MembershipAlbumViewModel = Readonly<{ id: string; name: string }>;
+
 type MembershipViewModel = Readonly<{
-  albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
   photoPresent: boolean;
-  addingAlbumIds: ReadonlyArray<string>;
-  inOpenAlbum: boolean;
-  removing: boolean;
+  loading: boolean;
+  failed: boolean;
+  message?: string;
+  containing: ReadonlyArray<MembershipAlbumViewModel>;
+  options: ReadonlyArray<
+    Readonly<{ id: string; name: string; member: boolean }>
+  >;
+  pendingAlbumIds: ReadonlyArray<string>;
 }>;
 
 type ControlsViewModel = Readonly<{
@@ -222,6 +264,7 @@ export interface LibraryBrowserView {
   setGridEmpty(text?: string, libraryCheck?: boolean): void;
   renderSources(model: SourceListViewModel): void;
   renderFolderAlbum(model: FolderAlbumViewModel): void;
+  renderSort(model: GridSortViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
@@ -291,15 +334,19 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
           <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
-            <div class="preview-mode-controls" data-preview-mode-controls role="group" aria-label="Preview mode">
-              <button type="button" class="preview-mode" data-preview-fit aria-pressed="true">Fit</button>
-              <button type="button" class="preview-mode" data-preview-fill aria-pressed="false">Fill</button>
+            <div class="zoom-controls" data-zoom-controls role="group" aria-label="Preview zoom">
+              <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
+              <button type="button" class="zoom-control zoom-step" data-zoom-out aria-label="Zoom out">−</button>
+              <input class="zoom-slider" type="range" data-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
+              <button type="button" class="zoom-control zoom-step" data-zoom-in aria-label="Zoom in">+</button>
+              <span class="zoom-level" data-zoom-level>—</span>
+              <button type="button" class="zoom-control" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
             </div>
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
@@ -311,8 +358,8 @@ export function createLibraryBrowserView(
           </section>
           <section class="review-tools" aria-label="Review tools">
             <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-            <div class="membership-controls" aria-label="Album membership"><label for="album-select">Album</label><select id="album-select" data-album-select></select><button type="button" data-add-to-album>Add to Album</button><button type="button" data-remove-from-album hidden>Remove from this Album</button></div>
-            <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-detail aria-pressed="false">Detail Review</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
+            <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>
+            <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
           </section>
         </section>
       </section>
@@ -356,6 +403,8 @@ export function createLibraryBrowserView(
     "[data-folder-album-status]",
   );
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
+  const gridSort = required<HTMLElement>(root, "[data-grid-sort]");
+  const sortSelect = required<HTMLSelectElement>(root, "[data-sort-select]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
@@ -373,12 +422,13 @@ export function createLibraryBrowserView(
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
-  const previewModeControls = required<HTMLElement>(
-    root,
-    "[data-preview-mode-controls]",
-  );
-  const previewFit = required<HTMLButtonElement>(root, "[data-preview-fit]");
-  const previewFill = required<HTMLButtonElement>(root, "[data-preview-fill]");
+  const zoomControls = required<HTMLElement>(root, "[data-zoom-controls]");
+  const zoomFit = required<HTMLButtonElement>(root, "[data-zoom-fit]");
+  const zoomOut = required<HTMLButtonElement>(root, "[data-zoom-out]");
+  const zoomIn = required<HTMLButtonElement>(root, "[data-zoom-in]");
+  const zoomSlider = required<HTMLInputElement>(root, "[data-zoom-slider]");
+  const zoomLevel = required<HTMLElement>(root, "[data-zoom-level]");
+  const zoom100 = required<HTMLButtonElement>(root, "[data-zoom-100]");
   const selection = required<HTMLElement>(root, "[data-selection]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
@@ -406,16 +456,34 @@ export function createLibraryBrowserView(
   const previous = required<HTMLButtonElement>(root, "[data-previous]");
   const next = required<HTMLButtonElement>(root, "[data-next]");
   const select = required<HTMLButtonElement>(root, "[data-select]");
-  const albumSelect = required<HTMLSelectElement>(root, "[data-album-select]");
-  const addToAlbum = required<HTMLButtonElement>(root, "[data-add-to-album]");
-  const removeFromAlbum = required<HTMLButtonElement>(
+  const membershipStatus = required<HTMLElement>(
     root,
-    "[data-remove-from-album]",
+    "[data-membership-status]",
+  );
+  const membershipList = required<HTMLElement>(root, "[data-membership-list]");
+  const membershipMessage = required<HTMLElement>(
+    root,
+    "[data-membership-message]",
+  );
+  const membershipManage = required<HTMLButtonElement>(
+    root,
+    "[data-membership-manage]",
+  );
+  const membershipRetry = required<HTMLButtonElement>(
+    root,
+    "[data-membership-retry]",
+  );
+  const membershipPanel = required<HTMLElement>(
+    root,
+    "[data-membership-panel]",
+  );
+  const membershipOptions = required<HTMLElement>(
+    root,
+    "[data-membership-options]",
   );
   const reject = required<HTMLButtonElement>(root, "[data-reject]");
   const clear = required<HTMLButtonElement>(root, "[data-clear]");
   const undo = required<HTMLButtonElement>(root, "[data-undo]");
-  const detail = required<HTMLButtonElement>(root, "[data-detail]");
   const ratings = required<HTMLElement>(root, "[data-ratings]");
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
   const rejectFeedback = required<HTMLElement>(root, "[data-reject-feedback]");
@@ -452,12 +520,35 @@ export function createLibraryBrowserView(
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
-  let selectedAlbumId = "";
+  let membershipManageOpen = false;
+  let membershipFocusAlbumId: string | undefined;
   let folderAlbumSelection = "";
-  type PreviewMode = "fit" | "fill" | "detail";
-  let previewMode: PreviewMode = "fit";
+  const MIN_ZOOM_PERCENT = 10;
+  const MAX_ZOOM_PERCENT = 800;
+  const ZOOM_STEP = 1.25;
+  const DETAIL_ZOOM_PERCENT = 200;
+  // Reported while no Preview image has measurable pixels, so the live
+  // percentage never claims a value the stage cannot show.
+  const ZOOM_LEVEL_UNMEASURED = "—";
+  // Preview zoom is presentation state: `zoomManual` distinguishes Fit
+  // from a manual percentage anchored to the Preview's own pixels, so
+  // `zoomPercent` maps 1 image pixel to `zoomPercent / 100` CSS pixels.
+  let zoomManual = false;
+  let zoomPercent = 100;
+  let renderedSortKind: ViewSourceKind | undefined;
   let panX = 0;
   let panY = 0;
+  let imageNaturalWidth = 0;
+  let imageNaturalHeight = 0;
+  const activePointers = new Map<number, { x: number; y: number }>();
+  type PinchGesture = Readonly<{
+    startPercent: number;
+    startScale: number;
+    startDistance: number;
+    offsetX: number;
+    offsetY: number;
+  }>;
+  let pinch: PinchGesture | undefined;
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
@@ -472,6 +563,9 @@ export function createLibraryBrowserView(
         lastY: number;
         startedAt: number;
         vertical: boolean;
+        // The zoom mode the gesture started in; it owns the drag until
+        // release even if Fit returns mid-gesture.
+        pan: boolean;
         surface: object;
         photoId: string;
       }
@@ -561,34 +655,207 @@ export function createLibraryBrowserView(
     selectFeedback.classList.remove("pending");
     rejectFeedback.classList.remove("pending");
   };
-  const applyTransform = () => {
-    preview.classList.toggle("fit", previewMode === "fit");
-    preview.classList.toggle("fill", previewMode === "fill");
-    preview.classList.toggle("detail", previewMode === "detail");
+  const resetGestures = () => {
+    for (const id of Array.from(activePointers.keys()))
+      if (preview.hasPointerCapture(id)) preview.releasePointerCapture(id);
+    activePointers.clear();
+    pinch = undefined;
+    preview.style.removeProperty("touch-action");
+    clearPointer();
+  };
+  const stageCenter = () => {
+    const box = stage.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  };
+  const fitScale = () => {
+    if (!imageNaturalWidth || !imageNaturalHeight) return 0;
+    const width = stage.clientWidth;
+    const height = stage.clientHeight;
+    if (!width || !height) return 0;
+    return Math.min(width / imageNaturalWidth, height / imageNaturalHeight);
+  };
+  const currentScale = () => (zoomManual ? zoomPercent / 100 : fitScale());
+  const currentPercent = () => {
+    const scale = currentScale();
+    return scale > 0 ? scale * 100 : zoomPercent;
+  };
+  const panLimitX = () =>
+    Math.max(0, (imageNaturalWidth * currentScale() - stage.clientWidth) / 2);
+  const panLimitY = () =>
+    Math.max(0, (imageNaturalHeight * currentScale() - stage.clientHeight) / 2);
+  const clampPan = () => {
+    panX = clamp(panX, -panLimitX(), panLimitX());
+    panY = clamp(panY, -panLimitY(), panLimitY());
+  };
+  // Zoom acts on the Preview's own pixels. A retained Preview can be shown
+  // again without a new load event, so the size is measured from the image
+  // element whenever the cached measurement is missing, and a Preview whose
+  // bytes never arrived has no pixels to measure at all.
+  const loadedPreviewImage = () => {
     const image = stage.querySelector<HTMLImageElement>("img");
-    if (!image) return;
-    image.style.transform =
-      previewMode === "detail"
-        ? `translate(${panX}px, ${panY}px) scale(2)`
-        : "translate(0, 0) scale(1)";
+    if (!image || !image.complete || image.naturalWidth === 0) return undefined;
+    if (!imageNaturalWidth || !imageNaturalHeight) {
+      imageNaturalWidth = image.naturalWidth;
+      imageNaturalHeight = image.naturalHeight;
+    }
+    return image;
   };
-  const updatePreviewModeControls = () => {
-    previewFit.setAttribute("aria-pressed", String(previewMode === "fit"));
-    previewFill.setAttribute("aria-pressed", String(previewMode === "fill"));
-    detail.setAttribute("aria-pressed", String(previewMode === "detail"));
-    detail.textContent =
-      previewMode === "detail" ? "Exit Detail" : "Detail Review";
-    applyTransform();
+  const measurableImage = () => Boolean(loadedPreviewImage());
+  const syncZoomControls = () => {
+    const enabled = alive && measurableImage();
+    zoomFit.disabled = !enabled;
+    zoomOut.disabled = !enabled;
+    zoomIn.disabled = !enabled;
+    zoomSlider.disabled = !enabled;
+    zoom100.disabled = !enabled;
   };
-  const setPreviewMode = (mode: PreviewMode) => {
+  const applyZoom = () => {
     if (!alive) return;
-    previewMode = mode;
+    preview.dataset.zoomState = zoomManual ? "manual" : "fit";
+    zoomFit.setAttribute("aria-pressed", String(!zoomManual));
+    const image = loadedPreviewImage();
+    const scale = currentScale();
+    if (!image || !imageNaturalWidth || !imageNaturalHeight || scale <= 0) {
+      // Without measurable pixels there is no percentage to report: the
+      // presentation returns to Fit instead of keeping a stale manual value.
+      zoomLevel.textContent = ZOOM_LEVEL_UNMEASURED;
+      zoomSlider.value = String(MIN_ZOOM_PERCENT);
+      zoomSlider.setAttribute("aria-valuetext", "Fit");
+      syncZoomControls();
+      return;
+    }
+    image.style.width = `${imageNaturalWidth * scale}px`;
+    image.style.height = `${imageNaturalHeight * scale}px`;
+    // The Preview is centered on the stage center, so the stage center is
+    // the origin that pan and pointer-anchored zoom are measured from.
+    image.style.transform = `translate(${panX}px, ${panY}px)`;
+    const percent = Math.round(scale * 100);
+    // A Fit can land below the manual floor on a large derivative: the label
+    // reports it truthfully while the slider keeps the value it can hold.
+    const sliderPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    zoomLevel.textContent = `${percent}%`;
+    zoomSlider.value = String(sliderPercent);
+    zoomSlider.setAttribute("aria-valuetext", `${sliderPercent}%`);
+    syncZoomControls();
+  };
+  const applyFit = () => {
+    if (!alive) return;
+    zoomManual = false;
     panX = 0;
     panY = 0;
-    updatePreviewModeControls();
+    applyZoom();
   };
-  const resetTransform = () => {
-    setPreviewMode("fit");
+  const applyManualZoom = (percent: number) => {
+    if (!alive) return;
+    zoomManual = true;
+    zoomPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    clampPan();
+    applyZoom();
+  };
+  const zoomBy = (factor: number) => {
+    const current = currentPercent();
+    const base = zoomManual ? zoomPercent : Math.max(MIN_ZOOM_PERCENT, current);
+    const target = clamp(base * factor, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    // Stepping stays monotonic: the manual floor cannot magnify a Fit that
+    // sits below it by zooming out, and it cannot shrink a 800% manual zoom
+    // by zooming in.
+    if (factor < 1 ? target >= current : target <= current) return;
+    applyManualZoom(target);
+  };
+  /// Changes zoom while keeping the image point under `anchor` (client
+  /// coordinates) stationary, then re-clamps the bounded pan.
+  const zoomAt = (percent: number, anchor: { x: number; y: number }) => {
+    const nextPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    const previousScale = currentScale();
+    const center = stageCenter();
+    const offsetX = anchor.x - (center.x + panX);
+    const offsetY = anchor.y - (center.y + panY);
+    if (previousScale > 0 && imageNaturalWidth > 0) {
+      const ratio = nextPercent / 100 / previousScale;
+      panX = anchor.x - center.x - offsetX * ratio;
+      panY = anchor.y - center.y - offsetY * ratio;
+    }
+    zoomManual = true;
+    zoomPercent = nextPercent;
+    clampPan();
+    applyZoom();
+  };
+  const resetZoomForImage = () => {
+    zoomManual = false;
+    zoomPercent = 100;
+    panX = 0;
+    panY = 0;
+    imageNaturalWidth = 0;
+    imageNaturalHeight = 0;
+    applyZoom();
+  };
+  const toggleDetail = () => {
+    if (!alive || !measurableImage()) return;
+    if (zoomManual && Math.abs(zoomPercent - DETAIL_ZOOM_PERCENT) < 0.5)
+      applyFit();
+    else applyManualZoom(DETAIL_ZOOM_PERCENT);
+  };
+  const beginPinch = () => {
+    const [first, second] = Array.from(activePointers.values());
+    clearPointer();
+    const scale = currentScale();
+    if (!first || !second || scale <= 0 || !imageNaturalWidth) {
+      pinch = undefined;
+      return;
+    }
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+    const center = stageCenter();
+    pinch = {
+      startPercent: currentPercent(),
+      startScale: scale,
+      startDistance: Math.max(
+        1,
+        Math.hypot(first.x - second.x, first.y - second.y),
+      ),
+      offsetX: midpoint.x - (center.x + panX),
+      offsetY: midpoint.y - (center.y + panY),
+    };
+    for (const id of Array.from(activePointers.keys()))
+      preview.setPointerCapture(id);
+    preview.style.touchAction = "none";
+  };
+  const updatePinch = () => {
+    const active = pinch;
+    const [first, second] = Array.from(activePointers.values());
+    if (!active || !first || !second) return;
+    const midpoint = {
+      x: (first.x + second.x) / 2,
+      y: (first.y + second.y) / 2,
+    };
+    const distance = Math.max(
+      1,
+      Math.hypot(first.x - second.x, first.y - second.y),
+    );
+    const nextPercent = clamp(
+      active.startPercent * (distance / active.startDistance),
+      MIN_ZOOM_PERCENT,
+      MAX_ZOOM_PERCENT,
+    );
+    const ratio = nextPercent / 100 / active.startScale;
+    const center = stageCenter();
+    zoomManual = true;
+    zoomPercent = nextPercent;
+    panX = midpoint.x - center.x - active.offsetX * ratio;
+    panY = midpoint.y - center.y - active.offsetY * ratio;
+    clampPan();
+    applyZoom();
+  };
+  const wheelZoom = (event: WheelEvent) => {
+    if (!alive || !stage.querySelector("img") || !imageNaturalWidth) return;
+    event.preventDefault();
+    const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+    const base = zoomManual
+      ? zoomPercent
+      : Math.max(MIN_ZOOM_PERCENT, currentPercent());
+    zoomAt(base * factor, { x: event.clientX, y: event.clientY });
   };
 
   const createSourceButton = (
@@ -1041,11 +1308,19 @@ export function createLibraryBrowserView(
       const photo = model.photoAt(index);
       if (!photo) {
         cell.disabled = true;
-        cell.textContent = "Loading…";
+        const placeholder = document.createElement("span");
+        placeholder.className = "cell-placeholder";
+        placeholder.textContent = "Loading…";
+        cell.append(placeholder);
         send({ kind: "grid-window", index });
       } else {
         cell.dataset.photoIndex = String(index);
         cell.disabled = !gridInteractionEnabled;
+        // The image keeps its own media area so the complete Photo displays
+        // at its true aspect ratio; state, rating, and fact indicators render
+        // in the footer beneath it instead of over the image.
+        const media = document.createElement("span");
+        media.className = "cell-media";
         const image = document.createElement("img");
         image.alt = `Photo ${index + 1} of ${model.total}`;
         image.loading = "lazy";
@@ -1053,6 +1328,9 @@ export function createLibraryBrowserView(
         image.decoding = "async";
         image.draggable = false;
         image.className = "thumbnail";
+        media.append(image);
+        const footer = document.createElement("span");
+        footer.className = "cell-footer";
         const badge = document.createElement("span");
         badge.className = `cell-state ${photo.selectionState}`;
         badge.textContent =
@@ -1084,7 +1362,8 @@ export function createLibraryBrowserView(
           );
         };
         presentFacts();
-        cell.append(image, badge, facts, caption);
+        footer.append(badge, caption, facts);
+        cell.append(media, footer);
         cell.addEventListener("click", () =>
           send({ kind: "open-photo", index }),
         );
@@ -1142,7 +1421,6 @@ export function createLibraryBrowserView(
     total: number,
   ): ReviewImagePresentation | undefined => {
     if (!alive) return undefined;
-    setPreviewMode("fit");
     const surface = photoStatusSurface;
     const image = document.createElement("img");
     image.alt = `Photo ${index + 1} of ${total}`;
@@ -1150,6 +1428,15 @@ export function createLibraryBrowserView(
     image.fetchPriority = "high";
     image.decoding = "async";
     stage.replaceChildren(image);
+    resetZoomForImage();
+    // Fit depends on the Preview's natural pixels, so the geometry is
+    // applied when the bytes arrive.
+    image.addEventListener("load", () => {
+      if (!alive || !image.isConnected) return;
+      imageNaturalWidth = image.naturalWidth;
+      imageNaturalHeight = image.naturalHeight;
+      applyZoom();
+    });
     const target: ReviewImageTarget = {
       get connected() {
         return image.isConnected;
@@ -1191,10 +1478,10 @@ export function createLibraryBrowserView(
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
     else {
-      setPreviewMode("fit");
       stage.replaceChildren(
         paragraph(model.photoId ? "Loading Preview…" : "Photo unavailable"),
       );
+      resetZoomForImage();
     }
     setPhotoStatus(
       model.photoId && model.available === false
@@ -1210,20 +1497,21 @@ export function createLibraryBrowserView(
     status.textContent = text;
   };
 
-  const toggleDetail = () => {
-    if (!alive || !stage.querySelector("img")) return;
-    setPreviewMode(previewMode === "detail" ? "fit" : "detail");
-  };
   const pointerDown = (event: PointerEvent) => {
-    if (
-      !alive ||
-      pointer ||
-      !event.isPrimary ||
-      (previewMode !== "detail" &&
-        (previewMode !== "fit" || !decisionInteractionEnabled)) ||
-      !currentPhotoId
-    )
+    if (!alive || !currentPhotoId) return;
+    activePointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+    if (activePointers.size === 2) {
+      event.preventDefault();
+      beginPinch();
       return;
+    }
+    if (activePointers.size > 2 || pinch || pointer || !event.isPrimary) return;
+    // Fit owns decision swipes; a manual zoom owns bounded panning. Neither
+    // state ever records a decision from a drag.
+    if (!zoomManual && !decisionInteractionEnabled) return;
     pointer = {
       id: event.pointerId,
       startX: event.clientX,
@@ -1232,27 +1520,34 @@ export function createLibraryBrowserView(
       lastY: event.clientY,
       startedAt: event.timeStamp,
       vertical: false,
+      pan: zoomManual,
       surface: photoSurface,
       photoId: currentPhotoId,
     };
     preview.setPointerCapture(event.pointerId);
   };
   const pointerMove = (event: PointerEvent) => {
-    if (!alive || !pointer || pointer.id !== event.pointerId) return;
+    if (!alive) return;
+    const tracked = activePointers.get(event.pointerId);
+    if (tracked) {
+      tracked.x = event.clientX;
+      tracked.y = event.clientY;
+    }
+    if (pinch) {
+      updatePinch();
+      return;
+    }
+    if (!pointer || pointer.id !== event.pointerId) return;
     const dx = event.clientX - pointer.startX;
     const dy = event.clientY - pointer.startY;
     const stepX = event.clientX - pointer.lastX;
     const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
-    if (previewMode === "detail") {
-      panX = clamp(panX + stepX, -stage.clientWidth / 2, stage.clientWidth / 2);
-      panY = clamp(
-        panY + stepY,
-        -stage.clientHeight / 2,
-        stage.clientHeight / 2,
-      );
-      applyTransform();
+    if (pointer.pan || zoomManual) {
+      panX = clamp(panX + stepX, -panLimitX(), panLimitX());
+      panY = clamp(panY + stepY, -panLimitY(), panLimitY());
+      applyZoom();
       return;
     }
     if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12)
@@ -1263,11 +1558,22 @@ export function createLibraryBrowserView(
     rejectFeedback.classList.toggle("pending", dx < -SWIPE_PENDING_PIXELS);
   };
   const finishPointer = (event: PointerEvent, cancelled = false) => {
-    if (!alive || !pointer || pointer.id !== event.pointerId) return;
+    if (!alive) return;
+    activePointers.delete(event.pointerId);
+    if (pinch) {
+      // A pinch keeps ownership until fewer than two pointers remain; the
+      // finger that is still down never becomes a decision swipe.
+      if (activePointers.size >= 2) return;
+      pinch = undefined;
+      preview.style.removeProperty("touch-action");
+      return;
+    }
+    if (!pointer || pointer.id !== event.pointerId) return;
     const active = pointer;
     clearPointer();
     if (
-      previewMode !== "fit" ||
+      active.pan ||
+      zoomManual ||
       cancelled ||
       active.vertical ||
       !decisionInteractionEnabled ||
@@ -1294,9 +1600,11 @@ export function createLibraryBrowserView(
     const target = event.target as HTMLElement | null;
     if (
       event.isComposing ||
-      target?.matches("input, textarea, select, [contenteditable=true]") ||
       target?.isContentEditable ||
-      event.altKey
+      event.altKey ||
+      target?.matches("textarea, select, [contenteditable=true]") ||
+      (target?.matches("input") &&
+        (target as HTMLInputElement).type !== "range")
     )
       return;
     const sourcesOpen = browser.classList.contains("sources-open");
@@ -1316,12 +1624,29 @@ export function createLibraryBrowserView(
       send({ kind: "undo" });
       return;
     }
-    if (modifier || event.shiftKey || photoView.hidden) return;
+    if (modifier || photoView.hidden) return;
+    if (event.key === "+" || event.key === "=") {
+      if (!measurableImage()) return;
+      event.preventDefault();
+      zoomBy(ZOOM_STEP);
+      return;
+    }
+    if (event.key === "-" || event.key === "_") {
+      if (!measurableImage()) return;
+      event.preventDefault();
+      zoomBy(1 / ZOOM_STEP);
+      return;
+    }
+    // A focused zoom slider keeps its own key handling; every other Photo
+    // View shortcut stays available while it holds focus.
+    if (target?.matches("input[type=range]") && rangeAdjustmentKey(event.key))
+      return;
+    if (event.shiftKey) return;
     if (event.key === "ArrowLeft") send({ kind: "previous" });
     else if (event.key === "ArrowRight") send({ kind: "next" });
     else if (event.key.toLowerCase() === "f") {
       event.preventDefault();
-      setPreviewMode("fill");
+      applyFit();
     } else if (event.key.toLowerCase() === "d") {
       event.preventDefault();
       toggleDetail();
@@ -1382,32 +1707,113 @@ export function createLibraryBrowserView(
   const renderMembership = (model: MembershipViewModel) => {
     if (!alive) return;
     membershipModel = model;
-    albumSelect.replaceChildren();
-    if (!model.albums.some((album) => album.id === selectedAlbumId))
-      selectedAlbumId = "";
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = model.albums.length
-      ? "Choose Album…"
-      : "No Albums yet";
-    placeholder.disabled = true;
-    placeholder.selected = selectedAlbumId === "";
-    albumSelect.append(placeholder);
-    for (const album of model.albums) {
-      const option = document.createElement("option");
-      option.value = album.id;
-      option.textContent = album.name;
-      option.selected = album.id === selectedAlbumId;
-      albumSelect.append(option);
+    const pending = new Set(model.pendingAlbumIds);
+    const renderFacts = () => {
+      membershipList.replaceChildren();
+      membershipMessage.hidden = true;
+      membershipMessage.textContent = "";
+      membershipRetry.hidden = true;
+      if (!model.photoPresent) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "No current Photo.";
+        membershipList.hidden = true;
+        return;
+      }
+      if (model.loading) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Loading Albums…";
+        membershipList.hidden = true;
+      } else if (model.failed) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Albums could not be loaded.";
+        membershipList.hidden = true;
+        membershipRetry.hidden = false;
+      } else if (model.containing.length === 0) {
+        membershipStatus.hidden = false;
+        membershipStatus.textContent = "Not in any Album yet";
+        membershipList.hidden = true;
+      } else {
+        membershipStatus.hidden = true;
+        membershipStatus.textContent = "";
+        membershipList.hidden = false;
+        for (const album of model.containing) {
+          const item = document.createElement("li");
+          item.className = "membership-item";
+          item.textContent = album.name;
+          membershipList.append(item);
+        }
+      }
+      if (model.message) {
+        membershipMessage.hidden = false;
+        membershipMessage.textContent = model.message;
+      }
+    };
+    const renderOptions = () => {
+      // Rebuilding the options must not drop keyboard focus from a checkbox
+      // the visitor is operating, even while that checkbox is disabled for
+      // its in-flight toggle.
+      const focused = document.activeElement;
+      const focusedAlbumId =
+        focused instanceof HTMLInputElement &&
+        membershipOptions.contains(focused)
+          ? focused.dataset.membershipAlbumId
+          : undefined;
+      if (focusedAlbumId !== undefined && pending.has(focusedAlbumId))
+        membershipFocusAlbumId = focusedAlbumId;
+      membershipOptions.replaceChildren();
+      if (!model.options.length) {
+        const empty = paragraph(
+          model.photoPresent ? "No Albums yet." : "No current Photo.",
+        );
+        empty.className = "membership-empty";
+        membershipOptions.append(empty);
+        return;
+      }
+      for (const album of model.options) {
+        const option = document.createElement("label");
+        option.className = "membership-option";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.dataset.membershipAlbumId = album.id;
+        input.checked = album.member;
+        input.disabled = !model.photoPresent || pending.has(album.id);
+        input.addEventListener("change", () => {
+          if (!alive) return;
+          send({
+            kind: "membership-toggle",
+            albumId: album.id,
+            member: input.checked,
+          });
+        });
+        const name = document.createElement("span");
+        name.textContent = album.name;
+        option.append(input, name);
+        membershipOptions.append(option);
+      }
+      const targetId = focusedAlbumId ?? membershipFocusAlbumId;
+      if (targetId !== undefined) {
+        const restored = Array.from(
+          membershipOptions.querySelectorAll("input"),
+        ).find((input) => input.dataset.membershipAlbumId === targetId);
+        if (!restored) membershipFocusAlbumId = undefined;
+        else if (!restored.disabled) {
+          if (document.activeElement === document.body) restored.focus();
+          membershipFocusAlbumId = undefined;
+        }
+      }
+    };
+    renderFacts();
+    membershipManage.disabled = !model.photoPresent;
+    membershipManage.setAttribute(
+      "aria-expanded",
+      String(membershipManageOpen),
+    );
+    membershipPanel.hidden = !membershipManageOpen;
+    if (membershipManageOpen) renderOptions();
+    else {
+      membershipFocusAlbumId = undefined;
+      membershipOptions.replaceChildren();
     }
-    albumSelect.disabled = !model.albums.length;
-    addToAlbum.disabled =
-      !model.albums.length ||
-      !model.photoPresent ||
-      !selectedAlbumId ||
-      model.addingAlbumIds.includes(selectedAlbumId);
-    removeFromAlbum.hidden = !model.inOpenAlbum;
-    removeFromAlbum.disabled = !model.inOpenAlbum || model.removing;
   };
 
   const renderFolderAlbum = (model: FolderAlbumViewModel) => {
@@ -1446,6 +1852,14 @@ export function createLibraryBrowserView(
   gridViewport.addEventListener("scroll", onScroll);
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", keydown);
+  const stageObserver = new ResizeObserver(() => {
+    if (!alive) return;
+    // Fit is recomputed and a manual percentage keeps its value, while a
+    // shrinking stage re-clamps how far the Preview may be panned.
+    clampPan();
+    applyZoom();
+  });
+  stageObserver.observe(stage);
   back.addEventListener("click", () => send({ kind: "show-grid" }));
   refresh.addEventListener("click", () => send({ kind: "refresh" }));
   gridEmptyAction.addEventListener("click", () =>
@@ -1456,17 +1870,22 @@ export function createLibraryBrowserView(
   previous.addEventListener("click", () => send({ kind: "previous" }));
   next.addEventListener("click", () => send({ kind: "next" }));
   undo.addEventListener("click", () => send({ kind: "undo" }));
-  detail.addEventListener("click", toggleDetail);
   stage.addEventListener("dblclick", toggleDetail);
-  previewFit.addEventListener("click", () => setPreviewMode("fit"));
-  previewFill.addEventListener("click", () => setPreviewMode("fill"));
-  previewModeControls.addEventListener("pointerdown", (event) =>
+  zoomFit.addEventListener("click", applyFit);
+  zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
+  zoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
+  zoom100.addEventListener("click", () => applyManualZoom(100));
+  zoomSlider.addEventListener("input", () =>
+    applyManualZoom(Number(zoomSlider.value)),
+  );
+  preview.addEventListener("wheel", wheelZoom, { passive: false });
+  zoomControls.addEventListener("pointerdown", (event) =>
     event.stopPropagation(),
   );
-  previewModeControls.addEventListener("pointermove", (event) =>
+  zoomControls.addEventListener("pointermove", (event) =>
     event.stopPropagation(),
   );
-  previewModeControls.addEventListener("pointerup", (event) =>
+  zoomControls.addEventListener("pointerup", (event) =>
     event.stopPropagation(),
   );
   select.addEventListener("click", () =>
@@ -1505,27 +1924,27 @@ export function createLibraryBrowserView(
         advance: false,
       });
   });
-  albumSelect.addEventListener("change", () => {
+  membershipManage.addEventListener("click", () => {
     if (!alive) return;
-    selectedAlbumId = albumSelect.value;
+    membershipManageOpen = !membershipManageOpen;
     if (membershipModel) renderMembership(membershipModel);
   });
+  membershipRetry.addEventListener("click", () =>
+    send({ kind: "membership-retry" }),
+  );
   folderAlbumSelect.addEventListener("change", () => {
     if (!alive) return;
     folderAlbumSelection = folderAlbumSelect.value;
     addFolderToAlbum.disabled = !folderAlbumSelection;
   });
-  addToAlbum.addEventListener("click", () => {
-    if (selectedAlbumId)
-      send({ kind: "membership-add", albumId: selectedAlbumId });
-  });
   addFolderToAlbum.addEventListener("click", () => {
     if (folderAlbumSelection)
       send({ kind: "folder-album-add", albumId: folderAlbumSelection });
   });
-  removeFromAlbum.addEventListener("click", () =>
-    send({ kind: "membership-remove" }),
-  );
+  sortSelect.addEventListener("change", () => {
+    if (!alive || sortSelect.disabled) return;
+    send({ kind: "sort-change", order: sortSelect.value as ViewSourceOrder });
+  });
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
@@ -1575,7 +1994,7 @@ export function createLibraryBrowserView(
     },
     setConnection(isConnected, sourceRetryVisible, photoRetryVisible) {
       if (!alive) return;
-      if (!isConnected) clearPointer();
+      if (!isConnected) resetGestures();
       connection.textContent = isConnected ? "Connected" : "Disconnected";
       connection.classList.toggle("offline", !isConnected);
       retry.hidden = !sourceRetryVisible;
@@ -1601,6 +2020,26 @@ export function createLibraryBrowserView(
     },
     renderSources,
     renderFolderAlbum,
+    renderSort(model) {
+      if (!alive) return;
+      if (renderedSortKind !== model.kind) {
+        renderedSortKind = model.kind;
+        sortSelect.replaceChildren(
+          ...SORT_OPTIONS[model.kind].map((option) => {
+            const element = document.createElement("option");
+            element.value = option.value;
+            element.textContent = option.label;
+            return element;
+          }),
+        );
+      }
+      const options = SORT_OPTIONS[model.kind];
+      sortSelect.value = options.some((option) => option.value === model.value)
+        ? model.value
+        : options[0]!.value;
+      sortSelect.disabled = !model.enabled;
+      gridSort.hidden = false;
+    },
     setControls(model) {
       if (!alive) return;
       gridInteractionEnabled = model.gridEnabled;
@@ -1625,10 +2064,7 @@ export function createLibraryBrowserView(
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
-      const hasPreviewImage = Boolean(stage.querySelector("img"));
-      previewFit.disabled = !hasPreviewImage;
-      previewFill.disabled = !hasPreviewImage;
-      detail.disabled = !hasPreviewImage;
+      syncZoomControls();
     },
     renderMembership,
     prepareSourceOpen(name) {
@@ -1637,6 +2073,7 @@ export function createLibraryBrowserView(
       cancelGridRender();
       gridLayer.replaceChildren();
       stage.replaceChildren();
+      resetZoomForImage();
       gridView.hidden = false;
       photoView.hidden = true;
       closeSources(false);
@@ -1665,7 +2102,7 @@ export function createLibraryBrowserView(
     },
     showGrid(index) {
       if (!alive) return;
-      resetTransform();
+      resetZoomForImage();
       photoView.hidden = true;
       gridView.hidden = false;
       closeSources(false);
@@ -1684,7 +2121,7 @@ export function createLibraryBrowserView(
       photoView.scrollTop = 0;
       syncSourcePanel();
       photoView.focus();
-      resetTransform();
+      resetZoomForImage();
       photoSurface = {};
     },
     renderPhotoFacts,
@@ -1699,8 +2136,10 @@ export function createLibraryBrowserView(
       );
     },
     showPreviewUnavailable(text) {
-      if (alive && !stage.querySelector("img"))
+      if (alive && !stage.querySelector("img")) {
         stage.replaceChildren(paragraph(text));
+        resetZoomForImage();
+      }
     },
     setPreviewFacts(value, isLimited) {
       if (!alive) return;
@@ -1732,7 +2171,9 @@ export function createLibraryBrowserView(
     dispose() {
       if (!alive) return;
       alive = false;
-      clearPointer();
+      resetGestures();
+      stageObserver.disconnect();
+      preview.removeEventListener("wheel", wheelZoom);
       cancelGridRender();
       compactSources.removeEventListener("change", onSourceViewportChange);
       gridViewport.removeEventListener("scroll", onScroll);
@@ -1821,4 +2262,14 @@ function sourceLabel(source?: ViewPreviewSource): string {
 
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
+}
+
+/// Keys a focused range input handles itself: arrows, Home, End, and Page.
+function rangeAdjustmentKey(key: string): boolean {
+  return (
+    key.startsWith("Arrow") ||
+    key.startsWith("Page") ||
+    key === "Home" ||
+    key === "End"
+  );
 }

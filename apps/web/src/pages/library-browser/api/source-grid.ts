@@ -10,18 +10,32 @@ export type SourceGridFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+/// One explicit view order for an open source. `source-default` leaves the
+/// order to the server: Capture Time earliest first for `All Photos` and an
+/// Original Folder, persisted membership position for an Album.
+export type SourceViewOrder =
+  | "source-default"
+  | "capture-time-asc"
+  | "capture-time-desc";
+
 export type BrowseSourceRequest =
-  | Readonly<{ kind: "library"; preferredPhotoId?: string }>
+  | Readonly<{
+      kind: "library";
+      preferredPhotoId?: string;
+      order?: SourceViewOrder;
+    }>
   | Readonly<{
       kind: "album";
       albumId: string;
       preferredPhotoId?: string;
+      order?: SourceViewOrder;
     }>
   | Readonly<{
       kind: "folder";
       folderPath: string;
       publication: string;
       preferredPhotoId?: string;
+      order?: SourceViewOrder;
     }>;
 
 export type SourceGridApiResult<T> =
@@ -86,6 +100,10 @@ export async function openBrowse(
   signal: AbortSignal,
 ): Promise<SourceGridApiResult<BrowseOpenResponse>> {
   let response: Response;
+  const order =
+    source.order && source.order !== "source-default"
+      ? { order: source.order }
+      : {};
   try {
     response = await fetcher("/api/browse", {
       method: "POST",
@@ -94,6 +112,7 @@ export async function openBrowse(
         source.kind === "library"
           ? {
               source: "library",
+              ...order,
               ...(source.preferredPhotoId
                 ? { photoId: source.preferredPhotoId }
                 : {}),
@@ -103,6 +122,7 @@ export async function openBrowse(
                 source: "folder",
                 folderPath: source.folderPath,
                 publication: source.publication,
+                ...order,
                 ...(source.preferredPhotoId
                   ? { photoId: source.preferredPhotoId }
                   : {}),
@@ -110,6 +130,7 @@ export async function openBrowse(
             : {
                 source: "album",
                 albumId: source.albumId,
+                ...order,
                 ...(source.preferredPhotoId
                   ? { photoId: source.preferredPhotoId }
                   : {}),

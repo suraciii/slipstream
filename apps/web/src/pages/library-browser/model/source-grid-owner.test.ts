@@ -165,6 +165,55 @@ describe("SourceGridOwner", () => {
     ]);
   });
 
+  test("sends only the requested order and reports it as the open view order", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const releases: string[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (init?.method === "DELETE") {
+        releases.push(url.pathname.split("/").at(-1)!);
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      if (url.pathname === "/api/browse" && init?.method === "POST") {
+        if (typeof init.body !== "string") throw new Error("expected a body");
+        bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        return Promise.resolve(opened(`browse-${bodies.length}`));
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    expect(owner.order).toBe("source-default");
+    await owner.open({ kind: "library" });
+    expect(bodies[0]).toEqual({ source: "library" });
+    expect(owner.order).toBe("source-default");
+
+    const album = {
+      kind: "album" as const,
+      album: { id: "album-1", name: "Keepers" },
+    };
+    await owner.open(album, { order: "capture-time-asc" });
+    expect(bodies[1]).toEqual({
+      source: "album",
+      albumId: "album-1",
+      order: "capture-time-asc",
+    });
+    expect(owner.order).toBe("capture-time-asc");
+
+    await owner.open(album, {
+      mode: "reopen",
+      order: "capture-time-desc",
+      preferredPhotoId: "photo-7",
+    });
+    expect(bodies[2]).toEqual({
+      source: "album",
+      albumId: "album-1",
+      order: "capture-time-desc",
+      photoId: "photo-7",
+    });
+    expect(owner.order).toBe("capture-time-desc");
+    expect(releases).toEqual(["browse-1", "browse-2"]);
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

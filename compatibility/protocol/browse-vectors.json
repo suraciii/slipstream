@@ -430,5 +430,119 @@
         "error": "Unknown Original Folder"
       }
     }
+  },
+  {
+    "name": "browse-open-library-capture-time-desc",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "order": "capture-time-desc"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 0,
+        "position": 0
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-invalid-order",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "order": "newest-first"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid browse order"
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-album-order-is-rejected",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "order": "album-order"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid browse order"
+      }
+    }
+  },
+  {
+    "name": "browse-open-folder-album-order-is-rejected",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "folder",
+        "folderPath": "",
+        "publication": "$publication",
+        "order": "album-order"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid browse order"
+      }
+    }
+  },
+  {
+    "name": "photo-albums-unknown-photo",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/00000000-0000-4000-8000-000000000000/albums"
+    },
+    "expected": {
+      "status": 404,
+      "body": {
+        "error": "Photo not found"
+      }
+    }
+  },
+  {
+    "name": "photo-albums-invalid-photo",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/NOT-A-ID/albums"
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Photo"
+      }
+    }
   }
 ]

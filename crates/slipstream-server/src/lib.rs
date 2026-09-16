@@ -62,9 +62,10 @@ pub(crate) use http::{HttpState, healthz, open_web_root, static_web};
 pub use http::{RunningServer, create_router, expand_library, start_server};
 pub use wire::{
     AlbumSummaryListResponse, AlbumSummaryWire, BrowseOpenResponse, BrowsePositionResponse,
-    BrowseSourceRequest, BrowseWindowResponse, DerivativeDelivery, FileLocationsResponse,
-    FolderAlbumMutationResponse, FolderChildWire, LibraryOverviewResponse, OriginalWire,
-    PhotoMetadataWire, PhotoSummary, PreviewResponse, ScanStatusWire,
+    BrowseSourceRequest, BrowseViewOrder, BrowseWindowResponse, DerivativeDelivery,
+    FileLocationsResponse, FolderAlbumMutationResponse, FolderChildWire, LibraryOverviewResponse,
+    OriginalWire, PhotoAlbumMembershipWire, PhotoAlbumsResponse, PhotoMetadataWire, PhotoSummary,
+    PreviewResponse, ScanStatusWire,
 };
 pub(crate) use wire::{album_summary, photo_summary_indexed_with_url, selection_state};
 

@@ -1,6 +1,6 @@
 use crate::{
     AlbumBrowseTarget, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact,
-    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoStateMutation,
+    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoAlbumMembership, PhotoStateMutation,
     PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
@@ -390,6 +390,22 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.list_album_summaries_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Bounded per-Photo Album membership for the Photo View membership
+    /// query. `None` means the Photo is unknown to the persisted Library.
+    pub async fn photo_albums(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<Vec<PhotoAlbumMembership>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.photo_albums_receiver(photo_id)
         }?;
         receive
             .await

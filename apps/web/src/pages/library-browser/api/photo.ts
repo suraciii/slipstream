@@ -1,4 +1,5 @@
 import type {
+  PhotoAlbumsResponse,
   PhotoMetadataResponse,
   PreviewResponse,
   SelectionState,
@@ -30,6 +31,10 @@ export type PhotoStateResult =
 
 export type PhotoMetadataResult =
   | Readonly<{ kind: "ok"; value: PhotoMetadataResponse }>
+  | Readonly<{ kind: "failed"; status?: number }>;
+
+export type PhotoAlbumsResult =
+  | Readonly<{ kind: "ok"; value: PhotoAlbumsResponse }>
   | Readonly<{ kind: "failed"; status?: number }>;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -79,6 +84,49 @@ const validMetadata = (value: unknown): value is PhotoMetadataResponse =>
   optional(value.iso, (item) => Number.isInteger(item) && Number(item) >= 0) &&
   optional(value.shutterSpeed, (item) => typeof item === "string") &&
   optional(value.focalLength, (item) => typeof item === "string");
+
+const validPhotoAlbums = (value: unknown): value is PhotoAlbumsResponse =>
+  isRecord(value) &&
+  Array.isArray(value.albums) &&
+  value.albums.every(
+    (album) =>
+      isRecord(album) &&
+      typeof album.id === "string" &&
+      album.id.length > 0 &&
+      typeof album.name === "string",
+  );
+
+export async function fetchPhotoAlbums(
+  fetcher: PhotoFetch,
+  photoId: string,
+  signal: AbortSignal,
+): Promise<PhotoAlbumsResult> {
+  let response: Response;
+  try {
+    response = await fetcher(`/api/photos/${photoId}/albums`, {
+      signal,
+      priority: "high",
+    });
+  } catch {
+    return Object.freeze({ kind: "failed" });
+  }
+  if (!response.ok)
+    return Object.freeze({ kind: "failed", status: response.status });
+  try {
+    const value: unknown = await response.json();
+    if (!validPhotoAlbums(value)) return Object.freeze({ kind: "failed" });
+    return Object.freeze({
+      kind: "ok",
+      value: Object.freeze({
+        albums: value.albums.map((album) =>
+          Object.freeze({ id: album.id, name: album.name }),
+        ),
+      }),
+    });
+  } catch {
+    return Object.freeze({ kind: "failed" });
+  }
+}
 
 export async function fetchPhotoMetadata(
   fetcher: PhotoFetch,

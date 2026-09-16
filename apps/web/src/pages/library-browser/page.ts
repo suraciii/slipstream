@@ -8,7 +8,7 @@ import type {
   FolderChild,
   SelectionState,
 } from "./api/contracts.js";
-import { fetchPhotoMetadata } from "./api/photo.js";
+import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
 import {
   createFileLocationOwner,
   type FileLocationAuthority,
@@ -31,6 +31,7 @@ import {
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
+import type { SourceViewOrder } from "./api/source-grid.js";
 import {
   createAlbumActionOwner,
   type AlbumActionAdmission,
@@ -175,6 +176,7 @@ export function mountLibraryBrowser(
       }
     }
     renderMembershipControls();
+    refreshMembershipFacts();
     renderSources();
   };
 
@@ -231,7 +233,7 @@ export function mountLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(remembered);
+        await openSourceDescriptor(remembered, undefined, sourceGrid.order);
       } else if (coordination.isCurrent()) {
         view.setGridStatus("Could not load this source. Retry to continue.");
       }
@@ -418,6 +420,19 @@ export function mountLibraryBrowser(
       recoveryGate.discard(claim);
     syncConnection();
   };
+  /// The open source's order is view state: the select shows the order the
+  /// open snapshot was built with, and stays disabled while an open is
+  /// already busy so a second order cannot race the first.
+  const renderSortControl = () => {
+    if (!applicationAlive) return;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
+    view.renderSort({
+      kind: sourceGrid.kind,
+      value: sourceGrid.order,
+      enabled: !interactionBusy && !photoOwner.opening,
+    });
+  };
+
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
@@ -449,6 +464,7 @@ export function mountLibraryBrowser(
         !photoOwner.opening &&
         photoOwner.canUndo,
     });
+    renderSortControl();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -1057,6 +1073,7 @@ export function mountLibraryBrowser(
     album?: AlbumSummary,
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
+    order: SourceViewOrder = "source-default",
   ) => {
     const descriptor: SourceGridSource =
       kind === "library"
@@ -1071,12 +1088,13 @@ export function mountLibraryBrowser(
               folder: folder!,
               publication: fileLocations.publication!,
             };
-    return openSourceDescriptor(descriptor, preferredPhotoId);
+    return openSourceDescriptor(descriptor, preferredPhotoId, order);
   };
 
   async function openSourceDescriptor(
     requested: SourceGridSource,
     preferredPhotoId?: string,
+    order: SourceViewOrder = "source-default",
   ): Promise<void> {
     const descriptor: SourceGridSource =
       requested.kind === "folder" && fileLocations.publication
@@ -1089,6 +1107,7 @@ export function mountLibraryBrowser(
     photoMetadataAbort = undefined;
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
+      order,
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
@@ -1110,8 +1129,7 @@ export function mountLibraryBrowser(
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
     view.prepareSourceOpen(sourceGrid.name);
-    // A new open snapshot ends the previous source's removal memory.
-    removedFromCurrentAlbum.clear();
+    renderSortControl();
     try {
       const opened = await pendingOpen;
       if (opened.kind === "detached") return;
@@ -1156,6 +1174,11 @@ export function mountLibraryBrowser(
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
       setConnected(true);
+      // A source replacement empties the snapshot while its open is in
+      // flight, and any render during that window clamps the Grid to the
+      // top. Position the reopened Grid only once the loaded window can
+      // hold the scroll the server resolved for the preferred Photo.
+      view.scrollToGridIndex(gridPosition);
       renderGrid();
       if (sourceGrid.total) {
         view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
@@ -1181,6 +1204,30 @@ export function mountLibraryBrowser(
       }
     }
   }
+
+  /// An explicit order change reopens the same source with the new order,
+  /// keeping the browser-local current Photo by identity. A source with no
+  /// current Photo yet starts at the first Photo of the new order.
+  const changeSort = async (order: SourceViewOrder): Promise<void> => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    if (order === sourceGrid.order) return;
+    // A Folder reopen needs the current File Location binding: without it a
+    // sort change can only send a stale publication and fail as a false
+    // disconnection. Match the refresh/reopen precondition.
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive || !bound) {
+        if (applicationAlive)
+          view.setGridStatus("Could not load this source. Retry to continue.");
+        return;
+      }
+    }
+    await openSourceDescriptor(
+      sourceGrid.source,
+      photoOwner.lastCurrentPhotoId,
+      order,
+    );
+  };
 
   const emptySourceStatus = (): string => {
     if (sourceGrid.kind === "album")
@@ -1251,6 +1298,7 @@ export function mountLibraryBrowser(
         : sourceGrid.source;
     const pendingOpen = sourceGrid.open(descriptor, {
       mode: "reopen",
+      order: sourceGrid.order,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     const authority = sourceGrid.authority;
@@ -1299,9 +1347,6 @@ export function mountLibraryBrowser(
       if (opened.kind === "failed") throw new Error("browse reopen failed");
       const gridPosition = sourceGrid.readGridPosition(authority);
       if (gridPosition === undefined) return;
-      // The replacement Snapshot is now authoritative. Retain this memory when
-      // reopen fails so the old recoverable view remains truthful.
-      removedFromCurrentAlbum.clear();
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,
@@ -1543,110 +1588,184 @@ export function mountLibraryBrowser(
     );
   };
 
-  // Album action ownership suppresses duplicate membership admissions. The
-  // open snapshot separately remembers members removed until reopen.
-  const removedFromCurrentAlbum = new Set<string>();
+  type MembershipFacts =
+    | Readonly<{ kind: "loading" }>
+    | Readonly<{
+        kind: "ready";
+        albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
+      }>
+    | Readonly<{ kind: "failed" }>;
+  let membershipFacts: MembershipFacts = { kind: "loading" };
+  let membershipPhotoId: string | undefined;
+  let membershipMessage: string | undefined;
+  let membershipAbort: AbortController | undefined;
+  let membershipRevision = 0;
+  const membershipAlbumName = (albumId: string): string =>
+    application.albums.find((album) => album.id === albumId)?.name ?? "Album";
 
   const renderMembershipControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
+    const photoId = photo?.id;
+    const facts: MembershipFacts =
+      photoId !== undefined && membershipPhotoId === photoId
+        ? membershipFacts
+        : { kind: "loading" };
+    const containing = facts.kind === "ready" ? facts.albums : [];
+    const memberIds = new Set(containing.map((album) => album.id));
+    const pending = photoId
+      ? application.albums
+          .filter(
+            (album) =>
+              albumActions.isMembershipAdmitted("add", album.id, photoId) ||
+              albumActions.isMembershipAdmitted("remove", album.id, photoId),
+          )
+          .map((album) => album.id)
+      : [];
     view.renderMembership({
-      albums: application.albums.map(({ id, name }) => ({ id, name })),
       photoPresent: Boolean(photo),
-      addingAlbumIds: photo
-        ? application.albums
-            .filter((album) =>
-              albumActions.isMembershipAdmitted("add", album.id, photo.id),
-            )
-            .map((album) => album.id)
-        : [],
-      inOpenAlbum:
-        sourceGrid.kind === "album" &&
-        Boolean(sourceGrid.albumId) &&
-        Boolean(photo) &&
-        !removedFromCurrentAlbum.has(photo!.id),
-      removing:
-        Boolean(photo && sourceGrid.albumId) &&
-        albumActions.isMembershipAdmitted(
-          "remove",
-          sourceGrid.albumId!,
-          photo!.id,
-        ),
+      loading: Boolean(photo) && facts.kind === "loading",
+      failed: Boolean(photo) && facts.kind === "failed",
+      ...(membershipMessage ? { message: membershipMessage } : {}),
+      containing,
+      options: application.albums.map((album) => ({
+        id: album.id,
+        name: album.name,
+        member: memberIds.has(album.id),
+      })),
+      pendingAlbumIds: pending,
     });
   };
 
-  const addMembership = (albumId: string): void => {
+  /// Loads the current Photo's Album membership. The read is fenced to the
+  /// Photo, to the generation, and to any membership toggle admitted while it
+  /// runs: a response that arrives after its Photo stopped being current, or
+  /// after a toggle took over the panel, is discarded. A revalidation keeps
+  /// the stated facts while it runs so the panel does not flicker.
+  const loadPhotoAlbums = async (
+    authority: PhotoAuthority,
+    photoId: string | undefined,
+    options: Readonly<{ force?: boolean; keepFacts?: boolean }> = {},
+  ): Promise<void> => {
+    if (
+      !options.force &&
+      photoId !== undefined &&
+      photoId === membershipPhotoId &&
+      membershipFacts.kind !== "failed"
+    )
+      return;
+    const showLoading = !options.keepFacts || photoId !== membershipPhotoId;
+    membershipAbort?.abort();
+    membershipAbort = undefined;
+    membershipPhotoId = photoId;
+    membershipMessage = undefined;
+    membershipRevision += 1;
+    const revision = membershipRevision;
+    if (!photoId) {
+      membershipFacts = { kind: "loading" };
+      renderMembershipControls();
+      return;
+    }
+    if (showLoading) {
+      membershipFacts = { kind: "loading" };
+      renderMembershipControls();
+    }
+    const controller = new AbortController();
+    membershipAbort = controller;
+    const result = await fetchPhotoAlbums(fetcher, photoId, controller.signal);
+    if (
+      controller.signal.aborted ||
+      membershipRevision !== revision ||
+      !photoOwner.isCurrent(authority) ||
+      currentPhoto()?.id !== photoId
+    )
+      return;
+    membershipFacts =
+      result.kind === "ok"
+        ? { kind: "ready", albums: result.value.albums }
+        : { kind: "failed" };
+    renderMembershipControls();
+  };
+
+  const refreshMembershipFacts = (): void => {
+    if (!applicationAlive) return;
+    const photo = currentPhoto();
+    if (!photo) return;
+    void loadPhotoAlbums(photoOwner.authority, photo.id, {
+      force: true,
+      keepFacts: true,
+    });
+  };
+
+  /// Sends one admitted membership toggle for the current Photo. The
+  /// checkbox shows the intended state while the mutation is in flight, and
+  /// a failed mutation keeps the panel truthful and names the action.
+  const toggleMembership = (albumId: string, member: boolean): void => {
     const photo = currentPhoto();
     if (!photo || !albumId) return;
     const photoId = photo.id;
-    if (albumActions.isMembershipAdmitted("add", albumId, photoId)) return;
+    const kind = member ? "add" : "remove";
+    if (albumActions.isMembershipAdmitted(kind, albumId, photoId)) return;
     const photoAuthority = photoOwner.authority;
-    const snapshotAuthority = sourceGrid.authority;
-    void (async () => {
-      const settlement = mutateAlbum(
-        (context) => albumActions.addMembership(albumId, photoId, context),
-        "photo",
-        photoAuthority,
+    const revision = ++membershipRevision;
+    const prior = membershipFacts;
+    if (membershipFacts.kind === "ready") {
+      const others = membershipFacts.albums.filter(
+        (album) => album.id !== albumId,
       );
-      renderMembershipControls();
-      const { ok: added, announce } = await settlement;
-      if (
-        added &&
-        sourceGrid.isCurrent(snapshotAuthority) &&
-        albumId === sourceGrid.albumId
-      )
-        removedFromCurrentAlbum.delete(photoId);
-      renderMembershipControls();
-      if (
-        added &&
-        photoOwner.isCurrent(photoAuthority) &&
-        currentPhoto()?.id === photoId
-      )
-        announce("Added to the Album.");
-    })();
-  };
-
-  const removeMembership = (): void => {
-    const photo = currentPhoto();
-    if (
-      !photo ||
-      sourceGrid.kind !== "album" ||
-      !sourceGrid.albumId ||
-      removedFromCurrentAlbum.has(photo.id)
-    )
-      return;
-    const albumId = sourceGrid.albumId;
-    const photoId = photo.id;
-    if (albumActions.isMembershipAdmitted("remove", albumId, photoId)) return;
-    const photoAuthority = photoOwner.authority;
+      membershipFacts = {
+        kind: "ready",
+        albums: member
+          ? [...others, { id: albumId, name: membershipAlbumName(albumId) }]
+          : others,
+      };
+    }
+    membershipMessage = undefined;
+    renderMembershipControls();
     void (async () => {
-      const settlement = mutateAlbum(
-        (context) => albumActions.removeMembership(albumId, photoId, context),
-        "photo",
-        photoAuthority,
-      );
+      const settlement = member
+        ? mutateAlbum(
+            (context) => albumActions.addMembership(albumId, photoId, context),
+            "photo",
+            photoAuthority,
+          )
+        : mutateAlbum(
+            (context) =>
+              albumActions.removeMembership(albumId, photoId, context),
+            "photo",
+            photoAuthority,
+          );
+      // The admission is registered now: show the checkbox as in flight.
       renderMembershipControls();
-      const {
-        ok: removed,
-        announce,
-        removedFromCurrentAlbum: removedFact,
-      } = await settlement;
-      if (
-        removed &&
-        removedFact !== undefined &&
-        sourceGrid.isCurrent(removedFact.sourceAuthority) &&
-        removedFact.albumId === sourceGrid.albumId
-      )
-        removedFromCurrentAlbum.add(photoId);
+      const { ok, announce } = await settlement;
+      const stillCurrent =
+        photoOwner.isCurrent(photoAuthority) && currentPhoto()?.id === photoId;
+      if (ok) {
+        if (stillCurrent) {
+          announce(
+            member
+              ? "Added to the Album."
+              : albumId === sourceGrid.albumId
+                ? "Removed from the Album. It stays in this open view until reopened."
+                : "Removed from the Album.",
+          );
+          void loadPhotoAlbums(photoAuthority, photoId, {
+            force: true,
+            keepFacts: true,
+          });
+        }
+        return;
+      }
+      // A failed toggle restores the prior true state. Facts that were still
+      // loading are not a true state: they become a load failure that offers
+      // the membership retry instead of stranding the panel on loading.
+      if (stillCurrent && membershipRevision === revision)
+        membershipFacts = prior.kind === "ready" ? prior : { kind: "failed" };
+      if (!stillCurrent) return;
+      membershipMessage = member
+        ? `Could not add this Photo to “${membershipAlbumName(albumId)}”.`
+        : `Could not remove this Photo from “${membershipAlbumName(albumId)}”.`;
       renderMembershipControls();
-      if (
-        removed &&
-        photoOwner.isCurrent(photoAuthority) &&
-        currentPhoto()?.id === photoId
-      )
-        announce(
-          "Removed from the Album. It stays in this open view until reopened.",
-        );
     })();
   };
 
@@ -1690,6 +1809,7 @@ export function mountLibraryBrowser(
       previewUrl: photo?.preview.url,
     });
     void loadPhotoMetadata(authority, photo?.id);
+    void loadPhotoAlbums(authority, photo?.id);
     if (image)
       photoOwner.attachReviewImage(
         authority,
@@ -2010,10 +2130,17 @@ export function mountLibraryBrowser(
       const album = application.albums.find(
         (candidate) => candidate.id === sourceGrid.albumId,
       );
-      if (album) await openSource("album", album);
+      if (album)
+        await openSource(
+          "album",
+          album,
+          undefined,
+          undefined,
+          sourceGrid.order,
+        );
       return;
     }
-    await openSourceDescriptor(sourceGrid.source);
+    await openSourceDescriptor(sourceGrid.source, undefined, sourceGrid.order);
   };
 
   const currentSourceRangeRetries = (
@@ -2095,7 +2222,7 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(remembered);
+      await openSourceDescriptor(remembered, undefined, sourceGrid.order);
     })();
   };
 
@@ -2184,6 +2311,9 @@ export function mountLibraryBrowser(
         if (outcome?.kind === "refresh-current-source") void refreshSource();
         return;
       }
+      case "sort-change":
+        void changeSort(intent.order);
+        return;
       case "source-open": {
         const source = intent.source;
         if (source.kind === "library") {
@@ -2273,11 +2403,11 @@ export function mountLibraryBrowser(
       case "photo-mutation":
         void mutate(intent.field, intent.value, intent.advance);
         return;
-      case "membership-add":
-        addMembership(intent.albumId);
+      case "membership-toggle":
+        toggleMembership(intent.albumId, intent.member);
         return;
-      case "membership-remove":
-        removeMembership();
+      case "membership-retry":
+        refreshMembershipFacts();
     }
   }
 
@@ -2286,6 +2416,7 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     applicationAlive = false;
     photoMetadataAbort?.abort();
+    membershipAbort?.abort();
     view.dispose();
     cancelScheduledGridRender();
     albumRecovery = undefined;

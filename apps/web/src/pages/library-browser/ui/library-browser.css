@@ -332,6 +332,37 @@
   min-width: 0;
 }
 
+.grid-sort {
+  min-width: 0;
+  flex: 0 0.25 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.grid-sort label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.grid-sort select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 2.25rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--canvas);
+  color: var(--text);
+  font-size: 0.72rem;
+}
+
+.grid-sort select:disabled {
+  opacity: 0.55;
+}
+
 .folder-album-controls {
   min-width: min(24rem, 42%);
   display: flex;
@@ -429,7 +460,7 @@
   height: 166px;
   min-height: 0;
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 0.25rem;
   overflow: hidden;
   padding: 0.3rem;
@@ -444,26 +475,56 @@
   background: #191d23;
 }
 
-.thumbnail {
-  width: 100%;
-  height: 126px;
-  object-fit: contain;
+/* The Photo keeps its own media area so the complete image displays at its
+   true aspect ratio; indicators render in the footer instead of over it. */
+.cell-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-radius: 0.125rem;
   background: #050607;
 }
 
-.cell-state {
-  position: absolute;
-  top: 0.5rem;
-  left: 0.5rem;
-  min-width: 1.5rem;
-  height: 1.5rem;
+.thumbnail {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 0.125rem;
+}
+
+.cell-placeholder {
+  grid-row: 1 / -1;
   display: grid;
   place-items: center;
+  min-height: 0;
+  border-radius: 0.125rem;
+  background: #0b0d10;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.cell-footer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.2rem 0.3rem;
+  min-width: 0;
+}
+
+.cell-state {
+  display: grid;
+  place-items: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
   border: 1px solid rgb(255 255 255 / 18%);
   border-radius: 50%;
   background: #20252c;
-  font-size: 0.9rem;
+  font-size: 0.7rem;
 }
 
 .cell-state.selected {
@@ -477,6 +538,7 @@
 }
 
 .cell-caption {
+  grid-column: 2;
   overflow: hidden;
   color: var(--muted);
   font-size: 0.75rem;
@@ -485,17 +547,12 @@
 }
 
 .cell-facts {
-  position: absolute;
-  right: 0.45rem;
-  bottom: 1.8rem;
-  left: 0.45rem;
-  padding: 0.2rem 0.3rem;
-  border-radius: 0.2rem;
-  background: rgb(13 15 18 / 88%);
+  grid-column: 1 / -1;
+  min-width: 0;
   color: var(--warning);
   font-size: 0.62rem;
   font-weight: 650;
-  line-height: 1.3;
+  line-height: 1.25;
   overflow-wrap: anywhere;
 }
 
@@ -593,20 +650,24 @@
   user-select: none;
 }
 
-.preview-mode-controls {
+.zoom-controls {
   position: absolute;
   z-index: 2;
   top: 0.65rem;
   right: 0.65rem;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 0.2rem;
+  max-width: calc(100% - 1.3rem);
   padding: 0.2rem;
   border: 1px solid var(--border-strong);
   border-radius: 0.375rem;
   background: rgb(14 16 19 / 92%);
 }
 
-.preview-mode {
+.zoom-control {
   min-width: 3rem;
   min-height: 2.1rem;
   padding: 0.25rem 0.5rem;
@@ -616,17 +677,38 @@
   font-size: 0.7rem;
 }
 
-.preview-mode[aria-pressed="true"] {
+.zoom-control.zoom-step {
+  min-width: 2.75rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.zoom-slider {
+  width: 7rem;
+  min-height: 2.1rem;
+  padding: 0;
+  accent-color: var(--focus);
+}
+
+.zoom-level {
+  min-width: 2.9rem;
+  color: var(--text);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.zoom-control[aria-pressed="true"] {
   border-color: var(--focus);
   background: var(--raised);
   color: var(--text);
 }
 
-.preview-mode:disabled {
+.zoom-control:disabled {
   opacity: 0.55;
 }
 
-.preview.detail {
+.preview[data-zoom-state="manual"] {
   touch-action: none;
 }
 
@@ -635,6 +717,9 @@
   min-height: 0;
   display: grid;
   place-items: center;
+  /* Centering track placement keeps an oversized Preview overflowing the
+     stage symmetrically, which pan and pointer-anchored zoom rely on. */
+  place-content: center;
   overflow: hidden;
   transition: transform 140ms ease-out;
 }
@@ -646,24 +731,14 @@
 
 .image-stage img {
   display: block;
+  /* Before the zoom engine measures the Preview it fills the stage, so the
+     load state keeps the composition the applied Fit geometry produces. */
   width: 100%;
   height: 100%;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  transform-origin: center;
-  transition: transform 120ms ease-out;
-}
-
-.preview.fill .image-stage img {
   max-width: none;
   max-height: none;
-  object-fit: cover;
-}
-
-.preview.detail .image-stage img {
-  max-width: 100%;
-  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center;
 }
 
 .swipe-feedback {
@@ -789,6 +864,10 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.photo-controls button {
+  min-height: 2.75rem;
+}
+
 .decision-controls span {
   margin-left: 0.2rem;
   color: currentColor;
@@ -840,8 +919,8 @@
 }
 
 .rating-controls legend,
-.membership-controls label {
-  margin-bottom: 0.25rem;
+.membership-heading {
+  margin: 0 0 0.25rem;
   color: var(--muted);
   font-size: 0.68rem;
   font-weight: 650;
@@ -875,31 +954,90 @@
   font-size: 0.65rem;
 }
 
-.membership-controls {
+.membership {
   min-width: 0;
-  display: flex;
-  align-items: end;
+  display: grid;
   gap: 0.35rem;
 }
 
-.membership-controls label {
-  align-self: center;
-  margin: 0;
+.membership-facts {
+  min-width: 0;
+  display: grid;
+  gap: 0.2rem;
 }
 
-.membership-controls select {
+.membership-status,
+.membership-message {
+  margin: 0;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.membership-status {
+  color: var(--muted);
+}
+
+.membership-message {
+  color: var(--warning);
+}
+
+.membership-list {
   min-width: 0;
-  min-height: 2.5rem;
-  flex: 1;
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.78rem;
+}
+
+.membership-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.membership-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.membership-panel {
+  min-width: 0;
+  max-height: 12rem;
   padding: 0.4rem 0.5rem;
-  border: 1px solid var(--border-strong);
+  overflow-y: auto;
+  border: 1px solid var(--border);
   border-radius: 0.375rem;
   background: var(--canvas);
-  color: var(--text);
 }
 
-.membership-controls button {
+.membership-options {
+  min-width: 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.membership-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+}
+
+.membership-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.membership-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 [hidden] {
@@ -924,7 +1062,7 @@
     min-height: 2.75rem;
   }
 
-  .preview.fit {
+  .preview[data-zoom-state="fit"] {
     touch-action: pan-y;
   }
 }
@@ -1052,6 +1190,15 @@
     min-height: 2.75rem;
   }
 
+  .grid-sort select {
+    max-width: 8.5rem;
+    min-height: 2.75rem;
+  }
+
+  .grid-heading {
+    flex: 1 1 0;
+  }
+
   .source-toggle {
     flex: none;
   }
@@ -1082,12 +1229,17 @@
     grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem;
   }
 
-  .preview-mode-controls {
+  .zoom-controls {
     top: 0.45rem;
     right: 0.45rem;
   }
 
-  .preview-mode {
+  .zoom-control {
+    min-height: 2.75rem;
+  }
+
+  .zoom-slider {
+    width: 5.5rem;
     min-height: 2.75rem;
   }
 
@@ -1119,7 +1271,7 @@
   }
 
   .rating-controls,
-  .membership-controls,
+  .membership,
   .photo-controls {
     grid-column: auto;
   }
@@ -1129,8 +1281,8 @@
     font-size: 0.75rem;
   }
 
-  .membership-controls select {
-    min-height: 2.75rem;
+  .membership-panel {
+    max-height: 10rem;
   }
 
   .photo-controls {
@@ -1158,13 +1310,9 @@
     font-size: 0.72rem;
   }
 
-  .membership-controls {
+  .membership-actions {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .membership-controls button {
-    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

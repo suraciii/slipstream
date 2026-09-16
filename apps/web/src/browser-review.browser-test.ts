@@ -60,6 +60,55 @@ function withCaptureTime(source: Uint8Array, captureTime: string): Uint8Array {
   app1.set(payload, 4);
   return new Uint8Array([...source.slice(0, 2), ...app1, ...source.slice(2)]);
 }
+/**
+ * Writes one EXIF Orientation tag into a JPEG, mirroring the TIFF layout the
+ * Rust capture and derivative pipeline already understands. Orientation 6
+ * rotates the displayed image 90 degrees clockwise.
+ */
+function withExifOrientation(source: Uint8Array, value: number): Uint8Array {
+  const dataOffset = 8 + 2 + 12 + 4;
+  const tiff = new Uint8Array(dataOffset);
+  tiff.set([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]);
+  tiff.set([1, 0], 8);
+  tiff.set([0x12, 0x01, 3, 0], 10);
+  const view = new DataView(tiff.buffer);
+  view.setUint32(14, 1, true);
+  view.setUint16(18, value, true);
+  const payload = new Uint8Array([69, 120, 105, 102, 0, 0, ...tiff]);
+  const app1 = new Uint8Array(payload.length + 4);
+  app1.set([
+    0xff,
+    0xe1,
+    (payload.length + 2) >> 8,
+    (payload.length + 2) & 0xff,
+  ]);
+  app1.set(payload, 4);
+  return new Uint8Array([...source.slice(0, 2), ...app1, ...source.slice(2)]);
+}
+async function jpegWithSize(
+  page: Page,
+  width: number,
+  height: number,
+): Promise<Buffer> {
+  const bytes = await page.evaluate(
+    async ({ width, height }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas is unavailable");
+      context.fillStyle = "#7a7d82";
+      context.fillRect(0, 0, width, height);
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, "image/jpeg", 0.92),
+      );
+      if (!blob) throw new Error("JPEG encoding failed");
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    },
+    { width, height },
+  );
+  return Buffer.from(bytes);
+}
 async function fixture() {
   const base = await mkdtemp(join(tmpdir(), "slipstream-browser-"));
   temporary.push(base);
@@ -100,6 +149,7 @@ type BrowsePhoto = {
   available: boolean;
   selectionState: string;
   rating: number;
+  originals?: ReadonlyArray<Readonly<{ kind: string }>>;
 };
 type AlbumMember = BrowsePhoto & { photoId: string; position: number };
 type AlbumState = { id: string; position: number; members: AlbumMember[] };
@@ -121,6 +171,31 @@ async function browseIds(url: string): Promise<string[]> {
   const opened = (await (
     await post(url, "/api/browse", { source: "library" })
   ).json()) as { token: string; total: number };
+  const ids: string[] = [];
+  let start = 0;
+  for (;;) {
+    const window = await browseWindow(url, opened.token, start);
+    if (window.total !== opened.total)
+      throw new Error("browse window total is inconsistent");
+    ids.push(...window.photos.map((photo) => photo.id));
+    start += window.photos.length;
+    if (window.photos.length === 0 || start >= opened.total) break;
+  }
+  await fetch(`${url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: url },
+  });
+  return ids;
+}
+
+async function browseOrderedIds(
+  url: string,
+  request: Record<string, unknown>,
+): Promise<string[]> {
+  const opened = (await (await post(url, "/api/browse", request)).json()) as {
+    token: string;
+    total: number;
+  };
   const ids: string[] = [];
   let start = 0;
   for (;;) {
@@ -177,6 +252,34 @@ async function waitForGridFrame(page: Page) {
   );
 }
 
+/// The rendered Grid cells in order; each thumbnail URL names its Photo.
+const gridPhotoIds = (page: Page) =>
+  page
+    .locator(".photo-cell img")
+    .evaluateAll((images) =>
+      images.map((image) =>
+        new URL(image.getAttribute("src") ?? "", location.origin).pathname
+          .split("/")
+          .at(-3),
+      ),
+    );
+
+async function expectGridOrder(page: Page, ids: string[]) {
+  await expect.poll(() => gridPhotoIds(page)).toEqual(ids);
+}
+
+function recordBrowseBodies(page: Page) {
+  const bodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/browse"
+    )
+      bodies.push(request.postDataJSON() as Record<string, unknown>);
+  });
+  return bodies;
+}
+
 async function evictFirstPhotoFact(page: Page) {
   const viewport = page.locator("[data-grid-viewport]");
   for (const [row, photoIndex] of [
@@ -220,6 +323,80 @@ async function waitForLoadedReviewImage(page: Page) {
       candidate.naturalWidth > 0
     );
   });
+}
+
+async function previewImageGeometry(page: Page) {
+  return page.locator("[data-stage] img").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const image = element as HTMLImageElement;
+    return {
+      width: box.width,
+      height: box.height,
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+    };
+  });
+}
+
+async function previewStageGeometry(page: Page) {
+  return page.locator("[data-stage]").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return {
+      width: box.width,
+      height: box.height,
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+    };
+  });
+}
+
+async function zoomLevel(page: Page) {
+  const text = await page.locator("[data-zoom-level]").textContent();
+  return Number((text ?? "").replace("%", ""));
+}
+
+// Decision swipes animate the stage back to rest; geometry measured during
+// that animation carries the residual offset.
+async function waitForStageAtRest(page: Page) {
+  await expect(page.locator("[data-stage]")).toHaveCSS("transform", "none");
+}
+
+// A replaced Preview image only receives its zoom geometry once its bytes
+// have loaded, so rendered size is the observable proof of applied zoom.
+async function expectRenderedZoom(page: Page, scale: number) {
+  await waitForLoadedReviewImage(page);
+  await expect
+    .poll(async () => {
+      const image = await previewImageGeometry(page);
+      return image.width / image.naturalWidth;
+    })
+    .toBeCloseTo(scale, 1);
+}
+
+// Fit depends on the live stage size, so a viewport change is only settled
+// once the rendered size matches the current fit scale again.
+async function waitForFit(page: Page) {
+  await expect
+    .poll(async () => {
+      const stage = await previewStageGeometry(page);
+      const image = await previewImageGeometry(page);
+      const state = await page
+        .locator("[data-preview]")
+        .getAttribute("data-zoom-state");
+      if (state !== "fit") return Number.POSITIVE_INFINITY;
+      const scale = Math.min(
+        stage.width / image.naturalWidth,
+        stage.height / image.naturalHeight,
+      );
+      return Math.abs(image.width - image.naturalWidth * scale);
+    })
+    .toBeLessThan(1);
 }
 
 async function startReview(
@@ -276,7 +453,10 @@ async function openGrid(page: Page, url: string, name: string) {
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
-  await page.getByText(/^(?:Ready · \d[\d,]* Photos?|0 Photos)$/).waitFor();
+  await page
+    .locator("[data-grid-status]")
+    .filter({ hasText: /^(?:Ready · \d[\d,]* Photos?|0 Photos)$/ })
+    .waitFor();
   await waitForGridFrame(page);
 }
 async function openSources(page: Page) {
@@ -291,6 +471,61 @@ async function openSources(page: Page) {
       return;
     }
   }
+}
+
+/// Album membership is read and managed in one panel: the facts list names the
+/// Albums this Photo is in, and the Manage panel holds one checkbox per Album.
+async function openMembershipPanel(page: Page) {
+  const manage = page.getByRole("button", { name: "Manage", exact: true });
+  if ((await manage.getAttribute("aria-expanded")) !== "true")
+    await manage.click();
+}
+
+function membershipCheckbox(page: Page, albumName: string) {
+  return page.getByRole("checkbox", { name: albumName, exact: true });
+}
+
+async function toggleAlbumMembership(page: Page, albumName: string) {
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, albumName).click();
+}
+
+/// Counts membership reads the page has settled, so a test can wait for a held
+/// response to be fully processed instead of guessing at elapsed time. The
+/// marker runs in a later task than the fetch continuation that assigns the
+/// membership facts.
+async function trackSettledMembershipReads(page: Page) {
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    let settled = 0;
+    window.fetch = (async (
+      input: Parameters<typeof window.fetch>[0],
+      init?: Parameters<typeof window.fetch>[1],
+    ) => {
+      const response = await nativeFetch(input, init);
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      if (url.endsWith("/albums") && (init?.method ?? "GET") === "GET")
+        setTimeout(() => {
+          settled += 1;
+          document.documentElement.dataset.membershipReadsSettled =
+            String(settled);
+        }, 0);
+      return response;
+    }) as typeof window.fetch;
+  });
+}
+
+async function settledMembershipReads(page: Page): Promise<number> {
+  return Number(
+    (await page
+      .locator("html")
+      .getAttribute("data-membership-reads-settled")) ?? "0",
+  );
 }
 function contrastRatio(foreground: string, background: string) {
   const luminance = (value: string) => {
@@ -549,7 +784,10 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     "Undo",
     "Previous",
     "Next",
-    "Detail Review",
+    "Fit Window",
+    "Zoom in",
+    "Zoom out",
+    "Zoom to 100 percent",
     "Rate 5 stars",
   ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
@@ -732,7 +970,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       const controlGroups = [
         ".decision-controls",
         ".rating-controls",
-        ".membership-controls",
+        ".membership",
         ".photo-controls",
       ].map((selector) => bounds(selector).height);
       return {
@@ -769,8 +1007,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
     const controls = [
       page.getByRole("button", { name: "Back to Grid" }),
       page.getByRole("button", { name: `Rate ${index + 3} stars` }),
-      page.getByLabel("Album", { exact: true }),
-      page.getByRole("button", { name: "Add to Album" }),
+      page.getByRole("button", { name: "Manage", exact: true }),
       page.getByRole("button", { name: "Previous" }),
       page.getByRole("button", { name: "Next" }),
     ];
@@ -790,6 +1027,14 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       });
       expect(contained).toBe(true);
     }
+    await openMembershipPanel(page);
+    const optionTargets = await interactiveGeometry(
+      page.locator("[data-membership-panel]"),
+    );
+    expect(
+      optionTargets.filter(({ width, height }) => width < 44 || height < 44),
+    ).toEqual([]);
+    expect(optionTargets.filter(({ contained }) => !contained)).toEqual([]);
 
     const ratingSaved = page.waitForResponse(
       (response) =>
@@ -803,16 +1048,27 @@ test("short mobile viewports keep every Photo action reachable and operable", as
       page.getByText(`${index + 3} stars`, { exact: true }),
     ).toBeVisible();
 
-    await page
-      .getByLabel("Album", { exact: true })
-      .selectOption({ label: "Destination" });
+    // Every viewport proves the membership toggle is operable, so the first
+    // step normalizes the membership the previous viewport left behind.
+    const destination = membershipCheckbox(page, "Destination");
+    await expect(destination).toBeVisible();
+    if (await destination.isChecked()) {
+      const membershipRemoved = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname.endsWith("/members/remove") &&
+          response.status() === 200,
+      );
+      await destination.uncheck();
+      await membershipRemoved;
+    }
     const membershipSaved = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname.endsWith("/members") &&
         response.status() === 200,
     );
-    await page.getByRole("button", { name: "Add to Album" }).click();
+    await destination.check();
     await membershipSaved;
     await expect(page.getByText("Added to the Album.")).toBeVisible();
 
@@ -853,32 +1109,322 @@ test("wide desktop Preview retains fit gesture ownership", async ({ page }) => {
   );
 });
 
-test("Preview Fit and Fill are explicit, bounded, and Fill does not select", async ({
+test("Preview zoom is explicit, bounded, and never records a decision", async ({
   page,
 }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 2);
   const running = await server(base, root);
-  await startReview(page, running.url, "All Photos");
   await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
 
   const preview = page.locator("[data-preview]");
-  const fit = page.getByRole("button", { name: "Fit", exact: true });
-  const fill = page.getByRole("button", { name: "Fill", exact: true });
-  await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(fill).toHaveAttribute("aria-pressed", "false");
-  await expect(preview).toHaveClass(/fit/);
-  await expect(preview).toHaveCSS("touch-action", "pan-y");
+  const fit = page.getByRole("button", { name: "Fit Window", exact: true });
+  const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+  const hundred = page.getByRole("button", {
+    name: "Zoom to 100 percent",
+    exact: true,
+  });
+  const slider = page.locator("[data-zoom-slider]");
+  const level = page.locator("[data-zoom-level]");
 
-  await fill.click();
-  await expect(fill).toHaveAttribute("aria-pressed", "true");
-  await expect(fit).toHaveAttribute("aria-pressed", "false");
-  await expect(preview).toHaveClass(/fill/);
-  await expect(preview.locator("[data-stage] img")).toHaveCSS(
-    "object-fit",
-    "cover",
+  // Fit is the default state, reports the percentage it produces, and keeps
+  // the complete composition inside the Preview area.
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  await expect(preview).toHaveCSS("touch-action", "pan-y");
+  const stage = await previewStageGeometry(page);
+  const fitted = await previewImageGeometry(page);
+  expect(fitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(fitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+  expect(
+    Math.abs(
+      fitted.width / fitted.naturalWidth - fitted.height / fitted.naturalHeight,
+    ),
+  ).toBeLessThan(0.01);
+  await expect(level).toHaveText(
+    `${Math.round((fitted.width / fitted.naturalWidth) * 100)}%`,
   );
+
+  // The zoom in control changes the real display size by one step.
+  await zoomIn.click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const stepped = await previewImageGeometry(page);
+  expect(stepped.width).toBeCloseTo(fitted.width * 1.25, 0);
+  expect(await zoomLevel(page)).toBe(
+    Math.round((stepped.width / stepped.naturalWidth) * 100),
+  );
+
+  // The slider changes the display size and the percentage together.
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  const slid = await previewImageGeometry(page);
+  expect(slid.width).toBeCloseTo(slid.naturalWidth * 3, 0);
+  expect(await zoomLevel(page)).toBe(300);
+
+  // 100% maps one Preview pixel to one CSS pixel.
+  await hundred.click();
+  const actual = await previewImageGeometry(page);
+  expect(actual.width).toBeCloseTo(actual.naturalWidth, 0);
+  expect(actual.height).toBeCloseTo(actual.naturalHeight, 0);
+  expect(await zoomLevel(page)).toBe(100);
+
+  // Fit Window restores the complete composition.
+  await fit.click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  const refitted = await previewImageGeometry(page);
+  expect(refitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(refitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+
+  // A zoomed drag pans instead of deciding, and the pan is bounded.
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await waitForStageAtRest(page);
+  const beforePan = await previewImageGeometry(page);
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 60, center.y + 10);
+  await page.mouse.up();
+  const afterPan = await previewImageGeometry(page);
+  const limitX = Math.max(0, (beforePan.width - stage.width) / 2);
+  const limitY = Math.max(0, (beforePan.height - stage.height) / 2);
+  expect(afterPan.left - beforePan.left).toBeCloseTo(Math.min(limitX, 60), 0);
+  expect(afterPan.top - beforePan.top).toBeCloseTo(Math.min(limitY, 10), 0);
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 2")).toBeVisible();
+
+  // Dragging far cannot pull the image out of view.
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 900, center.y + 900);
+  await page.mouse.up();
+  const bounded = await previewImageGeometry(page);
+  if (bounded.width > stage.width) {
+    expect(bounded.left).toBeLessThanOrEqual(stage.left + 0.5);
+    expect(bounded.right).toBeGreaterThanOrEqual(stage.right - 0.5);
+  } else {
+    expect(bounded.left + bounded.width / 2).toBeCloseTo(
+      stage.left + stage.width / 2,
+      0,
+    );
+  }
+  if (bounded.height > stage.height) {
+    expect(bounded.top).toBeLessThanOrEqual(stage.top + 0.5);
+    expect(bounded.bottom).toBeGreaterThanOrEqual(stage.bottom - 0.5);
+  } else {
+    expect(bounded.top + bounded.height / 2).toBeCloseTo(
+      stage.top + stage.height / 2,
+      0,
+    );
+  }
+  expect(stateRequests).toBe(0);
+
+  // The keyboard reaches Fit, detail zoom, and stepped zoom.
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await page.keyboard.press("d");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  expect(await zoomLevel(page)).toBe(200);
+  await page.keyboard.press("-");
+  expect(await zoomLevel(page)).toBe(160);
   await expect(preview).toHaveCSS("touch-action", "none");
+
+  // No horizontal page overflow while zoomed.
+  const layout = await page.locator("[data-photo-view]").evaluate((view) => {
+    const previewBox = view.querySelector<HTMLElement>("[data-preview]");
+    if (!previewBox) throw new Error("Preview is missing");
+    return {
+      viewWidth: view.clientWidth,
+      viewScrollWidth: view.scrollWidth,
+      previewWidth: previewBox.getBoundingClientRect().width,
+    };
+  });
+  expect(layout.viewScrollWidth).toBe(layout.viewWidth);
+  expect(layout.previewWidth).toBeLessThanOrEqual(layout.viewWidth);
+
+  // Changing Photo resets the zoom state to Fit.
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  expect(stateRequests).toBe(0);
+});
+
+test("desktop wheel zoom keeps the image point under the pointer stationary", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  await page.setViewportSize({ width: 900, height: 800 });
+  await waitForFit(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("400");
+  await slider.dispatchEvent("input");
+
+  const pointer = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return {
+      x: box.left + box.width * 0.32,
+      y: box.top + box.height * 0.4,
+    };
+  });
+  const before = await previewImageGeometry(page);
+  const fractionX = (pointer.x - before.left) / before.width;
+  const fractionY = (pointer.y - before.top) / before.height;
+  await page.mouse.move(pointer.x, pointer.y);
+  await page.mouse.wheel(0, -120);
+  const after = await previewImageGeometry(page);
+  expect(after.width).toBeCloseTo(before.width * 1.25, 0);
+  // The same image point stays under the pointer while zooming.
+  expect(pointer.x - fractionX * after.width).toBeCloseTo(after.left, 0);
+  expect(pointer.y - fractionY * after.height).toBeCloseTo(after.top, 0);
+  await page.mouse.wheel(0, 120);
+  await expect
+    .poll(async () => (await previewImageGeometry(page)).width)
+    .toBeCloseTo(before.width, 0);
+});
+
+test("touch pinch zooms around the gesture midpoint without deciding", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  await preview.getByRole("button", { name: "Zoom to 100 percent" }).click();
+  const before = await previewImageGeometry(page);
+  expect(before.width).toBeCloseTo(before.naturalWidth, 0);
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 50,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 50,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  const pinched = await previewImageGeometry(page);
+  expect(pinched.width).toBeCloseTo(before.width * 2, 0);
+  expect(await zoomLevel(page)).toBe(200);
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 1")).toBeVisible();
+});
+
+test("window resize recomputes Fit and keeps a manual percentage", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+
+  await page.setViewportSize({ width: 900, height: 800 });
+  await waitForFit(page);
+  const wideFit = await previewImageGeometry(page);
+
+  await page.setViewportSize({ width: 600, height: 800 });
+  await expect
+    .poll(async () => (await previewImageGeometry(page)).width)
+    .toBeLessThan(wideFit.width);
+  const stage = await previewStageGeometry(page);
+  const narrowFit = await previewImageGeometry(page);
+  expect(narrowFit.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(narrowFit.height).toBeLessThanOrEqual(stage.height + 0.5);
+
+  await page.locator("[data-zoom-slider]").fill("100");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
+  await expect(level).toHaveText("100%");
+  await page.setViewportSize({ width: 760, height: 800 });
+  await expect(level).toHaveText("100%");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const resized = await previewImageGeometry(page);
+  expect(resized.width).toBeCloseTo(resized.naturalWidth, 0);
+});
+
+test("a pan that began while zoomed never becomes a decision", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
 
   let stateRequests = 0;
   page.on("request", (request) => {
@@ -888,42 +1434,274 @@ test("Preview Fit and Fill are explicit, bounded, and Fill does not select", asy
     )
       stateRequests += 1;
   });
-  await swipe(page, 100, 220);
-  expect(stateRequests).toBe(0);
-  await expect(page.getByText("1 / 2")).toBeVisible();
 
-  await page.keyboard.press("f");
-  await expect(fill).toHaveAttribute("aria-pressed", "true");
-  await page.keyboard.press("d");
-  await expect(
-    page.getByRole("button", { name: "Exit Detail" }),
-  ).toHaveAttribute("aria-pressed", "true");
-  await expect(preview).toHaveClass(/detail/);
-  await fit.click();
-  await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
-
-  const layout = await page.locator("[data-photo-view]").evaluate((view) => {
-    const preview = view.querySelector<HTMLElement>("[data-preview]");
-    if (!preview) throw new Error("Preview is missing");
-    return {
-      viewWidth: view.clientWidth,
-      viewScrollWidth: view.scrollWidth,
-      previewWidth: preview.getBoundingClientRect().width,
-    };
+  // The drag starts as a pan; restoring Fit mid-drag must not hand the
+  // gesture back to the decision swipe that Fit owns.
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
   });
-  expect(layout.viewScrollWidth).toBe(layout.viewWidth);
-  expect(layout.previewWidth).toBeLessThanOrEqual(layout.viewWidth);
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 130, center.y + 10);
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await page.mouse.up();
+
+  // The release handler runs before this navigation settles, so neither the
+  // request count nor the durable Album fact can race it.
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 3")).toBeVisible();
+  expect(stateRequests).toBe(0);
+  expect(
+    (await state(running.url, albumId)).members.map(
+      (member) => member.selectionState,
+    ),
+  ).toEqual(["undecided", "undecided", "undecided"]);
+});
+
+test("zoom controls are disabled while no Preview image is measurable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  // The Preview state stays ready while its bytes never arrive, which
+  // leaves an image element on the stage without any pixels to measure.
+  await page.route("**/api/derivatives/*/review/*", (route) => route.abort());
+  await startReview(page, running.url, "All Photos");
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Preview could not be loaded. You can continue browsing.",
+  );
+
+  const preview = page.locator("[data-preview]");
+  const fit = page.getByRole("button", { name: "Fit Window", exact: true });
+  const zoomOut = page.getByRole("button", { name: "Zoom out", exact: true });
+  const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+  const hundred = page.getByRole("button", {
+    name: "Zoom to 100 percent",
+    exact: true,
+  });
+  await expect(fit).toBeDisabled();
+  await expect(zoomOut).toBeDisabled();
+  await expect(zoomIn).toBeDisabled();
+  await expect(hundred).toBeDisabled();
+  await expect(page.locator("[data-zoom-slider]")).toBeDisabled();
+  await expect(page.locator("[data-zoom-level]")).toHaveText("—");
+
+  // Keyboard zoom is ignored without measurable pixels.
+  await page.keyboard.press("+");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+
+  // A healthy Photo restores zoom control.
+  await page.unroute("**/api/derivatives/*/review/*");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.getByText("2 / 2")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await expect(hundred).toBeEnabled();
+  await expect(fit).toBeEnabled();
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
+});
+
+test("a Photo without usable Preview bytes reports no zoom percentage", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  let healthyPhotoId: string | undefined;
+  await page.route("**/api/derivatives/*/review/*", async (route) => {
+    const photoId = new URL(route.request().url()).pathname.split("/")[3]!;
+    healthyPhotoId ??= photoId;
+    if (photoId === healthyPhotoId) {
+      await route.continue();
+      return;
+    }
+    await route.abort();
+  });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expect(level).toHaveText("300%");
 
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(fill).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Preview could not be loaded. You can continue browsing.",
+  );
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
+    page.getByRole("button", { name: "Fit Window", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(level).toHaveText("—");
+  await expect(slider).toBeDisabled();
+});
+
+test("a Fit below the manual floor keeps stepping monotonic", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  // A 2560 px derivative in a narrow Preview area puts Fit below the 10%
+  // manual floor, which the stepping controls must never exceed.
+  await writeFile(
+    join(root, "large.jpg"),
+    await jpegWithSize(page, 2560, 2560),
+  );
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+  const slider = page.locator("[data-zoom-slider]");
+  await page.setViewportSize({ width: 300, height: 844 });
+  await waitForFit(page);
+
+  const fitted = await previewImageGeometry(page);
+  const fitPercent = Math.round((fitted.width / fitted.naturalWidth) * 100);
+  expect(fitPercent).toBeLessThan(10);
+  await expect(level).toHaveText(`${fitPercent}%`);
+  // The slider spans the manual range only, and it must not contradict the
+  // value it reports to assistive technology.
+  expect(await slider.inputValue()).toBe("10");
+  await expect(slider).toHaveAttribute("aria-valuetext", "10%");
+
+  // Zooming out below the floor must not magnify the Preview.
+  await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  const unzoomed = await previewImageGeometry(page);
+  expect(unzoomed.width).toBeCloseTo(fitted.width, 1);
+  await expect(level).toHaveText(`${fitPercent}%`);
+
+  // Zooming in enters manual zoom above the Fit it started from.
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const zoomed = await previewImageGeometry(page);
+  expect(zoomed.width).toBeGreaterThan(fitted.width);
+  expect(zoomed.width).toBeCloseTo(zoomed.naturalWidth * 0.125, 0);
+  await expect(level).toHaveText("13%");
+});
+
+test("keyboard zoom-in steps the Preview without deciding", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+
+  await waitForFit(page);
+  const fitted = await previewImageGeometry(page);
+  await page.keyboard.press("+");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const stepped = await previewImageGeometry(page);
+  expect(stepped.width).toBeCloseTo(fitted.width * 1.25, 0);
+  const first = await zoomLevel(page);
+  await page.keyboard.press("=");
+  expect(await zoomLevel(page)).toBeGreaterThan(first);
+  expect((await previewImageGeometry(page)).width).toBeCloseTo(
+    fitted.width * 1.5625,
+    0,
+  );
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 2")).toBeVisible();
+});
+
+test("returning to Grid View resets the zoom state to Fit", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 3);
+
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-view]")).toBeVisible();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await waitForFit(page);
+  const stage = await previewStageGeometry(page);
+  const refitted = await previewImageGeometry(page);
+  expect(refitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(refitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+  // The live percentage reports the composition this Photo's Fit produces.
+  await expect(page.locator("[data-zoom-level]")).toHaveText(
+    `${Math.round((refitted.width / refitted.naturalWidth) * 100)}%`,
+  );
+});
+
+test("a manual pan is re-clamped after the Preview area grows", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("200");
+  await slider.dispatchEvent("input");
+  await expectRenderedZoom(page, 2);
+
+  // Panning past the bound stops at the bound.
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 900, center.y);
+  await page.mouse.up();
+  const narrowStage = await previewStageGeometry(page);
+  const panned = await previewImageGeometry(page);
+  const narrowLimit = Math.max(0, (panned.width - narrowStage.width) / 2);
+  expect(narrowLimit).toBeGreaterThan(0);
+  expect(
+    panned.left + panned.width / 2 - (narrowStage.left + narrowStage.width / 2),
+  ).toBeCloseTo(narrowLimit, 0);
+
+  // The wider Preview area holds the whole Photo again, so the manual pan is
+  // re-clamped to zero instead of keeping the stale offset.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect
+    .poll(async () => {
+      const stage = await previewStageGeometry(page);
+      const image = await previewImageGeometry(page);
+      const limit = Math.max(0, (image.width - stage.width) / 2);
+      const offset =
+        image.left + image.width / 2 - (stage.left + stage.width / 2);
+      return Math.abs(offset) - limit;
+    })
+    .toBeLessThanOrEqual(0.5);
+  await expect(page.locator("[data-zoom-level]")).toHaveText("200%");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
 });
 
 test("Photo View shows review capture metadata and explicit missing values", async ({
@@ -1069,13 +1847,16 @@ function touchQualification(viewport: { width: number; height: number }) {
     await page.getByRole("button", { name: "Previous" }).click();
     await expect(page.getByText("Selected", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Detail Review" }).click();
+    await page.locator("[data-zoom-slider]").fill("400");
+    await page.locator("[data-zoom-slider]").dispatchEvent("input");
+    await expect(preview).toHaveAttribute("data-zoom-state", "manual");
     await expect(preview).toHaveCSS("touch-action", "none");
+    await expectRenderedZoom(page, 4);
+    await waitForStageAtRest(page);
     await photoView.evaluate((view) => {
       view.scrollTop = 0;
     });
-    const image = page.locator("[data-stage] img");
-    const before = await image.evaluate((element) => element.style.transform);
+    const before = await previewImageGeometry(page);
     const detailGesture = await preview.evaluate((surface) => {
       const box = surface.getBoundingClientRect();
       return {
@@ -1091,10 +1872,9 @@ function touchQualification(viewport: { width: number; height: number }) {
     });
     const stateRequestsBeforeDetail = stateRequests;
     await touchDrag(page, detailGesture.from, detailGesture.to);
-    await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 120, 36\)/);
-    expect(await image.evaluate((element) => element.style.transform)).not.toBe(
-      before,
-    );
+    const after = await previewImageGeometry(page);
+    expect(after.left - before.left).toBeCloseTo(120, 0);
+    expect(after.top - before.top).toBeCloseTo(36, 0);
     expect(stateRequests).toBe(stateRequestsBeforeDetail);
     expect(await photoView.evaluate((view) => view.scrollTop)).toBe(0);
     await expect(page.getByText("1 / 3")).toBeVisible();
@@ -1109,7 +1889,7 @@ test.describe("touch qualification", () => {
     { width: 667, height: 375 },
   ]) {
     test(
-      `fit Preview at ${viewport.width}x${viewport.height} yields real vertical touch scrolling while horizontal decisions and Detail pan remain owned`,
+      `fit Preview at ${viewport.width}x${viewport.height} yields real vertical touch scrolling while horizontal decisions and manual zoom pan remain owned`,
       touchQualification(viewport),
     );
   }
@@ -1498,7 +2278,7 @@ test("Clear is available only for a decided Photo", async ({ page }) => {
     .evaluate((view) =>
       Array.from(
         view.querySelectorAll<HTMLElement>(
-          ".facts dt, .rating-controls legend, .membership-controls label",
+          ".facts dt, .rating-controls legend, .membership-heading",
         ),
         (node) => {
           const surface = node.closest<HTMLElement>(
@@ -1733,12 +2513,12 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
-  await page.getByRole("button", { name: "Detail Review" }).click();
+  await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
+  await page.locator("[data-zoom-slider]").fill("800");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
   const preview = page.locator("[data-preview]");
-  const image = page.locator("[data-stage] img");
+  await expectRenderedZoom(page, 8);
+  const beforePan = await previewImageGeometry(page);
   await preview.dispatchEvent("pointerdown", {
     pointerId: 71,
     isPrimary: true,
@@ -1753,7 +2533,9 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
     clientY: 330,
     pointerType: "touch",
   });
-  await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 40, 30\)/);
+  const afterPan = await previewImageGeometry(page);
+  expect(afterPan.left - beforePan.left).toBeCloseTo(40, 0);
+  expect(afterPan.top - beforePan.top).toBeCloseTo(30, 0);
   await preview.dispatchEvent("pointerup", {
     pointerId: 71,
     isPrimary: true,
@@ -1933,10 +2715,9 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(
-    page.getByRole("button", { name: "Exit Detail" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("d");
+  const preview = page.locator("[data-preview]");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
   await swipe(page, 100, 220);
   await expect(page.getByText("1 / 2")).toBeVisible();
   expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
@@ -1945,9 +2726,7 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Next" }).click(),
   );
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
 });
 
 test("Photo View recovery status wraps without hiding Retry or lower controls", async ({
@@ -2033,7 +2812,7 @@ test("Photo View recovery status wraps without hiding Retry or lower controls", 
       };
     });
     expect(controls.contained).toBe(true);
-    expect(controls.buttons).toEqual([true, true, true, true]);
+    expect(controls.buttons).toEqual([true, true, true]);
   }
 
   await retry.click();
@@ -2332,41 +3111,41 @@ test("the current photo joins and leaves albums from the photo view", async ({
   const albumId = created.albums.find((album) => album.name === "Picks")!.id;
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  const [photoId] = await browseIds(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
 
-  // Adding the current Photo to an Album updates the bounded counts.
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
+  // A Photo that belongs to no Album states that plainly.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+
+  // Adding the current Photo to an Album updates the listed membership and
+  // the bounded counts.
   const firstAdd = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
       new URL(response.url()).pathname.endsWith("/members") &&
       response.status() === 200,
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await toggleAlbumMembership(page, "Picks");
   await firstAdd;
   await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.getByText("Not in any Album yet")).toBeHidden();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /Picks 1 Photo/ }),
   ).toBeVisible();
 
-  // Adding an existing member is idempotent.
+  // A repeated add for an existing member stays one membership: the panel
+  // lists the Album once and the counts stay at one Photo.
+  await post(running.url, `/api/albums/${albumId}/members`, { photoId });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
-  const idempotentAdd = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      new URL(response.url()).pathname.endsWith("/members") &&
-      response.status() === 200,
-  );
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await idempotentAdd;
-  await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Picks")).toBeChecked();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).members)
+    .toHaveLength(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /Picks 1 Photo/ }),
@@ -2381,13 +3160,15 @@ test("the current photo joins and leaves albums from the photo view", async ({
     albumId,
     page.getByRole("button", { name: /^Photo 1 of 1/ }),
   );
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
+  await toggleAlbumMembership(page, "Picks");
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
   await expect(page.getByText("1 / 1")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("button", { name: /^Picks 0 Photos$/ }),
@@ -2395,6 +3176,284 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(
     page.getByRole("button", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
+});
+
+test("the membership panel lists the current Photo's Albums across sources and reloads", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const longName = "Summer Trip ".repeat(10).trim().slice(0, 120);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Alpha" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const alphaId = created.albums.find((album) => album.name === "Alpha")!.id;
+  await post(running.url, "/api/albums", { name: "Beta" });
+  await post(running.url, "/api/albums", { name: longName });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  // A Photo in no Album states that plainly.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+
+  // Managing several Albums lists every one in Album-list order.
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Alpha").check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Alpha"]);
+  await membershipCheckbox(page, "Beta").check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+  ]);
+  await membershipCheckbox(page, longName).check();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+
+  // A long Album name truncates visually, keeps its full text, and stays
+  // inside its control group.
+  const longest = page.locator("[data-membership-list] li").nth(2);
+  const clipped = await longest.evaluate((element) => ({
+    text: element.textContent,
+    textOverflow: getComputedStyle(element).textOverflow,
+    clipped: element.scrollWidth > element.clientWidth,
+    right: element.getBoundingClientRect().right,
+    containerRight: element.parentElement!.getBoundingClientRect().right,
+  }));
+  expect(clipped.text).toBe(longName);
+  expect(clipped.textOverflow).toBe("ellipsis");
+  expect(clipped.clipped).toBe(true);
+  expect(clipped.right).toBeLessThanOrEqual(clipped.containerRight + 0.5);
+
+  // The same facts hold in an Album source and after a reload.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Alpha 1 Photo/ }).click();
+  await openPhotoAndWaitForProgress(
+    page,
+    alphaId,
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  );
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+  await expect(membershipCheckbox(page, "Alpha")).toBeChecked();
+  await expect(membershipCheckbox(page, "Beta")).toBeChecked();
+
+  await page.reload();
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Alpha",
+    "Beta",
+    longName,
+  ]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Alpha")).toBeChecked();
+  await expect(membershipCheckbox(page, "Beta")).toBeChecked();
+  await expect(membershipCheckbox(page, longName)).toBeChecked();
+});
+
+test("a failed membership read stays retryable without blocking decisions", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Picks" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  await page.route("**/api/photos/*/albums", (route) => route.abort());
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openMembershipPanel(page);
+  await expect(page.getByText("Albums could not be loaded.")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry Albums" });
+  await expect(retry).toBeVisible();
+
+  // Membership being down leaves Preview, selection, Rating, and navigation
+  // usable and never claims a disconnection.
+  await expect(page.getByText("Disconnected", { exact: true })).toBeHidden();
+  await waitForLoadedReviewImage(page);
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Rate 3 stars" }).click();
+  await expect(page.getByText("3 stars", { exact: true })).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+
+  // Retrying reloads only the membership facts.
+  await page.unroute("**/api/photos/*/albums");
+  await retry.click();
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+  await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
+  await expect(retry).toBeHidden();
+});
+
+test("a held membership read is discarded when the Photo changes", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "First Only" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find(
+    (album) => album.name === "First Only",
+  )!.id;
+  const [firstId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${albumId}/members`, {
+    photoIds: [firstId],
+  });
+
+  // Record when an aborted membership read settles, so the discard is
+  // observed deterministically instead of by elapsed time.
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (async (...args: Parameters<typeof fetch>) => {
+      const input = args[0];
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      try {
+        return await nativeFetch(...args);
+      } catch (error) {
+        if (url.endsWith("/albums"))
+          setTimeout(() => {
+            document.documentElement.dataset.membershipAborted = "true";
+          }, 0);
+        throw error;
+      }
+    }) as typeof window.fetch;
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+
+  let releaseFirst!: () => void;
+  const firstReleased = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let heldOnce = false;
+  await page.route("**/api/photos/*/albums", async (route) => {
+    if (heldOnce) {
+      await route.continue();
+      return;
+    }
+    heldOnce = true;
+    await firstReleased;
+    // The client aborted this read when the Photo changed.
+    await route
+      .fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          albums: [{ id: albumId, name: "First Only" }],
+        }),
+      })
+      .catch(() => {});
+  });
+  try {
+    await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
+    await expect(page.getByText("Loading Albums…")).toBeVisible();
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect(page.getByText("2 / 2")).toBeVisible();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    // The superseded read has settled; its Album must never paint.
+    await expect(page.locator("html")).toHaveAttribute(
+      "data-membership-aborted",
+      "true",
+    );
+    releaseFirst();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
+    await expect(page.getByText("First Only", { exact: true })).toBeHidden();
+  } finally {
+    releaseFirst();
+    await page.unroute("**/api/photos/*/albums");
+  }
+});
+
+test("deleting an Album re-verifies the current Photo's membership", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Keep" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const keepId = created.albums.find((album) => album.name === "Keep")!.id;
+  const doomed = (await (
+    await post(running.url, "/api/albums", { name: "Doomed" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const doomedId = doomed.albums.find((album) => album.name === "Doomed")!.id;
+  const [photoId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${keepId}/members`, {
+    photoIds: [photoId],
+  });
+  await post(running.url, `/api/albums/${doomedId}/members`, {
+    photoIds: [photoId],
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Keep",
+    "Doomed",
+  ]);
+
+  // Deleting an Album the Photo belongs to re-verifies the current facts.
+  await openSources(page);
+  await page.getByRole("button", { name: "Delete Doomed" }).click();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(page.locator("[data-membership-list] li")).toHaveText(["Keep"]);
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Keep")).toBeChecked();
+  await expect(membershipCheckbox(page, "Doomed")).toHaveCount(0);
+});
+
+test("the membership panel is operable by keyboard", async ({ page }) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Keyboard" });
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+
+  const manage = page.getByRole("button", { name: "Manage", exact: true });
+  await manage.focus();
+  await page.keyboard.press("Enter");
+  await expect(manage).toHaveAttribute("aria-expanded", "true");
+
+  const membership = membershipCheckbox(page, "Keyboard");
+  await membership.focus();
+  const added = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/members") &&
+      response.status() === 200,
+  );
+  await page.keyboard.press("Space");
+  await added;
+  await expect(membership).toBeChecked();
+  // The re-render keeps keyboard focus on the operated checkbox.
+  await expect(membership).toBeFocused();
+  await expect(page.locator("[data-membership-list] li")).toHaveText([
+    "Keyboard",
+  ]);
 });
 
 test("an older saved-position response cannot supersede a newer Album removal", async ({
@@ -2480,7 +3539,7 @@ test("an older saved-position response cannot supersede a newer Album removal", 
     const savedPositionResponse = progressResponse(page, albumId);
     await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
     await progressPersisted;
-    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await toggleAlbumMembership(page, "Picks");
     await overviewCaptured;
     releaseProgress();
     const deliveredProgress = await savedPositionResponse;
@@ -2529,14 +3588,14 @@ test("a successful membership retry recovers its exact Album connection", async 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
 
   await page.route("**/api/albums/*/members", (route) => route.abort());
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await toggleAlbumMembership(page, "Picks");
   await expect(
     page.getByText("The Photo could not be added to the Album."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Could not add this Photo to “Picks”."),
   ).toBeVisible();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
@@ -2548,15 +3607,16 @@ test("a successful membership retry recovers its exact Album connection", async 
       new URL(response.url()).pathname === `/api/albums/${albumId}/members` &&
       response.status() === 200,
   );
-  await expect(
-    page.getByRole("button", { name: "Add to Album" }),
-  ).toBeEnabled();
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  // The failed toggle restored the true state instead of wedging the control.
+  await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+  await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+  await membershipCheckbox(page, "Picks").check();
   await retried;
 
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
+  await expect(membershipCheckbox(page, "Picks")).toBeChecked();
   await openSources(page);
   await expect(
     page.getByRole("button", { name: /^Picks 1 Photo$/ }),
@@ -2564,6 +3624,200 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect
     .poll(async () => (await state(running.url, albumId)).members)
     .toHaveLength(1);
+});
+
+test("a membership read landing during a failed toggle never strands the panel", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Picks")!.id;
+  await trackSettledMembershipReads(page);
+
+  // The read is answered only after the toggle is already in flight, and the
+  // toggle fails after that answer reached the page. The answer must not stand
+  // in for a panel the failed toggle then restores as loading.
+  let releaseRead!: () => void;
+  const readHeld = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  let releaseWrite!: () => void;
+  const writeHeld = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  let markReadArrived!: () => void;
+  const readArrived = new Promise<void>((resolve) => {
+    markReadArrived = resolve;
+  });
+  await page.route("**/api/photos/*/albums", async (route) => {
+    const response = await route.fetch();
+    markReadArrived();
+    await readHeld;
+    await route.fulfill({ response }).catch(() => {});
+  });
+  await page.route("**/api/albums/*/members", async (route) => {
+    await writeHeld;
+    await route.abort();
+  });
+  try {
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await openMembershipPanel(page);
+    await expect(page.getByText("Loading Albums…")).toBeVisible();
+    await readArrived;
+
+    // Loading facts render the checkboxes unchecked, so this click only
+    // states the intent; the in-flight write owns the panel from here.
+    await membershipCheckbox(page, "Picks").click();
+    releaseRead();
+    // The delivered answer is discarded: a toggle owns the panel until it
+    // settles, so the failed toggle still restores its own prior state.
+    await expect.poll(() => settledMembershipReads(page)).toBeGreaterThan(0);
+    releaseWrite();
+
+    await expect(
+      page.getByText("Could not add this Photo to “Picks”."),
+    ).toBeVisible();
+    await expect(page.getByText("Albums could not be loaded.")).toBeVisible();
+    await expect(page.getByText("Loading Albums…")).toBeHidden();
+    const retry = page.getByRole("button", { name: "Retry Albums" });
+    await expect(retry).toBeVisible();
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    expect((await state(running.url, albumId)).members).toEqual([]);
+
+    // Retrying reloads the membership facts and clears the failure.
+    await page.unroute("**/api/photos/*/albums");
+    await retry.click();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    await expect(retry).toBeHidden();
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+  } finally {
+    releaseRead();
+    releaseWrite();
+    await page.unroute("**/api/photos/*/albums").catch(() => {});
+    await page.unroute("**/api/albums/*/members").catch(() => {});
+  }
+});
+
+test("a membership read never repaints over an in-flight toggle", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const picks = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const picksId = picks.albums.find((album) => album.name === "Picks")!.id;
+  const other = (await (
+    await post(running.url, "/api/albums", { name: "Other" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const otherId = other.albums.find((album) => album.name === "Other")!.id;
+  const [photoId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${picksId}/members`, {
+    photoIds: [photoId],
+  });
+
+  await trackSettledMembershipReads(page);
+  let holdReads = false;
+  let releaseReads!: () => void;
+  const readsHeld = new Promise<void>((resolve) => {
+    releaseReads = resolve;
+  });
+  let markReadHeld!: () => void;
+  const heldReadArrived = new Promise<void>((resolve) => {
+    markReadHeld = resolve;
+  });
+  await page.route("**/api/photos/*/albums", async (route) => {
+    if (!holdReads) {
+      await route.continue();
+      return;
+    }
+    let response: Awaited<ReturnType<typeof route.fetch>> | undefined;
+    try {
+      response = await route.fetch();
+    } catch {
+      response = undefined;
+    }
+    markReadHeld();
+    await readsHeld;
+    if (response) await route.fulfill({ response }).catch(() => {});
+    else await route.abort().catch(() => {});
+  });
+  let releaseRemoval!: () => void;
+  const removalHeld = new Promise<void>((resolve) => {
+    releaseRemoval = resolve;
+  });
+  let markRemovalArrived!: () => void;
+  const removalArrived = new Promise<void>((resolve) => {
+    markRemovalArrived = resolve;
+  });
+  await page.route(`**/api/albums/${picksId}/members/remove`, async (route) => {
+    markRemovalArrived();
+    await removalHeld;
+    await route.continue();
+  });
+  try {
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await openMembershipPanel(page);
+    await expect(membershipCheckbox(page, "Picks")).toBeChecked();
+
+    // Adding to another Album leaves that Album's membership read unanswered.
+    holdReads = true;
+    await membershipCheckbox(page, "Other").check();
+    await expect(page.getByText("Added to the Album.")).toBeVisible();
+    await heldReadArrived;
+
+    // Removing Picks is admitted while the read is still unanswered.
+    await membershipCheckbox(page, "Picks").uncheck();
+    await removalArrived;
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect(membershipCheckbox(page, "Picks")).toBeDisabled();
+
+    // The answer still holds the pre-write membership. It must not repaint
+    // the checkbox the visitor is operating.
+    releaseReads();
+    await expect.poll(() => settledMembershipReads(page)).toBeGreaterThan(1);
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect(membershipCheckbox(page, "Picks")).toBeDisabled();
+    await expect(page.locator("[data-membership-list] li")).toHaveText([
+      "Other",
+    ]);
+
+    releaseRemoval();
+    await expect(page.getByText("Removed from the Album.")).toBeVisible();
+    await expect(page.locator("[data-membership-list] li")).toHaveText([
+      "Other",
+    ]);
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect
+      .poll(async () => (await state(running.url, picksId)).members)
+      .toHaveLength(0);
+    await expect
+      .poll(async () => (await state(running.url, otherId)).members)
+      .toHaveLength(1);
+  } finally {
+    releaseReads();
+    releaseRemoval();
+    await page.unroute("**/api/photos/*/albums").catch(() => {});
+    await page
+      .unroute(`**/api/albums/${picksId}/members/remove`)
+      .catch(() => {});
+  }
 });
 
 test("different Album membership keys admit independently", async ({
@@ -2582,6 +3836,7 @@ test("different Album membership keys admit independently", async ({
   const albumB = createdB.albums.find((album) => album.name === "B")!.id;
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await openMembershipPanel(page);
 
   let releaseA!: () => void;
   const heldA = new Promise<void>((resolve) => {
@@ -2591,22 +3846,19 @@ test("different Album membership keys admit independently", async ({
     await heldA;
     await route.continue();
   });
-  const picker = page.getByLabel("Album", { exact: true });
-  await picker.selectOption(albumA);
   const requestA = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumA}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await expect(picker).toBeEnabled();
+  await membershipCheckbox(page, "A").check();
+  // Only the Album with an in-flight toggle is disabled; the other Album
+  // stays operable.
+  await expect(membershipCheckbox(page, "A")).toBeDisabled();
 
-  await picker.selectOption(albumB);
-  await expect(
-    page.getByRole("button", { name: "Add to Album" }),
-  ).toBeEnabled();
+  await expect(membershipCheckbox(page, "B")).toBeEnabled();
   const requestB = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumB}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "B").check();
   await requestB;
   releaseA();
   await requestA;
@@ -2702,7 +3954,10 @@ test("creating an album from the photo view opens it and makes it available for 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByLabel("Album", { exact: true })).toBeDisabled();
+  // With no Albums at all the panel says so instead of offering a control.
+  await expect(page.getByText("Not in any Album yet")).toBeVisible();
+  await openMembershipPanel(page);
+  await expect(page.getByText("No Albums yet.")).toBeVisible();
 
   await openSources(page);
   await page.getByRole("button", { name: "New Album" }).click();
@@ -2718,11 +3973,9 @@ test("creating an album from the photo view opens it and makes it available for 
   await openSources(page);
   await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByLabel("Album", { exact: true })).toBeEnabled();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Fresh" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await openMembershipPanel(page);
+  await expect(membershipCheckbox(page, "Fresh")).toBeVisible();
+  await membershipCheckbox(page, "Fresh").check();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -2747,16 +4000,18 @@ test("a failed removal stays retryable from the photo view", async ({
   );
 
   await page.route("**/api/albums/*/members/remove", (route) => route.abort());
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await toggleAlbumMembership(page, "Retry");
   await expect(
     page.getByText("The Photo could not be removed from the Album."),
   ).toBeVisible();
-  // The failed control is re-enabled, not wedged.
   await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeEnabled();
+    page.getByText("Could not remove this Photo from “Retry”."),
+  ).toBeVisible();
+  // The failed toggle restored the true state and stays retryable.
+  await expect(membershipCheckbox(page, "Retry")).toBeEnabled();
+  await expect(membershipCheckbox(page, "Retry")).toBeChecked();
   await page.unroute("**/api/albums/*/members/remove");
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await membershipCheckbox(page, "Retry").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -2852,11 +4107,9 @@ test("a late album success cannot overwrite a newer removal notice", async ({
     await released;
     await route.continue();
   });
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Other" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Other").check();
+  await membershipCheckbox(page, "Hold").uncheck();
   const removedNotice = page.getByText(
     "Removed from the Album. It stays in this open view until reopened.",
   );
@@ -2894,11 +4147,9 @@ test("a superseded album failure surfaces in the library summary", async ({
     if (fail) await route.abort();
     else await route.continue();
   });
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Other" });
-  await page.getByRole("button", { name: "Add to Album" }).click();
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Other").check();
+  await membershipCheckbox(page, "Hold").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -3609,14 +4860,15 @@ test("in-flight membership and delete operations stay disabled across re-renders
     await route.continue();
     folderDelivered();
   });
-  const removeButton = page.locator("[data-remove-from-album]");
+  const slowMembership = membershipCheckbox(page, "Slow");
   const removalSettled = page.waitForResponse(
     (response) =>
       response.url().includes("/members/remove") &&
       response.request().method() === "POST",
   );
-  await removeButton.click();
-  await expect(removeButton).toBeDisabled();
+  await openMembershipPanel(page);
+  await slowMembership.click();
+  await expect(slowMembership).toBeDisabled();
   // A routine Preview completion must not silently take ownership from the
   // user-initiated removal while that mutation is still in flight.
   releasePreview();
@@ -3628,7 +4880,7 @@ test("in-flight membership and delete operations stay disabled across re-renders
   // Deterministically wait until the delayed folder response has been
   // delivered and its re-render landed, then verify the in-flight guard.
   await folderDeliveredSettled;
-  await expect(removeButton).toBeDisabled();
+  await expect(slowMembership).toBeDisabled();
   release!();
   await removalSettled;
   await expect(page.locator("[data-status]")).toContainText(
@@ -3639,8 +4891,9 @@ test("in-flight membership and delete operations stay disabled across re-renders
     page.getByRole("button", { name: /^Slow 1 Photo/ }),
   ).toBeVisible();
   expect(calls).toBe(1);
-  // The removed member is no longer removable within the open snapshot.
-  await expect(removeButton).toBeHidden();
+  // The removed member is no longer a member within the open snapshot.
+  await expect(slowMembership).toBeEnabled();
+  await expect(slowMembership).not.toBeChecked();
 });
 
 test("a current saved-position failure blocks decisions until Photo Retry confirms it", async ({
@@ -3980,9 +5233,7 @@ test("an admitted album add completes after switching sources", async ({
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page
-    .getByLabel("Album", { exact: true })
-    .selectOption({ label: "Picks" });
+  await openMembershipPanel(page);
 
   // Hold the membership response while the source changes underneath.
   let release: (() => void) | undefined;
@@ -4001,7 +5252,7 @@ test("an admitted album add completes after switching sources", async ({
     }
     await route.continue();
   });
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "Picks").check();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   release!();
   // The admitted mutation still updates the bounded Album list.
@@ -4810,9 +6061,12 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   );
   await page.keyboard.press("5");
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  const image = page.locator("[data-stage] img");
+  await page.locator("[data-zoom-slider]").fill("800");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
   const preview = page.locator("[data-preview]");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  await expectRenderedZoom(page, 8);
+  const beforePan = await previewImageGeometry(page);
   await preview.dispatchEvent("pointerdown", {
     pointerId: 61,
     isPrimary: true,
@@ -4827,7 +6081,9 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
     clientY: 330,
     pointerType: "touch",
   });
-  await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 40, 30\)/);
+  const afterPan = await previewImageGeometry(page);
+  expect(afterPan.left).toBeCloseTo(beforePan.left + 40, 0);
+  expect(afterPan.top).toBeCloseTo(beforePan.top + 30, 0);
   await preview.dispatchEvent("pointerup", {
     pointerId: 61,
     isPrimary: true,
@@ -4838,7 +6094,8 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "selected",
   );
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
@@ -4886,9 +6143,16 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await startReview(page, running.url, "Review", albumId);
   await waitForLoadedReviewImage(page);
   await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "fit",
+  );
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
@@ -4903,9 +6167,16 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await expect(
     page.getByText("RAW embedded JPEG", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "fit",
+  );
   expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
   expect(await originalSnapshot(raw)).toEqual(copiedBefore);
 });
@@ -5004,6 +6275,656 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   await expect
     .poll(() => previewRequests.some((url) => url.includes(aId)))
     .toBe(true);
+});
+
+test("Grid sort offers one explicit Capture Time order and refreshes in that order", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  const tie = withCaptureTime(source, "2026:01:03 10:00:00");
+  await writeFile(join(root, "C.jpg"), tie);
+  await writeFile(join(root, "D.jpg"), tie);
+  await writeFile(join(root, "M.jpg"), source);
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(ascending).toHaveLength(5);
+  // Only the Capture Time direction reverses: equal times keep their
+  // tie-breaker direction, and Photos without a Capture Time stay last.
+  expect(descending).toEqual([
+    ascending[2],
+    ascending[3],
+    ascending[1],
+    ascending[0],
+    ascending[4],
+  ]);
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  const sort = page.locator("[data-sort-select]");
+  await expect(sort).toBeVisible();
+  await expect(sort).toBeEnabled();
+  await expect(sort).toHaveAccessibleName("Sort");
+  await expect(page.locator("[data-sort-select] option")).toHaveText([
+    "Capture Time, earliest first",
+    "Capture Time, latest first",
+  ]);
+  await expect(sort).toHaveValue("source-default");
+  await expectGridOrder(page, ascending);
+
+  // The control sits in the Grid's keyboard order.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(sort).toBeFocused();
+
+  await sort.selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  await expect(sort).toHaveValue("capture-time-desc");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+  });
+
+  // An explicit refresh builds a new snapshot with the selected order.
+  await openSources(page);
+  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await expect(sort).toBeEnabled();
+  await expectGridOrder(page, descending);
+  await expect(sort).toHaveValue("capture-time-desc");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+  });
+
+  // The order belongs to the open view: nothing persists it across reloads.
+  await page.reload();
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expectGridOrder(page, ascending);
+});
+
+test("Grid sort keeps the current Photo by identity and repositions around it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 12; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(2, "0")}.jpg`),
+      withCaptureTime(
+        source,
+        `2026:01:0${1 + Math.floor(index / 6)} ${String(
+          10 + (index % 6),
+        ).padStart(2, "0")}:00:00`,
+      ),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(ascending).toHaveLength(12);
+  expect(descending).toEqual([...ascending].reverse());
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 12 Photos$/)).toBeVisible();
+  const anchorId = ascending[8]!;
+  const anchorCell = page.locator('[data-photo-index="8"]');
+  await anchorCell.scrollIntoViewIfNeeded();
+  await anchorCell.click();
+  await expect(page.getByText("9 / 12")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  // The order change keeps the Photo at the current Grid position by ID
+  // instead of reopening at the first position.
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+  const position = descending.indexOf(anchorId);
+  expect(position).toBe(3);
+  const columns = await page.locator(".photo-cell").evaluateAll((cells) => {
+    const firstRow = (cells[0] as HTMLElement | undefined)?.style.top;
+    return cells.filter((cell) => (cell as HTMLElement).style.top === firstRow)
+      .length;
+  });
+  expect(columns).toBe(2);
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-grid-viewport]")
+        .evaluate((viewport) => viewport.scrollTop),
+    )
+    .toBe(Math.floor(position / columns) * 178);
+});
+
+test("Album sort defaults to Album order and time views leave positions alone", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  await writeFile(join(root, "M.jpg"), source);
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  const { albumId } = await createAlbum(running.url, "Explicit order");
+  const albumOrder = [ascending[2]!, ascending[1]!, ascending[0]!];
+  const descending = [ascending[1]!, ascending[0]!, ascending[2]!];
+  // Persist a membership order that matches neither time view.
+  await post(running.url, `/api/albums/${albumId}/order`, {
+    photoIds: albumOrder,
+  });
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Explicit order");
+  const sort = page.locator("[data-sort-select]");
+  await expect(page.locator("[data-sort-select] option")).toHaveText([
+    "Album order",
+    "Capture Time, earliest first",
+    "Capture Time, latest first",
+  ]);
+  await expect(sort).toHaveValue("source-default");
+  await expectGridOrder(page, albumOrder);
+
+  await sort.selectOption("capture-time-asc");
+  await expectGridOrder(page, ascending);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    order: "capture-time-asc",
+  });
+
+  await sort.selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    order: "capture-time-desc",
+  });
+
+  // A time view never rewrites persisted membership positions.
+  const persisted = await state(running.url, albumId);
+  expect(persisted.members.map((member) => member.photoId)).toEqual(albumOrder);
+  expect(persisted.members.map((member) => member.position)).toEqual([0, 1, 2]);
+
+  // Another source starts at its own default order...
+  await openSources(page);
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expect(page.locator("[data-sort-select] option")).toHaveText([
+    "Capture Time, earliest first",
+    "Capture Time, latest first",
+  ]);
+  await expectGridOrder(page, ascending);
+
+  // ...and reopening this Album returns to its persisted order.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expectGridOrder(page, albumOrder);
+});
+
+test("a sort open superseded by a newer source open leaves the newer order committed", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(2);
+
+  let releaseDescending = () => {};
+  const heldDescending = new Promise<void>((resolve) => {
+    releaseDescending = resolve;
+  });
+  const heldRoutes: Promise<void>[] = [];
+  await page.route("**/api/browse", (route) => {
+    const request = route.request();
+    const body = request.postDataJSON() as { order?: string };
+    if (request.method() !== "POST" || body.order !== "capture-time-desc")
+      return route.continue();
+    heldRoutes.push(
+      heldDescending.then(() => route.continue()).catch(() => undefined),
+    );
+    return undefined;
+  });
+  const browseBodies = recordBrowseBodies(page);
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await expectGridOrder(page, ascending);
+  const sort = page.locator("[data-sort-select]");
+  await sort.selectOption("capture-time-desc");
+  // The control cannot submit a second order while this open is busy.
+  await expect(sort).toBeDisabled();
+  await expect
+    .poll(
+      () =>
+        browseBodies.filter((body) => body.order === "capture-time-desc")
+          .length,
+    )
+    .toBe(1);
+
+  // A newer source open supersedes the held order change.
+  await openSources(page);
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await expect(sort).toBeEnabled();
+  await expect(sort).toHaveValue("source-default");
+  await expectGridOrder(page, ascending);
+
+  releaseDescending();
+  await Promise.all(heldRoutes);
+  expect(
+    browseBodies.filter((body) => body.order === "capture-time-desc"),
+  ).toHaveLength(1);
+  await expectGridOrder(page, ascending);
+  await expect(sort).toHaveValue("source-default");
+});
+
+test("a Folder sort change waits for the File Location binding before reopening", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"));
+  const source = await jpeg();
+  await writeFile(
+    join(root, "shoot/one.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "root.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Library Folder subfolders" })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "shoot · Folder" }),
+  ).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+
+  // A completed Library check resets the File Location binding; while that
+  // route fails, the open Folder snapshot stays visible but unbound.
+  await page.route(/\/api\/file-locations/, (route) => route.abort());
+  const bindingAttempted = page.waitForRequest(/\/api\/file-locations/);
+  await writeFile(
+    join(root, "shoot/two.jpg"),
+    withCaptureTime(source, "2026:01:03 10:00:00"),
+  );
+  await post(running.url, "/api/scan", {});
+  await page.waitForFunction(async () => {
+    const response = await fetch("/api/overview");
+    const overview = (await response.json()) as { scan: { state: string } };
+    return overview.scan.state === "idle";
+  });
+  await bindingAttempted;
+
+  const browseBodies = recordBrowseBodies(page);
+  const sort = page.locator("[data-sort-select]");
+  await expect(sort).toBeEnabled();
+  // The Folder tree failure is what the user sees first; the order change
+  // must not add a second, different failure on top of it.
+  const connectionBefore = await page.locator("[data-connection]").innerText();
+  await sort.selectOption("capture-time-desc");
+
+  // The guard defers the order change instead of sending a Folder open with
+  // the superseded publication, so no Browse is attempted at all.
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  expect(browseBodies).toEqual([]);
+  // The retained snapshot stays truthful, the connection state is unchanged,
+  // and the control still reports the open snapshot's order.
+  await expect(
+    page.getByRole("button", { name: /^Photo 1 of 1/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.locator("[data-connection]").innerText())
+    .toBe(connectionBefore);
+  await expect(sort).toHaveValue("source-default");
+
+  // Once the binding route recovers, a fresh open uses the current
+  // publication and the selected order applies to the reopened Folder.
+  await page.unroute(/\/api\/file-locations/);
+  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+  const publication = (
+    (await (await fetch(`${running.url}/api/status`)).json()) as {
+      publication: string;
+    }
+  ).publication;
+  await sort.selectOption("capture-time-desc");
+  const expected = await browseOrderedIds(running.url, {
+    source: "folder",
+    folderPath: "shoot",
+    publication,
+    order: "capture-time-desc",
+  });
+  expect(expected).toHaveLength(2);
+  await expectGridOrder(page, expected);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "folder",
+    folderPath: "shoot",
+    publication,
+    order: "capture-time-desc",
+  });
+});
+
+test("an Album sort change keeps the current Photo and its resume identity", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 4; index += 1)
+    await writeFile(
+      join(root, `member-${index}.jpg`),
+      withCaptureTime(source, `2026:01:0${index + 1} 10:00:00`),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(4);
+  const { albumId } = await createAlbum(running.url, "Anchored");
+  // Persist an Album order that matches neither Capture Time direction.
+  const albumOrder = [
+    ascending[2]!,
+    ascending[0]!,
+    ascending[3]!,
+    ascending[1]!,
+  ];
+  await post(running.url, `/api/albums/${albumId}/order`, {
+    photoIds: albumOrder,
+  });
+  const descending = [...ascending].reverse();
+  const anchorId = albumOrder[1]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(3);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Anchored");
+  await expectGridOrder(page, albumOrder);
+
+  // Open the second Album member, then change the order from the Grid.
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 2 of 4/ }),
+  );
+  await expect(page.getByText("2 / 4")).toBeVisible();
+  await expect
+    .poll(async () => (await state(running.url, albumId)).position)
+    .toBe(1);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  const sort = page.locator("[data-sort-select]");
+  await sort.selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  // The Album reopen carries the Album identity and the current Photo anchor.
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+
+  // The same Photo stays current at its new position in the changed order.
+  await page.locator(`[data-photo-index="${anchorPosition}"]`).click();
+  await expect(page.getByText(`${anchorPosition + 1} / 4`)).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+  // A time view never rewrites the persisted Album positions.
+  const persisted = await state(running.url, albumId);
+  expect(persisted.members.map((member) => member.photoId)).toEqual(albumOrder);
+  expect(persisted.members.map((member) => member.position)).toEqual([
+    0, 1, 2, 3,
+  ]);
+
+  // Leaving and reopening the Album resumes by Photo identity under its own
+  // default order instead of by the last view position index.
+  await openSources(page);
+  await page.getByRole("button", { name: /All Photos/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await openSources(page);
+  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await expect(page.locator("[data-sort-select]")).toHaveValue(
+    "source-default",
+  );
+  await expectGridOrder(page, albumOrder);
+  await expect(
+    page.getByRole("button", { name: /^Photo 2 of 4/ }),
+  ).toBeVisible();
+});
+
+test("Previous and Next follow the order selected from the Grid", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 5; index += 1)
+    await writeFile(
+      join(root, `step-${index}.jpg`),
+      withCaptureTime(source, `2026:02:0${index + 1} 10:00:00`),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(5);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(descending).toEqual([...ascending].reverse());
+  const anchorId = ascending[3]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(1);
+
+  // The displayed Preview's URL names the current Photo, so navigation can be
+  // checked by identity instead of by request arrival order.
+  const currentPreviewId = () =>
+    page
+      .locator("[data-stage] img")
+      .evaluate((image) =>
+        new URL(image.getAttribute("src") ?? "", location.origin).pathname
+          .split("/")
+          .at(-3),
+      );
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  const anchorCell = page.locator('[data-photo-index="3"]');
+  await anchorCell.click();
+  await expect(page.getByText("4 / 5")).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(anchorId);
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await expectGridOrder(page, descending);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+
+  // Reopening the anchored Photo uses the new order's position, and the
+  // navigation steps through the new order's identity sequence.
+  await page.locator(`[data-photo-index="${anchorPosition}"]`).click();
+  await expect(page.getByText(`${anchorPosition + 1} / 5`)).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(anchorId);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText(`${anchorPosition + 2} / 5`)).toBeVisible();
+  const nextId = descending[anchorPosition + 1]!;
+  await expect.poll(currentPreviewId).toBe(nextId);
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByText(`${anchorPosition + 3} / 5`)).toBeVisible();
+  const finalId = descending[anchorPosition + 2]!;
+  await expect.poll(currentPreviewId).toBe(finalId);
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByText(`${anchorPosition + 2} / 5`)).toBeVisible();
+  await expect.poll(currentPreviewId).toBe(nextId);
+});
+
+test("a Library order switch aligns windows beyond the first Grid window", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  const count = 70;
+  for (let index = 0; index < count; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      withCaptureTime(
+        source,
+        `2026:03:01 ${String(Math.floor(index / 60)).padStart(2, "0")}:${String(
+          index % 60,
+        ).padStart(2, "0")}:00`,
+      ),
+    );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  expect(ascending).toHaveLength(count);
+  const descending = await browseOrderedIds(running.url, {
+    source: "library",
+    order: "capture-time-desc",
+  });
+  expect(descending).toEqual([...ascending].reverse());
+
+  // The current Photo sits in the first window before the switch and in the
+  // second one after it, so the reopened snapshot must realign its window.
+  const anchorIndex = 5;
+  const anchorId = ascending[anchorIndex]!;
+  const anchorPosition = descending.indexOf(anchorId);
+  expect(anchorPosition).toBe(count - 1 - anchorIndex);
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+  const anchorCell = page.locator(`[data-photo-index="${anchorIndex}"]`);
+  await expect(anchorCell).toBeVisible();
+  await anchorCell.click();
+  await expect(page.getByText(`${anchorIndex + 1} / 70`)).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
+
+  const browseBodies = recordBrowseBodies(page);
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    photoId: anchorId,
+  });
+  // The reopened snapshot renders the anchor's region of the new order
+  // instead of restarting at its first position: every rendered cell carries
+  // the new order's Photo at its own index, contiguously, and the anchor
+  // stays current inside the viewport.
+  const renderedCells = () =>
+    page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>(".photo-cell")).map(
+        (cell) => ({
+          index: Number(cell.dataset.photoIndex),
+          id:
+            new URL(
+              cell.querySelector("img")?.getAttribute("src") ?? "",
+              location.origin,
+            ).pathname
+              .split("/")
+              .at(-3) ?? "",
+        }),
+      ),
+    );
+  await expect
+    .poll(async () => {
+      const cells = await renderedCells();
+      return cells.length > 0 && cells.every((cell) => cell.id !== "");
+    })
+    .toBe(true);
+  const rendered = await renderedCells();
+  expect(rendered[0]!.index).toBeGreaterThan(0);
+  expect(rendered.map((cell) => cell.index)).toEqual(
+    Array.from(
+      { length: rendered.length },
+      (_, offset) => rendered[0]!.index + offset,
+    ),
+  );
+  for (const cell of rendered) expect(cell.id).toBe(descending[cell.index]);
+  // The anchored Photo is the current one again and is scrolled into view.
+  const anchored = page.locator(`[data-photo-index="${anchorPosition}"]`);
+  await expect(anchored).toBeVisible();
+  expect(await renderedCells()).toContainEqual({
+    index: anchorPosition,
+    id: anchorId,
+  });
+  expect(
+    await anchored.evaluate((cell) => {
+      const viewport = cell.closest("[data-grid-viewport]");
+      if (!(viewport instanceof HTMLElement)) return false;
+      const cellBox = cell.getBoundingClientRect();
+      const viewportBox = viewport.getBoundingClientRect();
+      return (
+        cellBox.bottom > viewportBox.top && cellBox.top < viewportBox.bottom
+      );
+    }),
+  ).toBe(true);
 });
 
 test("active Library Review keeps its Capture Time snapshot until the next Session", async ({
@@ -5443,7 +7364,7 @@ test("an admitted Album write settles after application teardown without present
   const albumId = created.albums.find((album) => album.name === "Detached")!.id;
   await page.goto(running.url);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await page.getByLabel("Album", { exact: true }).selectOption(albumId);
+  await openMembershipPanel(page);
 
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -5456,7 +7377,7 @@ test("an admitted Album write settles after application teardown without present
   const settled = page.waitForResponse((response) =>
     response.url().includes(`/api/albums/${albumId}/members`),
   );
-  await page.getByRole("button", { name: "Add to Album" }).click();
+  await membershipCheckbox(page, "Detached").check();
   await page.evaluate(() =>
     window.dispatchEvent(new PageTransitionEvent("pagehide")),
   );
@@ -6444,6 +8365,414 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   await expect(currentCell.locator(".cell-facts")).toBeHidden();
 });
 
+/**
+ * Geometry for one rendered Grid cell. The image box is the rendered Photo,
+ * not the media area, because .thumbnail sizes itself from the derivative's
+ * natural pixels inside the cell media area. `facts` carries the visible fact
+ * text so a caller can prove which cell renders a Photo-state indicator.
+ */
+type GridCellGeometry = Readonly<{
+  index: number;
+  cellWidth: number;
+  cellHeight: number;
+  mediaWidth: number;
+  mediaHeight: number;
+  imageWidth: number;
+  imageHeight: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  facts: string | null;
+  indicatorsOverlapImage: boolean;
+  imageInsideMedia: boolean;
+}>;
+
+async function gridCellGeometry(page: Page): Promise<GridCellGeometry[]> {
+  return page.evaluate(() => {
+    const overlaps = (inner: DOMRect, outer: DOMRect) =>
+      Math.max(
+        0,
+        Math.min(inner.right, outer.right) - Math.max(inner.left, outer.left),
+      ) > 0.5 &&
+      Math.max(
+        0,
+        Math.min(inner.bottom, outer.bottom) - Math.max(inner.top, outer.top),
+      ) > 0.5;
+    const inside = (inner: DOMRect, outer: DOMRect) =>
+      inner.left >= outer.left - 1 &&
+      inner.right <= outer.right + 1 &&
+      inner.top >= outer.top - 1 &&
+      inner.bottom <= outer.bottom + 1;
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(".photo-cell[data-photo-index]"),
+    ).map((cell) => {
+      const image = cell.querySelector<HTMLImageElement>("img.thumbnail");
+      const media = cell.querySelector<HTMLElement>(".cell-media");
+      if (!image || !media) throw new Error("Grid cell geometry is missing");
+      const cellBox = cell.getBoundingClientRect();
+      const mediaBox = media.getBoundingClientRect();
+      const imageBox = image.getBoundingClientRect();
+      const indicators = Array.from(
+        cell.querySelectorAll<HTMLElement>(
+          ".cell-state, .cell-caption, .cell-facts",
+        ),
+      ).filter((element) => !element.hidden && element.offsetParent !== null);
+      const facts = indicators.find((element) =>
+        element.classList.contains("cell-facts"),
+      );
+      return {
+        index: Number(cell.dataset.photoIndex),
+        cellWidth: cellBox.width,
+        cellHeight: cellBox.height,
+        mediaWidth: mediaBox.width,
+        mediaHeight: mediaBox.height,
+        imageWidth: imageBox.width,
+        imageHeight: imageBox.height,
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        facts: facts?.textContent ?? null,
+        indicatorsOverlapImage: indicators.some((element) =>
+          overlaps(imageBox, element.getBoundingClientRect()),
+        ),
+        imageInsideMedia: inside(imageBox, mediaBox),
+      };
+    });
+  });
+}
+
+async function cellBoxes(
+  page: Page,
+): Promise<Array<Readonly<{ index: number; width: number; height: number }>>> {
+  return page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(".grid-layer > .photo-cell"),
+      (cell) => {
+        const box = cell.getBoundingClientRect();
+        return {
+          index: Number(cell.dataset.photoIndex ?? -1),
+          width: box.width,
+          height: box.height,
+        };
+      },
+    ),
+  );
+}
+
+/** Ratio tolerance for rendered pixels versus the derivative's natural size. */
+function expectAspectRatio(geometry: GridCellGeometry): void {
+  const rendered = geometry.imageWidth / geometry.imageHeight;
+  const natural = geometry.naturalWidth / geometry.naturalHeight;
+  expect(Math.abs(rendered - natural) / natural).toBeLessThan(0.02);
+}
+
+test("Grid cells keep uniform cards while displaying true Photo aspect ratios", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const samples = [
+    { name: "a-landscape.jpg", width: 320, height: 180 },
+    { name: "b-portrait.jpg", width: 180, height: 320 },
+    { name: "c-square.jpg", width: 256, height: 256 },
+    { name: "d-panorama.jpg", width: 960, height: 160 },
+  ];
+  for (const sample of samples)
+    await writeFile(
+      join(root, sample.name),
+      await jpegWithSize(page, sample.width, sample.height),
+    );
+  const running = await server(base, root);
+  // One sample also carries a Photo-state indicator, so the footer grows and
+  // the media area shrinks inside the very same uniform card. Samples sort by
+  // path, so index 1 is b-portrait.jpg; the assertions below fail loudly if
+  // that ordering changes.
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(samples.length);
+  const factPhotoId = ids[1]!;
+  await page.route("**/api/browse/**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      photos: Array<{ id: string; ambiguous: boolean }>;
+    };
+    await route.fulfill({
+      response,
+      json: {
+        ...body,
+        photos: body.photos.map((photo) =>
+          photo.id === factPhotoId ? { ...photo, ambiguous: true } : photo,
+        ),
+      },
+    });
+  });
+  const loadedThumbnails = () =>
+    page.evaluate(
+      () =>
+        Array.from(
+          document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+        ).filter((image) => image.complete && image.naturalWidth > 0).length,
+    );
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await expect.poll(loadedThumbnails).toBe(4);
+    const cells = await gridCellGeometry(page);
+    expect(cells).toHaveLength(4);
+    // Uniform cards: the Grid stays a regular, virtualizable unit grid.
+    const widths = new Set(cells.map((cell) => Math.round(cell.cellWidth)));
+    const heights = new Set(cells.map((cell) => Math.round(cell.cellHeight)));
+    expect(widths.size).toBe(1);
+    expect(heights.size).toBe(1);
+    const naturalRatio = (cell: GridCellGeometry) =>
+      cell.naturalWidth / cell.naturalHeight;
+    // Thumbnail derivatives preserve the source ratio; the panorama is
+    // downscaled to the bounded target, so classify by ratio, not pixels.
+    const landscape = cells.find(
+      (cell) => naturalRatio(cell) > 1.4 && naturalRatio(cell) < 2.2,
+    );
+    const portrait = cells.find((cell) => naturalRatio(cell) < 0.8);
+    const square = cells.find(
+      (cell) => Math.abs(naturalRatio(cell) - 1) < 0.05,
+    );
+    const panorama = cells.find((cell) => naturalRatio(cell) > 3);
+    expect(
+      landscape && portrait && square && panorama,
+      "each sample aspect class renders one cell",
+    ).toBeTruthy();
+    // Exactly one cell renders the Photo-state indicator, and it is the
+    // portrait whose thumbnail is loaded.
+    expect(cells.filter((cell) => cell.facts !== null)).toHaveLength(1);
+    expect(portrait!.facts).toBe("Ambiguous pairing");
+    expect(landscape!.facts).toBeNull();
+    // Sources below the bounded derivative target keep their exact pixels.
+    expect([landscape!.naturalWidth, landscape!.naturalHeight]).toEqual([
+      320, 180,
+    ]);
+    expect([portrait!.naturalWidth, portrait!.naturalHeight]).toEqual([
+      180, 320,
+    ]);
+    expect([square!.naturalWidth, square!.naturalHeight]).toEqual([256, 256]);
+    for (const cell of cells) {
+      expectAspectRatio(cell);
+      expect(cell.imageInsideMedia).toBe(true);
+      // Indicators live beside or beneath the image, never over it.
+      expect(cell.indicatorsOverlapImage).toBe(false);
+      expect(cell.imageWidth).toBeLessThanOrEqual(cell.mediaWidth + 1);
+      expect(cell.imageHeight).toBeLessThanOrEqual(cell.mediaHeight + 1);
+    }
+    // Orientation is visible at a glance: wide, tall, square, and panoramic
+    // Photos render as distinct shapes inside identical cards.
+    expect(landscape!.imageWidth).toBeGreaterThan(landscape!.imageHeight);
+    expect(landscape!.imageWidth).toBeGreaterThanOrEqual(
+      landscape!.mediaWidth - 1,
+    );
+    expect(portrait!.imageHeight).toBeGreaterThan(portrait!.imageWidth);
+    expect(portrait!.imageHeight).toBeGreaterThanOrEqual(
+      portrait!.mediaHeight - 1,
+    );
+    // The fact-bearing cell grew its footer and shrank its media area without
+    // changing the uniform card box or the Photo's rendered ratio.
+    expect(portrait!.mediaHeight).toBeLessThan(landscape!.mediaHeight);
+    expect(Math.abs(portrait!.cellHeight - landscape!.cellHeight)).toBeLessThan(
+      0.5,
+    );
+    expect(Math.abs(square!.imageWidth - square!.imageHeight)).toBeLessThan(
+      1.5,
+    );
+    expect(panorama!.imageHeight).toBeLessThan(landscape!.imageHeight);
+  }
+});
+
+test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const landscape = await jpegWithSize(page, 320, 180);
+  await writeFile(join(root, "rotated.jpg"), withExifOrientation(landscape, 6));
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await expect
+    .poll(() =>
+      page
+        .locator(".photo-cell img")
+        .first()
+        .evaluate((image: HTMLImageElement) =>
+          image.complete && image.naturalWidth > 0
+            ? `${image.naturalWidth}x${image.naturalHeight}`
+            : "pending",
+        ),
+    )
+    .toBe("180x320");
+  const [cell] = await gridCellGeometry(page);
+  expect(cell).toBeDefined();
+  // Orientation 6 rotates 320x180 to 180x320; a double rotation would show
+  // 320x180. The rendered box keeps the corrected ratio without stretching.
+  expect(cell!.naturalWidth).toBe(180);
+  expect(cell!.naturalHeight).toBe(320);
+  expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
+  expectAspectRatio(cell!);
+  expect(cell!.indicatorsOverlapImage).toBe(false);
+});
+
+test("a RAW and JPEG pair renders one Grid cell with the JPEG's single rotation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  // Same stem, two Originals, so the pair forms one Photo. The JPEG claims EXIF
+  // orientation 6 (320x180 displayed as 180x320) and the RAW bytes are
+  // deliberately unreadable, so the Preview comes from the matching JPEG.
+  await writeFile(
+    join(root, "a.jpg"),
+    withExifOrientation(await jpegWithSize(page, 320, 180), 6),
+  );
+  await writeFile(join(root, "a.ARW"), "raw-bytes-a");
+  const running = await server(base, root);
+  const opened = (await (
+    await post(running.url, "/api/browse", { source: "library" })
+  ).json()) as { token: string; total: number };
+  const paired = await browseWindow(running.url, opened.token, 0);
+  await fetch(`${running.url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: running.url },
+  });
+  // Pairing is name-based and independent of byte validity: the RAW and the
+  // JPEG are one Photo with both members, not two Photos.
+  expect(paired.total).toBe(1);
+  expect(
+    paired.photos[0]!.originals?.map((original) => original.kind).sort(),
+  ).toEqual(["jpeg", "raw"]);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await waitForGridFrame(page);
+  await expect(page.locator(".photo-cell[data-photo-index]")).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page
+        .locator(".photo-cell img")
+        .first()
+        .evaluate((image: HTMLImageElement) =>
+          image.complete && image.naturalWidth > 0
+            ? `${image.naturalWidth}x${image.naturalHeight}`
+            : "pending",
+        ),
+    )
+    .toBe("180x320");
+  const [cell] = await gridCellGeometry(page);
+  expect(cell).toBeDefined();
+  // Orientation 6 is baked once for the pair too: a second rotation would
+  // render 320x180.
+  expect(cell!.naturalWidth).toBe(180);
+  expect(cell!.naturalHeight).toBe(320);
+  expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
+  // The complete composition displays: the ratio survives, nothing crops, and
+  // no indicator covers the image.
+  expectAspectRatio(cell!);
+  expect(cell!.imageInsideMedia).toBe(true);
+  expect(cell!.imageWidth).toBeLessThanOrEqual(cell!.mediaWidth + 1);
+  expect(cell!.imageHeight).toBeLessThanOrEqual(cell!.mediaHeight + 1);
+  expect(cell!.indicatorsOverlapImage).toBe(false);
+});
+
+test("Grid placeholders and late thumbnails never change cell geometry", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  let holdThumbnails = true;
+  const heldThumbnails: Array<() => void> = [];
+  await page.route("**/api/derivatives/**", async (route) => {
+    if (!holdThumbnails) return route.continue();
+    await new Promise<void>((resolve) => heldThumbnails.push(resolve));
+    return route.continue();
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 70 Photos")).toBeVisible();
+  await waitForGridFrame(page);
+  await expect(
+    page.locator(".photo-cell[data-photo-index]").first(),
+  ).toBeVisible();
+  // The thumbnail bytes are still held, so every image box is unresolved.
+  expect(
+    await page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+      ).every((image) => image.naturalWidth === 0),
+    ),
+  ).toBe(true);
+  // Cells exist with final geometry before any thumbnail byte arrives.
+  const beforeThumbnails = await cellBoxes(page);
+  expect(beforeThumbnails.length).toBeGreaterThan(0);
+  holdThumbnails = false;
+  for (const release of heldThumbnails.splice(0)) release();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          Array.from(
+            document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+          ).filter((image) => image.complete && image.naturalWidth > 0).length,
+      ),
+    )
+    .toBeGreaterThan(0);
+  const afterThumbnails = await cellBoxes(page);
+  expect(afterThumbnails).toEqual(beforeThumbnails);
+
+  // A window that has not delivered facts yet keeps the same cell box while
+  // it shows its placeholder.
+  const heldWindows: Array<() => void> = [];
+  let holdWindows = true;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") && url.searchParams.has("start"),
+    async (route) => {
+      if (!holdWindows) return route.continue();
+      await new Promise<void>((resolve) => heldWindows.push(resolve));
+      return route.continue();
+    },
+  );
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = 30 * 178;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(page.locator(".cell-placeholder").first()).toBeVisible();
+  const placeholder = await page
+    .locator(".cell-placeholder")
+    .first()
+    .evaluate((element) => {
+      const cell = element.closest<HTMLElement>(".photo-cell");
+      if (!cell) throw new Error("Placeholder cell is missing");
+      const box = cell.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+  const loaded = beforeThumbnails[0]!;
+  expect(Math.abs(placeholder.width - loaded.width)).toBeLessThan(0.5);
+  expect(Math.abs(placeholder.height - loaded.height)).toBeLessThan(0.5);
+  holdWindows = false;
+  for (const release of heldWindows.splice(0)) release();
+  await expect(page.locator(".cell-placeholder")).toHaveCount(0);
+  const loadedCell = await page
+    .locator(".photo-cell[data-photo-index]")
+    .first()
+    .evaluate((cell) => {
+      const box = cell.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+  expect(Math.abs(loadedCell.width - placeholder.width)).toBeLessThan(0.5);
+  expect(Math.abs(loadedCell.height - placeholder.height)).toBeLessThan(0.5);
+});
+
 test("a completed mutation cannot reopen or advance a superseding source", async ({
   page,
 }) => {
@@ -7146,15 +9475,14 @@ test("an expired Album snapshot replaces retired membership memory", async ({
   );
   await expect(page.getByText("1 / 250")).toBeVisible();
   const firstId = (await state(running.url, albumId)).members[0]!.photoId;
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Expiry").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeHidden();
+  await expect(membershipCheckbox(page, "Expiry")).not.toBeChecked();
   const readded = await post(running.url, `/api/albums/${albumId}/members`, {
     photoIds: [firstId],
   });
@@ -7230,9 +9558,8 @@ test("an expired Album snapshot replaces retired membership memory", async ({
     releaseReopen();
     await expect(tailPhoto).toBeEnabled();
     await openPhotoAndWaitForProgress(page, albumId, tailPhoto);
-    await expect(
-      page.getByRole("button", { name: "Remove from this Album" }),
-    ).toBeVisible();
+    await openMembershipPanel(page);
+    await expect(membershipCheckbox(page, "Expiry")).toBeChecked();
   } finally {
     releaseReopen();
     await page.unroute(/\/api\/browse/);
@@ -7275,7 +9602,8 @@ for (const failure of replacementFirstWindowFailures) {
       page.getByRole("button", { name: /^Photo 1 of 250/ }),
     );
     const firstId = (await state(running.url, albumId)).members[0]!.photoId;
-    await page.getByRole("button", { name: "Remove from this Album" }).click();
+    await openMembershipPanel(page);
+    await membershipCheckbox(page, "Replacement failure").uncheck();
     await expect(
       page.getByText(
         "Removed from the Album. It stays in this open view until reopened.",
@@ -7436,7 +9764,8 @@ test("a failed expired Album reopen retains retired membership memory", async ({
     albumId,
     page.getByRole("button", { name: /^Photo 1 of 70/ }),
   );
-  await page.getByRole("button", { name: "Remove from this Album" }).click();
+  await openMembershipPanel(page);
+  await membershipCheckbox(page, "Expiry failure").uncheck();
   await expect(
     page.getByText(
       "Removed from the Album. It stays in this open view until reopened.",
@@ -7484,9 +9813,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 70/ }).click();
   await expect(page.locator("[data-review]")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Remove from this Album" }),
-  ).toBeHidden();
+  await expect(membershipCheckbox(page, "Expiry failure")).not.toBeChecked();
 });
 
 test("Photo View recovery defers Grid windows until Grid is visible", async ({
@@ -8557,9 +10884,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   });
   const retainedPreviewSrc = await currentImage.getAttribute("src");
   if (!retainedPreviewSrc) throw new Error("Current Preview src is missing");
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Fit Window" })).toBeEnabled();
   await page.keyboard.press("ArrowRight");
   await expect.poll(() => boundaryRequests).toBeGreaterThanOrEqual(2);
   staleBoundaryRequests = boundaryRequests;
@@ -8567,9 +10892,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   // available instead of claiming the unavailable Photo is already open.
   await expect(page.getByText("60 / 70")).toBeVisible();
   await expect(currentImage).toHaveAttribute("src", retainedPreviewSrc);
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Fit Window" })).toBeEnabled();
   // The boundary window is still loading; Back to Grid must stay available.
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),

@@ -6,10 +6,10 @@ use crate::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
     AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
     DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
-    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
-    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
-    ScanLimits, ScanSnapshot, SelectionState,
+    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
+    PhotoRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
+    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState,
+    RelativeOriginalPath, ScanLimits, ScanSnapshot, SelectionState,
     identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -197,6 +197,9 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
 
 type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
 
+/// Bounded per-Photo Album membership query result.
+type PhotoAlbums = Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>;
+
 enum Command {
     Probe(Reply<u64>),
     Snapshot(Reply<ScanSnapshot>),
@@ -209,6 +212,10 @@ enum Command {
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
     ListAlbums(Reply<Vec<AlbumRecord>>),
     ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
+    PhotoAlbums {
+        photo_id: String,
+        reply: Reply<Option<Vec<PhotoAlbumMembership>>>,
+    },
     AlbumBrowseTarget {
         album_id: String,
         reply: Reply<Option<AlbumBrowseTarget>>,
@@ -458,6 +465,20 @@ impl Persistence {
         Ok(receive)
     }
 
+    /// Bounded per-Photo membership: the Albums containing one Photo, in
+    /// Album-list order, without materializing any member list.
+    pub(crate) fn photo_albums_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<oneshot::Receiver<PhotoAlbums>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::PhotoAlbums {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
     /// Ordered membership identity for one Album's Browse Snapshot.
     pub(crate) fn album_browse_target_receiver(
         &self,
@@ -626,6 +647,9 @@ fn owner_main(
             }
             Command::ListAlbumSummaries(reply) => {
                 let _ = reply.send(list_album_summaries(&connection));
+            }
+            Command::PhotoAlbums { photo_id, reply } => {
+                let _ = reply.send(photo_albums(&connection, &photo_id));
             }
             Command::AlbumBrowseTarget { album_id, reply } => {
                 let _ = reply.send(album_browse_target(&connection, &album_id));
@@ -2095,6 +2119,36 @@ fn list_album_summaries(connection: &Connection) -> Result<Vec<AlbumSummary>, Pe
         })
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)
+}
+
+fn photo_albums(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError> {
+    let exists = connection
+        .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    if exists.is_none() {
+        return Ok(None);
+    }
+    connection
+        .prepare(
+            "SELECT a.id, a.name
+             FROM album_members m JOIN albums a ON a.id = m.album_id
+             WHERE m.photo_id = ? ORDER BY a.created_at, a.id",
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([photo_id], |row| {
+            Ok(PhotoAlbumMembership {
+                album_id: row.get(0)?,
+                album_name: row.get(1)?,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
         .map_err(|_| PersistenceError::Storage)
 }
 
