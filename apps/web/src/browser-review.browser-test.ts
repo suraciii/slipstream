@@ -3344,14 +3344,20 @@ test("the membership panel lists the current Photo's Albums across sources and r
 
   // A long Album name truncates visually, keeps its full text, and stays
   // inside its control group.
-  const longest = page.locator("[data-membership-list] li").nth(2);
-  const clipped = await longest.evaluate((element) => ({
-    text: element.textContent,
-    textOverflow: getComputedStyle(element).textOverflow,
-    clipped: element.scrollWidth > element.clientWidth,
-    right: element.getBoundingClientRect().right,
-    containerRight: element.parentElement!.getBoundingClientRect().right,
-  }));
+  const clipped = await page.evaluate(() => {
+    // Query inside the evaluation so a membership re-render cannot detach
+    // the measured element between resolution and measurement.
+    const element = document.querySelectorAll<HTMLElement>(
+      "[data-membership-list] li",
+    )[2]!;
+    return {
+      text: element.textContent,
+      textOverflow: getComputedStyle(element).textOverflow,
+      clipped: element.scrollWidth > element.clientWidth,
+      right: element.getBoundingClientRect().right,
+      containerRight: element.parentElement!.getBoundingClientRect().right,
+    };
+  });
   expect(clipped.text).toBe(longName);
   expect(clipped.textOverflow).toBe("ellipsis");
   expect(clipped.clipped).toBe(true);
@@ -8818,7 +8824,9 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   await waitForLoadedReviewImage(page);
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.keyboard.press("p");
-  await expect(page.getByText("2 / 3")).toBeVisible();
+  // The decision at index 1 commits and advances to the last Photo.
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(stateBadge(1)).toHaveText("✓");
   await expect(stateBadge(1)).toHaveClass(/selected/);
@@ -8829,7 +8837,9 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   await waitForLoadedReviewImage(page);
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.keyboard.press("x");
-  await expect(page.getByText("3 / 3")).toBeVisible();
+  // The last Photo cannot advance, so it stays and reports its decision.
+  await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(stateBadge(2)).toHaveText("×");
   await expect(stateBadge(2)).toHaveClass(/rejected/);
