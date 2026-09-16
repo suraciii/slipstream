@@ -4,13 +4,12 @@ use super::{
 };
 use crate::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
-    PhotoAlbumMembership,
     AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
     DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
-    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoRecord, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
-    PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath,
-    ScanLimits, ScanSnapshot, SelectionState,
+    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
+    PhotoRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
+    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState,
+    RelativeOriginalPath, ScanLimits, ScanSnapshot, SelectionState,
     identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -197,6 +196,9 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
 }
 
 type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
+
+/// Bounded per-Photo Album membership query result.
+type PhotoAlbums = Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>;
 
 enum Command {
     Probe(Reply<u64>),
@@ -468,10 +470,7 @@ impl Persistence {
     pub(crate) fn photo_albums_receiver(
         &self,
         photo_id: &str,
-    ) -> Result<
-        oneshot::Receiver<Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>>,
-        PersistenceError,
-    > {
+    ) -> Result<oneshot::Receiver<PhotoAlbums>, PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::PhotoAlbums {
             photo_id: photo_id.to_owned(),

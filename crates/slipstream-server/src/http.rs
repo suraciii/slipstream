@@ -302,7 +302,7 @@ pub(crate) async fn open_browse(
                 BrowseViewOrder::CaptureTimeAscending
             }
         }
-        Some("album-order") if album_source => BrowseViewOrder::AlbumOrder,
+        Some("album-order") => BrowseViewOrder::AlbumOrder,
         Some("capture-time-asc") => BrowseViewOrder::CaptureTimeAscending,
         Some("capture-time-desc") => BrowseViewOrder::CaptureTimeDescending,
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse order"),
@@ -1064,6 +1064,10 @@ impl From<ServerError> for ApiError {
             ServerError::BrowseLimit => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "Browse window is invalid",
+            },
+            ServerError::BrowseOrder => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Invalid browse order",
             },
             ServerError::FileLocationsExpired => Self {
                 status: StatusCode::CONFLICT,

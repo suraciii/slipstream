@@ -40,9 +40,10 @@ pub use domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
     AlbumRecord, AlbumSummary, DiscoveredOriginal, MAXIMUM_FOLDER_ALBUM_PHOTOS,
     OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
-    PhotoAlbumMembership, PhotoRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult,
-    PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot, SelectionState,
+    PhotoAlbumMembership, PhotoRecord, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
+    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
+    SelectionState,
 };
 pub use identity::{
     InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,

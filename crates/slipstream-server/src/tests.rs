@@ -58,14 +58,25 @@ async fn wait_for_scan_runs(application: &Application, target: u64) {
     panic!("Library scan did not settle before the test deadline");
 }
 
+/// The default view order for one Browse source, matching the HTTP layer.
+fn default_order(source: &BrowseSourceRequest) -> BrowseViewOrder {
+    match source {
+        BrowseSourceRequest::Album(_) => BrowseViewOrder::AlbumOrder,
+        BrowseSourceRequest::Library | BrowseSourceRequest::Folder { .. } => {
+            BrowseViewOrder::CaptureTimeAscending
+        }
+    }
+}
+
 /// Bounded traversal of one Browse source. Tests must observe Library
 /// state through the bounded protocol, never a complete-Photo route.
 async fn browse_summaries(
     application: &Application,
     source: BrowseSourceRequest,
 ) -> Vec<PhotoSummary> {
+    let order = default_order(&source);
     let opened = application
-        .browse_open(source, None)
+        .browse_open(source, order, None)
         .await
         .expect("browse open succeeds");
     let mut photos = Vec::new();
@@ -674,7 +685,11 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     let opened = application
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     let window = application
@@ -724,6 +739,658 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
                 .contains(config.library_root.to_str().unwrap())
         );
     }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// Bounded traversal for one explicit view order. Tests observe order only
+/// through the bounded protocol, never a complete-Photo route.
+async fn browse_ids_in_order(
+    application: &Application,
+    source: BrowseSourceRequest,
+    order: BrowseViewOrder,
+) -> Vec<String> {
+    browse_ids_in_pages(application, source, order, 60).await
+}
+
+async fn browse_ids_in_pages(
+    application: &Application,
+    source: BrowseSourceRequest,
+    order: BrowseViewOrder,
+    limit: usize,
+) -> Vec<String> {
+    let opened = application
+        .browse_open(source, order, None)
+        .await
+        .expect("browse open succeeds");
+    let mut ids = Vec::new();
+    let mut start = 0;
+    loop {
+        let window = application
+            .browse_window(&opened.token, start, limit)
+            .await
+            .expect("browse window succeeds");
+        let count = window.photos.len();
+        ids.extend(window.photos.into_iter().map(|photo| photo.id));
+        start += count;
+        if count == 0 || start >= opened.total {
+            break;
+        }
+    }
+    application.browse_close(&opened.token);
+    ids
+}
+
+/// Maps Photo IDs to their ordering Location names from one Library snapshot
+/// read, so order assertions compare real persisted facts rather than test
+/// guesses about generated identities.
+async fn ordering_locations(application: &Application, ids: &[String]) -> Vec<String> {
+    let snapshot = application.library.snapshot().await.unwrap();
+    let locations: HashMap<&str, &str> = snapshot
+        .photos
+        .iter()
+        .map(|photo| (photo.id.as_str(), photo.sort_path.as_str()))
+        .collect();
+    ids.iter()
+        .map(|id| locations[id.as_str()].to_owned())
+        .collect()
+}
+
+/// Reads the Photo an Album Snapshot resumes at, exactly like a browser:
+/// open the Snapshot, then read its reported position.
+async fn album_resume(
+    application: &Application,
+    album_id: &str,
+    order: BrowseViewOrder,
+) -> (usize, String) {
+    let opened = application
+        .browse_open(BrowseSourceRequest::Album(album_id.to_owned()), order, None)
+        .await
+        .expect("album browse open succeeds");
+    let window = application
+        .browse_window(&opened.token, opened.position, 1)
+        .await
+        .expect("album resume window succeeds");
+    let photo_id = window.photos[0].id.clone();
+    application.browse_close(&opened.token);
+    (opened.position, photo_id)
+}
+
+/// Photo ID by ordering Location name for one set of IDs.
+async fn photo_ids_by_location(
+    application: &Application,
+    ids: &[String],
+) -> HashMap<String, String> {
+    let snapshot = application.library.snapshot().await.unwrap();
+    let locations: HashMap<&str, &str> = snapshot
+        .photos
+        .iter()
+        .map(|photo| (photo.id.as_str(), photo.sort_path.as_str()))
+        .collect();
+    ids.iter()
+        .map(|id| (locations[id.as_str()].to_owned(), id.clone()))
+        .collect()
+}
+
+async fn get_json(router: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let response = send(
+        router,
+        Request::builder()
+            .uri(format!("http://camera.local{uri}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let status = response.status();
+    (status, response_json(response).await)
+}
+
+#[tokio::test]
+async fn browse_view_order_reverses_only_capture_time_and_keeps_missing_last() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    capture_metadata_fixture(&root.join("a.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("c.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("b.jpg"), "2026:01:01 10:00:00");
+    jpeg_fixture(&root.join("d.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("z.jpg"), 8, 4, [4, 5, 6]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+
+    let ascending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    assert_eq!(
+        ordering_locations(&application, &ascending).await,
+        vec!["a.jpg", "c.jpg", "b.jpg", "d.jpg", "z.jpg"]
+    );
+    let descending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeDescending,
+    )
+    .await;
+    // Equal Capture Times keep the Location tie-breaker ascending and the
+    // missing-time partition stays last instead of leading the view.
+    assert_eq!(
+        ordering_locations(&application, &descending).await,
+        vec!["b.jpg", "a.jpg", "c.jpg", "d.jpg", "z.jpg"]
+    );
+    assert_eq!(ascending.len(), 5);
+    // The Published Library keeps its natural ascending order: a view order
+    // is a projection, not a rewrite.
+    let snapshot = application.library.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot
+            .photos
+            .iter()
+            .map(|photo| photo.sort_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a.jpg", "c.jpg", "b.jpg", "d.jpg", "z.jpg"]
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn folder_view_order_reverses_only_capture_time_within_the_subtree() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("sub")).unwrap();
+    capture_metadata_fixture(&root.join("sub/a.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("sub/b.jpg"), "2026:01:01 10:00:00");
+    jpeg_fixture(&root.join("sub/c.jpg"), 8, 4, [1, 2, 3]);
+    capture_metadata_fixture(&root.join("other.jpg"), "2026:01:01 08:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let publication = application
+        .file_locations(None, "", 0, 60)
+        .await
+        .unwrap()
+        .publication;
+    let folder = || BrowseSourceRequest::Folder {
+        location: "sub".to_owned(),
+        publication: publication.clone(),
+    };
+    let ascending = browse_ids_in_order(
+        &application,
+        folder(),
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    assert_eq!(
+        ordering_locations(&application, &ascending).await,
+        vec!["sub/a.jpg", "sub/b.jpg", "sub/c.jpg"]
+    );
+    let descending = browse_ids_in_order(
+        &application,
+        folder(),
+        BrowseViewOrder::CaptureTimeDescending,
+    )
+    .await;
+    assert_eq!(
+        ordering_locations(&application, &descending).await,
+        vec!["sub/b.jpg", "sub/a.jpg", "sub/c.jpg"]
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn album_time_views_order_members_without_rewriting_membership_positions() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    capture_metadata_fixture(&root.join("a.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("b.jpg"), "2026:01:01 10:00:00");
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [1, 2, 3]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let library_ids = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    let locations = ordering_locations(&application, &library_ids).await;
+    let by_location: HashMap<&str, &String> = locations
+        .iter()
+        .map(|location| location.as_str())
+        .zip(library_ids.iter())
+        .collect();
+    let a = by_location["a.jpg"].clone();
+    let b = by_location["b.jpg"].clone();
+    let c = by_location["c.jpg"].clone();
+
+    application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Picks".to_owned(),
+        })
+        .await
+        .unwrap();
+    let album_id = application
+        .albums()
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Picks")
+        .unwrap()
+        .id;
+    // Membership order is deliberately not Capture Time order.
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: album_id.clone(),
+            photo_ids: vec![c.clone(), b.clone(), a.clone()],
+        })
+        .await
+        .unwrap();
+
+    let album_order = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Album(album_id.clone()),
+        BrowseViewOrder::AlbumOrder,
+    )
+    .await;
+    assert_eq!(album_order, vec![c.clone(), b.clone(), a.clone()]);
+    let time_ascending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Album(album_id.clone()),
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    assert_eq!(time_ascending, vec![a.clone(), b.clone(), c.clone()]);
+    let time_descending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Album(album_id.clone()),
+        BrowseViewOrder::CaptureTimeDescending,
+    )
+    .await;
+    assert_eq!(time_descending, vec![b.clone(), a.clone(), c.clone()]);
+
+    // A preferred Photo resolves by identity inside the requested view.
+    let preferred = application
+        .browse_open(
+            BrowseSourceRequest::Album(album_id.clone()),
+            BrowseViewOrder::CaptureTimeDescending,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preferred.position, 1);
+    application.browse_close(&preferred.token);
+
+    // Persisted membership positions keep the Album's own order.
+    let album = application
+        .library
+        .list_albums()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|album| album.id == album_id)
+        .unwrap();
+    assert_eq!(
+        album
+            .members
+            .iter()
+            .map(|member| member.photo_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![c.as_str(), b.as_str(), a.as_str()]
+    );
+    assert_eq!(
+        album
+            .members
+            .iter()
+            .map(|member| member.position)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn browse_open_rejects_unknown_and_source_invalid_order() {
+    let (base, config) = prepare_fixture();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let unknown = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({"source": "library", "order": "newest-first"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(unknown).await,
+        serde_json::json!({"error": "Invalid browse order"})
+    );
+    let album_order_on_library = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({"source": "library", "order": "album-order"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(album_order_on_library.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(album_order_on_library).await,
+        serde_json::json!({"error": "Invalid browse order"})
+    );
+    let folder_album_order = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({
+            "source": "folder",
+            "folderPath": "",
+            "publication": "0123456789abcdef",
+            "order": "album-order"
+        }),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(folder_album_order.status(), StatusCode::BAD_REQUEST);
+    let accepted = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({"source": "library", "order": "capture-time-desc"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    // The source/order compatibility rule lives in the application boundary,
+    // so a direct caller cannot silently reinterpret `album-order`.
+    assert!(matches!(
+        application
+            .browse_open(
+                BrowseSourceRequest::Library,
+                BrowseViewOrder::AlbumOrder,
+                None,
+            )
+            .await,
+        Err(ServerError::BrowseOrder)
+    ));
+    assert!(matches!(
+        application
+            .browse_open(
+                BrowseSourceRequest::Folder {
+                    location: "".to_owned(),
+                    publication: "0123456789abcdef".to_owned(),
+                },
+                BrowseViewOrder::AlbumOrder,
+                None,
+            )
+            .await,
+        Err(ServerError::BrowseOrder)
+    ));
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn photo_albums_route_reports_true_membership_from_the_owner() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let ids = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    assert_eq!(ids.len(), 3);
+    for name in ["Picks", "Later"] {
+        application
+            .mutate_album(slipstream_core::AlbumMutation::Create {
+                name: name.to_owned(),
+            })
+            .await
+            .unwrap();
+    }
+    let albums = application.albums().await.unwrap().albums;
+    let picks = albums
+        .iter()
+        .find(|album| album.name == "Picks")
+        .unwrap()
+        .id
+        .clone();
+    let later = albums
+        .iter()
+        .find(|album| album.name == "Later")
+        .unwrap()
+        .id
+        .clone();
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: picks.clone(),
+            photo_ids: vec![ids[0].clone()],
+        })
+        .await
+        .unwrap();
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: later.clone(),
+            photo_ids: vec![ids[0].clone(), ids[1].clone()],
+        })
+        .await
+        .unwrap();
+    // Re-adding an existing member must not duplicate membership.
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: picks.clone(),
+            photo_ids: vec![ids[0].clone()],
+        })
+        .await
+        .unwrap();
+
+    let (status, body) = get_json(&router, &format!("/api/photos/{}/albums", ids[0])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({"albums": [
+            {"id": picks, "name": "Picks"},
+            {"id": later, "name": "Later"},
+        ]})
+    );
+    let (status, body) = get_json(&router, &format!("/api/photos/{}/albums", ids[1])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({"albums": [{"id": later, "name": "Later"}]})
+    );
+    let (status, body) = get_json(&router, &format!("/api/photos/{}/albums", ids[2])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({"albums": []}));
+    let (status, body) = get_json(
+        &router,
+        "/api/photos/00000000-0000-4000-8000-000000000000/albums",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, serde_json::json!({"error": "Photo not found"}));
+    let (status, body) = get_json(&router, "/api/photos/NOT-A-ID/albums").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, serde_json::json!({"error": "Invalid Photo"}));
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn album_saved_position_falls_back_by_membership_position_in_time_views() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    // `c` deliberately has no Capture Time so a time view puts it last.
+    capture_metadata_fixture(&root.join("a.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("b.jpg"), "2026:01:01 10:00:00");
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [1, 2, 3]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    let by_name = photo_ids_by_location(&application, &ids).await;
+    let (a, b, c) = (
+        by_name["a.jpg"].clone(),
+        by_name["b.jpg"].clone(),
+        by_name["c.jpg"].clone(),
+    );
+
+    // Membership order starts with the Photo that will become unavailable.
+    let album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Picks".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Picks")
+        .unwrap()
+        .id;
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: album.clone(),
+            photo_ids: vec![c.clone(), a.clone(), b.clone()],
+        })
+        .await
+        .unwrap();
+    application
+        .mutate_album(slipstream_core::AlbumMutation::SetProgress {
+            album_id: album.clone(),
+            photo_id: c.clone(),
+        })
+        .await
+        .unwrap();
+    fs::remove_file(root.join("c.jpg")).unwrap();
+    application.rescan().await.unwrap();
+
+    // Saved `c` is unavailable, so every order resumes at the next available
+    // member by membership position: `a`.
+    assert_eq!(
+        album_resume(&application, &album, BrowseViewOrder::AlbumOrder).await,
+        (1, a.clone())
+    );
+    let ascending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Album(album.clone()),
+        BrowseViewOrder::CaptureTimeAscending,
+    )
+    .await;
+    assert_eq!(
+        ordering_locations(&application, &ascending).await,
+        vec!["a.jpg", "b.jpg", "c.jpg"]
+    );
+    assert_eq!(
+        album_resume(&application, &album, BrowseViewOrder::CaptureTimeAscending).await,
+        (0, a.clone())
+    );
+    let descending = browse_ids_in_order(
+        &application,
+        BrowseSourceRequest::Album(album.clone()),
+        BrowseViewOrder::CaptureTimeDescending,
+    )
+    .await;
+    assert_eq!(
+        ordering_locations(&application, &descending).await,
+        vec!["b.jpg", "a.jpg", "c.jpg"]
+    );
+    // Membership position picks `a` even though its view position differs.
+    assert_eq!(
+        album_resume(&application, &album, BrowseViewOrder::CaptureTimeDescending).await,
+        (1, a.clone())
+    );
+    // The explicit preferred Photo still outranks the saved position, and the
+    // persisted membership positions never move.
+    let opened = application
+        .browse_open(
+            BrowseSourceRequest::Album(album.clone()),
+            BrowseViewOrder::CaptureTimeDescending,
+            Some(&b),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.position, 0);
+    application.browse_close(&opened.token);
+    assert_eq!(
+        browse_ids_in_order(
+            &application,
+            BrowseSourceRequest::Album(album),
+            BrowseViewOrder::AlbumOrder,
+        )
+        .await,
+        vec![c, a, b]
+    );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn descending_paged_windows_stay_globally_ordered_without_duplicates() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    for index in 0..65u32 {
+        let name = format!("n{index:02}.jpg");
+        capture_metadata_fixture(
+            &root.join(&name),
+            &format!("2026:01:01 09:{:02}:{:02}", index / 60, index % 60),
+        );
+    }
+    // Two Photos without a valid Capture Time stay last in both directions.
+    jpeg_fixture(&root.join("d.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("z.jpg"), 8, 4, [4, 5, 6]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+
+    let descending = browse_ids_in_pages(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeDescending,
+        7,
+    )
+    .await;
+    let mut expected_timed = (0..65u32)
+        .map(|index| format!("n{index:02}.jpg"))
+        .collect::<Vec<_>>();
+    expected_timed.reverse();
+    let mut expected = expected_timed;
+    expected.extend(["d.jpg".to_owned(), "z.jpg".to_owned()]);
+    assert_eq!(descending.len(), 67);
+    assert_eq!(
+        ordering_locations(&application, &descending).await,
+        expected
+    );
+    let unique = descending.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), descending.len(), "windows repeated a Photo");
+
+    // The same paged traversal in ascending order is the exact inverse of the
+    // time partition, proving both directions page one global order.
+    let ascending = browse_ids_in_pages(
+        &application,
+        BrowseSourceRequest::Library,
+        BrowseViewOrder::CaptureTimeAscending,
+        7,
+    )
+    .await;
+    let ascending_timed = &ascending[..65];
+    let mut reversed_timed = ascending_timed.to_vec();
+    reversed_timed.reverse();
+    assert_eq!(reversed_timed, descending[..65].to_vec());
+    assert_eq!(
+        ordering_locations(&application, &ascending[65..]).await,
+        vec!["d.jpg", "z.jpg"]
+    );
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1013,7 +1680,11 @@ async fn album_browse_open_resolves_saved_position_without_members_response() {
         .await
         .unwrap();
     let opened = application
-        .browse_open(BrowseSourceRequest::Album(album_id), None)
+        .browse_open(
+            BrowseSourceRequest::Album(album_id),
+            BrowseViewOrder::AlbumOrder,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(opened.total, 3);
@@ -1332,6 +2003,7 @@ async fn folder_sources_filter_ancestry_and_expire_with_publication() {
                     location: "a".to_owned(),
                     publication: publication.clone(),
                 },
+                BrowseViewOrder::CaptureTimeAscending,
                 None,
             )
             .await,
@@ -1501,7 +2173,11 @@ async fn empty_album_opens_lists_and_accepts_first_member() {
     assert_eq!(summary.photo_count, 0);
     assert!(!summary.has_saved_position);
     let opened = application
-        .browse_open(BrowseSourceRequest::Album(album_id.clone()), None)
+        .browse_open(
+            BrowseSourceRequest::Album(album_id.clone()),
+            BrowseViewOrder::AlbumOrder,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(opened.total, 0);
@@ -1520,7 +2196,11 @@ async fn empty_album_opens_lists_and_accepts_first_member() {
         .unwrap();
     assert_eq!(summary.photo_count, ids.len());
     let opened = application
-        .browse_open(BrowseSourceRequest::Album(summary.id.clone()), None)
+        .browse_open(
+            BrowseSourceRequest::Album(summary.id.clone()),
+            BrowseViewOrder::AlbumOrder,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(opened.total, ids.len());
@@ -1537,11 +2217,19 @@ async fn browse_tokens_are_process_unique_and_expiry_is_enforced() {
     wait_for_scan_settled(&application_a).await;
     wait_for_scan_settled(&application_b).await;
     let opened_a = application_a
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     let opened_b = application_b
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     assert_ne!(opened_a.token, opened_b.token);
@@ -1642,12 +2330,20 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
     application.rescan().await.unwrap();
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let library = application
-        .browse_open(BrowseSourceRequest::Library, Some(&ids[2]))
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            Some(&ids[2]),
+        )
         .await
         .unwrap();
     assert_eq!(library.position, 2);
     let fallback = application
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(fallback.position, 0);
@@ -1681,7 +2377,11 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
         .await
         .unwrap();
     let preferred = application
-        .browse_open(BrowseSourceRequest::Album(album_id), Some(&ids[2]))
+        .browse_open(
+            BrowseSourceRequest::Album(album_id),
+            BrowseViewOrder::AlbumOrder,
+            Some(&ids[2]),
+        )
         .await
         .unwrap();
     assert_eq!(preferred.position, 2);
@@ -1868,7 +2568,11 @@ async fn publication_preserves_facts_committed_between_scan_and_publication() {
     drop(publish_sender);
     wait_for_scan_settled(&application).await;
     let opened = application
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     let window = application
@@ -1922,7 +2626,11 @@ async fn publication_keeps_scan_owned_invalidation_availability_and_user_state()
     application.rescan().await.unwrap();
 
     let opened = application
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     let window = application
@@ -2075,7 +2783,11 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     assert_eq!(overview.photo_count, 0);
     assert_eq!(overview.scan.state, "idle");
     let opened = reopened
-        .browse_open(BrowseSourceRequest::Library, None)
+        .browse_open(
+            BrowseSourceRequest::Library,
+            BrowseViewOrder::CaptureTimeAscending,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(opened.total, 0);
