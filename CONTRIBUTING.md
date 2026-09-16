@@ -1,5 +1,36 @@
 # Contributing
 
+## Language and Writing
+
+Write project documentation, Issue titles and bodies, pull request titles and
+descriptions, and commit messages in English. This rule applies to submissions
+made through the GitHub UI, CLI, API, or automation. Conversation with contributors
+may use their preferred language.
+
+Use short sentences, active voice, American spelling, and consistent terms.
+Prefer plain technical English inspired by ASD-STE100; formal compliance is not
+required. Use the domain terms in [`CONTEXT.md`](CONTEXT.md). Preserve exact
+identifiers, filenames, user-provided names, and quoted diagnostic output in their
+original language. Explain non-English evidence in English when needed.
+
+## Issues
+
+Use the Bug Report form for incorrect behavior and the Improvement Proposal form
+for a product, architecture, or workflow change. Search existing Issues first and
+link related work. Keep each Issue focused on one coherent outcome; related fixes
+may share an Issue when they have the same acceptance criteria.
+
+Describe the observed problem before proposing a solution. Separate measurements
+from assumptions. Record the affected version and reproduction steps when known;
+state what is unknown instead of guessing. Remove secrets and private photo data
+from attachments and logs.
+
+Before implementation, agree on scope and observable acceptance criteria, and
+update the affected Product and Design Specs as required by
+[`AGENTS.md`](AGENTS.md). For work that spans several Issues, use a parent Issue
+with links and a completion checklist. Keep investigation evidence and progress
+in the Issue or pull request, not in durable specifications.
+
 ## Prerequisites
 
 The native Preview boundary is currently verified on Linux only.
