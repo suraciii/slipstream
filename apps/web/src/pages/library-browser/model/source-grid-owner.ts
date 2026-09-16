@@ -201,9 +201,16 @@ export interface SourceGridOwner {
     rating: number,
   ): boolean;
   invalidateWindow(index: number): void;
-  trimFacts(anchor: number): void;
+  trimFacts(anchor?: number): void;
   alignedStart(index: number): number;
   describeWindow(index: number): Readonly<{ start: number; range: string }>;
+  ensureRange(
+    start: number,
+    end: number,
+    operation: SourceWindowOperation,
+    options?: Readonly<{ quiet?: boolean; priority?: "high" | "low" }>,
+  ): void;
+  onWindowSettled(handler: (outcome: SourceWindowOutcome) => void): () => void;
   loadWindow(
     index: number,
     operation: SourceWindowOperation,
@@ -298,6 +305,16 @@ export function createSourceGridOwner(
   let sourceTasks = new TaskScope();
   let gridTasks = new TaskScope();
   let facts = new Map<number, PhotoSummary>();
+  // Latest visible range reported through range admission. Fact eviction
+  // anchors here; window requests never anchor eviction to a request-time
+  // index.
+  let visibleRange: Readonly<{ start: number; end: number }> | undefined;
+  // Fallback anchor for control-flow callers that never reported a range: the
+  // most recently settled window, never the index a request captured.
+  let latestSettledWindowStart: number | undefined;
+  const windowSettledHandlers = new Set<
+    (outcome: SourceWindowOutcome) => void
+  >();
   let thumbnails = new Map<string, string>();
   // null means the endpoint failed before it supplied a Thumbnail URL.
   let thumbnailDeliveryFailures = new Map<string, string | null>();
@@ -371,11 +388,41 @@ export function createSourceGridOwner(
     return start < end;
   };
 
-  const trimFacts = (anchor: number) => {
-    if (facts.size <= MAX_RETAINED_FACTS) return;
+  const notifyWindowSettled = (outcome: SourceWindowOutcome) => {
+    for (const handler of windowSettledHandlers) handler(outcome);
+  };
+
+  const onWindowSettled = (
+    handler: (outcome: SourceWindowOutcome) => void,
+  ): (() => void) => {
+    windowSettledHandlers.add(handler);
+    return () => {
+      windowSettledHandlers.delete(handler);
+    };
+  };
+
+  const trimFacts = (anchor?: number) => {
+    if (visibleRange) {
+      const span = Math.max(0, visibleRange.end - visibleRange.start);
+      // Cover the latest range span plus one window of buffer on each side,
+      // floored at the former fixed cap and at most 3x the span plus two
+      // windows of buffer, so the bound follows the reported viewport and
+      // never the Library total.
+      const bound = Math.max(MAX_RETAINED_FACTS, span + WINDOW_SIZE * 2);
+      const protectedStart = Math.max(0, visibleRange.start - WINDOW_SIZE);
+      const protectedEnd = Math.min(total, visibleRange.end + WINDOW_SIZE);
+      for (const index of [...facts.keys()]) {
+        if (facts.size <= bound) break;
+        if (index < protectedStart || index >= protectedEnd)
+          facts.delete(index);
+      }
+      return;
+    }
+    const fallback = anchor ?? latestSettledWindowStart;
+    if (fallback === undefined || facts.size <= MAX_RETAINED_FACTS) return;
     for (const index of [...facts.keys()])
       if (
-        Math.abs(index - anchor) > WINDOW_SIZE &&
+        Math.abs(index - fallback) > WINDOW_SIZE &&
         facts.size > MAX_RETAINED_FACTS
       )
         facts.delete(index);
@@ -414,6 +461,8 @@ export function createSourceGridOwner(
     token = "";
     if (priorToken) releaseToken(priorToken);
     retryRequired = false;
+    visibleRange = undefined;
+    latestSettledWindowStart = undefined;
     if (mode === "replace") {
       sourceReady = false;
       total = 0;
@@ -533,28 +582,14 @@ export function createSourceGridOwner(
     start,
   });
 
-  async function loadWindow(
-    index: number,
+  const startWindowLoad = (
     operation: SourceWindowOperation,
-    options: Readonly<{ quiet?: boolean; priority?: "high" | "low" }> = {},
-  ): Promise<SourceWindowOutcome> {
-    const start = alignedStart(index);
+    index: number,
+    start: number,
+    options: Readonly<{ quiet?: boolean; priority?: "high" | "low" }>,
+  ): Promise<SourceWindowOutcome> => {
     const owner = operationOwner(operation);
     const ownerAuthority = operationAuthority(operation);
-    if (
-      !operationIsCurrent(operation) ||
-      !token ||
-      total === 0 ||
-      operationTasks(operation).halted
-    ) {
-      if (operationIsCurrent(operation) && total === 0) {
-        if (operation.kind === "source") sourceReady = true;
-        return { kind: "loaded", authority, owner, start, changed: false };
-      }
-      return detachedWindow(operation, start);
-    }
-    if (windowLoaded(start))
-      return { kind: "loaded", authority, owner, start, changed: false };
     const capturedToken = token;
     const expectedTotal = total;
     const tasks = operationTasks(operation);
@@ -606,7 +641,8 @@ export function createSourceGridOwner(
         }
         for (const [offset, photo] of result.value.photos.entries())
           facts.set(result.value.start + offset, photo);
-        trimFacts(index);
+        latestSettledWindowStart = start;
+        trimFacts();
         if (operation.kind === "source") sourceReady = true;
         return {
           kind: "loaded",
@@ -617,8 +653,65 @@ export function createSourceGridOwner(
         };
       },
     );
+    // One notification per completed window, however many consumers joined
+    // the shared task. Joined awaiters still receive their own outcome.
+    if (shared.started)
+      void shared.promise.then(notifyWindowSettled, () => undefined);
     return shared.promise;
+  };
+
+  async function loadWindow(
+    index: number,
+    operation: SourceWindowOperation,
+    options: Readonly<{ quiet?: boolean; priority?: "high" | "low" }> = {},
+  ): Promise<SourceWindowOutcome> {
+    const start = alignedStart(index);
+    const owner = operationOwner(operation);
+    if (
+      !operationIsCurrent(operation) ||
+      !token ||
+      total === 0 ||
+      operationTasks(operation).halted
+    ) {
+      if (operationIsCurrent(operation) && total === 0) {
+        if (operation.kind === "source") sourceReady = true;
+        return { kind: "loaded", authority, owner, start, changed: false };
+      }
+      return detachedWindow(operation, start);
+    }
+    if (windowLoaded(start))
+      return { kind: "loaded", authority, owner, start, changed: false };
+    return startWindowLoad(operation, index, start, options);
   }
+
+  const ensureRange = (
+    start: number,
+    end: number,
+    operation: SourceWindowOperation,
+    options: Readonly<{ quiet?: boolean; priority?: "high" | "low" }> = {},
+  ): void => {
+    if (closed || !Number.isFinite(start) || !Number.isFinite(end)) return;
+    if (!operationIsCurrent(operation) || !token) return;
+    if (total === 0) {
+      if (operation.kind === "source") sourceReady = true;
+      return;
+    }
+    if (operationTasks(operation).halted) return;
+    const from = Math.max(0, Math.min(start, total));
+    const to = Math.max(from, Math.min(end, total));
+    if (from >= to) return;
+    visibleRange = { start: from, end: to };
+    trimFacts();
+    const lastStart = alignedStart(to - 1);
+    for (
+      let windowStart = alignedStart(from);
+      windowStart <= lastStart;
+      windowStart += WINDOW_SIZE
+    ) {
+      if (windowLoaded(windowStart)) continue;
+      void startWindowLoad(operation, windowStart, windowStart, options);
+    }
+  };
 
   const findPhotoIndex = (photoId: string): number | undefined => {
     if (closed || !photoId) return undefined;
@@ -947,6 +1040,8 @@ export function createSourceGridOwner(
       for (let offset = start; offset < end; offset += 1) facts.delete(offset);
     },
     trimFacts,
+    ensureRange,
+    onWindowSettled,
     alignedStart,
     describeWindow(index) {
       const start = alignedStart(index);
@@ -969,6 +1064,7 @@ export function createSourceGridOwner(
       closed = true;
       generation += 1;
       authority = makeAuthority();
+      windowSettledHandlers.clear();
       detachImages();
       sourceTasks.halt();
       gridTasks.halt();
