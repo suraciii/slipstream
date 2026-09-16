@@ -196,6 +196,7 @@ pub enum ServerError {
     BrowseNotFound,
     PhotoNotFound,
     BrowseLimit,
+    BrowseOrder,
     Join(String),
     NotPublished,
     FileLocationsExpired,
@@ -221,6 +222,9 @@ impl fmt::Display for ServerError {
             Self::BrowseNotFound => formatter.write_str("Browse source is no longer available"),
             Self::PhotoNotFound => formatter.write_str("Photo is no longer available"),
             Self::BrowseLimit => formatter.write_str("Browse window is invalid"),
+            Self::BrowseOrder => {
+                formatter.write_str("Browse view order is invalid for this source")
+            }
             Self::Join(error) => formatter.write_str(error),
             Self::NotPublished => formatter.write_str(
                 "Library is initializing; the first completed scan has not published a Library yet",

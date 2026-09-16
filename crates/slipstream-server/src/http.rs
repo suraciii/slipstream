@@ -146,6 +146,7 @@ pub(crate) fn create_router_with_web_root(
         .route("/api/photos/{id}/preview", get(get_preview))
         .route("/api/photos/{id}/thumbnail", get(get_thumbnail))
         .route("/api/photos/{id}/metadata", get(get_photo_metadata))
+        .route("/api/photos/{id}/albums", get(get_photo_albums))
         // The complete-membership list is retired; the path only creates Albums.
         .route("/api/albums", get(retired_album_list).post(create_album))
         .route(
@@ -301,7 +302,7 @@ pub(crate) async fn open_browse(
                 BrowseViewOrder::CaptureTimeAscending
             }
         }
-        Some("album-order") if album_source => BrowseViewOrder::AlbumOrder,
+        Some("album-order") => BrowseViewOrder::AlbumOrder,
         Some("capture-time-asc") => BrowseViewOrder::CaptureTimeAscending,
         Some("capture-time-desc") => BrowseViewOrder::CaptureTimeDescending,
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse order"),
@@ -778,6 +779,19 @@ pub(crate) async fn get_photo_metadata(
     }
 }
 
+pub(crate) async fn get_photo_albums(
+    State(state): State<HttpState>,
+    axum::extract::Path(photo_id): axum::extract::Path<String>,
+) -> Response<Body> {
+    if !valid_id(&photo_id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo");
+    }
+    match state.application.photo_albums(&photo_id).await {
+        Ok(albums) => json_response(StatusCode::OK, &albums),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
 pub(crate) async fn get_preview(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1050,6 +1064,10 @@ impl From<ServerError> for ApiError {
             ServerError::BrowseLimit => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: "Browse window is invalid",
+            },
+            ServerError::BrowseOrder => Self {
+                status: StatusCode::BAD_REQUEST,
+                message: "Invalid browse order",
             },
             ServerError::FileLocationsExpired => Self {
                 status: StatusCode::CONFLICT,

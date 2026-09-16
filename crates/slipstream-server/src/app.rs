@@ -74,7 +74,10 @@ impl Published {
 }
 
 /// The PhotoRecord for one Photo ID inside an immutable Published Library.
-fn published_photo<'a>(published: &'a Published, id: &str) -> Option<&'a slipstream_core::PhotoRecord> {
+fn published_photo<'a>(
+    published: &'a Published,
+    id: &str,
+) -> Option<&'a slipstream_core::PhotoRecord> {
     published
         .photos_by_id
         .get(id)
@@ -86,15 +89,22 @@ fn published_photo<'a>(published: &'a Published, id: &str) -> Option<&'a slipstr
 /// persisted deterministic order's COALESCE.
 fn published_capture_key<'a>(
     published: &'a Published,
-    photo: &'a slipstream_core::PhotoRecord,
+    photo: &slipstream_core::PhotoRecord,
 ) -> Option<&'a str> {
-    let original_key = |id: &'a Option<String>| -> Option<&'a str> {\n        published
+    let original_key = |id: &Option<String>| -> Option<&'a str> {
+        published
             .originals_by_id
             .get(id.as_deref()?)
-            .map(|position| &published.snapshot.originals[*position])
+            .and_then(|position| published.snapshot.originals.get(*position))
             .and_then(|original| original.capture.order_key.as_deref())
     };
     original_key(&photo.raw_original_id).or_else(|| original_key(&photo.jpeg_original_id))
+}
+
+/// The authoritative Capture Time order key for one Photo ID in the
+/// Published Library. Unknown Photos have no key.
+fn published_capture_key_for_id<'a>(published: &'a Published, id: &str) -> Option<&'a str> {
+    published_photo(published, id).and_then(|photo| published_capture_key(published, photo))
 }
 
 /// Applies the requested view order to one complete source ID list.
@@ -111,11 +121,13 @@ fn order_ids_by_capture_time(
         return ids;
     }
     ids.sort_by(|a, b| {
+        let a_key = published_capture_key_for_id(published, a);
+        let b_key = published_capture_key_for_id(published, b);
         let a_photo = published_photo(published, a);
         let b_photo = published_photo(published, b);
-        let a_key = a_photo.and_then(|photo| published_capture_key(published, photo));
-        let b_key = b_photo.and_then(|photo| published_capture_key(published, photo));
-        a_key.is_none().cmp(&b_key.is_none())
+        a_key
+            .is_none()
+            .cmp(&b_key.is_none())
             .then_with(|| match (a_key, b_key) {
                 (Some(a), Some(b)) => b.cmp(a),
                 _ => std::cmp::Ordering::Equal,
@@ -127,6 +139,69 @@ fn order_ids_by_capture_time(
             .then_with(|| a.cmp(b))
     });
     ids
+}
+
+/// Orders one Album's members for a time view while keeping each member's
+/// availability with its identity, so saved-position resolution applies to
+/// the same order the Photographer sees. Membership positions themselves
+/// are never changed.
+fn order_album_members(
+    published: &Published,
+    mut members: Vec<slipstream_core::AlbumBrowseMember>,
+    order: BrowseViewOrder,
+) -> Vec<slipstream_core::AlbumBrowseMember> {
+    if order == BrowseViewOrder::AlbumOrder {
+        return members;
+    }
+    let ascending = order == BrowseViewOrder::CaptureTimeAscending;
+    members.sort_by(|a, b| {
+        let a_key = published_capture_key_for_id(published, &a.photo_id);
+        let b_key = published_capture_key_for_id(published, &b.photo_id);
+        let a_photo = published_photo(published, &a.photo_id);
+        let b_photo = published_photo(published, &b.photo_id);
+        a_key
+            .is_none()
+            .cmp(&b_key.is_none())
+            .then_with(|| match (a_key, b_key) {
+                (Some(a), Some(b)) => {
+                    if ascending {
+                        a.cmp(b)
+                    } else {
+                        b.cmp(a)
+                    }
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| match (a_photo, b_photo) {
+                (Some(a), Some(b)) => a.sort_path.cmp(&b.sort_path),
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.photo_id.cmp(&b.photo_id))
+    });
+    members
+}
+
+/// The member that opening an Album resumes at, expressed as a Photo
+/// identity. The durable saved position and its unavailable-member fallback
+/// resolve by membership position, which is the Album's own durable order;
+/// the caller maps the identity into the requested view order.
+fn album_resume_member(
+    members: &[slipstream_core::AlbumBrowseMember],
+    saved_photo_id: Option<&str>,
+) -> Option<String> {
+    let saved =
+        saved_photo_id.and_then(|saved| members.iter().position(|member| member.photo_id == saved));
+    let index = saved
+        .and_then(|saved| {
+            members[saved].available.then_some(saved).or_else(|| {
+                (1..=members.len())
+                    .map(|offset| (saved + offset) % members.len())
+                    .find(|index| members[*index].available)
+            })
+        })
+        .or_else(|| members.iter().position(|member| member.available))
+        .or(saved);
+    index.map(|index| members[index].photo_id.clone())
 }
 
 fn ordered_library_ids(published: &Published, order: BrowseViewOrder) -> Vec<String> {
@@ -728,6 +803,13 @@ impl Application {
         order: BrowseViewOrder,
         preferred_photo_id: Option<&str>,
     ) -> Result<BrowseOpenResponse, ServerError> {
+        // Only an Album source owns persisted membership position, so
+        // `album-order` is rejected for every other source before any
+        // Snapshot is created instead of silently behaving as a time view.
+        if order == BrowseViewOrder::AlbumOrder && !matches!(source, BrowseSourceRequest::Album(_))
+        {
+            return Err(ServerError::BrowseOrder);
+        }
         let (photo_ids, position): (Vec<String>, usize) = match source {
             BrowseSourceRequest::Library => {
                 let guard = self
@@ -772,9 +854,7 @@ impl Application {
                     &published.snapshot.originals,
                     &location,
                 );
-                drop(guard);
-                let photo_ids =
-                    order_ids_by_capture_time(published, photo_ids, order);
+                let photo_ids = order_ids_by_capture_time(published, photo_ids, order);
                 let position = preferred_photo_id
                     .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
                     .unwrap_or(0);
@@ -786,12 +866,10 @@ impl Application {
                     .album_browse_target(&id)
                     .await?
                     .ok_or(ServerError::BrowseNotFound)?;
-                let photo_ids = if matches!(order, BrowseViewOrder::AlbumOrder) {
-                    target
-                        .members
-                        .into_iter()
-                        .map(|member| member.photo_id)
-                        .collect()
+                let resume_member_id =
+                    album_resume_member(&target.members, target.saved_photo_id.as_deref());
+                let members = if matches!(order, BrowseViewOrder::AlbumOrder) {
+                    target.members
                 } else {
                     let guard = self
                         .shared
@@ -801,39 +879,26 @@ impl Application {
                     let Some(published) = guard.as_ref() else {
                         return Err(ServerError::NotPublished);
                     };
-                    order_ids_by_capture_time(
-                        published,
-                        target
-                            .members
-                            .iter()
-                            .map(|member| member.photo_id.clone())
-                            .collect(),
-                        order,
-                    )
+                    order_album_members(published, target.members, order)
                 };
                 let preferred = preferred_photo_id.and_then(|preferred| {
-                    photo_ids.iter().position(|id| id == preferred)
+                    members
+                        .iter()
+                        .position(|member| member.photo_id == preferred)
                 });
-                let saved = target.saved_photo_id.as_deref().and_then(|saved| {
-                    photo_ids.iter().position(|id| id == saved)
-                });
-                let position = preferred.unwrap_or_else(|| {
-                    saved
-                        .filter(|saved| target.members[*saved].available)
-                        .or_else(|| {
-                            saved.and_then(|saved| {
-                                (1..=photo_ids.len())
-                                    .map(|offset| (saved + offset) % photo_ids.len())
-                                    .find(|index| target.members[*index].available)
-                            })
+                let position = preferred
+                    .or_else(|| {
+                        resume_member_id.and_then(|member_id| {
+                            members
+                                .iter()
+                                .position(|member| member.photo_id == member_id)
                         })
-                        .or_else(|| {
-                            target.members.iter().position(|member| member.available)
-                        })
-                        .or(saved)
-                        .unwrap_or(0)
-                });
-                (photo_ids, position)
+                    })
+                    .unwrap_or(0);
+                (
+                    members.into_iter().map(|member| member.photo_id).collect(),
+                    position,
+                )
             }
         };
         let token = format!(
