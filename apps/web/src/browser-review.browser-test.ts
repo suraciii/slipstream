@@ -222,6 +222,80 @@ async function waitForLoadedReviewImage(page: Page) {
   });
 }
 
+async function previewImageGeometry(page: Page) {
+  return page.locator("[data-stage] img").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const image = element as HTMLImageElement;
+    return {
+      width: box.width,
+      height: box.height,
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+    };
+  });
+}
+
+async function previewStageGeometry(page: Page) {
+  return page.locator("[data-stage]").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return {
+      width: box.width,
+      height: box.height,
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: box.bottom,
+    };
+  });
+}
+
+async function zoomLevel(page: Page) {
+  const text = await page.locator("[data-zoom-level]").textContent();
+  return Number((text ?? "").replace("%", ""));
+}
+
+// Decision swipes animate the stage back to rest; geometry measured during
+// that animation carries the residual offset.
+async function waitForStageAtRest(page: Page) {
+  await expect(page.locator("[data-stage]")).toHaveCSS("transform", "none");
+}
+
+// A replaced Preview image only receives its zoom geometry once its bytes
+// have loaded, so rendered size is the observable proof of applied zoom.
+async function expectRenderedZoom(page: Page, scale: number) {
+  await waitForLoadedReviewImage(page);
+  await expect
+    .poll(async () => {
+      const image = await previewImageGeometry(page);
+      return image.width / image.naturalWidth;
+    })
+    .toBeCloseTo(scale, 1);
+}
+
+// Fit depends on the live stage size, so a viewport change is only settled
+// once the rendered size matches the current fit scale again.
+async function waitForFit(page: Page) {
+  await expect
+    .poll(async () => {
+      const stage = await previewStageGeometry(page);
+      const image = await previewImageGeometry(page);
+      const state = await page
+        .locator("[data-preview]")
+        .getAttribute("data-zoom-state");
+      if (state !== "fit") return Number.POSITIVE_INFINITY;
+      const scale = Math.min(
+        stage.width / image.naturalWidth,
+        stage.height / image.naturalHeight,
+      );
+      return Math.abs(image.width - image.naturalWidth * scale);
+    })
+    .toBeLessThan(1);
+}
+
 async function startReview(
   page: Page,
   url: string,
@@ -549,7 +623,10 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
     "Undo",
     "Previous",
     "Next",
-    "Detail Review",
+    "Fit Window",
+    "Zoom in",
+    "Zoom out",
+    "Zoom to 100 percent",
     "Rate 5 stars",
   ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
@@ -853,33 +930,76 @@ test("wide desktop Preview retains fit gesture ownership", async ({ page }) => {
   );
 });
 
-test("Preview Fit and Fill are explicit, bounded, and Fill does not select", async ({
+test("Preview zoom is explicit, bounded, and never records a decision", async ({
   page,
 }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 2);
   const running = await server(base, root);
-  await startReview(page, running.url, "All Photos");
   await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
 
   const preview = page.locator("[data-preview]");
-  const fit = page.getByRole("button", { name: "Fit", exact: true });
-  const fill = page.getByRole("button", { name: "Fill", exact: true });
+  const fit = page.getByRole("button", { name: "Fit Window", exact: true });
+  const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+  const hundred = page.getByRole("button", {
+    name: "Zoom to 100 percent",
+    exact: true,
+  });
+  const slider = page.locator("[data-zoom-slider]");
+  const level = page.locator("[data-zoom-level]");
+
+  // Fit is the default state, reports the percentage it produces, and keeps
+  // the complete composition inside the Preview area.
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(fill).toHaveAttribute("aria-pressed", "false");
-  await expect(preview).toHaveClass(/fit/);
   await expect(preview).toHaveCSS("touch-action", "pan-y");
-
-  await fill.click();
-  await expect(fill).toHaveAttribute("aria-pressed", "true");
-  await expect(fit).toHaveAttribute("aria-pressed", "false");
-  await expect(preview).toHaveClass(/fill/);
-  await expect(preview.locator("[data-stage] img")).toHaveCSS(
-    "object-fit",
-    "cover",
+  const stage = await previewStageGeometry(page);
+  const fitted = await previewImageGeometry(page);
+  expect(fitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(fitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+  expect(
+    Math.abs(
+      fitted.width / fitted.naturalWidth - fitted.height / fitted.naturalHeight,
+    ),
+  ).toBeLessThan(0.01);
+  await expect(level).toHaveText(
+    `${Math.round((fitted.width / fitted.naturalWidth) * 100)}%`,
   );
-  await expect(preview).toHaveCSS("touch-action", "none");
 
+  // The zoom in control changes the real display size by one step.
+  await zoomIn.click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const stepped = await previewImageGeometry(page);
+  expect(stepped.width).toBeCloseTo(fitted.width * 1.25, 0);
+  expect(await zoomLevel(page)).toBe(
+    Math.round((stepped.width / stepped.naturalWidth) * 100),
+  );
+
+  // The slider changes the display size and the percentage together.
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  const slid = await previewImageGeometry(page);
+  expect(slid.width).toBeCloseTo(slid.naturalWidth * 3, 0);
+  expect(await zoomLevel(page)).toBe(300);
+
+  // 100% maps one Preview pixel to one CSS pixel.
+  await hundred.click();
+  const actual = await previewImageGeometry(page);
+  expect(actual.width).toBeCloseTo(actual.naturalWidth, 0);
+  expect(actual.height).toBeCloseTo(actual.naturalHeight, 0);
+  expect(await zoomLevel(page)).toBe(100);
+
+  // Fit Window restores the complete composition.
+  await fit.click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await expect(fit).toHaveAttribute("aria-pressed", "true");
+  const refitted = await previewImageGeometry(page);
+  expect(refitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(refitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+
+  // A zoomed drag pans instead of deciding, and the pan is bounded.
   let stateRequests = 0;
   page.on("request", (request) => {
     if (
@@ -888,42 +1008,227 @@ test("Preview Fit and Fill are explicit, bounded, and Fill does not select", asy
     )
       stateRequests += 1;
   });
-  await swipe(page, 100, 220);
+  await slider.fill("300");
+  await slider.dispatchEvent("input");
+  await waitForStageAtRest(page);
+  const beforePan = await previewImageGeometry(page);
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 60, center.y + 10);
+  await page.mouse.up();
+  const afterPan = await previewImageGeometry(page);
+  const limitX = Math.max(0, (beforePan.width - stage.width) / 2);
+  const limitY = Math.max(0, (beforePan.height - stage.height) / 2);
+  expect(afterPan.left - beforePan.left).toBeCloseTo(Math.min(limitX, 60), 0);
+  expect(afterPan.top - beforePan.top).toBeCloseTo(Math.min(limitY, 10), 0);
   expect(stateRequests).toBe(0);
   await expect(page.getByText("1 / 2")).toBeVisible();
 
-  await page.keyboard.press("f");
-  await expect(fill).toHaveAttribute("aria-pressed", "true");
-  await page.keyboard.press("d");
-  await expect(
-    page.getByRole("button", { name: "Exit Detail" }),
-  ).toHaveAttribute("aria-pressed", "true");
-  await expect(preview).toHaveClass(/detail/);
-  await fit.click();
-  await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
+  // Dragging far cannot pull the image out of view.
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 900, center.y + 900);
+  await page.mouse.up();
+  const bounded = await previewImageGeometry(page);
+  if (bounded.width > stage.width) {
+    expect(bounded.left).toBeLessThanOrEqual(stage.left + 0.5);
+    expect(bounded.right).toBeGreaterThanOrEqual(stage.right - 0.5);
+  } else {
+    expect(bounded.left + bounded.width / 2).toBeCloseTo(
+      stage.left + stage.width / 2,
+      0,
+    );
+  }
+  if (bounded.height > stage.height) {
+    expect(bounded.top).toBeLessThanOrEqual(stage.top + 0.5);
+    expect(bounded.bottom).toBeGreaterThanOrEqual(stage.bottom - 0.5);
+  } else {
+    expect(bounded.top + bounded.height / 2).toBeCloseTo(
+      stage.top + stage.height / 2,
+      0,
+    );
+  }
+  expect(stateRequests).toBe(0);
 
+  // The keyboard reaches Fit, detail zoom, and stepped zoom.
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+  await page.keyboard.press("d");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  expect(await zoomLevel(page)).toBe(200);
+  await page.keyboard.press("-");
+  expect(await zoomLevel(page)).toBe(160);
+  await expect(preview).toHaveCSS("touch-action", "none");
+
+  // No horizontal page overflow while zoomed.
   const layout = await page.locator("[data-photo-view]").evaluate((view) => {
-    const preview = view.querySelector<HTMLElement>("[data-preview]");
-    if (!preview) throw new Error("Preview is missing");
+    const previewBox = view.querySelector<HTMLElement>("[data-preview]");
+    if (!previewBox) throw new Error("Preview is missing");
     return {
       viewWidth: view.clientWidth,
       viewScrollWidth: view.scrollWidth,
-      previewWidth: preview.getBoundingClientRect().width,
+      previewWidth: previewBox.getBoundingClientRect().width,
     };
   });
   expect(layout.viewScrollWidth).toBe(layout.viewWidth);
   expect(layout.previewWidth).toBeLessThanOrEqual(layout.viewWidth);
 
+  // Changing Photo resets the zoom state to Fit.
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await expect(fit).toHaveAttribute("aria-pressed", "true");
-  await expect(fill).toHaveAttribute("aria-pressed", "false");
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
+  expect(stateRequests).toBe(0);
+});
+
+test("desktop wheel zoom keeps the image point under the pointer stationary", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  await page.setViewportSize({ width: 900, height: 800 });
+  await waitForFit(page);
+  const preview = page.locator("[data-preview]");
+  const slider = page.locator("[data-zoom-slider]");
+  await slider.fill("400");
+  await slider.dispatchEvent("input");
+
+  const pointer = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return {
+      x: box.left + box.width * 0.32,
+      y: box.top + box.height * 0.4,
+    };
+  });
+  const before = await previewImageGeometry(page);
+  const fractionX = (pointer.x - before.left) / before.width;
+  const fractionY = (pointer.y - before.top) / before.height;
+  await page.mouse.move(pointer.x, pointer.y);
+  await page.mouse.wheel(0, -120);
+  const after = await previewImageGeometry(page);
+  expect(after.width).toBeCloseTo(before.width * 1.25, 0);
+  // The same image point stays under the pointer while zooming.
+  expect(pointer.x - fractionX * after.width).toBeCloseTo(after.left, 0);
+  expect(pointer.y - fractionY * after.height).toBeCloseTo(after.top, 0);
+  await page.mouse.wheel(0, 120);
+  await expect
+    .poll(async () => (await previewImageGeometry(page)).width)
+    .toBeCloseTo(before.width, 0);
+});
+
+test("touch pinch zooms around the gesture midpoint without deciding", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  await preview.getByRole("button", { name: "Zoom to 100 percent" }).click();
+  const before = await previewImageGeometry(page);
+  expect(before.width).toBeCloseTo(before.naturalWidth, 0);
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  let stateRequests = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateRequests += 1;
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 50,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 50,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  const pinched = await previewImageGeometry(page);
+  expect(pinched.width).toBeCloseTo(before.width * 2, 0);
+  expect(await zoomLevel(page)).toBe(200);
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 21,
+    isPrimary: true,
+    clientX: center.x - 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 22,
+    isPrimary: false,
+    clientX: center.x + 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  expect(stateRequests).toBe(0);
+  await expect(page.getByText("1 / 1")).toBeVisible();
+});
+
+test("window resize recomputes Fit and keeps a manual percentage", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+  const preview = page.locator("[data-preview]");
+  const level = page.locator("[data-zoom-level]");
+
+  await page.setViewportSize({ width: 900, height: 800 });
+  await waitForFit(page);
+  const wideFit = await previewImageGeometry(page);
+
+  await page.setViewportSize({ width: 600, height: 800 });
+  await expect
+    .poll(async () => (await previewImageGeometry(page)).width)
+    .toBeLessThan(wideFit.width);
+  const stage = await previewStageGeometry(page);
+  const narrowFit = await previewImageGeometry(page);
+  expect(narrowFit.width).toBeLessThanOrEqual(stage.width + 0.5);
+  expect(narrowFit.height).toBeLessThanOrEqual(stage.height + 0.5);
+
+  await page.locator("[data-zoom-slider]").fill("100");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
+  await expect(level).toHaveText("100%");
+  await page.setViewportSize({ width: 760, height: 800 });
+  await expect(level).toHaveText("100%");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const resized = await previewImageGeometry(page);
+  expect(resized.width).toBeCloseTo(resized.naturalWidth, 0);
 });
 
 test("Photo View shows review capture metadata and explicit missing values", async ({
@@ -1069,13 +1374,16 @@ function touchQualification(viewport: { width: number; height: number }) {
     await page.getByRole("button", { name: "Previous" }).click();
     await expect(page.getByText("Selected", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Detail Review" }).click();
+    await page.locator("[data-zoom-slider]").fill("400");
+    await page.locator("[data-zoom-slider]").dispatchEvent("input");
+    await expect(preview).toHaveAttribute("data-zoom-state", "manual");
     await expect(preview).toHaveCSS("touch-action", "none");
+    await expectRenderedZoom(page, 4);
+    await waitForStageAtRest(page);
     await photoView.evaluate((view) => {
       view.scrollTop = 0;
     });
-    const image = page.locator("[data-stage] img");
-    const before = await image.evaluate((element) => element.style.transform);
+    const before = await previewImageGeometry(page);
     const detailGesture = await preview.evaluate((surface) => {
       const box = surface.getBoundingClientRect();
       return {
@@ -1091,10 +1399,9 @@ function touchQualification(viewport: { width: number; height: number }) {
     });
     const stateRequestsBeforeDetail = stateRequests;
     await touchDrag(page, detailGesture.from, detailGesture.to);
-    await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 120, 36\)/);
-    expect(await image.evaluate((element) => element.style.transform)).not.toBe(
-      before,
-    );
+    const after = await previewImageGeometry(page);
+    expect(after.left - before.left).toBeCloseTo(120, 0);
+    expect(after.top - before.top).toBeCloseTo(36, 0);
     expect(stateRequests).toBe(stateRequestsBeforeDetail);
     expect(await photoView.evaluate((view) => view.scrollTop)).toBe(0);
     await expect(page.getByText("1 / 3")).toBeVisible();
@@ -1109,7 +1416,7 @@ test.describe("touch qualification", () => {
     { width: 667, height: 375 },
   ]) {
     test(
-      `fit Preview at ${viewport.width}x${viewport.height} yields real vertical touch scrolling while horizontal decisions and Detail pan remain owned`,
+      `fit Preview at ${viewport.width}x${viewport.height} yields real vertical touch scrolling while horizontal decisions and manual zoom pan remain owned`,
       touchQualification(viewport),
     );
   }
@@ -1733,12 +2040,12 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
-  await page.getByRole("button", { name: "Detail Review" }).click();
+  await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
+  await page.locator("[data-zoom-slider]").fill("800");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
   const preview = page.locator("[data-preview]");
-  const image = page.locator("[data-stage] img");
+  await expectRenderedZoom(page, 8);
+  const beforePan = await previewImageGeometry(page);
   await preview.dispatchEvent("pointerdown", {
     pointerId: 71,
     isPrimary: true,
@@ -1753,7 +2060,9 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
     clientY: 330,
     pointerType: "touch",
   });
-  await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 40, 30\)/);
+  const afterPan = await previewImageGeometry(page);
+  expect(afterPan.left - beforePan.left).toBeCloseTo(40, 0);
+  expect(afterPan.top - beforePan.top).toBeCloseTo(30, 0);
   await preview.dispatchEvent("pointerup", {
     pointerId: 71,
     isPrimary: true,
@@ -1933,10 +2242,9 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(
-    page.getByRole("button", { name: "Exit Detail" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("d");
+  const preview = page.locator("[data-preview]");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
   await swipe(page, 100, 220);
   await expect(page.getByText("1 / 2")).toBeVisible();
   expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
@@ -1945,9 +2253,7 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Next" }).click(),
   );
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toHaveAttribute("aria-pressed", "false");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
 });
 
 test("Photo View recovery status wraps without hiding Retry or lower controls", async ({
@@ -2033,7 +2339,7 @@ test("Photo View recovery status wraps without hiding Retry or lower controls", 
       };
     });
     expect(controls.contained).toBe(true);
-    expect(controls.buttons).toEqual([true, true, true, true]);
+    expect(controls.buttons).toEqual([true, true, true]);
   }
 
   await retry.click();
@@ -4810,9 +5116,12 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   );
   await page.keyboard.press("5");
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  const image = page.locator("[data-stage] img");
+  await page.locator("[data-zoom-slider]").fill("800");
+  await page.locator("[data-zoom-slider]").dispatchEvent("input");
   const preview = page.locator("[data-preview]");
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  await expectRenderedZoom(page, 8);
+  const beforePan = await previewImageGeometry(page);
   await preview.dispatchEvent("pointerdown", {
     pointerId: 61,
     isPrimary: true,
@@ -4827,7 +5136,9 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
     clientY: 330,
     pointerType: "touch",
   });
-  await expect(image).toHaveCSS("transform", /matrix\(2, 0, 0, 2, 40, 30\)/);
+  const afterPan = await previewImageGeometry(page);
+  expect(afterPan.left).toBeCloseTo(beforePan.left + 40, 0);
+  expect(afterPan.top).toBeCloseTo(beforePan.top + 30, 0);
   await preview.dispatchEvent("pointerup", {
     pointerId: 61,
     isPrimary: true,
@@ -4838,7 +5149,8 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "selected",
   );
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("f");
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
   await expect(page.getByText("3 / 3")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
@@ -4886,9 +5198,16 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await startReview(page, running.url, "Review", albumId);
   await waitForLoadedReviewImage(page);
   await expect(page.getByText("JPEG", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "fit",
+  );
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
@@ -4903,9 +5222,16 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await expect(
     page.getByText("RAW embedded JPEG", { exact: true }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Detail Review" }).click();
-  await expect(page.getByRole("button", { name: "Exit Detail" })).toBeVisible();
-  await page.getByRole("button", { name: "Exit Detail" }).click();
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "manual",
+  );
+  await page.keyboard.press("d");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "fit",
+  );
   expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
   expect(await originalSnapshot(raw)).toEqual(copiedBefore);
 });
@@ -8528,9 +8854,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   });
   const retainedPreviewSrc = await currentImage.getAttribute("src");
   if (!retainedPreviewSrc) throw new Error("Current Preview src is missing");
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Fit Window" })).toBeEnabled();
   await page.keyboard.press("ArrowRight");
   await expect.poll(() => boundaryRequests).toBeGreaterThanOrEqual(2);
   staleBoundaryRequests = boundaryRequests;
@@ -8538,9 +8862,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   // available instead of claiming the unavailable Photo is already open.
   await expect(page.getByText("60 / 70")).toBeVisible();
   await expect(currentImage).toHaveAttribute("src", retainedPreviewSrc);
-  await expect(
-    page.getByRole("button", { name: "Detail Review" }),
-  ).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Fit Window" })).toBeEnabled();
   // The boundary window is still loading; Back to Grid must stay available.
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),

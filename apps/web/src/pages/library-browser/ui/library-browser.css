@@ -599,7 +599,11 @@
   top: 0.65rem;
   right: 0.65rem;
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 0.2rem;
+  max-width: calc(100% - 1.3rem);
   padding: 0.2rem;
   border: 1px solid var(--border-strong);
   border-radius: 0.375rem;
@@ -616,6 +620,27 @@
   font-size: 0.7rem;
 }
 
+.preview-mode.zoom-step {
+  min-width: 2.75rem;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.zoom-slider {
+  width: 7rem;
+  min-height: 2.1rem;
+  padding: 0;
+  accent-color: var(--focus);
+}
+
+.zoom-level {
+  min-width: 2.9rem;
+  color: var(--text);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .preview-mode[aria-pressed="true"] {
   border-color: var(--focus);
   background: var(--raised);
@@ -626,7 +651,7 @@
   opacity: 0.55;
 }
 
-.preview.detail {
+.preview[data-zoom-state="manual"] {
   touch-action: none;
 }
 
@@ -635,6 +660,9 @@
   min-height: 0;
   display: grid;
   place-items: center;
+  /* Centering track placement keeps an oversized Preview overflowing the
+     stage symmetrically, which pan and pointer-anchored zoom rely on. */
+  place-content: center;
   overflow: hidden;
   transition: transform 140ms ease-out;
 }
@@ -646,24 +674,14 @@
 
 .image-stage img {
   display: block;
+  /* Before the zoom engine measures the Preview it fills the stage, so the
+     load state keeps the composition the applied Fit geometry produces. */
   width: 100%;
   height: 100%;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  transform-origin: center;
-  transition: transform 120ms ease-out;
-}
-
-.preview.fill .image-stage img {
   max-width: none;
   max-height: none;
-  object-fit: cover;
-}
-
-.preview.detail .image-stage img {
-  max-width: 100%;
-  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center;
 }
 
 .swipe-feedback {
@@ -787,6 +805,10 @@
 
 .photo-controls {
   grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.photo-controls button {
+  min-height: 2.75rem;
 }
 
 .decision-controls span {
@@ -924,7 +946,7 @@
     min-height: 2.75rem;
   }
 
-  .preview.fit {
+  .preview[data-zoom-state="fit"] {
     touch-action: pan-y;
   }
 }
@@ -1088,6 +1110,11 @@
   }
 
   .preview-mode {
+    min-height: 2.75rem;
+  }
+
+  .zoom-slider {
+    width: 5.5rem;
     min-height: 2.75rem;
   }
 
