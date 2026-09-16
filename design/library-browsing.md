@@ -80,6 +80,18 @@ This metadata is intentionally loaded on demand instead of being added to
 every bounded Grid window. The first product does not expose a general EXIF
 tree, metadata editor, or unbounded metadata response.
 
+### Photo Album Membership Query
+
+Photo View obtains the Albums that contain one Photo through
+`GET /api/photos/{id}/albums`. The response lists each containing Album's
+identifier and name in Album-list order. The query is resolved server-side
+from the Album membership tables; the browser must not derive membership by
+traversing every Album's members. The response is bounded by the number of
+Albums and contains no member lists. An unknown Photo identifier is a
+distinct not-found failure. Reading membership is read-only; mutations
+continue through the existing Album routes with their admitted-write
+contracts.
+
 The position lookup accepts one stable Photo ID through
 `GET /api/browse/{token}/position?photoId={id}`. It returns that Photo's
 position in the same immutable Browse Snapshot, or `null` when the Photo is
@@ -130,6 +142,7 @@ GET    /api/file-locations?publication={opaque}&parent={folder}&start={position}
 POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
 GET    /api/browse/{token}/position?photoId={id}
+GET    /api/photos/{id}/albums
 DELETE /api/browse/{token}
 ```
 
@@ -186,6 +199,13 @@ or:
 { "source": "album", "albumId": "opaque-id" }
 ```
 
+It optionally accepts one explicit view order. For `library` and `folder`
+sources the values are `"capture-time-asc"` (the default when omitted) and
+`"capture-time-desc"`. For `album` sources the values are `"album-order"`
+(the default when omitted), `"capture-time-asc"`, and
+`"capture-time-desc"`. An order value that is invalid for the source is
+rejected before any Snapshot is created.
+
 It returns the opaque token, total count, initial position, and optionally one bounded first window. The exact JSON belongs to the protocol compatibility fixtures; database rows and absolute Original Locations do not cross this boundary.
 
 The protocol has no route that materializes every Photo fact, every Album member, every Original Folder, or complete recursive Folder membership. The legacy unbounded complete-Photo and complete-membership routes remain retired. Album mutations return bounded Album summaries in the same shape as the Library Overview's Album list, never member lists. Legacy Photo Set routes and source values are retired rather than aliased. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
@@ -194,9 +214,21 @@ The protocol has no route that materializes every Photo fact, every Album member
 
 An `All Photos` Browse Snapshot copies Photo IDs from the current Published Library's deterministic Capture Time order. An Original Folder Browse Snapshot filters that order by the recursive component-aware Folder rule. An Album Browse Snapshot copies IDs by persisted membership position.
 
-After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library.
+The requested view order is applied once, server-side, to the complete
+source before the Snapshot is frozen:
 
-The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local.
+- `capture-time-desc` reverses only the Capture Time direction. Photos
+  without a valid authoritative Capture Time stay in the trailing partition,
+  and the ordering Location and Photo ID tie-breakers keep their existing
+  direction, so a descending view is never produced by reversing a
+  sequence that contains missing-time Photos.
+- An Album time view orders members by the same Capture Time authority
+  through the Published Library's Photo facts while leaving persisted
+  membership positions untouched.
+
+After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library, and an explicit refresh reuses the currently selected order.
+
+The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local. Saved position and view order are independent: the position resolves by Photo identity whichever order the open view uses.
 
 ### Grid Loading
 
@@ -348,6 +380,8 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - every Browse Window respects the enforced maximum;
 - browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
 - `All Photos` and Original Folder order match Capture Time rules, while Album order matches membership position;
+- each source's default order is used when no order is requested, `capture-time-desc` and Album time views order the complete source before pagination, missing-time Photos stay last in both directions, tie-breakers keep their direction, and persisted Album positions are unchanged;
+- the per-Photo Album membership query answers from membership tables without materializing member lists, and an unknown Photo is a distinct not-found failure;
 - a rescan refreshes facts and File Location navigation but cannot reorder or insert into an open Browse Snapshot;
 - reopening the source after rescan uses the new complete order and current Folder subtree;
 - Album saved-position and unavailable-member fallback work without complete membership transfer;

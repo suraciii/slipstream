@@ -213,9 +213,10 @@ The first-slice gate must prove:
 - derivatives preserve a valid ICC profile or are correctly converted to sRGB;
 - a low-resolution source is not upscaled or misrepresented;
 - selection and Rating transactions survive restart;
-- swipe actions do not fire while Detail Review is zoomed;
-- Preview Fit, Fill, and bounded Detail Review modes remain contained by the
-  Photo View viewport and expose their current state programmatically;
+- swipe actions do not fire while the Preview is zoomed;
+- Fit and continuous zoom keep the Preview contained by the Photo View
+  viewport, expose the current zoom state programmatically, and never
+  record a decision while zoomed;
 - failed mutations do not silently advance;
 - cache invalidation follows current Original Location, source revision, and derivative version;
 - the complete path runs through the real browser-server protocol.

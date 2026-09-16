@@ -43,7 +43,7 @@ The primary interface for viewing Photos from `All Photos`, one Original Folder,
 The progressively loaded thumbnail view of the current `All Photos`, Original Folder, or Album source.
 
 **Photo View**:
-The focused view of one Photo with Preview, navigation, Selection State, Rating, and Detail Review controls.
+The focused view of one Photo with Preview, zoom, navigation, Selection State, Rating, and Album membership controls.
 
 **Selection State**:
 The keep decision for a Photo: `undecided`, `selected`, or `rejected`.
@@ -60,4 +60,4 @@ The JPEG shown in Grid View or Photo View. It comes from a matching JPEG Origina
 The content used for a Preview: `matching-jpeg` or `embedded-raw-jpeg`.
 
 **Detail Review**:
-Magnified Preview inspection for focus, motion, or expression. Its detail is limited by the Preview resolution.
+Magnified Preview inspection for focus, motion, or expression, performed through Photo View zoom. Its detail is limited by the Preview resolution.

@@ -105,9 +105,9 @@ defined by Web Async Ownership:
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
-  It yields fit-mode vertical touch panning to native Photo View scrolling,
-  retains horizontal decision gestures, and takes full Preview drag ownership
-  only during Detail Review.
+  It yields Fit-state vertical touch panning to native Photo View scrolling,
+  retains Fit-state horizontal decision gestures, and takes full Preview
+  drag ownership whenever the zoom state is manual.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
@@ -167,25 +167,38 @@ state continues to converge through the existing API and ordering contracts.
 
 ### Preview presentation state
 
-The page UI owns one transient Preview mode for the current Photo. It is
-presentation state, not Photo state, and is reset when the current Photo or
-view changes. The page UI exposes the mode through a small segmented control
-and keeps its state available to assistive technology.
+The page UI owns one transient Preview zoom state for the current Photo. It
+is presentation state, not Photo state, and is reset when the current Photo
+or view changes. The page UI exposes the state through Fit Window, zoom out,
+a continuous slider, zoom in, a live percentage, and a 100% action, and
+keeps the state available to assistive technology.
 
-Two implementation shapes were considered:
+The state is one zoom percentage plus a Fit marker rather than a mode list:
 
-- A continuous zoom slider would offer finer control, but it adds a new
-  numeric state, touch/pan edge cases, and a larger control on the already
-  constrained Photo View surface.
-- Three bounded modes, `Fit`, `Fill`, and `Detail Review`, make the important
-  viewing choices explicit while keeping gesture ownership deterministic.
+- `Fit` recomputes from the Preview area and the image's natural size, owns
+  the existing horizontal decision and vertical scrolling gestures, and
+  reports the percentage it produces.
+- A manual zoom percentage in `[10%, 800%]` is anchored to the Preview's
+  natural pixels: `100%` maps one Preview pixel to one CSS pixel. Pointer
+  wheel and pinch zoom keep the gesture point stationary; one-finger drag
+  pans within bounded overflow and never records a decision.
+- Detail inspection is the manual zoom state rather than a separate mode,
+  so `D` toggles a 200% detail zoom inside the same continuous state.
 
-The bounded modes are selected because they solve the current viewport and
-inspection problem without introducing a general image editor. `Fit` owns
-the existing horizontal decision and vertical scrolling gestures. `Fill`
-disables swipe decisions and crops only inside the Preview area. `Detail
-Review` additionally owns one-finger pan at a fixed bounded magnification.
-Both non-Fit modes leave explicit Select and Reject controls available.
+This shape is selected because the Photographer must reach any
+magnification between complete composition and honest pixel inspection
+without a second control model. The retired `Fill` cropping mode is not
+reintroduced: cropping hid composition rather than inspecting it. Explicit
+Select and Reject controls stay available in every zoom state.
+
+### Membership presentation state
+
+The page UI also presents the current Photo's Album membership from a
+per-Photo server query, with loading, empty, and failed members of its own.
+The page controller owns that read like capture metadata: it is fenced to
+the current Photo, a late response for another Photo is discarded, and
+failure does not affect decision readiness. Membership mutations continue
+to run through the Album action owner's admitted-write contract.
 
 ### Styling
 

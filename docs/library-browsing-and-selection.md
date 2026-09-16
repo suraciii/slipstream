@@ -25,8 +25,10 @@ All Folder windows retained together must come from the same Published Library. 
 
 The first product uses two views:
 
-- **Grid View** shows progressively loaded thumbnail cells from the current source.
-- **Photo View** shows one current Photo with selection, Rating, Preview, navigation, and Detail Review controls.
+- **Grid View** shows progressively loaded thumbnail cells from the current
+  source.
+- **Photo View** shows one current Photo with selection, Rating, Preview,
+  Album membership, navigation, and Preview zoom controls.
 
 The Photographer opens Photo View by activating a Grid cell. A Grid cell must be enabled only while its activation can immediately open Photo View against the current source. While Slipstream replaces an expired source snapshot, it must make retained Grid cells unavailable until the replacement source is ready. It must not expose an enabled Grid cell whose activation does nothing. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
 
@@ -46,7 +48,7 @@ Grid View must keep its current source name, truthful loading status, and Librar
 
 A valid Album name must not widen Grid View or Photo View beyond the Library Browser at a supported viewport. Its visible current-source title may be visually truncated, but assistive technology must retain the complete Album name.
 
-Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Detail Review, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
+Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Preview zoom, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
 
 When a short viewport cannot show a usable Preview and every control at once, Photo View must preserve a usable Preview and provide a vertical path to every existing control. It must not clip controls without a way to reach them. At supported narrow widths, Grid cells must divide each complete row evenly across the available Grid width, leaving no more than the ordinary inter-cell gap at the trailing edge. The `Library Folder` source label must remain fully readable.
 
@@ -75,6 +77,35 @@ Original Folder order must use the `All Photos` order filtered by component-awar
 
 Album order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, Original Folder changes, and rescans must not reorder an Album.
 
+## Source Ordering Selection
+
+Grid View must expose one explicit order selection for the open source:
+
+- `All Photos` and an Original Folder offer Capture Time, earliest first
+  (the default) and Capture Time, latest first.
+- An Album offers Album order (the default), Capture Time earliest first, and
+  Capture Time latest first.
+
+A time order belongs to the open view only. It must never rewrite persisted
+Album member positions, and an Album's persisted order remains the default
+when it is reopened.
+
+The server applies the selected order to the complete source before it
+paginates windows, so Grid and Photo navigation share one globally ordered
+view. Photos without a valid authoritative Capture Time sort last in both
+directions. Equal Capture Times keep the deterministic ordering Location and
+Photo ID tie-breakers; reversing the time direction never reverses those
+tie-breakers and never moves missing-time Photos ahead of timed Photos. Time
+ordering reuses the existing RAW/JPEG Capture Time authority and camera-local
+normalization; it does not guess time zones and does not use file modification
+time.
+
+Changing the order must keep the current Photo, resolved by Photo ID, and
+reposition the view around it. Opening or reopening a different source uses
+that source's default order. The first product does not persist the selected
+order across reloads. Album saved positions restore by Photo identity and are
+unaffected by the selected view order.
+
 ## Progressive Grid Loading
 
 Grid View must become interactive from a bounded first window of Photos. It must not wait for the entire source to transfer, parse, or render.
@@ -98,6 +129,28 @@ A Grid cell must show, when available:
 
 Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
 
+## Grid Composition and Orientation
+
+Grid cells remain uniform, virtualizable units. The Photo image inside each
+cell must display complete and unstretched at its true aspect ratio:
+landscape Photos render wider than tall, portrait Photos taller than wide,
+and square Photos square. A panoramic Photo must read as one long
+composition rather than a cropped strip.
+
+Letterboxing must stay quiet. A cell must not crop every Photo to one
+composition and must not stretch an image to fill its area. Selection State,
+Rating, and Photo state indicators must not overlay the Photo image; they
+render beside or beneath the image area.
+
+Orientation follows the EXIF-corrected derivative dimensions. A Photo whose
+Preview derivative applies an EXIF rotation must display with the corrected
+orientation exactly once, and a RAW/JPEG pair remains one Photo with one
+cell.
+
+While a thumbnail is not yet loaded or its dimensions are unknown, the cell
+must keep a stable placeholder. The placeholder must not fake an orientation
+and must not cause Grid layout to jump when the thumbnail arrives.
+
 Thumbnail, Preview, scan, and bounded look-ahead loading must run in the background. Rebuildable or superseded loading must not delay source changes, navigation, already available controls, or returning between Grid View and Photo View. Changing source or view must cancel pending image transfers and requests owned only by the previous source, Photo, or view; hiding obsolete loading is not sufficient when it would continue consuming capacity. Slipstream may wait only when the requested action depends on confirmed facts or persistence, such as opening a source's first bounded window or safely completing a Selection State change before advancing.
 
 ## Photo View
@@ -108,6 +161,7 @@ Photo View must show one current Photo as the primary content. It must also show
 - Selection State;
 - Rating;
 - Preview Source;
+- the Albums that contain the current Photo;
 - controls for select, reject, clear, undo, and Rating;
 - previous and next navigation; and
 - whether Preview detail is limited; and
@@ -196,6 +250,37 @@ Album mutations must persist before Slipstream presents them as complete. Changi
 
 The first Album-management interface does not require Grid multi-select, drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums. Adding an entire current Folder is supported separately from Grid multi-select.
 
+## Photo Album Membership
+
+Photo View must show which Albums contain the current Photo. The membership
+list is the server's answer for that Photo, distinct from the browsing
+source and from recent management actions: viewing the same Photo from any
+source must present the same membership, and it must remain correct after a
+reload.
+
+A Photo in no Album must say so explicitly. Membership loading and failure
+are displayed independently of the Preview and capture metadata; a failed
+membership load must not disable selection, Rating, navigation, or Preview
+behavior and must offer a retry that reloads only the membership facts.
+
+Photo View must offer one membership management panel that lists Albums with
+a checkbox reflecting the Photo's true membership. Checking an Album adds
+the Photo through the same persistence rules as any membership addition,
+and unchecking removes it through the same rules as membership removal,
+including the browsing-position contract when removing from the open Album.
+Creating a new Album reuses the existing Album creation entry. An Album list
+too large for one view must load on demand rather than transferring every
+member of every Album.
+
+A successful add or remove must update the membership list and the Album
+counts. A failed toggle must keep the prior true state, identify the failed
+Album and action, and leave the toggle retryable. Adding a Photo that
+already belongs must not create a duplicate membership.
+
+Switching Photos quickly must never present another Photo's membership. A
+membership response that arrives after its Photo is no longer current must
+be discarded.
+
 ## Selection State
 
 Each Photo has exactly one Selection State:
@@ -210,7 +295,7 @@ A selection action must persist before Slipstream treats navigation caused by th
 
 ## Touch Gestures
 
-When the Preview fits within Photo View:
+While the Preview zoom state is Fit:
 
 - a committed right swipe must set `selected`;
 - a committed left swipe must set `rejected`;
@@ -219,37 +304,50 @@ When the Preview fits within Photo View:
 
 A committed swipe advances to the next Photo after the decision is accepted.
 
-Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, when the Preview fits within Photo View, a vertical gesture that begins on the Preview must scroll Photo View naturally. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
+Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
 
-## Preview Modes and Detail Review
+## Preview Zoom and Fit
 
-Photo View must expose an explicit Preview mode control with these modes:
+Photo View must keep the complete Preview visible by default. **Fit** shows
+the entire Preview without cropping, as large as the available Preview area
+allows, and is the state every Photo opens in.
 
-- **Fit** is the default. It shows the complete Preview without cropping and
-  restores fit-mode touch behavior.
-- **Fill** scales the Preview to cover the available Preview area. The edges
-  may be cropped, but the image must remain contained by the area and must not
-  create page overflow.
-- **Detail Review** magnifies the Preview by a bounded amount for focus,
-  motion, or expression inspection. The interface must identify this mode as
-  active and must provide a clear way to return to Fit.
+Photo View must expose explicit zoom controls:
 
-Changing Photo or returning to Grid View must reset the mode to Fit. Fit and
-Fill reset any Detail Review pan. The browser must not upscale a Preview for
-Detail Review when doing so would imply that the source contains additional
-detail.
+- a **Fit Window** action that restores the complete composition;
+- a zoom out action, a continuous zoom slider, and a zoom in action;
+- a live zoom percentage; and
+- a **100%** action.
 
-While Preview mode is not Fit:
+The percentage is relative to the Preview image's own pixels. `100%` maps one
+Preview pixel to one CSS pixel regardless of device pixel ratio; it reports
+the honest derivative resolution and never implies RAW sensor precision. The
+zoom range is 10% to 800% of the Preview's natural size. The buttons and
+wheel step zoom multiplicatively, and the slider moves continuously within
+the same range. Fit is reported with the percentage it actually produces.
 
-- one-finger dragging must not select or reject the Photo;
-- in Detail Review, one-finger dragging pans the Preview within its bounded
-  overflow; and
-- Select and Reject remain available through explicit controls.
+On a device with a pointer wheel, wheel zoom must keep the image point under
+the pointer stationary while zooming. On a touch device, a two-finger pinch
+zooms around the gesture midpoint. Once the Photo is larger than the Preview
+area, dragging pans within bounded overflow so the image cannot be dragged
+out of view; while it fits, panning is not available and the image stays
+centered.
 
-In Fit mode, horizontal touch dragging retains the existing selection gesture
-and vertical dragging scrolls a short Photo View naturally. Keyboard users
-must be able to choose Fit, Fill, and Detail Review through the visible mode
-controls; the controls must expose their current mode programmatically.
+Zoom and pan must never record a Selection State or Rating. While the zoom
+state is manual, one-finger dragging pans the Preview and swipe decisions are
+unavailable; explicit Select and Reject controls stay available. In Fit,
+horizontal dragging keeps the decision gesture and vertical dragging scrolls
+a short Photo View naturally.
+
+Every zoom control must be operable from the keyboard, and the current zoom
+state must be exposed programmatically. Keyboard shortcuts `+` and `-` step
+zoom, `F` restores Fit, and `D` toggles a 200% detail zoom.
+
+Changing Photo or returning to Grid View must reset the zoom state to Fit.
+When the viewport or Preview area changes size, Fit must recompute, and a
+manual zoom must keep its percentage while its pan is constrained again.
+Zooming above 100% is allowed but is always reported truthfully; the interface
+must not suggest the source contains detail beyond the Preview derivative.
 
 ## Rating
 
@@ -300,6 +398,8 @@ Photo navigation must commit a new current Photo only after its bounded Photo fa
 If the current Preview cannot load, Slipstream must keep the Photo in source order, identify the failure, and allow navigation without forcing a selection decision.
 
 If an Album creation, rename, delete, or membership change cannot persist, Slipstream must identify the affected Album and action. It must retain a recoverable current source and must not present the failed change as complete.
+
+If the current Photo's Album membership cannot load, Slipstream must keep the prior or empty membership presentation truthful, identify the failure beside the membership panel, and offer a retry. The failure must not affect selection, Rating, navigation, or Preview behavior.
 
 If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
 
