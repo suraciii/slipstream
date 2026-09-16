@@ -1094,6 +1094,88 @@ describe("SourceGridOwner", () => {
     owner.dispose();
   });
 
+  test("visits the clamped tail window the range start cannot align to", async () => {
+    const rangeWindows = async (
+      total: number,
+      range: Readonly<{ start: number; end: number }>,
+    ): Promise<Readonly<{ requested: number[]; missing: number[] }>> => {
+      const requested: number[] = [];
+      const owner = createSourceGridOwner((input, init) => {
+        const url = requestUrl(input);
+        if (url.pathname === "/api/browse" && init?.method === "POST")
+          return Promise.resolve(opened("browse-1", total));
+        if (url.pathname === "/api/browse/browse-1") {
+          const start = Number(url.searchParams.get("start"));
+          requested.push(start);
+          return Promise.resolve(windowResponse(start, total));
+        }
+        if (init?.method === "DELETE")
+          return Promise.resolve(new Response(null, { status: 204 }));
+        throw new Error(`unexpected request ${url.pathname}`);
+      });
+      const authority = await openLibrary(owner);
+      await owner.loadWindow(0, { kind: "source", authority });
+      const before = requested.length;
+      owner.ensureRange(range.start, range.end, { kind: "grid", authority });
+      await flushTasks();
+      const missing: number[] = [];
+      for (let index = range.start; index < Math.min(range.end, total); index += 1)
+        if (owner.photoAt(index) === undefined) missing.push(index);
+      const result = { requested: requested.slice(before), missing };
+      owner.dispose();
+      return result;
+    };
+
+    // The 400-Photo tail window is [340,400): a range starting at 220 aligns
+    // to 180 and would stop at 300 without the clamped tail step.
+    expect(await rangeWindows(400, { start: 220, end: 400 })).toEqual({
+      requested: [180, 240, 300, 340],
+      missing: [],
+    });
+    expect(await rangeWindows(400, { start: 340, end: 400 })).toEqual({
+      requested: [300, 340],
+      missing: [],
+    });
+    // The 70-Photo tail window is [10,70): the window at 0 is already loaded.
+    expect(await rangeWindows(70, { start: 58, end: 70 })).toEqual({
+      requested: [10],
+      missing: [],
+    });
+    // Multiples of the window size keep their aligned walk.
+    expect(await rangeWindows(300, { start: 180, end: 300 })).toEqual({
+      requested: [180, 240],
+      missing: [],
+    });
+  });
+
+  test("does not re-request a fully loaded tail window", async () => {
+    const requested: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 400));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requested.push(start);
+        return Promise.resolve(windowResponse(start, 400));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "source", authority });
+    owner.ensureRange(220, 400, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 180, 240, 300, 340]);
+    expect(owner.photoAt(340)?.id).toBe("photo-340");
+    expect(owner.photoAt(399)?.id).toBe("photo-399");
+    owner.ensureRange(220, 400, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 180, 240, 300, 340]);
+    owner.dispose();
+  });
+
   test("shares one in-flight window between range admission and a control-flow load", async () => {
     const pendingWindow = deferred<Response>();
     let windowRequests = 0;

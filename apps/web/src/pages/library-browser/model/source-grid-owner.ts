@@ -702,14 +702,17 @@ export function createSourceGridOwner(
     if (from >= to) return;
     visibleRange = { start: from, end: to };
     trimFacts();
+    // The clamped tail window rarely sits on the 60-boundary the range start
+    // aligns to, so a plain `+= WINDOW_SIZE` walk would skip it (a 400-Photo
+    // range [220,400) visits 180, 240, 300 and then the tail 340). Each step
+    // is clamped to the last aligned window and the walk stops once it has
+    // visited that window exactly once.
     const lastStart = alignedStart(to - 1);
-    for (
-      let windowStart = alignedStart(from);
-      windowStart <= lastStart;
-      windowStart += WINDOW_SIZE
-    ) {
-      if (windowLoaded(windowStart)) continue;
-      void startWindowLoad(operation, windowStart, windowStart, options);
+    for (let windowStart = alignedStart(from); ; windowStart += WINDOW_SIZE) {
+      const current = Math.min(windowStart, lastStart);
+      if (!windowLoaded(current))
+        void startWindowLoad(operation, current, current, options);
+      if (windowStart >= lastStart) break;
     }
   };
 
