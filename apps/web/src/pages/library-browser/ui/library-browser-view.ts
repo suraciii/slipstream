@@ -1296,6 +1296,16 @@ export function createLibraryBrowserView(
     reportedGridRange = undefined;
     gridLayer.replaceChildren();
   };
+  /// Detaches the image of a cell that leaves the rendered range or is rebuilt
+  /// in place: an already-started transfer cannot keep owning a connection,
+  /// and its late error cannot claim a delivery failure for the Photo.
+  const detachGridImage = (cell: HTMLButtonElement) => {
+    const image = cell.querySelector<HTMLImageElement>("img");
+    if (!image) return;
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute("src");
+  };
   const positionGridCell = (
     cell: HTMLButtonElement,
     index: number,
@@ -1435,6 +1445,7 @@ export function createLibraryBrowserView(
     for (const [index, rendered] of renderedCells)
       if (index < start || index >= end) {
         rendered.cell.remove();
+        detachGridImage(rendered.cell);
         renderedCells.delete(index);
       }
     let anchor: ChildNode | null = null;
@@ -1449,13 +1460,22 @@ export function createLibraryBrowserView(
         rendered = existing;
         positionGridCell(rendered.cell, index, count, stride);
       } else {
+        // A rebuilt cell replaces its old node, so a stale placeholder or a
+        // changed rendering never stays in the layer.
+        if (existing) {
+          detachGridImage(existing.cell);
+          existing.cell.remove();
+        }
         rendered = buildGridCell(index, photo, model.total, count, stride);
         renderedCells.set(index, rendered);
       }
       // Walking down keeps rendered cells in source order with the fewest
       // moves: a cell already positioned before the next rendered index is
       // left untouched.
-      if (rendered.cell.nextSibling !== anchor)
+      if (
+        rendered.cell.parentNode !== gridLayer ||
+        rendered.cell.nextSibling !== anchor
+      )
         gridLayer.insertBefore(rendered.cell, anchor);
       anchor = rendered.cell;
     }

@@ -18,6 +18,7 @@ import {
   test,
   type Locator,
   type Page,
+  type Request as PlaywrightRequest,
   type Route,
 } from "@playwright/test";
 
@@ -311,6 +312,64 @@ async function openPhotoAndWaitForProgress(
   );
   await confirmed;
 }
+
+/// The rendered Grid range as the layout presents it: the first rendered Photo
+/// index and one past the last one, derived from cell geometry.
+const renderedGridSpan = (page: Page) =>
+  page.evaluate(() => {
+    const cells = Array.from(
+      document.querySelectorAll<HTMLElement>(".photo-cell"),
+    );
+    const columns = new Set(cells.map((cell) => cell.style.left)).size;
+    const firstTop = Math.min(
+      ...cells.map((cell) => Number.parseFloat(cell.style.top)),
+    );
+    const firstIndex = (firstTop / 178) * columns;
+    return {
+      cells: cells.length,
+      start: firstIndex,
+      end: firstIndex + cells.length,
+    };
+  });
+
+/// The aligned 60-Photo windows that cover a reported range.
+const coveringWindowStarts = (start: number, end: number, total: number) => {
+  const starts: number[] = [];
+  for (let windowStart = 0; windowStart < total; windowStart += 60)
+    if (windowStart < end && windowStart + 60 > start) starts.push(windowStart);
+  if (total % 60 !== 0 && end === total && !starts.includes(total - 60))
+    starts.push(total - 60);
+  return starts;
+};
+
+/// Browse-window requests by aligned start, with the ones still in flight.
+const recordWindowRequests = (page: Page) => {
+  const requested: number[] = [];
+  const pending = new Set<PlaywrightRequest>();
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "GET" || !url.pathname.startsWith("/api/browse/"))
+      return;
+    requested.push(Number(url.searchParams.get("start")));
+    pending.add(request);
+  });
+  page.on("requestfinished", (request) => pending.delete(request));
+  page.on("requestfailed", (request) => pending.delete(request));
+  return { requested, pending };
+};
+
+/// Settles when every rendered cell has its Photo and no window is in flight.
+const expectGridConverged = async (
+  page: Page,
+  windows: Readonly<{ pending: Set<PlaywrightRequest> }>,
+) => {
+  await expect
+    .poll(async () => ({
+      placeholders: await page.locator(".cell-placeholder").count(),
+      inFlight: windows.pending.size,
+    }))
+    .toEqual({ placeholders: 0, inFlight: 0 });
+};
 
 async function waitForLoadedReviewImage(page: Page) {
   const image = page.locator("[data-stage] img");
@@ -8035,33 +8094,366 @@ test("scroll events coalesce Grid rendering to one animation frame", async ({
   page,
 }) => {
   const { base, root } = await fixture();
-  await writePhotos(root, 8);
+  await writePhotos(root, 120);
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(running.url);
-  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
-  await expect(page.locator(".photo-cell img")).toHaveCount(8);
+  await openGrid(page, running.url, "All Photos");
 
-  const renderCount = await page.evaluate(
+  const frameBatches = await page.evaluate(
     () =>
-      new Promise<number>((resolve) => {
+      new Promise<number[]>((resolve) => {
         const layer = document.querySelector<HTMLElement>("[data-grid-layer]");
         const viewport = document.querySelector<HTMLElement>(
           "[data-grid-viewport]",
         );
         if (!layer || !viewport) throw new Error("Grid elements are missing");
-        const replaceChildren = layer.replaceChildren.bind(layer);
-        let count = 0;
-        layer.replaceChildren = (...nodes: Node[]) => {
-          count += 1;
-          replaceChildren(...nodes);
-        };
+        const batches: number[] = [];
+        let current = 0;
+        const observer = new MutationObserver((records) => {
+          if (records.some((record) => record.type === "childList"))
+            current += 1;
+        });
+        observer.observe(layer, { childList: true });
+        viewport.scrollTop = 30 * 178;
         for (let index = 0; index < 8; index += 1)
           viewport.dispatchEvent(new Event("scroll"));
-        requestAnimationFrame(() => resolve(count));
+        const collect = (remaining: number) =>
+          requestAnimationFrame(() => {
+            batches.push(current);
+            current = 0;
+            if (remaining > 1) collect(remaining - 1);
+            else {
+              observer.disconnect();
+              resolve(batches);
+            }
+          });
+        collect(3);
       }),
   );
-  expect(renderCount).toBe(1);
+  // Eight scroll events in one frame merge into exactly one Grid DOM update,
+  // and no frame mutates the Grid more than once.
+  expect(frameBatches[0]).toBe(1);
+  expect(frameBatches.every((count) => count <= 1)).toBe(true);
+});
+
+/// Opens the default library source without changing the viewport, so a test
+/// can drive the Grid at a viewport size of its own.
+const openInitialGrid = async (page: Page, url: string, index = 0) => {
+  await page.goto(url);
+  await expect(
+    page.locator(`[data-photo-index="${index}"] img`),
+  ).toHaveAttribute("src", /\/thumbnail\//);
+  await waitForGridFrame(page);
+};
+
+const sortedUnique = (values: ReadonlyArray<number>) =>
+  [...new Set(values)].sort((left, right) => left - right);
+
+/// Scrolls the Grid and waits for the merged render that reports the range.
+const scrollGrid = async (page: Page, scrollTop: number | "end") => {
+  await page.locator("[data-grid-viewport]").evaluate((viewport, target) => {
+    viewport.scrollTop = target === "end" ? viewport.scrollHeight : target;
+    viewport.dispatchEvent(new Event("scroll"));
+  }, scrollTop);
+  await waitForGridFrame(page);
+};
+
+test("a scroll burst admits one window request per covering aligned window", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  const windows = recordWindowRequests(page);
+  await openInitialGrid(page, running.url);
+  const visible = await renderedGridSpan(page);
+  expect(windows.requested).toEqual(
+    coveringWindowStarts(visible.start, visible.end, 300),
+  );
+  expect(windows.requested.length).toBeGreaterThan(1);
+
+  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    viewport.scrollTop = viewport.scrollHeight;
+    for (let index = 0; index < 10; index += 1)
+      viewport.dispatchEvent(new Event("scroll"));
+  });
+  await waitForGridFrame(page);
+  await expectGridConverged(page, windows);
+  const tail = await renderedGridSpan(page);
+  expect(tail.end).toBe(300);
+  // One request per aligned window however many scroll events reported it: no
+  // window is requested twice and none outside the covered range.
+  expect(windows.requested).toEqual(
+    sortedUnique([
+      ...coveringWindowStarts(visible.start, visible.end, 300),
+      ...coveringWindowStarts(tail.start, tail.end, 300),
+    ]),
+  );
+  await expect(page.locator('[data-photo-index="299"] img')).toHaveAttribute(
+    "src",
+    /\/thumbnail\//,
+  );
+});
+
+test("a scrolled Grid keeps the DOM of the Photos that stay rendered", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  let releaseWindow: () => void = () => undefined;
+  const windowGate = new Promise<void>((resolve) => {
+    releaseWindow = resolve;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "60",
+    (route) => windowGate.then(() => route.continue()).catch(() => undefined),
+  );
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.locator('[data-photo-index="0"]')).toBeVisible();
+    const viewport = page.locator("[data-grid-viewport]");
+    // Rows 29 and 30 render 54–69 and 56–71: the loaded window ends at 60, so
+    // the Photos entering beyond it stay placeholders.
+    await viewport.evaluate((element) => {
+      element.scrollTop = 29 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.locator('[data-photo-index="59"]')).toBeVisible();
+    // The unloaded window beyond index 60 renders stable placeholders instead
+    // of Photo cells.
+    await expect(page.locator('[data-photo-index="60"]')).toHaveCount(0);
+    await expect(page.locator(".cell-placeholder").first()).toBeVisible();
+    const retainedCell = await page
+      .locator('[data-photo-index="58"]')
+      .elementHandle();
+    const retainedImage = await page
+      .locator('[data-photo-index="58"] img')
+      .elementHandle();
+    const retainedPlaceholder = await page
+      .locator(".photo-cell:has(.cell-placeholder):not([data-photo-index])")
+      .first()
+      .elementHandle();
+    expect(retainedCell).not.toBeNull();
+    expect(retainedImage).not.toBeNull();
+    expect(retainedPlaceholder).not.toBeNull();
+
+    await scrollGrid(page, 30 * 178);
+    // The Photos that stayed keep their button and their image; nothing is
+    // rebound or refetched.
+    expect(await retainedCell!.evaluate((node) => node.isConnected)).toBe(true);
+    expect(await retainedImage!.evaluate((node) => node.isConnected)).toBe(
+      true,
+    );
+    expect(
+      await retainedImage!.evaluate(
+        (node) => node === node.closest(".photo-cell")?.querySelector("img"),
+      ),
+    ).toBe(true);
+    expect(
+      await retainedPlaceholder!.evaluate((node) => node.isConnected),
+    ).toBe(true);
+  } finally {
+    releaseWindow();
+    await page.unroute(/\/api\/browse\//);
+  }
+});
+
+test("a fast multi-window scroll mutates the Grid at most once per frame", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGrid(page, running.url, "All Photos");
+
+  const frameBatches = await page.evaluate(
+    () =>
+      new Promise<number[]>((resolve) => {
+        const layer = document.querySelector<HTMLElement>("[data-grid-layer]");
+        const viewport = document.querySelector<HTMLElement>(
+          "[data-grid-viewport]",
+        );
+        if (!layer || !viewport) throw new Error("Grid elements are missing");
+        const batches: number[] = [];
+        let current = 0;
+        const observer = new MutationObserver((records) => {
+          if (records.some((record) => record.type === "childList"))
+            current += 1;
+        });
+        observer.observe(layer, { childList: true });
+        let step = 0;
+        const advance = () =>
+          requestAnimationFrame(() => {
+            batches.push(current);
+            current = 0;
+            step += 1;
+            if (step < 8) {
+              viewport.scrollTop = step * 6 * 178;
+              viewport.dispatchEvent(new Event("scroll"));
+              viewport.dispatchEvent(new Event("scroll"));
+              advance();
+            } else {
+              observer.disconnect();
+              resolve(batches);
+            }
+          });
+        viewport.scrollTop = 6 * 178;
+        viewport.dispatchEvent(new Event("scroll"));
+        viewport.dispatchEvent(new Event("scroll"));
+        advance();
+      }),
+  );
+  // Data-driven updates merge into the scroll render: no frame touches the
+  // Grid more than once while windows arrive under a fast scroll.
+  expect(frameBatches.every((count) => count <= 1)).toBe(true);
+  expect(frameBatches.some((count) => count === 1)).toBe(true);
+});
+
+test("a scroll reversal converges without churn or repeat requests", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const windows = recordWindowRequests(page);
+  await openGrid(page, running.url, "All Photos");
+  await scrollGrid(page, 30 * 178);
+  await expectGridConverged(page, windows);
+  expect(sortedUnique(windows.requested)).toContain(60);
+  const loadedRequests = [...windows.requested];
+  const retainedCell = await page
+    .locator('[data-photo-index="70"]')
+    .elementHandle();
+  expect(retainedCell).not.toBeNull();
+
+  const mutations = await page.locator("[data-grid-viewport]").evaluate(
+    (element) =>
+      new Promise<number>((resolve) => {
+        const gridLayer =
+          document.querySelector<HTMLElement>("[data-grid-layer]");
+        if (!gridLayer) throw new Error("Grid layer is missing");
+        const start = element.scrollTop;
+        let count = 0;
+        const observer = new MutationObserver((records) => {
+          count += records.filter(
+            (record) => record.type === "childList",
+          ).length;
+        });
+        observer.observe(gridLayer, { childList: true });
+        element.scrollTop = start + 2 * 178;
+        element.dispatchEvent(new Event("scroll"));
+        element.scrollTop = start;
+        element.dispatchEvent(new Event("scroll"));
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            observer.disconnect();
+            resolve(count);
+          }),
+        );
+      }),
+  );
+  // Down and back within one frame reports the same range: the settled Grid
+  // neither churns its cells nor asks for a window it already has.
+  expect(mutations).toBe(0);
+  expect(windows.requested).toEqual(loadedRequests);
+  expect(await retainedCell!.evaluate((node) => node.isConnected)).toBe(true);
+  await expectGridConverged(page, windows);
+});
+
+test("out-of-order window settlements render every loaded Photo position", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  let releaseFirst: () => void = () => undefined;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "60",
+    async (route) => {
+      await firstGate;
+      try {
+        await route.continue();
+      } catch {
+        /* the range may be superseded before the held response lands */
+      }
+    },
+  );
+  try {
+    await page.setViewportSize({ width: 2560, height: 1440 });
+    await openInitialGrid(page, running.url);
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      element.scrollTop = 6 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    // The later window commits while the range's first window is still held.
+    await expect(page.locator('[data-photo-index="180"] img')).toHaveAttribute(
+      "src",
+      /\/thumbnail\//,
+    );
+    const laterCell = await page
+      .locator('[data-photo-index="200"]')
+      .elementHandle();
+    expect(laterCell).not.toBeNull();
+
+    releaseFirst();
+    await expect(page.locator('[data-photo-index="60"] img')).toHaveAttribute(
+      "src",
+      /\/thumbnail\//,
+    );
+    await expect(page.locator(".cell-placeholder")).toHaveCount(0);
+    // The late window fills its own positions without evicting the range that
+    // already committed.
+    expect(await laterCell!.evaluate((node) => node.isConnected)).toBe(true);
+    await expect(page.locator('[data-photo-index="200"] img')).toHaveAttribute(
+      "src",
+      /\/thumbnail\//,
+    );
+  } finally {
+    releaseFirst();
+    await page.unroute(/\/api\/browse\//);
+  }
+});
+
+test("a large viewport loads only covering windows and stays bounded", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  const windows = recordWindowRequests(page);
+  await openInitialGrid(page, running.url);
+  const visible = await renderedGridSpan(page);
+  expect(windows.requested).toEqual(
+    coveringWindowStarts(visible.start, visible.end, 300),
+  );
+  expect(visible.cells).toBeLessThan(300);
+
+  await scrollGrid(page, "end");
+  await expectGridConverged(page, windows);
+  const tail = await renderedGridSpan(page);
+  expect(tail.end).toBe(300);
+  expect(tail.cells).toBeLessThan(300);
+  expect(sortedUnique(windows.requested)).toEqual(
+    sortedUnique([
+      ...coveringWindowStarts(visible.start, visible.end, 300),
+      ...coveringWindowStarts(tail.start, tail.end, 300),
+    ]),
+  );
+  expect(await page.locator(".photo-cell").count()).toBeLessThan(300);
 });
 
 test("Back to Grid restoration supersedes a queued scroll render", async ({
@@ -8174,14 +8566,19 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   expect(thumbnailApiRequests).toBe(0);
   expect(derivativeRequests).toBe(1);
 
+  // A merged Grid update reuses the visible Photo's cell and the image that
+  // already failed, so the failure stays attached to that Photo instead of a
+  // replacement node.
   const failedCell = await cell.elementHandle();
+  const failedImage = await image.elementHandle();
   expect(failedCell).not.toBeNull();
+  expect(failedImage).not.toBeNull();
   await page.locator("[data-grid-viewport]").evaluate((viewport) => {
     viewport.dispatchEvent(new Event("scroll"));
   });
-  await expect
-    .poll(() => failedCell!.evaluate((node) => node.isConnected))
-    .toBe(false);
+  await waitForGridFrame(page);
+  expect(await failedCell!.evaluate((node) => node.isConnected)).toBe(true);
+  expect(await failedImage!.evaluate((node) => node.isConnected)).toBe(true);
   await expect(facts).toHaveText(factsText);
   await expect(cell).toHaveAccessibleName(accessibleName);
 
@@ -8344,15 +8741,12 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   const detachedImage = await currentImage.elementHandle();
   expect(detachedImage).not.toBeNull();
 
-  await page.locator("[data-grid-viewport]").evaluate((viewport) => {
-    viewport.dispatchEvent(new Event("scroll"));
-  });
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      ),
-  );
+  // Photo View hands the Grid back by rebuilding its cells, so the captured
+  // image is detached from the cell that now presents the Photo.
+  await currentCell.click();
+  await expect(page.getByText("1 / 1")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await waitForGridFrame(page);
   expect(await detachedImage!.evaluate((image) => image.isConnected)).toBe(
     false,
   );
