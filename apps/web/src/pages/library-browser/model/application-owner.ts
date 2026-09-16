@@ -545,8 +545,10 @@ export function createApplicationOwner(
               activeScanCycle = undefined;
               // Claiming the failure is a transition, not a poll result, so a
               // Library that stays failed keeps one claim while the monitor
-              // keeps probing the server for reachability.
-              if (prior !== "failed") claimScanFailure();
+              // keeps probing the server for reachability. A first committed
+              // overview can already report the failure, so the missing notice
+              // claims it even though the observed state did not change.
+              if (prior !== "failed" || !scanFailureNotice) claimScanFailure();
             } else if (
               scan.state === "idle" &&
               prior &&

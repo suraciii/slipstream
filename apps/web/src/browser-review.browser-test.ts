@@ -280,6 +280,30 @@ function recordBrowseBodies(page: Page) {
   return bodies;
 }
 
+/// Holds arriving `/api/status` answers so a test can change the state the
+/// monitor's polls report and click a notice the polls own. The monitor keeps
+/// probing while a failed Library check is claimed, so a poll that lands
+/// between the routed state change and the click would release or replace the
+/// notice the click targets.
+function statusAnswerGate() {
+  let holding = false;
+  const waiting: Array<() => void> = [];
+  return {
+    held: () => waiting.length,
+    async wait(): Promise<void> {
+      if (!holding) return;
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    },
+    hold(): () => void {
+      holding = true;
+      return () => {
+        holding = false;
+        for (const release of waiting.splice(0)) release();
+      };
+    },
+  };
+}
+
 async function evictFirstPhotoFact(page: Page) {
   const viewport = page.locator("[data-grid-viewport]");
   for (const [row, photoIndex] of [
@@ -2850,15 +2874,24 @@ test("a connection proven outside the probe is lost again when the probe reports
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 
   // The idle probe stops answering, so the browser stops claiming a server.
-  await page.route("**/api/status", (route) => route.abort());
+  const probeGate = statusAnswerGate();
+  await page.route("**/api/status", async (route) => {
+    await probeGate.wait();
+    await route.abort();
+  });
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
 
   // Opening another source succeeds while the probe still cannot answer, so
   // that request proves the transport and the browser claims the connection
-  // again without a usable status answer.
+  // again without a usable status answer. The monitor probes sequentially, so
+  // parking the next one first leaves no answer able to clear that claim
+  // before it is asserted.
+  const resumeProbe = probeGate.hold();
+  await expect.poll(() => probeGate.held()).toBeGreaterThan(0);
   await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  resumeProbe();
 
   // The next probe reports the same loss again. Reachability is judged
   // against the transport the browser currently claims, not against the
@@ -4567,6 +4600,9 @@ test("the application status monitor owns scan failure, retry, and completion", 
 
   let command: "rejected" | "held" | "lost" = "rejected";
   let statusMode: "failed" | "idle" | "inspecting" | "cycle" = "failed";
+  // The monitor keeps polling, so a poll that landed while a test changes
+  // `statusMode` could release the notice the next click targets.
+  const statusGate = statusAnswerGate();
   let cycleStatusCalls = 0;
   let scanCalls = 0;
   let releaseHeldScan!: () => void;
@@ -4574,6 +4610,7 @@ test("the application status monitor owns scan failure, retry, and completion", 
     releaseHeldScan = resolve;
   });
   await page.route("**/api/status", async (route) => {
+    await statusGate.wait();
     const state =
       statusMode === "cycle"
         ? cycleStatusCalls++ === 0
@@ -4624,19 +4661,24 @@ test("the application status monitor owns scan failure, retry, and completion", 
   await duplicateAlbum;
   await expect(page.getByLabel("Album name")).toHaveValue("Keep");
   await page.getByRole("button", { name: "Close", exact: true }).click();
+  const resumeIdle = statusGate.hold();
   statusMode = "idle";
   await retryCheck.click();
   await expect(page.getByText("Disconnected")).toBeVisible();
   await expect(retryCheck).toBeVisible();
   await expect(page.getByText(/Library check complete/)).toBeHidden();
+  resumeIdle();
 
   command = "held";
+  const resumeInspecting = statusGate.hold();
   statusMode = "inspecting";
   await retryCheck.click();
+  // The click owns this notice until the held answers resume.
   await expect(
     page.locator("[data-grid-summary]").getByText("Starting Library check…"),
   ).toBeInViewport();
   await expect(retryCheck).toBeHidden();
+  resumeInspecting();
   await expect.poll(() => scanCalls).toBe(2);
   await expect(
     page
@@ -4652,9 +4694,11 @@ test("the application status monitor owns scan failure, retry, and completion", 
   // non-idle→idle cycle. That monitor completion consumes the command once
   // and releases its exact Recovery claim.
   command = "lost";
+  const resumeCycle = statusGate.hold();
   statusMode = "cycle";
   cycleStatusCalls = 0;
   await retryCheck.click();
+  resumeCycle();
   await expect(
     page
       .locator("[data-grid-summary]")
@@ -4688,6 +4732,9 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
   let statusState = "failed";
   let scanCalls = 0;
   let overviewCalls = 0;
+  // The monitor keeps polling, so a poll that landed while `statusState`
+  // changes to `inspecting` could release the notice the next click targets.
+  const statusGate = statusAnswerGate();
   let releaseHeldScan!: () => void;
   const heldScan = new Promise<void>((resolve) => {
     releaseHeldScan = resolve;
@@ -4697,6 +4744,7 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
     releaseHeldStatus = resolve;
   });
   await page.route("**/api/status", async (route) => {
+    await statusGate.wait();
     if (statusState === "held") {
       await heldStatus;
       await route.fulfill({ status: 503, body: "unavailable" });
@@ -4742,8 +4790,10 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
   await expect(retryCheck).toBeVisible();
 
   command = "held";
+  const resumeStatus = statusGate.hold();
   statusState = "inspecting";
   await retryCheck.click();
+  resumeStatus();
   await expect.poll(() => scanCalls).toBe(2);
   await expect(
     page.locator("[data-grid-summary]").getByText("Inspecting Capture Time…"),

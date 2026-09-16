@@ -67,19 +67,24 @@ loop, and in-flight continuation; transport need not be aborted. Application
 teardown does the same. A detached monitor never writes scan status or starts
 an overview load.
 
-An answered HTTP non-success or transport failure is silent, does not create
-or release a Recovery claim, and leaves the current monitor running. A
-successful response may write scan progress only as a background update
-through the Summary Notice Channel. Each individual status request captures a
-fresh non-owning background epoch when that request starts; the lifetime
-monitor does not reuse one epoch. Transition handling compares the response
-with the last scan state observed by this monitor. A first committed overview
-whose scan is already `idle` establishes the baseline and does not invent a
+An answered HTTP non-success or transport failure writes no scan status,
+creates or releases no Recovery claim, and leaves the current monitor running.
+A transport failure also clears the reachability axis described under
+Connectivity and recovery ownership, and a usable answer sets it. A successful
+response may write scan progress only as a background update through the
+Summary Notice Channel. Each individual status request captures a fresh
+non-owning background epoch when that request starts; the lifetime monitor
+does not reuse one epoch. Transition handling compares the response with the
+last scan state observed by this monitor. A first committed overview whose
+scan is already `idle` establishes the baseline and does not invent a
 completion event because no open snapshot predates that commit.
 
-A semantic `failed` scan retains the prior Published Library, stops that poll,
-and claims an actionable `scan-failure` Summary notice with a **Retry Library
-Check** action.
+A semantic `failed` scan retains the prior Published Library, keeps polling at
+the resting cadence, and claims one actionable `scan-failure` Summary notice
+with a **Retry Library Check** action. That notice is the claim: further
+failed polls keep the monitor probing for reachability without claiming it
+again, and a missing notice is claimed once even when the committed overview
+already reported the failure.
 
 When a current poll first observes `idle` after a non-idle scan, it advances
 the overview data floor, claims a completion notice that the prior open Browse
@@ -532,10 +537,10 @@ Focused automated coverage must prove:
 - the first committed overview starts exactly one application-lifetime status
   monitor for both published and unpublished Libraries; idle monitoring
   detects externally triggered scans; HTTP non-success and transport failure
-  remain silent; a semantic failed scan retains the prior publication and owns
-  Retry Library Check; and the retry command's terminal result and monitor
-  transition consume one completion handle exactly once without changing an
-  open snapshot;
+  write no scan status and own no claim; a semantic failed scan retains the
+  prior publication, keeps probing, and owns Retry Library Check; and the
+  retry command's terminal result and monitor transition consume one
+  completion handle exactly once without changing an open snapshot;
 - concurrent startup/explicit scan admissions run one application-owned leader,
   publish once, return one captured terminal status to all live waiters, and
   finish status accounting even when one or every HTTP waiter disconnects;

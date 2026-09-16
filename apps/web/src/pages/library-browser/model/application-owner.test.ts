@@ -439,6 +439,37 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
+  test("claims the Retry action when the committed overview is already failed", async () => {
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(
+          response(overview("publication-1", "Album", { scanState: "failed" })),
+        );
+      return Promise.resolve(response(scan("failed", "publication-1")));
+    });
+    const failureClaims = () =>
+      summaryEvents(events).filter(
+        (event) => event.summary.action?.kind === "retry-library-check",
+      );
+
+    // The committed overview already reports the failure, so the monitor's
+    // baseline state is `failed` before its first poll. The overview summary
+    // is background presentation without an action.
+    await owner.refreshOverview();
+    expect(failureClaims()).toHaveLength(0);
+
+    // The first failed poll is the transition that claims the actionable
+    // notice even though the observed scan state never changed.
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // The claimed notice is the claim: the next failed poll keeps polling and
+    // keeps that one notice instead of claiming again.
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+    owner.dispose();
+  });
+
   test("settles one terminal scan and signs a one-shot refresh intent", async () => {
     let overviewRequests = 0;
     let statusRequests = 0;
