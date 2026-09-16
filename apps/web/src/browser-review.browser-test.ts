@@ -453,7 +453,10 @@ async function openGrid(page: Page, url: string, name: string) {
   await page
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
-  await page.getByText(/^(?:Ready · \d[\d,]* Photos?|0 Photos)$/).waitFor();
+  await page
+    .locator("[data-grid-status]")
+    .filter({ hasText: /^(?:Ready · \d[\d,]* Photos?|0 Photos)$/ })
+    .waitFor();
   await waitForGridFrame(page);
 }
 async function openSources(page: Page) {
