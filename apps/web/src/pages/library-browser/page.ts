@@ -94,6 +94,7 @@ export function mountLibraryBrowser(
       }
       void sourceGrid.loadThumbnail(binding.photoId, binding.target);
     },
+    (binding) => sourceGrid.releaseThumbnail(binding.photoId, binding.target),
   );
   const photoOwner = createPhotoOwner(
     fetcher,

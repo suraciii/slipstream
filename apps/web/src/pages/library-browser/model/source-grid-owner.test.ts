@@ -804,7 +804,6 @@ describe("SourceGridOwner", () => {
     const first = new FakeImage();
     const replacement = new FakeImage();
 
-    owner.beginGridRender();
     const firstRequest = owner.loadThumbnail("photo-0", first);
     const staleError = first.onerror;
     const secondRequest = owner.loadThumbnail("photo-0", replacement);
@@ -845,7 +844,6 @@ describe("SourceGridOwner", () => {
     await openLibrary(owner);
 
     const failed = new FakeImage();
-    owner.beginGridRender();
     owner.presentThumbnail("photo-0", failed, "/hydrated.jpg", true);
     failed.onerror?.call(
       failed,
@@ -859,14 +857,14 @@ describe("SourceGridOwner", () => {
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
 
     const sameUrl = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-0", failed);
     owner.presentThumbnail("photo-0", sameUrl, "/hydrated.jpg", true);
     expect(sameUrl.deliveryFailed).toBe(true);
     expect(sameUrl.src).toBe("");
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
 
     const changedUrl = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-0", sameUrl);
     owner.presentThumbnail("photo-0", changedUrl, "/replacement.jpg", true);
     expect(changedUrl.deliveryFailed).toBe(false);
     expect(changedUrl.src).toBe("/replacement.jpg");
@@ -892,10 +890,15 @@ describe("SourceGridOwner", () => {
     });
     await openLibrary(owner);
 
+    let previous: Readonly<{ id: string; image: FakeImage }> | undefined;
     for (let index = 0; index < 241; index += 1) {
-      owner.beginGridRender();
-      await owner.loadThumbnail(`photo-${index}`, new FakeImage());
+      const id = `photo-${index}`;
+      const image = new FakeImage();
+      await owner.loadThumbnail(id, image);
+      if (previous) owner.releaseThumbnail(previous.id, previous.image);
+      previous = { id, image };
     }
+    expect(owner.retainedImageCount).toBe(1);
     expect(owner.retainedThumbnailCount).toBe(240);
   });
 
@@ -911,20 +914,73 @@ describe("SourceGridOwner", () => {
       throw new Error(`unexpected request ${url.pathname}`);
     });
     await openLibrary(owner);
+    let previous: Readonly<{ id: string; image: FakeImage }> | undefined;
     for (let index = 0; index < 241; index += 1) {
-      owner.beginGridRender();
+      const id = `photo-${index}`;
       const image = new FakeImage();
-      await owner.loadThumbnail(`photo-${index}`, image);
+      await owner.loadThumbnail(id, image);
       expect(image.deliveryFailed).toBe(true);
+      if (previous) owner.releaseThumbnail(previous.id, previous.image);
+      previous = { id, image };
     }
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(240);
+    expect(owner.retainedImageCount).toBe(1);
 
     const hydrated = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-240", previous!.image);
     owner.presentThumbnail("photo-240", hydrated, "/hydrated.jpg", true);
     expect(hydrated.src).toBe("/hydrated.jpg");
     expect(hydrated.deliveryFailed).toBe(false);
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(239);
+  });
+
+  test("releases the owner's hold on Grid images the view drops", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 720));
+      if (url.pathname.startsWith("/api/photos/")) {
+        const id = url.pathname.split("/")[3];
+        return Promise.resolve(
+          new Response(JSON.stringify({ state: "ready", url: `/${id}.jpg` }), {
+            status: 200,
+          }),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    // A long scroll across twelve windows drops every cell it leaves behind.
+    const rendered: Array<Readonly<{ id: string; image: FakeImage }>> = [];
+    for (let index = 0; index < 720; index += 1) {
+      const id = `photo-${index}`;
+      const image = new FakeImage();
+      await owner.loadThumbnail(id, image);
+      expect(image.src).toBe(`/${id}.jpg`);
+      rendered.push({ id, image });
+      if (rendered.length > 200) {
+        const dropped = rendered.shift()!;
+        owner.releaseThumbnail(dropped.id, dropped.image);
+      }
+      expect(owner.retainedImageCount).toBeLessThanOrEqual(200);
+    }
+    for (const { id, image } of rendered) owner.releaseThumbnail(id, image);
+    expect(owner.retainedImageCount).toBe(0);
+
+    // Releasing a cell with a pending transfer drops the browser-managed
+    // source without touching the rebuildable URL cache.
+    const pending = new FakeImage();
+    owner.presentThumbnail("photo-700", pending, "/pending.jpg", true);
+    expect(pending.src).toBe("/pending.jpg");
+    owner.releaseThumbnail("photo-700", pending);
+    expect(pending.src).toBe("");
+    expect(pending.onload).toBeNull();
+    expect(pending.onerror).toBeNull();
+    expect(owner.retainedThumbnailCount).toBeGreaterThan(0);
+    owner.dispose();
   });
 
   test("cleans a browser-managed image transfer exactly once", async () => {
@@ -938,7 +994,6 @@ describe("SourceGridOwner", () => {
     });
     await openLibrary(owner);
     const image = new FakeImage();
-    owner.beginGridRender();
     owner.presentThumbnail("photo-0", image, "/pending.jpg", true);
     owner.stopGridWork();
     owner.dispose();
@@ -1263,6 +1318,63 @@ describe("SourceGridOwner", () => {
       start: 0,
       changed: true,
     });
+    owner.dispose();
+  });
+
+  test("shares one in-flight window between a Grid range and a source load", async () => {
+    const pendingWindow = deferred<Response>();
+    let windowRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1") {
+        windowRequests += 1;
+        return pendingWindow.promise;
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+
+    // A Grid range admission and the source open that awaits the same aligned
+    // window share one in-flight request.
+    owner.ensureRange(0, 60, { kind: "grid", authority });
+    const awaiting = owner.loadWindow(0, { kind: "source", authority });
+    await flushTasks();
+    expect(windowRequests).toBe(1);
+
+    pendingWindow.resolve(windowResponse(0, 180));
+    expect(await awaiting).toMatchObject({
+      kind: "loaded",
+      start: 0,
+      changed: true,
+    });
+    owner.dispose();
+  });
+
+  test("one throwing settlement subscriber cannot silence the others", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(new Response(null, { status: 503 }));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled(() => {
+      throw new Error("subscriber failed");
+    });
+    owner.onWindowSettled((outcome) => settled.push(outcome));
+
+    owner.ensureRange(0, 60, { kind: "grid", authority });
+    await flushTasks();
+    expect(settled.map((outcome) => outcome.kind)).toEqual(["failed"]);
     owner.dispose();
   });
 

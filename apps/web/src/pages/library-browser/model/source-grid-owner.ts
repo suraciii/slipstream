@@ -166,6 +166,7 @@ export interface SourceGridOwner {
   readonly retainedFactCount: number;
   readonly retainedThumbnailCount: number;
   readonly retainedThumbnailDeliveryFailureCount: number;
+  readonly retainedImageCount: number;
   isCurrent(authority: SourceAuthority): boolean;
   isReady(authority: SourceAuthority): boolean;
   renewPhotoWindow(): PhotoWindowAuthority;
@@ -222,8 +223,8 @@ export interface SourceGridOwner {
     options?: Readonly<{ quiet?: boolean; priority?: "high" | "low" }>,
   ): Promise<SourceWindowOutcome>;
   stopGridWork(): void;
-  beginGridRender(): void;
   loadThumbnail(photoId: string, image: GridThumbnailImage): Promise<void>;
+  releaseThumbnail(photoId: string, image: GridThumbnailImage): void;
   presentThumbnail(
     photoId: string,
     image: GridThumbnailImage,
@@ -394,7 +395,16 @@ export function createSourceGridOwner(
   };
 
   const notifyWindowSettled = (outcome: SourceWindowOutcome) => {
-    for (const handler of windowSettledHandlers) handler(outcome);
+    // A subscriber that throws owns its own failure: it must not silence the
+    // other subscribers or surface as an unhandled rejection on the shared
+    // window task.
+    for (const handler of windowSettledHandlers) {
+      try {
+        handler(outcome);
+      } catch {
+        /* the failing subscriber owns its own failure */
+      }
+    }
   };
 
   const onWindowSettled = (
@@ -583,12 +593,13 @@ export function createSourceGridOwner(
     );
   };
 
+  /// Windows are admitted by aligned start, so Source- and Grid-kind demands
+  /// for one window share the Grid scope and its `window:<start>` key: one
+  /// in-flight request per window, cancelled when the Grid surface hands off.
   const operationTasks = (operation: SourceWindowOperation) =>
     operation.kind === "photo"
       ? (photoWindows.get(operation.authority)?.tasks ?? haltedPhotoTasks)
-      : operation.kind === "source"
-        ? sourceTasks
-        : gridTasks;
+      : gridTasks;
 
   const detachedWindow = (
     operation: SourceWindowOperation,
@@ -659,7 +670,13 @@ export function createSourceGridOwner(
         }
         for (const [offset, photo] of result.value.photos.entries())
           facts.set(result.value.start + offset, photo);
-        latestSettledWindowStart = start;
+        // The fallback eviction anchor only moves forward: a window that
+        // settles late never re-anchors eviction to a position captured when
+        // an older request started.
+        latestSettledWindowStart =
+          latestSettledWindowStart === undefined
+            ? start
+            : Math.max(latestSettledWindowStart, start);
         trimFacts();
         if (operation.kind === "source") sourceReady = true;
         return {
@@ -941,9 +958,21 @@ export function createSourceGridOwner(
     }
   }
 
-  const beginGridRender = () => detachImages();
-
   const clearRenderedThumbnails = () => detachImages();
+
+  /// Releases the owner's hold on a Grid image the view dropped or rebuilt:
+  /// the browser-managed transfer stops owning a source and the Photo's
+  /// delivery-failure memory stays, so a re-rendered cell re-attaches from the
+  /// rebuildable URL cache. Retention follows the visible Grid, never the
+  /// number of Photos rendered in one session.
+  const releaseThumbnail = (photoId: string, image: GridThumbnailImage) => {
+    if (renderedImages.get(photoId) !== image) return;
+    renderedImages.delete(photoId);
+    const transfer = imageTransfers.get(photoId);
+    if (transfer?.image !== image) return;
+    imageTransfers.delete(photoId);
+    transfer.finish();
+  };
 
   return {
     get authority() {
@@ -994,6 +1023,9 @@ export function createSourceGridOwner(
     },
     get retainedThumbnailDeliveryFailureCount() {
       return thumbnailDeliveryFailures.size;
+    },
+    get retainedImageCount() {
+      return renderedImages.size;
     },
     isCurrent,
     isReady(candidate) {
@@ -1073,8 +1105,8 @@ export function createSourceGridOwner(
     },
     loadWindow,
     stopGridWork,
-    beginGridRender,
     loadThumbnail,
+    releaseThumbnail,
     presentThumbnail(photoId, image, url, attachDisconnected) {
       registerImage(photoId, image);
       attachThumbnail(photoId, image, url, attachDisconnected);

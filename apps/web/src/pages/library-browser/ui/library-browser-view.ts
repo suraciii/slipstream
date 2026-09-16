@@ -197,6 +197,10 @@ type RenderedGridCell = {
   readonly cell: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
+  /// The thumbnail ownership this cell holds while it presents a Photo. A
+  /// cell that leaves the rendered range or is rebuilt hands it back so the
+  /// owner's image state follows the rendered Grid.
+  thumbnail: GridThumbnailBinding | undefined;
 };
 
 /// Placeholder cells present no Photo: they never initiate loading.
@@ -332,6 +336,7 @@ export function createLibraryBrowserView(
   root: HTMLElement,
   emit: (intent: LibraryBrowserIntent) => void,
   bindThumbnail: (binding: GridThumbnailBinding) => void,
+  releaseThumbnail: (binding: GridThumbnailBinding) => void,
 ): LibraryBrowserView {
   let alive = true;
   root.innerHTML = `
@@ -1292,19 +1297,28 @@ export function createLibraryBrowserView(
   /// while a source is replaced, and when Photo View hands the surface back
   /// without the Grid images it detached.
   const clearGridCells = () => {
+    for (const rendered of renderedCells.values()) releaseGridCell(rendered);
     renderedCells.clear();
     reportedGridRange = undefined;
     gridLayer.replaceChildren();
   };
   /// Detaches the image of a cell that leaves the rendered range or is rebuilt
   /// in place: an already-started transfer cannot keep owning a connection,
-  /// and its late error cannot claim a delivery failure for the Photo.
-  const detachGridImage = (cell: HTMLButtonElement) => {
-    const image = cell.querySelector<HTMLImageElement>("img");
-    if (!image) return;
-    image.onload = null;
-    image.onerror = null;
-    image.removeAttribute("src");
+  /// and its late error cannot claim a delivery failure for the Photo. The
+  /// cell also hands its thumbnail ownership back to the owner, whose image
+  /// state then follows the rendered Grid instead of every Photo a session
+  /// rendered.
+  const releaseGridCell = (rendered: RenderedGridCell) => {
+    const image = rendered.cell.querySelector<HTMLImageElement>("img");
+    if (image) {
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+    }
+    if (rendered.thumbnail) {
+      releaseThumbnail(rendered.thumbnail);
+      rendered.thumbnail = undefined;
+    }
   };
   const positionGridCell = (
     cell: HTMLButtonElement,
@@ -1337,6 +1351,7 @@ export function createLibraryBrowserView(
         cell,
         signature: LOADING_CELL_SIGNATURE,
         deliveryFailed: false,
+        thumbnail: undefined,
       };
     }
     cell.dataset.photoIndex = String(index);
@@ -1375,6 +1390,7 @@ export function createLibraryBrowserView(
       cell,
       signature: "",
       deliveryFailed: false,
+      thumbnail: undefined,
     };
     const presentFacts = () => {
       const values = gridPhotoFacts(photo, rendered.deliveryFailed);
@@ -1399,8 +1415,8 @@ export function createLibraryBrowserView(
     footer.append(badge, caption, facts);
     cell.append(media, footer);
     cell.addEventListener("click", () => send({ kind: "open-photo", index }));
-    if (alive)
-      bindThumbnail({
+    if (alive) {
+      const binding: GridThumbnailBinding = {
         photoId: photo.id,
         preview: photo.preview,
         target: gridThumbnailTarget(image, (failed) => {
@@ -1408,7 +1424,10 @@ export function createLibraryBrowserView(
           rendered.signature = gridCellSignature(index, photo, failed);
           presentFacts();
         }),
-      });
+      };
+      rendered.thumbnail = binding;
+      bindThumbnail(binding);
+    }
     return rendered;
   };
   const renderGrid = (
@@ -1445,7 +1464,7 @@ export function createLibraryBrowserView(
     for (const [index, rendered] of renderedCells)
       if (index < start || index >= end) {
         rendered.cell.remove();
-        detachGridImage(rendered.cell);
+        releaseGridCell(rendered);
         renderedCells.delete(index);
       }
     let anchor: ChildNode | null = null;
@@ -1465,7 +1484,7 @@ export function createLibraryBrowserView(
         // A rebuilt cell replaces its old node, so a stale placeholder or a
         // changed rendering never stays in the layer.
         if (existing) {
-          detachGridImage(existing.cell);
+          releaseGridCell(existing);
           existing.cell.remove();
         }
         rendered = buildGridCell(index, photo, model.total, count, stride);
