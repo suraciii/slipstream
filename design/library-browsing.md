@@ -232,11 +232,31 @@ The server resolves Album saved position when it creates the Snapshot. It applie
 
 ### Grid Loading
 
-The browser requests only the first Grid window needed for the viewport and a small look-ahead. Scrolling requests later windows. It may discard distant facts while retaining enough identity and measurements to preserve scroll position.
+The source/Grid owner owns one range admission path. The visible range plus
+a bounded buffer is reported as one unit; the owner computes the aligned
+bounded windows still missing for that range, starts at most one in-flight
+request per window, coalesces every concurrent demand for the same window
+onto that request, and settles exactly one completion notification per
+completed window no matter how many consumers joined. Rendering is
+presentational: it never initiates loading and never subscribes per cell.
 
-The rendered Grid must use virtualization or an equivalent bounded-DOM mechanism. The number of rendered cells must be proportional to the viewport and look-ahead, not the total source size.
+The rendered Grid must use virtualization or an equivalent bounded-DOM
+mechanism. The number of rendered cells must be proportional to the viewport
+and look-ahead, not the total source size. Grid DOM updates merge to at most
+one per animation frame, and each update reuses the nodes of Photos that
+stay visible: only entering, leaving, or changed cells are touched.
 
-Duplicate or overlapping window requests may share server work, but a general response cache is not required. SQLite queries must run through the existing owner boundary and must preserve request order.
+Retained Photo facts are capped at a bound that covers the actual viewport
+and buffer at supported large viewports. Eviction is anchored to the latest
+reported visible range and protects that range and its buffer; a late
+response for an older position must never evict current-viewport data. A
+window request captured before a source change must not commit into the new
+source; correctness never depends on cancellation succeeding.
+
+Duplicate or overlapping window requests share server work through the
+single in-flight coalescing above; a general response cache is not required.
+SQLite queries must run through the existing owner boundary and must
+preserve request order.
 
 ### Current Photo Facts
 
@@ -281,7 +301,7 @@ The browser treats source control and current-Photo requests as foreground work.
 
 Each source opening and current Photo owns a client request generation. Starting a newer generation aborts fetch-based work from the prior generation and rejects any late response or failure from changing current state. Before a superseded Grid or Photo View is detached or hidden, the browser explicitly removes every pending image source so an already-started transfer cannot continue owning an HTTP connection. A stale Browse Snapshot opened after supersession is explicitly closed.
 
-Grid thumbnail transfer and adjacent Preview preparation use lower browser priority than source, window, and current-Photo requests. Grid and Photo View image decoding is asynchronous, while Photo View's current Preview retains foreground network priority. Scroll events may request the next bounded window immediately, but Grid DOM reconstruction is coalesced to at most one render per animation frame.
+Grid thumbnail transfer and adjacent Preview preparation use lower browser priority than source, window, and current-Photo requests. Grid and Photo View image decoding is asynchronous, while Photo View's current Preview retains foreground network priority. Scroll events report one visible range per coalesced update; window admission runs immediately while Grid DOM reconstruction is coalesced to at most one render per animation frame that reuses the nodes of Photos still visible.
 
 ### Loading Feedback
 
@@ -393,5 +413,6 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - background scan status reports real phases and counts and never publishes a partial Library;
 - disconnect, failed window, expired Snapshot, and retry behavior preserve already loaded content;
 - a source switch reaches its bounded ready state while prior Grid derivative responses remain held, cancels superseded fetches, and ignores late responses;
-- thumbnail requests retain lower browser priority than current source and Photo work, and repeated scroll events cause at most one Grid reconstruction per animation frame; and
+- thumbnail requests retain lower browser priority than current source and Photo work, and repeated scroll events cause at most one Grid reconstruction per animation frame while overlapping cells keep their DOM node identity;
+- one coalesced request serves every concurrent demand for a bounded window, each completed window settles exactly one completion notification, a late response for an older position never evicts current-viewport facts, and retained facts and rendered cells stay bounded at supported large viewports; and
 - mobile Chromium remains usable under throttled network and CPU conditions.
