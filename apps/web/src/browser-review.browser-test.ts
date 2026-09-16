@@ -2826,6 +2826,87 @@ test("an idle browser reports a lost connection from the status probe", async ({
   await page.unroute("**/api/status");
 });
 
+test("a connection proven outside the probe is lost again when the probe reports it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"), { recursive: true });
+  const data = await jpeg();
+  await writeFile(join(root, "shoot/one.jpg"), data);
+  await writeFile(join(root, "root.jpg"), data);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", {
+      name: "Toggle Library Folder subfolders",
+    })
+    .click();
+  await expect(
+    page.getByRole("button", { name: /shoot 1 Photo/ }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: /^All Photos/ }).click();
+  await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+  // The idle probe stops answering, so the browser stops claiming a server.
+  await page.route("**/api/status", (route) => route.abort());
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+  // Opening another source succeeds while the probe still cannot answer, so
+  // that request proves the transport and the browser claims the connection
+  // again without a usable status answer.
+  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+  // The next probe reports the same loss again. Reachability is judged
+  // against the transport the browser currently claims, not against the
+  // outcome of an older probe, so the connection is reported lost again.
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible({
+    timeout: 15_000,
+  });
+});
+
+test("a usable status answer leaves an established connection untouched", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+  let probes = 0;
+  await page.route("**/api/status", (route) => {
+    probes += 1;
+    return route.continue();
+  });
+  // The probe answers on every poll. Nothing is lost, so the connection
+  // presentation must not be written again while those answers arrive.
+  const rewrites = await page.evaluate(async () => {
+    const element = document.querySelector("[data-connection]")!;
+    let records = 0;
+    const observer = new MutationObserver((entries) => {
+      records += entries.length;
+    });
+    observer.observe(element, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    await new Promise((resolve) => {
+      setTimeout(resolve, 5_000);
+    });
+    observer.disconnect();
+    return { records, text: element.textContent };
+  });
+  expect(probes).toBeGreaterThanOrEqual(2);
+  expect(rewrites.text).toBe("Connected");
+  expect(rewrites.records).toBe(0);
+});
+
 test("an uncertain Undo retires Undo and requires Photo Retry", async ({
   page,
 }) => {

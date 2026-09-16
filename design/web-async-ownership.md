@@ -444,6 +444,13 @@ prove that the server is reachable, but only the designated recovery under the
 same current owner releases the claim. Decision controls are enabled only when
 no blocking current claim remains and the current bounded source and Photo
 facts have been confirmed.
+
+The idle status poll is also the designated reachability signal. A poll that
+cannot reach the server clears the reachability axis, and a usable status
+answer sets it. That signal owns no claim: it neither adds a blocking claim nor
+retires the one a failed operation created, so reachability can be restored
+while decision readiness still waits for its own recovery.
+
 Changing source or Photo creates a transition lineage. Claims from owner A
 become predecessor claims for the in-progress owner B: they cannot present into
 B, but they keep decisions blocked during establishment. If B establishes its

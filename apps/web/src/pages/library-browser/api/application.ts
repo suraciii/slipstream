@@ -21,7 +21,7 @@ export async function fetchLibraryOverview(
 /// reachability; an answered error stays a server-side condition.
 export type LibraryStatusOutcome =
   | Readonly<{ kind: "answered"; scan: LibraryOverviewResponse["scan"] }>
-  | Readonly<{ kind: "rejected"; status: number }>
+  | Readonly<{ kind: "rejected" }>
   | Readonly<{ kind: "unreachable" }>;
 
 export async function probeLibraryStatus(
@@ -33,15 +33,14 @@ export async function probeLibraryStatus(
   } catch {
     return Object.freeze({ kind: "unreachable" });
   }
-  if (!response.ok)
-    return Object.freeze({ kind: "rejected", status: response.status });
+  if (!response.ok) return Object.freeze({ kind: "rejected" });
   try {
     return Object.freeze({
       kind: "answered",
       scan: (await response.json()) as LibraryOverviewResponse["scan"],
     });
   } catch {
-    return Object.freeze({ kind: "rejected", status: response.status });
+    return Object.freeze({ kind: "rejected" });
   }
 }
 

@@ -181,7 +181,6 @@ export function createApplicationOwner(
   let scanCompletionNotice: NoticeHandle | undefined;
   let activeScanCycle: ScanCycle | undefined;
   let lastCompletedPublication: string | undefined;
-  let probeUnreachable = false;
 
   const authorityForAlbum = (albumId: string): AlbumSummaryAuthority => {
     const known = albumSummaryAuthorities.get(albumId);
@@ -287,22 +286,18 @@ export function createApplicationOwner(
     if (!closed) void emit({ kind: "mark-reachable" });
   };
 
-  /// The status probe is the browser's continuous reachability signal. Report
-  /// each transport transition once: a server that stopped answering loses
-  /// reachability, and a usable status answer restores it. An answered error
-  /// is a server-side condition that reports neither transition.
+  /// The status probe is the browser's continuous reachability signal. The
+  /// transport outcome is reported as observed: the current probe is the only
+  /// evidence this owner has, so the state owner decides whether that outcome
+  /// changes the shared reachability it maintains. An answered error is a
+  /// server-side condition that reports neither transition.
   const reportProbeReachability = (outcome: LibraryStatusOutcome): void => {
     if (closed) return;
     if (outcome.kind === "unreachable") {
-      if (probeUnreachable) return;
-      probeUnreachable = true;
       void emit({ kind: "transport-lost" });
       return;
     }
-    if (outcome.kind === "answered" && probeUnreachable) {
-      probeUnreachable = false;
-      markReachable();
-    }
+    if (outcome.kind === "answered") markReachable();
   };
 
   const retainOverviewFailure = (): void => {
@@ -504,13 +499,14 @@ export function createApplicationOwner(
     const queueNext = (): void => {
       if (!monitor.isCurrent()) return;
       cancelScheduled = schedule(
-        observedScanState === "idle" ? 2_000 : 500,
+        observedScanState === "idle" || observedScanState === "failed"
+          ? 2_000
+          : 500,
         async () => {
           cancelScheduled = undefined;
           if (!monitor.isCurrent()) return;
           const background = notices.backgroundEpoch();
           let settled = false;
-          let keepMonitoring = true;
           try {
             const outcome = await probeLibraryStatus(fetcher);
             if (!monitor.isCurrent()) return;
@@ -547,8 +543,10 @@ export function createApplicationOwner(
             if (scan.state === "failed") {
               if (activeScanCycle) activeScanCycle.consumed = true;
               activeScanCycle = undefined;
-              claimScanFailure();
-              keepMonitoring = false;
+              // Claiming the failure is a transition, not a poll result, so a
+              // Library that stays failed keeps one claim while the monitor
+              // keeps probing the server for reachability.
+              if (prior !== "failed") claimScanFailure();
             } else if (
               scan.state === "idle" &&
               prior &&
@@ -567,7 +565,7 @@ export function createApplicationOwner(
             /* unexpected monitor failures stay silent; the probe owns transport */
           } finally {
             if (!settled) notices.discardBackground(background);
-            if (monitor.isCurrent() && keepMonitoring) queueNext();
+            if (monitor.isCurrent()) queueNext();
             else monitor.finish();
           }
         },

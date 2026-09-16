@@ -185,10 +185,16 @@ export function mountLibraryBrowser(
   ): Promise<void> => {
     if (!applicationAlive) return;
     if (coordination.kind === "mark-reachable") {
+      // The probe answers on every poll, so an already established connection
+      // under a reachable transport has nothing to restore and stays untouched.
+      if (connectionEstablished && recoveryGate.transportReachable) return;
       setConnected(true);
       return;
     }
     if (coordination.kind === "transport-lost") {
+      // Reachability is owned here, so a probe that repeats a loss the page
+      // already applied changes nothing.
+      if (!recoveryGate.transportReachable) return;
       recoveryGate.markTransportLost();
       syncConnection();
       return;
