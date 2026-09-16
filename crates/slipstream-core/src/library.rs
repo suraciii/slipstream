@@ -1,6 +1,6 @@
 use crate::{
     AlbumBrowseTarget, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact,
-    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoStateMutation,
+    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoAlbumMembership, PhotoStateMutation,
     PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
