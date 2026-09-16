@@ -40,7 +40,7 @@ The first product provides two derivative sizes:
 
 If the source is smaller, Slipstream must retain its actual dimensions and must not upscale it for storage.
 
-The server may provide the original matching or embedded JPEG bytes for Detail Review when doing so is safe and useful. Full-resolution tiling is not required initially.
+The server may provide the original matching or embedded JPEG bytes for magnified inspection when doing so is safe and useful. Full-resolution tiling is not required initially.
 
 ## Color Handling
 
@@ -70,7 +70,7 @@ If a matching JPEG is corrupt and a RAW Original exists, Slipstream must try the
 
 If extraction, decoding, orientation, or derivative generation fails for every allowed source, Slipstream must mark the Photo Preview unavailable. It must not substitute an unrelated file or generic RAW development without identifying a different contract.
 
-A low-resolution embedded JPEG is not a load failure. Slipstream must show it and identify that Detail Review is limited.
+A low-resolution embedded JPEG is not a load failure. Slipstream must show it and identify that Preview detail is limited.
 
 A Preview generation failure must not modify the Original File or remove an existing valid cached Preview until a replacement is complete.
 
@@ -80,4 +80,4 @@ A Preview generation failure must not modify the Original File or remove an exis
 
 `DSCF0002.RAF` has no matching JPEG and contains a 6240-by-4160 embedded JPEG. Slipstream uses that embedded JPEG and labels the source `RAW embedded JPEG`.
 
-`DSCF0003.RAF` contains only a 640-by-480 embedded thumbnail. Slipstream may show it, but Detail Review must identify that focus inspection is limited.
+`DSCF0003.RAF` contains only a 640-by-480 embedded thumbnail. Slipstream may show it, but must identify that focus inspection is limited by the Preview resolution.

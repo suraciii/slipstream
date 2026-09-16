@@ -1,5 +1,6 @@
 import "./library-browser.css";
 
+import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
 
 type ViewSelectionState = "undecided" | "selected" | "rejected";
@@ -7,6 +8,8 @@ type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
 
 const GRID_CELL_HEIGHT = 178;
 const GRID_CELL_WIDTH = 150;
+/** Full wording behind the compact limited-detail marker in the Preview fact. */
+const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
 const SWIPE_PENDING_PIXELS = 24;
 const SWIPE_COMMIT_PIXELS = 72;
 const SWIPE_COMMIT_VELOCITY = 0.5;
@@ -375,7 +378,7 @@ export function createLibraryBrowserView(
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
           <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>0 stars</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div><div data-limited hidden><dt>Detail</dt><dd>Limited by camera Preview resolution</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
+            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
           </section>
           <section class="review-tools" aria-label="Review tools">
@@ -454,7 +457,6 @@ export function createLibraryBrowserView(
   const selection = required<HTMLElement>(root, "[data-selection]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
-  const limited = required<HTMLElement>(root, "[data-limited]");
   const metadataCaptureTime = required<HTMLElement>(
     root,
     "[data-metadata-capture-time]",
@@ -896,6 +898,9 @@ export function createLibraryBrowserView(
     button.className = `source-card${active ? " active" : ""}`;
     if (active) button.setAttribute("aria-current", "true");
     button.disabled = disableWhenEmpty && count === 0;
+    // The name may be visually truncated; the title keeps the full name
+    // available on hover without changing the accessible name.
+    button.title = name;
     button.innerHTML = "<strong></strong><span></span>";
     required<HTMLElement>(button, "strong").textContent = name;
     required<HTMLElement>(button, "span").textContent =
@@ -942,20 +947,22 @@ export function createLibraryBrowserView(
     const row = document.createElement("div");
     row.className = "folder-row folder-child";
     row.style.marginLeft = `${Math.min(depth - 1, 6) * 12}px`;
-    const expand = document.createElement("button");
-    expand.type = "button";
-    expand.className = "folder-expand";
-    expand.setAttribute("aria-expanded", String(folder.expanded));
-    expand.textContent = folder.expanded ? "▾" : "▸";
-    expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
-    expand.disabled = !folder.hasDescendantFolders;
-    expand.addEventListener("click", () =>
-      send({
-        kind: "folder-toggle",
-        location: folder.location,
-        expanded: folder.expanded,
-      }),
-    );
+    if (folder.hasDescendantFolders) {
+      const expand = document.createElement("button");
+      expand.type = "button";
+      expand.className = "folder-expand";
+      expand.setAttribute("aria-expanded", String(folder.expanded));
+      expand.textContent = folder.expanded ? "▾" : "▸";
+      expand.setAttribute("aria-label", `Toggle ${folder.name} subfolders`);
+      expand.addEventListener("click", () =>
+        send({
+          kind: "folder-toggle",
+          location: folder.location,
+          expanded: folder.expanded,
+        }),
+      );
+      row.append(expand);
+    }
     const button = createSourceButton(
       `${folder.name}${folder.hasDescendantFolders ? " · Subfolders" : ""}`,
       folder.photoCount,
@@ -974,7 +981,7 @@ export function createLibraryBrowserView(
         },
       }),
     );
-    row.append(expand, button);
+    row.append(button);
     fragment.append(row);
     if (!folder.expanded) return;
     for (const child of folder.children) appendFolder(fragment, child);
@@ -1402,14 +1409,6 @@ export function createLibraryBrowserView(
     media.append(image);
     const footer = document.createElement("span");
     footer.className = "cell-footer";
-    const badge = document.createElement("span");
-    badge.className = `cell-state ${photo.selectionState}`;
-    badge.textContent =
-      photo.selectionState === "undecided"
-        ? ""
-        : photo.selectionState === "selected"
-          ? "✓"
-          : "×";
     const caption = document.createElement("span");
     caption.className = "cell-caption";
     caption.textContent = photo.rating
@@ -1443,7 +1442,17 @@ export function createLibraryBrowserView(
       photo,
       rendered.deliveryFailed,
     );
-    footer.append(badge, caption, facts);
+    // Only a recorded decision earns a badge. An empty badge on every
+    // undecided cell reads as an unchecked control instead of a fact.
+    if (photo.selectionState === "undecided") {
+      caption.classList.add("cell-caption-wide");
+      footer.append(caption, facts);
+    } else {
+      const badge = document.createElement("span");
+      badge.className = `cell-state ${photo.selectionState}`;
+      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
+      footer.append(badge, caption, facts);
+    }
     cell.append(media, footer);
     cell.addEventListener("click", () => send({ kind: "open-photo", index }));
     if (alive) {
@@ -1563,7 +1572,8 @@ export function createLibraryBrowserView(
     currentSelection = model.selectionState ?? "undecided";
     selection.textContent = selectionLabel(currentSelection);
     const value = model.rating ?? 0;
-    rating.textContent = `${value} ${value === 1 ? "star" : "stars"}`;
+    rating.textContent =
+      value === 0 ? "No rating" : `${value} ${value === 1 ? "star" : "stars"}`;
     for (const button of Array.from(
       ratings.querySelectorAll<HTMLButtonElement>("[data-rating-value]"),
     ))
@@ -1574,7 +1584,10 @@ export function createLibraryBrowserView(
   };
   const renderPhotoMetadata = (model: PhotoMetadataViewModel = {}) => {
     if (!alive) return;
-    metadataCaptureTime.textContent = model.captureTime ?? "—";
+    metadataCaptureTime.textContent =
+      model.captureTime === undefined
+        ? "—"
+        : formatCaptureTime(model.captureTime);
     metadataAperture.textContent = model.aperture ?? "—";
     metadataIso.textContent = model.iso === undefined ? "—" : String(model.iso);
     metadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
@@ -1630,6 +1643,17 @@ export function createLibraryBrowserView(
       surface,
     };
   };
+  const applyPreviewFact = (
+    source: ViewPreviewSource | undefined,
+    isLimited: boolean,
+  ) => {
+    previewSource.textContent = isLimited
+      ? `${sourceLabel(source)} · limited detail`
+      : sourceLabel(source);
+    if (isLimited) previewSource.title = LIMITED_PREVIEW_DETAIL;
+    else previewSource.removeAttribute("title");
+  };
+
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     photoTitle.textContent = model.sourceName;
@@ -1637,8 +1661,7 @@ export function createLibraryBrowserView(
     photoSurface = {};
     renderPhotoFacts(model);
     renderPhotoMetadata();
-    previewSource.textContent = sourceLabel(model.previewSource);
-    limited.hidden = !model.limitedDetail;
+    applyPreviewFact(model.previewSource, Boolean(model.limitedDetail));
     let image: ReviewImagePresentation | undefined;
     if (model.previewUrl)
       image = presentReviewImage(model.previewUrl, model.index, model.total);
@@ -2311,8 +2334,7 @@ export function createLibraryBrowserView(
     },
     setPreviewFacts(value, isLimited) {
       if (!alive) return;
-      previewSource.textContent = sourceLabel(value);
-      limited.hidden = !isLimited;
+      applyPreviewFact(value, isLimited);
     },
     setAlbumFormMessage(formId, message) {
       if (!alive || !albumForm || albumForm.formId !== formId) return;
