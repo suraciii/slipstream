@@ -397,6 +397,22 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// Bounded per-Photo Album membership for the Photo View membership
+    /// query. `None` means the Photo is unknown to the persisted Library.
+    pub async fn photo_albums(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<Vec<PhotoAlbumMembership>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.photo_albums_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
     pub async fn album_browse_target(
         &self,
         album_id: &str,

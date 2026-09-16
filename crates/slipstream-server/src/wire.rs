@@ -63,6 +63,31 @@ pub enum BrowseSourceRequest {
     },
 }
 
+/// The explicit view order requested for one Browse Snapshot.
+/// `AlbumOrder` is meaningful only for an Album source and means persisted
+/// membership position; `CaptureTimeAscending` matches the Published
+/// Library's natural order for library and Folder sources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowseViewOrder {
+    AlbumOrder,
+    CaptureTimeAscending,
+    CaptureTimeDescending,
+}
+
+/// Bounded per-Photo Album membership response: Album identities only.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoAlbumsResponse {
+    pub albums: Vec<PhotoAlbumMembershipWire>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoAlbumMembershipWire {
+    pub id: String,
+    pub name: String,
+}
+
 /// One bounded File Location window response.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

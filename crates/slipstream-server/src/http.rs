@@ -251,6 +251,8 @@ pub(crate) struct BrowseOpenBody {
     publication: Option<String>,
     #[serde(default)]
     photo_id: Option<String>,
+    #[serde(default)]
+    order: Option<String>,
 }
 
 pub(crate) async fn open_browse(
@@ -290,9 +292,23 @@ pub(crate) async fn open_browse(
         },
         _ => return api_error(StatusCode::BAD_REQUEST, "Invalid browse source"),
     };
+    let album_source = matches!(source, BrowseSourceRequest::Album(_));
+    let order = match body.order.as_deref() {
+        None => {
+            if album_source {
+                BrowseViewOrder::AlbumOrder
+            } else {
+                BrowseViewOrder::CaptureTimeAscending
+            }
+        }
+        Some("album-order") if album_source => BrowseViewOrder::AlbumOrder,
+        Some("capture-time-asc") => BrowseViewOrder::CaptureTimeAscending,
+        Some("capture-time-desc") => BrowseViewOrder::CaptureTimeDescending,
+        Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse order"),
+    };
     match state
         .application
-        .browse_open(source, preferred_photo_id.as_deref())
+        .browse_open(source, order, preferred_photo_id.as_deref())
         .await
     {
         Ok(result) => json_response(StatusCode::OK, &result),
