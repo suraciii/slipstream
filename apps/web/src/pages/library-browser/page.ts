@@ -31,6 +31,7 @@ import {
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
+import type { SourceViewOrder } from "./api/source-grid.js";
 import {
   createAlbumActionOwner,
   type AlbumActionAdmission,
@@ -232,7 +233,7 @@ export function mountLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(remembered);
+        await openSourceDescriptor(remembered, undefined, sourceGrid.order);
       } else if (coordination.isCurrent()) {
         view.setGridStatus("Could not load this source. Retry to continue.");
       }
@@ -419,6 +420,19 @@ export function mountLibraryBrowser(
       recoveryGate.discard(claim);
     syncConnection();
   };
+  /// The open source's order is view state: the select shows the order the
+  /// open snapshot was built with, and stays disabled while an open is
+  /// already busy so a second order cannot race the first.
+  const renderSortControl = () => {
+    if (!applicationAlive) return;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
+    view.renderSort({
+      kind: sourceGrid.kind,
+      value: sourceGrid.order,
+      enabled: !interactionBusy && !photoOwner.opening,
+    });
+  };
+
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
@@ -450,6 +464,7 @@ export function mountLibraryBrowser(
         !photoOwner.opening &&
         photoOwner.canUndo,
     });
+    renderSortControl();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -1058,6 +1073,7 @@ export function mountLibraryBrowser(
     album?: AlbumSummary,
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
+    order: SourceViewOrder = "source-default",
   ) => {
     const descriptor: SourceGridSource =
       kind === "library"
@@ -1072,12 +1088,13 @@ export function mountLibraryBrowser(
               folder: folder!,
               publication: fileLocations.publication!,
             };
-    return openSourceDescriptor(descriptor, preferredPhotoId);
+    return openSourceDescriptor(descriptor, preferredPhotoId, order);
   };
 
   async function openSourceDescriptor(
     requested: SourceGridSource,
     preferredPhotoId?: string,
+    order: SourceViewOrder = "source-default",
   ): Promise<void> {
     const descriptor: SourceGridSource =
       requested.kind === "folder" && fileLocations.publication
@@ -1090,6 +1107,7 @@ export function mountLibraryBrowser(
     photoMetadataAbort = undefined;
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
+      order,
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
@@ -1111,6 +1129,7 @@ export function mountLibraryBrowser(
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
     view.prepareSourceOpen(sourceGrid.name);
+    renderSortControl();
     // A new open snapshot ends the previous source's removal memory.
     removedFromCurrentAlbum.clear();
     try {
@@ -1157,6 +1176,11 @@ export function mountLibraryBrowser(
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
       setConnected(true);
+      // A source replacement empties the snapshot while its open is in
+      // flight, and any render during that window clamps the Grid to the
+      // top. Position the reopened Grid only once the loaded window can
+      // hold the scroll the server resolved for the preferred Photo.
+      view.scrollToGridIndex(gridPosition);
       renderGrid();
       if (sourceGrid.total) {
         view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
@@ -1182,6 +1206,19 @@ export function mountLibraryBrowser(
       }
     }
   }
+
+  /// An explicit order change reopens the same source with the new order,
+  /// keeping the browser-local current Photo by identity. A source with no
+  /// current Photo yet starts at the first Photo of the new order.
+  const changeSort = (order: SourceViewOrder): void => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    if (order === sourceGrid.order) return;
+    void openSourceDescriptor(
+      sourceGrid.source,
+      photoOwner.lastCurrentPhotoId,
+      order,
+    );
+  };
 
   const emptySourceStatus = (): string => {
     if (sourceGrid.kind === "album")
@@ -1252,6 +1289,7 @@ export function mountLibraryBrowser(
         : sourceGrid.source;
     const pendingOpen = sourceGrid.open(descriptor, {
       mode: "reopen",
+      order: sourceGrid.order,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     const authority = sourceGrid.authority;
@@ -2102,10 +2140,17 @@ export function mountLibraryBrowser(
       const album = application.albums.find(
         (candidate) => candidate.id === sourceGrid.albumId,
       );
-      if (album) await openSource("album", album);
+      if (album)
+        await openSource(
+          "album",
+          album,
+          undefined,
+          undefined,
+          sourceGrid.order,
+        );
       return;
     }
-    await openSourceDescriptor(sourceGrid.source);
+    await openSourceDescriptor(sourceGrid.source, undefined, sourceGrid.order);
   };
 
   const currentSourceRangeRetries = (
@@ -2187,7 +2232,7 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(remembered);
+      await openSourceDescriptor(remembered, undefined, sourceGrid.order);
     })();
   };
 
@@ -2276,6 +2321,9 @@ export function mountLibraryBrowser(
         if (outcome?.kind === "refresh-current-source") void refreshSource();
         return;
       }
+      case "sort-change":
+        changeSort(intent.order);
+        return;
       case "source-open": {
         const source = intent.source;
         if (source.kind === "library") {

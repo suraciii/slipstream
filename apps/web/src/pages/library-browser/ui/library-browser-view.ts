@@ -23,8 +23,44 @@ export type AlbumFormReference = Readonly<{
   name: string;
 }>;
 
+export type ViewSourceOrder =
+  | "source-default"
+  | "capture-time-asc"
+  | "capture-time-desc";
+
+type ViewSourceKind = "library" | "album" | "folder";
+
+type SortOption = Readonly<{ value: ViewSourceOrder; label: string }>;
+
+/// Capture Time is ascending by default, so only the reversed direction needs
+/// its own option.
+const CAPTURE_TIME_OPTIONS: ReadonlyArray<SortOption> = [
+  { value: "source-default", label: "Capture Time, earliest first" },
+  { value: "capture-time-desc", label: "Capture Time, latest first" },
+];
+
+/// The Grid's explicit order selection for the open source. Option labels are
+/// presentation: `source-default` names the order the server applies when no
+/// explicit order is requested (Capture Time earliest first, or Album order).
+const SORT_OPTIONS: Record<ViewSourceKind, ReadonlyArray<SortOption>> = {
+  library: CAPTURE_TIME_OPTIONS,
+  folder: CAPTURE_TIME_OPTIONS,
+  album: [
+    { value: "source-default", label: "Album order" },
+    { value: "capture-time-asc", label: "Capture Time, earliest first" },
+    { value: "capture-time-desc", label: "Capture Time, latest first" },
+  ],
+};
+
+export type GridSortViewModel = Readonly<{
+  kind: ViewSourceKind;
+  value: ViewSourceOrder;
+  enabled: boolean;
+}>;
+
 export type LibraryBrowserIntent =
   | Readonly<{ kind: "summary-action"; presentationId: number }>
+  | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
@@ -228,6 +264,7 @@ export interface LibraryBrowserView {
   setGridEmpty(text?: string, libraryCheck?: boolean): void;
   renderSources(model: SourceListViewModel): void;
   renderFolderAlbum(model: FolderAlbumViewModel): void;
+  renderSort(model: GridSortViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
@@ -297,7 +334,7 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -366,6 +403,8 @@ export function createLibraryBrowserView(
     "[data-folder-album-status]",
   );
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
+  const gridSort = required<HTMLElement>(root, "[data-grid-sort]");
+  const sortSelect = required<HTMLSelectElement>(root, "[data-sort-select]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
@@ -496,6 +535,7 @@ export function createLibraryBrowserView(
   // `zoomPercent` maps 1 image pixel to `zoomPercent / 100` CSS pixels.
   let zoomManual = false;
   let zoomPercent = 100;
+  let renderedSortKind: ViewSourceKind | undefined;
   let panX = 0;
   let panY = 0;
   let imageNaturalWidth = 0;
@@ -1872,6 +1912,10 @@ export function createLibraryBrowserView(
     if (folderAlbumSelection)
       send({ kind: "folder-album-add", albumId: folderAlbumSelection });
   });
+  sortSelect.addEventListener("change", () => {
+    if (!alive || sortSelect.disabled) return;
+    send({ kind: "sort-change", order: sortSelect.value as ViewSourceOrder });
+  });
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
@@ -1947,6 +1991,26 @@ export function createLibraryBrowserView(
     },
     renderSources,
     renderFolderAlbum,
+    renderSort(model) {
+      if (!alive) return;
+      if (renderedSortKind !== model.kind) {
+        renderedSortKind = model.kind;
+        sortSelect.replaceChildren(
+          ...SORT_OPTIONS[model.kind].map((option) => {
+            const element = document.createElement("option");
+            element.value = option.value;
+            element.textContent = option.label;
+            return element;
+          }),
+        );
+      }
+      const options = SORT_OPTIONS[model.kind];
+      sortSelect.value = options.some((option) => option.value === model.value)
+        ? model.value
+        : options[0]!.value;
+      sortSelect.disabled = !model.enabled;
+      gridSort.hidden = false;
+    },
     setControls(model) {
       if (!alive) return;
       gridInteractionEnabled = model.gridEnabled;
