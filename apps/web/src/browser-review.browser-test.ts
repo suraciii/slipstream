@@ -9773,6 +9773,116 @@ test("a source establishment failure retires the claim it replaces", async ({
   }
 });
 
+test("a failed expired reopen binds the thumbnails of its retained cells again", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 250);
+  const running = await server(base, root);
+
+  // Every Grid thumbnail image stays in flight: its source is set and its
+  // bytes never arrive, which is the image state a Grid boundary detaches.
+  let releaseImages!: () => void;
+  const imagesReleased = new Promise<void>((resolve) => {
+    releaseImages = resolve;
+  });
+  await page.route("**/api/derivatives/*/thumbnail/*", async (route) => {
+    await imagesReleased;
+    await route.continue();
+  });
+
+  let releaseExpired!: () => void;
+  const expiredReleased = new Promise<void>((resolve) => {
+    releaseExpired = resolve;
+  });
+  let releaseReopen!: () => void;
+  const reopenReleased = new Promise<void>((resolve) => {
+    releaseReopen = resolve;
+  });
+  try {
+    await openGrid(page, running.url, "All Photos");
+    const viewport = page.locator("[data-grid-viewport]");
+    // Install the Browse route only after the source is open: the first
+    // window it holds is the one a scroll demand asks for.
+    let holdFirstWindow = true;
+    let expiredWindowStart: string | undefined;
+    let reopenRequested = false;
+    let reopenHeld = false;
+    let reopenServingWindow = false;
+    await page.route(/\/api\/browse/, async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (request.method() === "POST" && reopenRequested) {
+        reopenHeld = true;
+        await reopenReleased;
+        reopenServingWindow = true;
+        await route.continue();
+        return;
+      }
+      if (request.method() === "GET") {
+        const start = url.searchParams.get("start");
+        if (holdFirstWindow && start !== null) {
+          holdFirstWindow = false;
+          expiredWindowStart = start;
+          await expiredReleased;
+          reopenRequested = true;
+          await route.fulfill({
+            status: 404,
+            contentType: "application/json",
+            body: '{"error":"Browse source expired or not found"}',
+          });
+          return;
+        }
+        if (reopenServingWindow) {
+          reopenServingWindow = false;
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: '{"error":"failed"}',
+          });
+          return;
+        }
+      }
+      await route.continue();
+    });
+
+    // Present an unloaded middle window and hold its answer, then present the
+    // loaded tail: the reopen is admitted while real retained tail cells are
+    // still rendered.
+    const middleScrollTop = await viewport.evaluate(
+      (element) => element.scrollHeight / 2,
+    );
+    await scrollGrid(page, middleScrollTop);
+    await expect.poll(() => expiredWindowStart !== undefined).toBe(true);
+    await scrollGrid(page, "end");
+    const tailPhoto = page.getByRole("button", {
+      name: /^Photo 250 of 250/,
+    });
+    await expect(tailPhoto).toBeVisible();
+    await expect(tailPhoto).toBeEnabled();
+    await expect(tailPhoto.locator("img")).toHaveAttribute("src", /\S/);
+
+    // Serve the held window as an expired Snapshot, and hold the reopen so
+    // its own window is still pending when the retained cells rebuild.
+    releaseExpired();
+    await expect.poll(() => reopenHeld).toBe(true);
+
+    // The reopen detached the images it owned mid-flight. The retained cells
+    // must bind their thumbnails again instead of staying blank until the
+    // next scroll.
+    await expect(tailPhoto.locator("img")).toHaveAttribute("src", /\S/);
+    releaseReopen();
+    await expect(page.locator("[data-grid-status]")).toContainText("503");
+    await expect(tailPhoto).toBeVisible();
+  } finally {
+    releaseExpired();
+    releaseReopen();
+    releaseImages();
+    await page.unroute(/\/api\/browse/);
+    await page.unroute("**/api/derivatives/*/thumbnail/*");
+  }
+});
+
 test("Grid Retry replays a clamped tail range from its original Photo anchor", async ({
   page,
 }) => {

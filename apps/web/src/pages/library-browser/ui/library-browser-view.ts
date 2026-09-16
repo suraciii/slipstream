@@ -197,6 +197,10 @@ type RenderedGridCell = {
   readonly cell: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
+  /// Set when the owner detached this cell's image at a Grid boundary: a
+  /// stripped source cannot come back by itself, so the next render builds the
+  /// cell again and binds its thumbnail anew.
+  imageDetached: boolean;
   /// The thumbnail ownership this cell holds while it presents a Photo. A
   /// cell that leaves the rendered range or is rebuilt hands it back so the
   /// owner's image state follows the rendered Grid.
@@ -292,6 +296,7 @@ export interface LibraryBrowserView {
   scheduleGridRender(): void;
   cancelGridRender(): void;
   clearGridCells(): void;
+  markDetachedGridCells(): void;
   gridVisible(): boolean;
   scrollToGridIndex(index: number): void;
   showGrid(index?: number): void;
@@ -1302,6 +1307,19 @@ export function createLibraryBrowserView(
     reportedGridRange = undefined;
     gridLayer.replaceChildren();
   };
+  /// Marks the retained cells whose image the owner detached at a Grid
+  /// boundary (a source reopen) as needing a rebuild. Only an image that had
+  /// not finished loading loses its source there, so the next render binds
+  /// the thumbnail of exactly those cells again - the cached URL re-attaches
+  /// without a new request - instead of showing a blank cell until the Photo
+  /// is scrolled out and back in.
+  const markDetachedGridCells = () => {
+    for (const rendered of renderedCells.values()) {
+      const image = rendered.cell.querySelector<HTMLImageElement>("img");
+      if (rendered.thumbnail && image && !image.getAttribute("src"))
+        rendered.imageDetached = true;
+    }
+  };
   /// Detaches the image of a cell that leaves the rendered range or is rebuilt
   /// in place: an already-started transfer cannot keep owning a connection,
   /// and its late error cannot claim a delivery failure for the Photo. The
@@ -1351,6 +1369,7 @@ export function createLibraryBrowserView(
         cell,
         signature: LOADING_CELL_SIGNATURE,
         deliveryFailed: false,
+        imageDetached: false,
         thumbnail: undefined,
       };
     }
@@ -1390,6 +1409,7 @@ export function createLibraryBrowserView(
       cell,
       signature: "",
       deliveryFailed: false,
+      imageDetached: false,
       thumbnail: undefined,
     };
     const presentFacts = () => {
@@ -1477,7 +1497,11 @@ export function createLibraryBrowserView(
         : LOADING_CELL_SIGNATURE;
       if (!photo) incomplete = true;
       let rendered: RenderedGridCell;
-      if (existing && existing.signature === signature) {
+      if (
+        existing &&
+        existing.signature === signature &&
+        !existing.imageDetached
+      ) {
         rendered = existing;
         positionGridCell(rendered.cell, index, count, stride);
       } else {
@@ -2227,6 +2251,7 @@ export function createLibraryBrowserView(
     scheduleGridRender,
     cancelGridRender,
     clearGridCells,
+    markDetachedGridCells,
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
       if (alive)
