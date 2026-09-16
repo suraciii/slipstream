@@ -19,6 +19,8 @@ A wide viewport must keep compact source navigation beside the Grid. A narrow vi
 
 The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
 
+A source name that is visually truncated must expose its complete name on hover. An Original Folder with no descendant Folders must not present an expand control; affected rows must keep their alignment without it.
+
 Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. File Locations must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
 
 All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
@@ -44,7 +46,9 @@ The first product uses one neutral dark appearance. Color must communicate keybo
 
 Required information must meet WCAG AA text contrast against its rendered background. Every visible interactive target must provide at least a 44 by 44 CSS-pixel target at supported narrow and short-landscape viewports. Focused controls must remain visibly distinguishable.
 
-Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards.
+Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards. The Library refresh action is a recovery action and must not occupy a permanently prominent primary slot.
+
+Album rename and delete are supporting actions. On a wide viewport whose primary pointer can hover, they may stay concealed until the Photographer hovers or focuses their Album row. They must remain visible without hover at supported touch and narrow viewports, and must remain reachable from the keyboard.
 
 A valid Album name must not widen Grid View or Photo View beyond the Library Browser at a supported viewport. Its visible current-source title may be visually truncated, but assistive technology must retain the complete Album name.
 
@@ -127,6 +131,8 @@ A Grid cell must show, when available:
 - Preview unavailability or failure without removing the Photo from its position; and
 - thumbnail delivery failure without replacing the Photo or Preview facts above.
 
+A Grid cell must carry a Selection State badge only while that Photo is `selected` or `rejected`. An `undecided` Photo must show no badge, so the badge always marks a recorded decision.
+
 Thumbnail completion must not change source order, Selection State, Rating, or saved Album position.
 
 ## Grid Composition and Orientation
@@ -173,6 +179,15 @@ explicit `—` value. The displayed values follow the same RAW-first, JPEG
 fallback authority used for Capture Time. Metadata loading failure must not
 disable selection, Rating, navigation, or Preview behavior. Slipstream does
 not provide a general EXIF editor or an unbounded metadata browser.
+
+Capture Time must display as camera-local `YYYY-MM-DD HH:MM`. Sub-second
+precision and the timezone-free normalized form are transport detail and must
+not appear in the interface. Slipstream must not convert, re-interpret, or
+invent a timezone for this value.
+
+Limited Preview detail must be identified together with the Preview Source
+fact, and must not be presented as a separate fact row. The complete
+explanation of the limit must remain available to assistive technology.
 
 The next and previous Photos must remain reachable without recording a decision.
 
@@ -302,6 +317,9 @@ While the Preview zoom state is Fit:
 - a drag below the commit threshold must return the Photo to its starting position without changing state; and
 - the surface must show the pending direction before release.
 
+The direction labels are a touch affordance. A device whose primary pointer
+can hover must not show them outside an in-progress decision drag.
+
 A committed swipe advances to the next Photo after the decision is accepted.
 
 Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
@@ -358,6 +376,11 @@ Changing Rating must not change Selection State. Selecting or rejecting a Photo 
 The Photographer must be able to set Rating through visible controls. Keyboard shortcuts `0` through `5` may provide the same behavior on devices with keyboards.
 
 Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. Zero must remain an explicit current value when the Photo has no Rating.
+
+Photo View must present a Photo with no Rating as `No rating` in its Rating
+fact. A rated Photo must present `<N> star` for one and `<N> stars`
+otherwise. This wording applies to the fact only; the Rating control keeps
+zero as an explicit value.
 
 ## Undo
 
