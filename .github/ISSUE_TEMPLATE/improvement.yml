@@ -1,0 +1,32 @@
+name: Improvement Proposal
+description: Propose a product, architecture, or workflow improvement.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Follow the project's [Language and Writing](https://github.com/suraciii/slipstream/blob/main/CONTRIBUTING.md#language-and-writing) and [Issue guidelines](https://github.com/suraciii/slipstream/blob/main/CONTRIBUTING.md#issues).
+        Use English for the title and body. Search existing Issues first. Prefer the smallest complete solution to a demonstrated problem.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and impact
+      description: Who encounters this problem, under what circumstances, and why does it matter? Include evidence where available.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome and acceptance criteria
+      description: Describe observable results that would resolve the problem. Use a checklist if helpful; state any open decisions.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and proposed approach
+      description: Optional boundaries, constraints, proposed solution, and alternatives. A complete technical design is not required to report a need.
+  - type: textarea
+    id: related
+    attributes:
+      label: Related work and dependencies
+      description: Link relevant Issues and specifications. For a parent Issue, list child Issues and completion conditions.
