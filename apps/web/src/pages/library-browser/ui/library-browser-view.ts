@@ -74,7 +74,7 @@ export type LibraryBrowserIntent =
       name?: string;
     }>
   | Readonly<{ kind: "grid-render" | "grid-resize" }>
-  | Readonly<{ kind: "grid-window"; index: number }>
+  | Readonly<{ kind: "grid-range"; start: number; end: number }>
   | Readonly<{ kind: "open-photo"; index: number }>
   | Readonly<{
       kind:
@@ -190,6 +190,18 @@ type GridViewModel = Readonly<{
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
 
+/// One rendered Grid cell. The signature covers everything the cell presents,
+/// so a merged render rebuilds only the cells whose Photo facts or delivery
+/// state changed and leaves every other button and its image in place.
+type RenderedGridCell = {
+  readonly cell: HTMLButtonElement;
+  signature: string;
+  deliveryFailed: boolean;
+};
+
+/// Placeholder cells present no Photo: they never initiate loading.
+const LOADING_CELL_SIGNATURE = "loading";
+
 type PhotoFactsViewModel = Readonly<{
   index: number;
   total: number;
@@ -275,6 +287,7 @@ export interface LibraryBrowserView {
   ): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
+  clearGridCells(): void;
   gridVisible(): boolean;
   scrollToGridIndex(index: number): void;
   showGrid(index?: number): void;
@@ -520,6 +533,10 @@ export function createLibraryBrowserView(
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
+  const renderedCells = new Map<number, RenderedGridCell>();
+  // The range the Grid last reported for admission. A render reports only a
+  // changed range, so one scroll path never sends duplicate reports.
+  let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
   let membershipManageOpen = false;
   let membershipFocusAlbumId: string | undefined;
   let folderAlbumSelection = "";
@@ -1270,6 +1287,120 @@ export function createLibraryBrowserView(
     cancelAnimationFrame(gridRenderFrame);
     gridRenderFrame = undefined;
   };
+  /// Drops every rendered cell so the next render builds the range from
+  /// scratch. The Grid DOM is cleared here when it is rebuilt from nothing:
+  /// while a source is replaced, and when Photo View hands the surface back
+  /// without the Grid images it detached.
+  const clearGridCells = () => {
+    renderedCells.clear();
+    reportedGridRange = undefined;
+    gridLayer.replaceChildren();
+  };
+  const positionGridCell = (
+    cell: HTMLButtonElement,
+    index: number,
+    count: number,
+    stride: number,
+  ) => {
+    cell.style.left = `${(index % count) * stride}px`;
+    cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
+    cell.style.width = compactSources.matches ? `${stride - 10}px` : "";
+  };
+  const buildGridCell = (
+    index: number,
+    photo: GridPhotoViewModel | undefined,
+    total: number,
+    count: number,
+    stride: number,
+  ): RenderedGridCell => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "photo-cell";
+    positionGridCell(cell, index, count, stride);
+    if (!photo) {
+      cell.disabled = true;
+      const placeholder = document.createElement("span");
+      placeholder.className = "cell-placeholder";
+      placeholder.textContent = "Loading…";
+      cell.append(placeholder);
+      return {
+        cell,
+        signature: LOADING_CELL_SIGNATURE,
+        deliveryFailed: false,
+      };
+    }
+    cell.dataset.photoIndex = String(index);
+    cell.disabled = !gridInteractionEnabled;
+    // The image keeps its own media area so the complete Photo displays
+    // at its true aspect ratio; state, rating, and fact indicators render
+    // in the footer beneath it instead of over the image.
+    const media = document.createElement("span");
+    media.className = "cell-media";
+    const image = document.createElement("img");
+    image.alt = `Photo ${index + 1} of ${total}`;
+    image.loading = "lazy";
+    image.fetchPriority = "low";
+    image.decoding = "async";
+    image.draggable = false;
+    image.className = "thumbnail";
+    media.append(image);
+    const footer = document.createElement("span");
+    footer.className = "cell-footer";
+    const badge = document.createElement("span");
+    badge.className = `cell-state ${photo.selectionState}`;
+    badge.textContent =
+      photo.selectionState === "undecided"
+        ? ""
+        : photo.selectionState === "selected"
+          ? "✓"
+          : "×";
+    const caption = document.createElement("span");
+    caption.className = "cell-caption";
+    caption.textContent = photo.rating
+      ? `${index + 1} · ${photo.rating}★`
+      : String(index + 1);
+    const facts = document.createElement("span");
+    facts.className = "cell-facts";
+    const rendered: RenderedGridCell = {
+      cell,
+      signature: "",
+      deliveryFailed: false,
+    };
+    const presentFacts = () => {
+      const values = gridPhotoFacts(photo, rendered.deliveryFailed);
+      facts.textContent = values.join(" · ");
+      facts.hidden = values.length === 0;
+      cell.setAttribute(
+        "aria-label",
+        [
+          `Photo ${index + 1} of ${total}`,
+          selectionLabel(photo.selectionState),
+          photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
+          ...values,
+        ].join(" — "),
+      );
+    };
+    presentFacts();
+    rendered.signature = gridCellSignature(
+      index,
+      photo,
+      rendered.deliveryFailed,
+    );
+    footer.append(badge, caption, facts);
+    cell.append(media, footer);
+    cell.addEventListener("click", () => send({ kind: "open-photo", index }));
+    if (alive)
+      bindThumbnail({
+        photoId: photo.id,
+        preview: photo.preview,
+        target: gridThumbnailTarget(image, (failed) => {
+          rendered.deliveryFailed = failed;
+          rendered.signature = gridCellSignature(index, photo, failed);
+          presentFacts();
+        }),
+      });
+    return rendered;
+  };
   const renderGrid = (
     model: GridViewModel,
     position?: number,
@@ -1297,87 +1428,36 @@ export function createLibraryBrowserView(
     const visibleRows = Math.ceil(viewportHeight / GRID_CELL_HEIGHT) + 4;
     const start = firstRow * count;
     const end = Math.min(model.total, start + visibleRows * count);
-    gridLayer.replaceChildren();
-    for (let index = start; index < end; index += 1) {
-      const cell = document.createElement("button");
-      cell.type = "button";
-      cell.className = "photo-cell";
-      cell.style.left = `${(index % count) * stride}px`;
-      cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
-      if (compactSources.matches) cell.style.width = `${stride - 10}px`;
-      const photo = model.photoAt(index);
-      if (!photo) {
-        cell.disabled = true;
-        const placeholder = document.createElement("span");
-        placeholder.className = "cell-placeholder";
-        placeholder.textContent = "Loading…";
-        cell.append(placeholder);
-        send({ kind: "grid-window", index });
-      } else {
-        cell.dataset.photoIndex = String(index);
-        cell.disabled = !gridInteractionEnabled;
-        // The image keeps its own media area so the complete Photo displays
-        // at its true aspect ratio; state, rating, and fact indicators render
-        // in the footer beneath it instead of over the image.
-        const media = document.createElement("span");
-        media.className = "cell-media";
-        const image = document.createElement("img");
-        image.alt = `Photo ${index + 1} of ${model.total}`;
-        image.loading = "lazy";
-        image.fetchPriority = "low";
-        image.decoding = "async";
-        image.draggable = false;
-        image.className = "thumbnail";
-        media.append(image);
-        const footer = document.createElement("span");
-        footer.className = "cell-footer";
-        const badge = document.createElement("span");
-        badge.className = `cell-state ${photo.selectionState}`;
-        badge.textContent =
-          photo.selectionState === "undecided"
-            ? ""
-            : photo.selectionState === "selected"
-              ? "✓"
-              : "×";
-        const caption = document.createElement("span");
-        caption.className = "cell-caption";
-        caption.textContent = photo.rating
-          ? `${index + 1} · ${photo.rating}★`
-          : String(index + 1);
-        const facts = document.createElement("span");
-        facts.className = "cell-facts";
-        let deliveryFailed = false;
-        const presentFacts = () => {
-          const values = gridPhotoFacts(photo, deliveryFailed);
-          facts.textContent = values.join(" · ");
-          facts.hidden = values.length === 0;
-          cell.setAttribute(
-            "aria-label",
-            [
-              `Photo ${index + 1} of ${model.total}`,
-              selectionLabel(photo.selectionState),
-              photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
-              ...values,
-            ].join(" — "),
-          );
-        };
-        presentFacts();
-        footer.append(badge, caption, facts);
-        cell.append(media, footer);
-        cell.addEventListener("click", () =>
-          send({ kind: "open-photo", index }),
-        );
-        if (alive)
-          bindThumbnail({
-            photoId: photo.id,
-            preview: photo.preview,
-            target: gridThumbnailTarget(image, (failed) => {
-              deliveryFailed = failed;
-              presentFacts();
-            }),
-          });
+    // Rendering is presentational: a cell that stays in the range and still
+    // presents the same Photo facts keeps its button and its thumbnail image,
+    // so a merged update never restarts a Thumbnail transfer. Only entering,
+    // leaving, or changed cells touch the DOM.
+    for (const [index, rendered] of renderedCells)
+      if (index < start || index >= end) {
+        rendered.cell.remove();
+        renderedCells.delete(index);
       }
-      gridLayer.append(cell);
+    let anchor: ChildNode | null = null;
+    for (let index = end - 1; index >= start; index -= 1) {
+      const photo = model.photoAt(index);
+      const existing = renderedCells.get(index);
+      const signature = photo
+        ? gridCellSignature(index, photo, existing?.deliveryFailed ?? false)
+        : LOADING_CELL_SIGNATURE;
+      let rendered: RenderedGridCell;
+      if (existing && existing.signature === signature) {
+        rendered = existing;
+        positionGridCell(rendered.cell, index, count, stride);
+      } else {
+        rendered = buildGridCell(index, photo, model.total, count, stride);
+        renderedCells.set(index, rendered);
+      }
+      // Walking down keeps rendered cells in source order with the fewest
+      // moves: a cell already positioned before the next rendered index is
+      // left untouched.
+      if (rendered.cell.nextSibling !== anchor)
+        gridLayer.insertBefore(rendered.cell, anchor);
+      anchor = rendered.cell;
     }
     if (consumeFocusRequest && gridFocusRequested) {
       gridFocusRequested = false;
@@ -1389,6 +1469,13 @@ export function createLibraryBrowserView(
             );
       gridFocusIndex = undefined;
       (cell ?? gridViewport).focus();
+    }
+    if (
+      end > start &&
+      (reportedGridRange?.start !== start || reportedGridRange.end !== end)
+    ) {
+      reportedGridRange = { start, end };
+      send({ kind: "grid-range", start, end });
     }
   };
 
@@ -1697,11 +1784,9 @@ export function createLibraryBrowserView(
   };
   const onScroll = () => {
     if (!alive || gridView.hidden) return;
+    // Scrolling reports the visible range through the merged render; it never
+    // starts per-cell work.
     scheduleGridRender();
-    send({
-      kind: "grid-window",
-      index: Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * columns(),
-    });
   };
 
   const renderMembership = (model: MembershipViewModel) => {
@@ -2071,7 +2156,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       const returnFocus = browser.classList.contains("sources-open");
       cancelGridRender();
-      gridLayer.replaceChildren();
+      clearGridCells();
       stage.replaceChildren();
       resetZoomForImage();
       gridView.hidden = false;
@@ -2094,6 +2179,7 @@ export function createLibraryBrowserView(
     renderGrid,
     scheduleGridRender,
     cancelGridRender,
+    clearGridCells,
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
       if (alive)
@@ -2105,6 +2191,9 @@ export function createLibraryBrowserView(
       resetZoomForImage();
       photoView.hidden = true;
       gridView.hidden = false;
+      // Photo View detached the owner's Grid images, so the visible Grid
+      // rebuilds its cells and re-attaches every thumbnail it still shows.
+      clearGridCells();
       closeSources(false);
       gridViewport.focus();
       if (index !== undefined)
@@ -2214,6 +2303,26 @@ function gridPhotoFacts(
   if (photo.preview.state === "failed") facts.push("Preview failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
   return facts;
+}
+
+/// Everything one rendered cell presents at its position. Two renders with the
+/// same signature leave the cell's button and thumbnail image untouched.
+function gridCellSignature(
+  index: number,
+  photo: GridPhotoViewModel,
+  deliveryFailed: boolean,
+): string {
+  return [
+    String(index),
+    photo.id,
+    photo.available ? "available" : "unavailable",
+    photo.ambiguous ? "ambiguous" : "paired",
+    photo.selectionState,
+    String(photo.rating),
+    photo.preview.state,
+    photo.preview.thumbnailUrl ?? "",
+    deliveryFailed ? "delivery-failed" : "delivered",
+  ].join("|");
 }
 
 function gridThumbnailTarget(

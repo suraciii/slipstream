@@ -57,6 +57,9 @@ type GridRangeRetry = Readonly<{
   start: number;
   quiet: boolean;
   priority: "high" | "low";
+  /// The exact failure presentation this range owns, so a later range status
+  /// report never hides the Retry message it shows.
+  message: string;
 }>;
 type BrowseRangeFailure = Readonly<{
   claim: RecoveryClaim;
@@ -235,7 +238,7 @@ export function mountLibraryBrowser(
       if (bindable) {
         await openSourceDescriptor(remembered, undefined, sourceGrid.order);
       } else if (coordination.isCurrent()) {
-        view.setGridStatus("Could not load this source. Retry to continue.");
+        setGridStatusText("Could not load this source. Retry to continue.");
       }
     }
   };
@@ -286,6 +289,67 @@ export function mountLibraryBrowser(
     !photoOwner.busy &&
     !photoOwner.opening;
   const browseRangeFailures = new Map<string, BrowseRangeFailure>();
+  // Grid status text has one owner at a time. The range status rewrites the
+  // line only when its own text changes, so merged window completions never
+  // churn it, and every other status takes the line over until the range
+  // reports again.
+  let rangeStatusText: string | undefined;
+  const setGridStatusText = (text: string) => {
+    rangeStatusText = undefined;
+    view.setGridStatus(text);
+  };
+  const setRangeStatusText = (text: string) => {
+    if (text === rangeStatusText) return;
+    rangeStatusText = text;
+    view.setGridStatus(text);
+  };
+  // The range the Grid last reported for admission, with the source it was
+  // reported for: window settlements present status only for that source.
+  let admittedRange:
+    | Readonly<{ start: number; end: number; authority: SourceAuthority }>
+    | undefined;
+  const firstMissingGridIndex = (
+    range: Readonly<{ start: number; end: number }>,
+  ): number | undefined => {
+    for (let index = range.start; index < range.end; index += 1)
+      if (sourceGrid.photoAt(index) === undefined) return index;
+    return undefined;
+  };
+  /// The exact Retry status of the failed window that owns the first Photo the
+  /// range is still missing, so a range report cannot hide an answered
+  /// failure behind a fresh loading line.
+  const rangeFailureStatus = (missing: number): string | undefined => {
+    for (const failure of browseRangeFailures.values()) {
+      if (failure.ownerScope !== "source" || !failure.retry) continue;
+      if (!recoveryGate.isActive(failure.claim)) continue;
+      if (!sourceGrid.isCurrent(failure.retry.sourceAuthority)) continue;
+      if (sourceGrid.alignedStart(missing) !== failure.retry.start) continue;
+      return failure.retry.message;
+    }
+    return undefined;
+  };
+  /// One truthful status for the reported range: the exact failure blocking
+  /// it, the aligned window still loading for it, or Ready once every Photo
+  /// in the range is present.
+  const presentRangeStatus = () => {
+    const range = admittedRange;
+    if (!range || !sourceGrid.isCurrent(range.authority)) return;
+    if (range.end <= range.start) return;
+    const missing = firstMissingGridIndex(range);
+    if (missing === undefined) {
+      setRangeStatusText(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
+      return;
+    }
+    const failure = rangeFailureStatus(missing);
+    if (failure !== undefined) {
+      setRangeStatusText(failure);
+      return;
+    }
+    const window = sourceGrid.describeWindow(missing);
+    setRangeStatusText(
+      `Loading ${window.range} of ${sourceGrid.total.toLocaleString()}…`,
+    );
+  };
   let albumRecovery: AlbumRecoveryRecord | undefined;
   const photoRecoveryKeys = new WeakMap<object, string>();
   let nextPhotoRecoveryKey = 0;
@@ -328,6 +392,19 @@ export function mountLibraryBrowser(
     if (value) recoveryGate.markReachable();
     syncConnection(message);
   };
+  const windowFailureMessage = (
+    outcome: Readonly<{
+      range: string;
+      transportLost: boolean;
+      status?: number;
+      malformed?: true;
+    }>,
+  ): string =>
+    outcome.malformed === true
+      ? `${outcome.range} returned an invalid response. Retry this range.`
+      : outcome.transportLost
+        ? `Connection lost while loading ${outcome.range}. Retry this range.`
+        : `${outcome.range} could not be loaded (HTTP ${outcome.status}). Retry this range.`;
   const failBrowseRange = (
     ownerScope: "source" | "photo",
     generation: string,
@@ -1181,14 +1258,14 @@ export function mountLibraryBrowser(
       view.scrollToGridIndex(gridPosition);
       renderGrid();
       if (sourceGrid.total) {
-        view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
+        presentRangeStatus();
       } else {
-        view.setGridStatus(formatPhotoCount(0));
+        setGridStatusText(formatPhotoCount(0));
         view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
       }
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
-      view.setGridStatus("Could not load this source. Retry to continue.");
+      setGridStatusText("Could not load this source. Retry to continue.");
       const claim = recoveryGate.issue("source-open", String(generation), {
         owner: { scope: "source", generation: String(generation) },
         transition: sourceTransition,
@@ -1218,7 +1295,7 @@ export function mountLibraryBrowser(
       const bound = await awaitRootBinding();
       if (!applicationAlive || !bound) {
         if (applicationAlive)
-          view.setGridStatus("Could not load this source. Retry to continue.");
+          setGridStatusText("Could not load this source. Retry to continue.");
         return;
       }
     }
@@ -1271,7 +1348,7 @@ export function mountLibraryBrowser(
       if (expectedGeneration !== sourceGrid.generation) return;
       if (!boundPublication) {
         // Fail truthfully instead of sending a publicationless request.
-        view.setGridStatus("Could not load this source. Retry to continue.");
+        setGridStatusText("Could not load this source. Retry to continue.");
         const claim = recoveryGate.issue(
           "source-reopen",
           String(expectedGeneration),
@@ -1322,7 +1399,7 @@ export function mountLibraryBrowser(
     syncConnection();
     const notice =
       "Library order expired. Reopening this source from the latest Library…";
-    view.setGridStatus(notice);
+    setGridStatusText(notice);
     view.setPhotoStatus(notice);
     try {
       const opened = await pendingOpen;
@@ -1363,8 +1440,9 @@ export function mountLibraryBrowser(
       );
       if (!sourceGrid.isCurrent(authority) || !windowReady) return;
       view.scrollToGridIndex(gridPosition);
+      view.clearGridCells();
       renderGrid();
-      view.setGridStatus(
+      setGridStatusText(
         "Source reopened using the latest published Library order.",
       );
       if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
@@ -1389,7 +1467,7 @@ export function mountLibraryBrowser(
       if (!sourceGrid.isCurrent(authority)) return;
       const failure =
         "This source expired and could not be reopened. Retry the connection.";
-      view.setGridStatus(failure);
+      setGridStatusText(failure);
       view.setPhotoStatus(failure);
       const claim = recoveryGate.issue("source-reopen", String(generation), {
         owner: { scope: "source", generation: String(generation) },
@@ -1429,7 +1507,7 @@ export function mountLibraryBrowser(
         : String(sourceGrid.generation);
     const { range } = sourceGrid.describeWindow(index);
     if (!quiet)
-      view.setGridStatus(
+      setGridStatusText(
         `Loading ${range} of ${sourceGrid.total.toLocaleString()}…`,
       );
     const outcome = await sourceGrid.loadWindow(index, operation, {
@@ -1453,14 +1531,9 @@ export function mountLibraryBrowser(
         return false;
       }
       if (outcome.kind === "failed") {
-        const message =
-          outcome.malformed === true
-            ? `${outcome.range} returned an invalid response. Retry this range.`
-            : outcome.transportLost
-              ? `Connection lost while loading ${outcome.range}. Retry this range.`
-              : `${outcome.range} could not be loaded (HTTP ${outcome.status}). Retry this range.`;
+        const message = windowFailureMessage(outcome);
         if (ownerScope === "photo") view.setPhotoStatus(message);
-        else view.setGridStatus(message);
+        else setGridStatusText(message);
         failBrowseRange(
           ownerScope,
           ownerGeneration,
@@ -1475,30 +1548,77 @@ export function mountLibraryBrowser(
                 start: outcome.start,
                 quiet,
                 priority,
+                message,
               },
           transition,
         );
         return false;
       }
       recoverBrowseRange(ownerScope, ownerGeneration, outcome.start);
-      if (outcome.changed) renderGrid();
-      if (!quiet)
-        view.setGridStatus(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
+      if (!quiet) {
+        if (admittedRange && sourceGrid.isCurrent(admittedRange.authority))
+          presentRangeStatus();
+        else setGridStatusText(`Ready · ${formatPhotoCount(sourceGrid.total)}`);
+      }
       return true;
     } finally {
-      if (
-        outcome.kind === "detached" &&
-        operation.kind === "grid" &&
-        sourceGrid.isCurrent(operation.authority) &&
-        view.gridVisible()
-      )
-        scheduleGridRender();
       updateControls();
     }
   };
+  /// One notification per completed Grid window, however many consumers joined
+  /// it. Range admission is fire-and-forget, so this is where a window the Grid
+  /// itself admitted presents its outcome and asks for the merged render; a
+  /// window a control-flow caller awaits still settles through that caller.
+  const unsubscribeWindowSettled = sourceGrid.onWindowSettled((outcome) => {
+    if (!applicationAlive) return;
+    // A window request captured before a source change never commits here.
+    if (!sourceGrid.isCurrent(outcome.authority)) return;
+    // Photo windows present through the Photo surface that awaits them.
+    if (outcome.owner.scope !== "source") return;
+    const generation = String(outcome.owner.generation);
+    switch (outcome.kind) {
+      case "loaded":
+        recoverBrowseRange("source", generation, outcome.start);
+        if (outcome.changed && view.gridVisible()) view.scheduleGridRender();
+        presentRangeStatus();
+        return;
+      case "failed": {
+        const message = windowFailureMessage(outcome);
+        setGridStatusText(message);
+        failBrowseRange(
+          "source",
+          generation,
+          outcome.start,
+          outcome.transportLost,
+          {
+            sourceAuthority: outcome.authority,
+            // A source whose first window has not established current facts
+            // retries as that window, exactly like the awaited path does.
+            operationKind: sourceGrid.isReady(outcome.authority)
+              ? "grid"
+              : "source",
+            anchorIndex: outcome.start,
+            start: outcome.start,
+            quiet: false,
+            priority: "high",
+            message,
+          },
+        );
+        updateControls();
+        return;
+      }
+      case "expired":
+        // Concurrent expired windows share one reopen: the first call
+        // supersedes the source generation the others still hold.
+        void reopenExpired(outcome.start, sourceGrid.generation);
+        return;
+      case "detached":
+        if (view.gridVisible()) view.scheduleGridRender();
+        return;
+    }
+  });
   const renderGrid = (position?: number, consumeFocusRequest = true) => {
     if (!applicationAlive) return;
-    sourceGrid.beginGridRender();
     view.renderGrid(
       {
         total: sourceGrid.total,
@@ -1893,6 +2013,7 @@ export function mountLibraryBrowser(
     const gridPosition = sourceGrid.readGridPosition(gridAuthority);
     view.showGrid(gridPosition);
     renderGrid(undefined, false);
+    presentRangeStatus();
     updateControls();
   };
   const persistPosition = (
@@ -2112,17 +2233,13 @@ export function mountLibraryBrowser(
     updateControls();
   };
 
-  const scheduleGridRender = () => {
-    view.scheduleGridRender();
-  };
-
   const refreshSource = async (): Promise<void> => {
     // A Folder reopen needs the File Location binding: never send a
     // publicationless browse (it can only fail as expired/invalid).
     if (sourceGrid.kind === "folder" && !fileLocations.publication) {
       await awaitRootBinding();
       if (!fileLocations.publication) {
-        view.setGridStatus("Could not load this source. Retry to continue.");
+        setGridStatusText("Could not load this source. Retry to continue.");
         return;
       }
     }
@@ -2218,7 +2335,7 @@ export function mountLibraryBrowser(
         resetFileLocations();
         const bound = await awaitRootBinding();
         if (!bound) {
-          view.setGridStatus("Could not load this source. Retry to continue.");
+          setGridStatusText("Could not load this source. Retry to continue.");
           return;
         }
       }
@@ -2363,6 +2480,19 @@ export function mountLibraryBrowser(
       case "grid-render":
         renderGrid();
         return;
+      case "grid-range":
+        // Report only: the owner owns alignment, coalescing, and admission.
+        admittedRange = {
+          start: intent.start,
+          end: intent.end,
+          authority: sourceGrid.authority,
+        };
+        sourceGrid.ensureRange(intent.start, intent.end, {
+          kind: "grid",
+          authority: admittedRange.authority,
+        });
+        presentRangeStatus();
+        return;
       case "grid-resize": {
         const authority = sourceGrid.authority;
         const position = sourceGrid.readGridPosition(authority);
@@ -2370,9 +2500,6 @@ export function mountLibraryBrowser(
         if (sourceGrid.isCurrent(authority)) renderGrid(position);
         return;
       }
-      case "grid-window":
-        void loadWindow(intent.index);
-        return;
       case "open-photo":
         void openPhoto(intent.index);
         return;
@@ -2419,6 +2546,7 @@ export function mountLibraryBrowser(
     membershipAbort?.abort();
     view.dispose();
     cancelScheduledGridRender();
+    unsubscribeWindowSettled();
     albumRecovery = undefined;
     albumActions.dispose();
     savedPositions.dispose();
