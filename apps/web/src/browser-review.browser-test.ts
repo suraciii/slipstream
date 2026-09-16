@@ -432,6 +432,44 @@ async function toggleAlbumMembership(page: Page, albumName: string) {
   await openMembershipPanel(page);
   await membershipCheckbox(page, albumName).click();
 }
+
+/// Counts membership reads the page has settled, so a test can wait for a held
+/// response to be fully processed instead of guessing at elapsed time. The
+/// marker runs in a later task than the fetch continuation that assigns the
+/// membership facts.
+async function trackSettledMembershipReads(page: Page) {
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    let settled = 0;
+    window.fetch = (async (
+      input: Parameters<typeof window.fetch>[0],
+      init?: Parameters<typeof window.fetch>[1],
+    ) => {
+      const response = await nativeFetch(input, init);
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : String(input);
+      if (url.endsWith("/albums") && (init?.method ?? "GET") === "GET")
+        setTimeout(() => {
+          settled += 1;
+          document.documentElement.dataset.membershipReadsSettled =
+            String(settled);
+        }, 0);
+      return response;
+    }) as typeof window.fetch;
+  });
+}
+
+async function settledMembershipReads(page: Page): Promise<number> {
+  return Number(
+    (await page
+      .locator("html")
+      .getAttribute("data-membership-reads-settled")) ?? "0",
+  );
+}
 function contrastRatio(foreground: string, background: string) {
   const luminance = (value: string) => {
     const channels = value
@@ -3235,6 +3273,200 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect
     .poll(async () => (await state(running.url, albumId)).members)
     .toHaveLength(1);
+});
+
+test("a membership read landing during a failed toggle never strands the panel", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Picks")!.id;
+  await trackSettledMembershipReads(page);
+
+  // The read is answered only after the toggle is already in flight, and the
+  // toggle fails after that answer reached the page. The answer must not stand
+  // in for a panel the failed toggle then restores as loading.
+  let releaseRead!: () => void;
+  const readHeld = new Promise<void>((resolve) => {
+    releaseRead = resolve;
+  });
+  let releaseWrite!: () => void;
+  const writeHeld = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  let markReadArrived!: () => void;
+  const readArrived = new Promise<void>((resolve) => {
+    markReadArrived = resolve;
+  });
+  await page.route("**/api/photos/*/albums", async (route) => {
+    const response = await route.fetch();
+    markReadArrived();
+    await readHeld;
+    await route.fulfill({ response }).catch(() => {});
+  });
+  await page.route("**/api/albums/*/members", async (route) => {
+    await writeHeld;
+    await route.abort();
+  });
+  try {
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await openMembershipPanel(page);
+    await expect(page.getByText("Loading Albums…")).toBeVisible();
+    await readArrived;
+
+    // Loading facts render the checkboxes unchecked, so this click only
+    // states the intent; the in-flight write owns the panel from here.
+    await membershipCheckbox(page, "Picks").click();
+    releaseRead();
+    // The delivered answer is discarded: a toggle owns the panel until it
+    // settles, so the failed toggle still restores its own prior state.
+    await expect.poll(() => settledMembershipReads(page)).toBeGreaterThan(0);
+    releaseWrite();
+
+    await expect(
+      page.getByText("Could not add this Photo to “Picks”."),
+    ).toBeVisible();
+    await expect(page.getByText("Albums could not be loaded.")).toBeVisible();
+    await expect(page.getByText("Loading Albums…")).toBeHidden();
+    const retry = page.getByRole("button", { name: "Retry Albums" });
+    await expect(retry).toBeVisible();
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    expect((await state(running.url, albumId)).members).toEqual([]);
+
+    // Retrying reloads the membership facts and clears the failure.
+    await page.unroute("**/api/photos/*/albums");
+    await retry.click();
+    await expect(page.getByText("Not in any Album yet")).toBeVisible();
+    await expect(retry).toBeHidden();
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+  } finally {
+    releaseRead();
+    releaseWrite();
+    await page.unroute("**/api/photos/*/albums").catch(() => {});
+    await page.unroute("**/api/albums/*/members").catch(() => {});
+  }
+});
+
+test("a membership read never repaints over an in-flight toggle", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "one.jpg"), await jpeg());
+  const running = await server(base, root);
+  const picks = (await (
+    await post(running.url, "/api/albums", { name: "Picks" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const picksId = picks.albums.find((album) => album.name === "Picks")!.id;
+  const other = (await (
+    await post(running.url, "/api/albums", { name: "Other" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const otherId = other.albums.find((album) => album.name === "Other")!.id;
+  const [photoId] = await browseIds(running.url);
+  await post(running.url, `/api/albums/${picksId}/members`, {
+    photoIds: [photoId],
+  });
+
+  await trackSettledMembershipReads(page);
+  let holdReads = false;
+  let releaseReads!: () => void;
+  const readsHeld = new Promise<void>((resolve) => {
+    releaseReads = resolve;
+  });
+  let markReadHeld!: () => void;
+  const heldReadArrived = new Promise<void>((resolve) => {
+    markReadHeld = resolve;
+  });
+  await page.route("**/api/photos/*/albums", async (route) => {
+    if (!holdReads) {
+      await route.continue();
+      return;
+    }
+    let response: Awaited<ReturnType<typeof route.fetch>> | undefined;
+    try {
+      response = await route.fetch();
+    } catch {
+      response = undefined;
+    }
+    markReadHeld();
+    await readsHeld;
+    if (response) await route.fulfill({ response }).catch(() => {});
+    else await route.abort().catch(() => {});
+  });
+  let releaseRemoval!: () => void;
+  const removalHeld = new Promise<void>((resolve) => {
+    releaseRemoval = resolve;
+  });
+  let markRemovalArrived!: () => void;
+  const removalArrived = new Promise<void>((resolve) => {
+    markRemovalArrived = resolve;
+  });
+  await page.route(`**/api/albums/${picksId}/members/remove`, async (route) => {
+    markRemovalArrived();
+    await removalHeld;
+    await route.continue();
+  });
+  try {
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+    await openMembershipPanel(page);
+    await expect(membershipCheckbox(page, "Picks")).toBeChecked();
+
+    // Adding to another Album leaves that Album's membership read unanswered.
+    holdReads = true;
+    await membershipCheckbox(page, "Other").check();
+    await expect(page.getByText("Added to the Album.")).toBeVisible();
+    await heldReadArrived;
+
+    // Removing Picks is admitted while the read is still unanswered.
+    await membershipCheckbox(page, "Picks").uncheck();
+    await removalArrived;
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect(membershipCheckbox(page, "Picks")).toBeDisabled();
+
+    // The answer still holds the pre-write membership. It must not repaint
+    // the checkbox the visitor is operating.
+    releaseReads();
+    await expect.poll(() => settledMembershipReads(page)).toBeGreaterThan(1);
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect(membershipCheckbox(page, "Picks")).toBeDisabled();
+    await expect(page.locator("[data-membership-list] li")).toHaveText([
+      "Other",
+    ]);
+
+    releaseRemoval();
+    await expect(page.getByText("Removed from the Album.")).toBeVisible();
+    await expect(page.locator("[data-membership-list] li")).toHaveText([
+      "Other",
+    ]);
+    await expect(membershipCheckbox(page, "Picks")).toBeEnabled();
+    await expect(membershipCheckbox(page, "Picks")).not.toBeChecked();
+    await expect
+      .poll(async () => (await state(running.url, picksId)).members)
+      .toHaveLength(0);
+    await expect
+      .poll(async () => (await state(running.url, otherId)).members)
+      .toHaveLength(1);
+  } finally {
+    releaseReads();
+    releaseRemoval();
+    await page.unroute("**/api/photos/*/albums").catch(() => {});
+    await page
+      .unroute(`**/api/albums/${picksId}/members/remove`)
+      .catch(() => {});
+  }
 });
 
 test("different Album membership keys admit independently", async ({
