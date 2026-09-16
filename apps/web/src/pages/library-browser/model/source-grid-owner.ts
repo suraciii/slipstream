@@ -7,6 +7,7 @@ import {
   releaseBrowse,
   type BrowseSourceRequest,
   type SourceGridFetch,
+  type SourceViewOrder,
 } from "../api/source-grid.js";
 import { TaskScope } from "./async-ownership.js";
 
@@ -148,6 +149,7 @@ export interface SourceGridOwner {
   readonly authority: SourceAuthority;
   readonly generation: number;
   readonly source: SourceGridSource;
+  readonly order: SourceViewOrder;
   readonly lastSource: SourceGridSource | undefined;
   readonly kind: SourceGridSource["kind"];
   readonly albumId: string | undefined;
@@ -167,6 +169,7 @@ export interface SourceGridOwner {
     options?: Readonly<{
       preferredPhotoId?: string;
       mode?: "replace" | "reopen";
+      order?: SourceViewOrder;
     }>,
   ): Promise<SourceOpenOutcome>;
   establish(authority: SourceAuthority): boolean;
@@ -232,20 +235,27 @@ type PhotoWindowRecord = Readonly<{
 
 const sourceRequest = (
   source: SourceGridSource,
+  order: SourceViewOrder,
   preferredPhotoId?: string,
 ): BrowseSourceRequest =>
   source.kind === "library"
-    ? { kind: "library", ...(preferredPhotoId ? { preferredPhotoId } : {}) }
+    ? {
+        kind: "library",
+        order,
+        ...(preferredPhotoId ? { preferredPhotoId } : {}),
+      }
     : source.kind === "album"
       ? {
           kind: "album",
           albumId: source.album.id,
+          order,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
         }
       : {
           kind: "folder",
           folderPath: source.folder.location,
           publication: source.publication,
+          order,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
         };
 
@@ -276,6 +286,7 @@ export function createSourceGridOwner(
   };
   let authority = makeAuthority();
   let source: SourceGridSource = freezeSource({ kind: "library" });
+  let viewOrder: SourceViewOrder = "source-default";
   let lastSource: SourceGridSource | undefined;
   let token = "";
   let total = 0;
@@ -384,6 +395,7 @@ export function createSourceGridOwner(
     options: Readonly<{
       preferredPhotoId?: string;
       mode?: "replace" | "reopen";
+      order?: SourceViewOrder;
     }> = {},
   ): Promise<SourceOpenOutcome> {
     if (closed) return detachedOpen(authority, generation);
@@ -397,6 +409,7 @@ export function createSourceGridOwner(
     const ownerAuthority = authority;
     const ownerGeneration = generation;
     source = freezeSource(nextSource);
+    viewOrder = options.order ?? "source-default";
     lastSource = source;
     token = "";
     if (priorToken) releaseToken(priorToken);
@@ -415,7 +428,7 @@ export function createSourceGridOwner(
     try {
       const result = await openBrowse(
         fetcher,
-        sourceRequest(source, options.preferredPhotoId),
+        sourceRequest(source, viewOrder, options.preferredPhotoId),
         task.signal!,
       );
       if (result.kind === "ok") {
@@ -827,6 +840,9 @@ export function createSourceGridOwner(
     },
     get source() {
       return source;
+    },
+    get order() {
+      return viewOrder;
     },
     get lastSource() {
       return lastSource;
