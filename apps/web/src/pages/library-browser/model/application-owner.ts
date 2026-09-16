@@ -5,8 +5,10 @@ import type {
 import {
   fetchLibraryOverview,
   fetchLibraryStatus,
+  probeLibraryStatus,
   requestLibraryScan,
   type ApplicationFetch,
+  type LibraryStatusOutcome,
 } from "../api/application.js";
 import {
   SettlementFamily,
@@ -66,7 +68,8 @@ export type ApplicationCoordination =
       kind: "recover";
       recovery: ApplicationRecovery;
     }>
-  | Readonly<{ kind: "mark-reachable" }>;
+  | Readonly<{ kind: "mark-reachable" }>
+  | Readonly<{ kind: "transport-lost" }>;
 
 export type ApplicationEvent =
   | ApplicationPresentation
@@ -178,6 +181,7 @@ export function createApplicationOwner(
   let scanCompletionNotice: NoticeHandle | undefined;
   let activeScanCycle: ScanCycle | undefined;
   let lastCompletedPublication: string | undefined;
+  let probeUnreachable = false;
 
   const authorityForAlbum = (albumId: string): AlbumSummaryAuthority => {
     const known = albumSummaryAuthorities.get(albumId);
@@ -281,6 +285,24 @@ export function createApplicationOwner(
 
   const markReachable = (): void => {
     if (!closed) void emit({ kind: "mark-reachable" });
+  };
+
+  /// The status probe is the browser's continuous reachability signal. Report
+  /// each transport transition once: a server that stopped answering loses
+  /// reachability, and a usable status answer restores it. An answered error
+  /// is a server-side condition that reports neither transition.
+  const reportProbeReachability = (outcome: LibraryStatusOutcome): void => {
+    if (closed) return;
+    if (outcome.kind === "unreachable") {
+      if (probeUnreachable) return;
+      probeUnreachable = true;
+      void emit({ kind: "transport-lost" });
+      return;
+    }
+    if (outcome.kind === "answered" && probeUnreachable) {
+      probeUnreachable = false;
+      markReachable();
+    }
   };
 
   const retainOverviewFailure = (): void => {
@@ -490,8 +512,11 @@ export function createApplicationOwner(
           let settled = false;
           let keepMonitoring = true;
           try {
-            const scan = await fetchLibraryStatus(fetcher);
+            const outcome = await probeLibraryStatus(fetcher);
             if (!monitor.isCurrent()) return;
+            reportProbeReachability(outcome);
+            if (outcome.kind !== "answered") return;
+            const scan = outcome.scan;
             const active = scan.state !== "idle" && scan.state !== "failed";
             if (active) {
               releaseScanFailure();
@@ -539,7 +564,7 @@ export function createApplicationOwner(
               completeScan(undefined, scan.publication);
             }
           } catch {
-            /* answered and transport status failures stay silent */
+            /* unexpected monitor failures stay silent; the probe owns transport */
           } finally {
             if (!settled) notices.discardBackground(background);
             if (monitor.isCurrent() && keepMonitoring) queueNext();

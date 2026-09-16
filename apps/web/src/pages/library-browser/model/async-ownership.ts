@@ -595,6 +595,10 @@ export class RecoveryGate {
     if (!this.#closed) this.#reachable = true;
   }
 
+  markTransportLost(): void {
+    if (!this.#closed) this.#reachable = false;
+  }
+
   beginTransition(
     scope: RecoveryScope,
     nextGeneration: string,

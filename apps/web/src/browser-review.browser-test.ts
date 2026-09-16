@@ -2842,6 +2842,49 @@ test("a stale answered Undo failure cannot restore Undo into a replacement sourc
   }
 });
 
+test("an idle browser reports a lost connection from the status probe", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+
+  // The Photographer takes no action here. Only the reachability probe runs,
+  // and the server stops answering it.
+  await page.route("**/api/status", (route) => route.abort());
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Reject" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeEnabled();
+
+  // A decision stays refused, including through the keyboard path.
+  await page.keyboard.press("p");
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+
+  // A usable status answer confirms the connection again.
+  await page.unroute("**/api/status");
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+
+  // An answered status error is a server-side condition, not a lost
+  // connection, so it must not report the browser disconnected.
+  await page.route("**/api/status", (route) =>
+    route.fulfill({ status: 503, body: "unavailable" }),
+  );
+  await page.waitForTimeout(3_000);
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  await page.unroute("**/api/status");
+});
+
 test("an uncertain Undo retires Undo and requires Photo Retry", async ({
   page,
 }) => {
