@@ -393,12 +393,6 @@ export function mountLibraryBrowser(
     if (value) recoveryGate.markReachable();
     syncConnection(message);
   };
-  // A Grid boundary hands the owner's image state back, so the retained cells
-  // have to be built again before they can show their thumbnails.
-  const markDetachedGridCells = () => {
-    view.markDetachedGridCells();
-    view.scheduleGridRender();
-  };
   const windowFailureMessage = (
     outcome: Readonly<{
       range: string;
@@ -1344,7 +1338,6 @@ export function mountLibraryBrowser(
       currentPhoto()?.id;
     cancelScheduledGridRender();
     sourceGrid.clearRenderedThumbnails();
-    markDetachedGridCells();
     let boundPublication = fileLocations.publication;
     if (sourceGrid.kind === "folder" && !boundPublication) {
       // A Folder source must never be reopened publicationless; wait for
@@ -1385,11 +1378,14 @@ export function mountLibraryBrowser(
       order: sourceGrid.order,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
-    // The reopen detaches the images the Grid had in flight. The retained
-    // cells are rebuilt by the next render, which binds their thumbnails
-    // again whether or not the reopen succeeds, and it runs while the reopen
-    // still presents the Photos of the range it kept.
-    markDetachedGridCells();
+    // The reopen detaches the images the Grid had in flight and keeps its
+    // retained cells. Binding those thumbnails again right here - from the URL
+    // the owner still holds - restores them without a render, so the retained
+    // range and the status line stay exactly as the reopen found them.
+    view.rebindDetachedGridCells({
+      total: sourceGrid.total,
+      photoAt: (index) => sourceGrid.photoAt(index),
+    });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
     const photoAuthority = photoOwner.rebindSource({
