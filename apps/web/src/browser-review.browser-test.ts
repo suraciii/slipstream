@@ -60,6 +60,55 @@ function withCaptureTime(source: Uint8Array, captureTime: string): Uint8Array {
   app1.set(payload, 4);
   return new Uint8Array([...source.slice(0, 2), ...app1, ...source.slice(2)]);
 }
+/**
+ * Writes one EXIF Orientation tag into a JPEG, mirroring the TIFF layout the
+ * Rust capture and derivative pipeline already understands. Orientation 6
+ * rotates the displayed image 90 degrees clockwise.
+ */
+function withExifOrientation(source: Uint8Array, value: number): Uint8Array {
+  const dataOffset = 8 + 2 + 12 + 4;
+  const tiff = new Uint8Array(dataOffset);
+  tiff.set([0x49, 0x49, 0x2a, 0, 8, 0, 0, 0]);
+  tiff.set([1, 0], 8);
+  tiff.set([0x12, 0x01, 3, 0], 10);
+  const view = new DataView(tiff.buffer);
+  view.setUint32(14, 1, true);
+  view.setUint16(18, value, true);
+  const payload = new Uint8Array([69, 120, 105, 102, 0, 0, ...tiff]);
+  const app1 = new Uint8Array(payload.length + 4);
+  app1.set([
+    0xff,
+    0xe1,
+    (payload.length + 2) >> 8,
+    (payload.length + 2) & 0xff,
+  ]);
+  app1.set(payload, 4);
+  return new Uint8Array([...source.slice(0, 2), ...app1, ...source.slice(2)]);
+}
+async function jpegWithSize(
+  page: Page,
+  width: number,
+  height: number,
+): Promise<Buffer> {
+  const bytes = await page.evaluate(
+    async ({ width, height }) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas is unavailable");
+      context.fillStyle = "#7a7d82";
+      context.fillRect(0, 0, width, height);
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob(resolve, "image/jpeg", 0.92),
+      );
+      if (!blob) throw new Error("JPEG encoding failed");
+      return Array.from(new Uint8Array(await blob.arrayBuffer()));
+    },
+    { width, height },
+  );
+  return Buffer.from(bytes);
+}
 async function fixture() {
   const base = await mkdtemp(join(tmpdir(), "slipstream-browser-"));
   temporary.push(base);
@@ -6442,6 +6491,312 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   await expect(currentImage).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(currentImage).toHaveAttribute("src", /\/thumbnail\//);
   await expect(currentCell.locator(".cell-facts")).toBeHidden();
+});
+
+/**
+ * Geometry for one rendered Grid cell. The image box is the rendered Photo,
+ * not the media area, because .thumbnail sizes itself from the derivative's
+ * natural pixels inside the cell media area.
+ */
+type GridCellGeometry = Readonly<{
+  index: number;
+  cellWidth: number;
+  cellHeight: number;
+  mediaWidth: number;
+  mediaHeight: number;
+  imageWidth: number;
+  imageHeight: number;
+  naturalWidth: number;
+  naturalHeight: number;
+  indicatorsOverlapImage: boolean;
+  imageInsideMedia: boolean;
+}>;
+
+async function gridCellGeometry(page: Page): Promise<GridCellGeometry[]> {
+  return page.evaluate(() => {
+    const overlaps = (inner: DOMRect, outer: DOMRect) =>
+      Math.max(
+        0,
+        Math.min(inner.right, outer.right) - Math.max(inner.left, outer.left),
+      ) > 0.5 &&
+      Math.max(
+        0,
+        Math.min(inner.bottom, outer.bottom) - Math.max(inner.top, outer.top),
+      ) > 0.5;
+    const inside = (inner: DOMRect, outer: DOMRect) =>
+      inner.left >= outer.left - 1 &&
+      inner.right <= outer.right + 1 &&
+      inner.top >= outer.top - 1 &&
+      inner.bottom <= outer.bottom + 1;
+    return Array.from(
+      document.querySelectorAll<HTMLElement>(".photo-cell[data-photo-index]"),
+    ).map((cell) => {
+      const image = cell.querySelector<HTMLImageElement>("img.thumbnail");
+      const media = cell.querySelector<HTMLElement>(".cell-media");
+      if (!image || !media) throw new Error("Grid cell geometry is missing");
+      const cellBox = cell.getBoundingClientRect();
+      const mediaBox = media.getBoundingClientRect();
+      const imageBox = image.getBoundingClientRect();
+      const indicators = Array.from(
+        cell.querySelectorAll<HTMLElement>(
+          ".cell-state, .cell-caption, .cell-facts",
+        ),
+      ).filter((element) => !element.hidden && element.offsetParent !== null);
+      return {
+        index: Number(cell.dataset.photoIndex),
+        cellWidth: cellBox.width,
+        cellHeight: cellBox.height,
+        mediaWidth: mediaBox.width,
+        mediaHeight: mediaBox.height,
+        imageWidth: imageBox.width,
+        imageHeight: imageBox.height,
+        naturalWidth: image.naturalWidth,
+        naturalHeight: image.naturalHeight,
+        indicatorsOverlapImage: indicators.some((element) =>
+          overlaps(imageBox, element.getBoundingClientRect()),
+        ),
+        imageInsideMedia: inside(imageBox, mediaBox),
+      };
+    });
+  });
+}
+
+async function cellBoxes(
+  page: Page,
+): Promise<Array<Readonly<{ index: number; width: number; height: number }>>> {
+  return page.evaluate(() =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(".grid-layer > .photo-cell"),
+      (cell) => {
+        const box = cell.getBoundingClientRect();
+        return {
+          index: Number(cell.dataset.photoIndex ?? -1),
+          width: box.width,
+          height: box.height,
+        };
+      },
+    ),
+  );
+}
+
+/** Ratio tolerance for rendered pixels versus the derivative's natural size. */
+function expectAspectRatio(geometry: GridCellGeometry): void {
+  const rendered = geometry.imageWidth / geometry.imageHeight;
+  const natural = geometry.naturalWidth / geometry.naturalHeight;
+  expect(Math.abs(rendered - natural) / natural).toBeLessThan(0.02);
+}
+
+test("Grid cells keep uniform cards while displaying true Photo aspect ratios", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const samples = [
+    { name: "a-landscape.jpg", width: 320, height: 180 },
+    { name: "b-portrait.jpg", width: 180, height: 320 },
+    { name: "c-square.jpg", width: 256, height: 256 },
+    { name: "d-panorama.jpg", width: 960, height: 160 },
+  ];
+  for (const sample of samples)
+    await writeFile(
+      join(root, sample.name),
+      await jpegWithSize(page, sample.width, sample.height),
+    );
+  const running = await server(base, root);
+  const loadedThumbnails = () =>
+    page.evaluate(
+      () =>
+        Array.from(
+          document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+        ).filter((image) => image.complete && image.naturalWidth > 0).length,
+    );
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await expect.poll(loadedThumbnails).toBe(4);
+    const cells = await gridCellGeometry(page);
+    expect(cells).toHaveLength(4);
+    // Uniform cards: the Grid stays a regular, virtualizable unit grid.
+    const widths = new Set(cells.map((cell) => Math.round(cell.cellWidth)));
+    const heights = new Set(cells.map((cell) => Math.round(cell.cellHeight)));
+    expect(widths.size).toBe(1);
+    expect(heights.size).toBe(1);
+    const naturalRatio = (cell: GridCellGeometry) =>
+      cell.naturalWidth / cell.naturalHeight;
+    // Thumbnail derivatives preserve the source ratio; the panorama is
+    // downscaled to the bounded target, so classify by ratio, not pixels.
+    const landscape = cells.find(
+      (cell) => naturalRatio(cell) > 1.4 && naturalRatio(cell) < 2.2,
+    );
+    const portrait = cells.find((cell) => naturalRatio(cell) < 0.8);
+    const square = cells.find(
+      (cell) => Math.abs(naturalRatio(cell) - 1) < 0.05,
+    );
+    const panorama = cells.find((cell) => naturalRatio(cell) > 3);
+    expect(
+      landscape && portrait && square && panorama,
+      "each sample aspect class renders one cell",
+    ).toBeTruthy();
+    // Sources below the bounded derivative target keep their exact pixels.
+    expect([landscape!.naturalWidth, landscape!.naturalHeight]).toEqual([
+      320, 180,
+    ]);
+    expect([portrait!.naturalWidth, portrait!.naturalHeight]).toEqual([
+      180, 320,
+    ]);
+    expect([square!.naturalWidth, square!.naturalHeight]).toEqual([256, 256]);
+    for (const cell of cells) {
+      expectAspectRatio(cell);
+      expect(cell.imageInsideMedia).toBe(true);
+      // Indicators live beside or beneath the image, never over it.
+      expect(cell.indicatorsOverlapImage).toBe(false);
+      expect(cell.imageWidth).toBeLessThanOrEqual(cell.mediaWidth + 1);
+      expect(cell.imageHeight).toBeLessThanOrEqual(cell.mediaHeight + 1);
+    }
+    // Orientation is visible at a glance: wide, tall, square, and panoramic
+    // Photos render as distinct shapes inside identical cards.
+    expect(landscape!.imageWidth).toBeGreaterThan(landscape!.imageHeight);
+    expect(landscape!.imageWidth).toBeGreaterThanOrEqual(
+      landscape!.mediaWidth - 1,
+    );
+    expect(portrait!.imageHeight).toBeGreaterThan(portrait!.imageWidth);
+    expect(portrait!.imageHeight).toBeGreaterThanOrEqual(
+      portrait!.mediaHeight - 1,
+    );
+    expect(Math.abs(square!.imageWidth - square!.imageHeight)).toBeLessThan(
+      1.5,
+    );
+    expect(panorama!.imageHeight).toBeLessThan(landscape!.imageHeight);
+  }
+});
+
+test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const landscape = await jpegWithSize(page, 320, 180);
+  await writeFile(join(root, "rotated.jpg"), withExifOrientation(landscape, 6));
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await expect
+    .poll(() =>
+      page
+        .locator(".photo-cell img")
+        .first()
+        .evaluate((image: HTMLImageElement) =>
+          image.complete && image.naturalWidth > 0
+            ? `${image.naturalWidth}x${image.naturalHeight}`
+            : "pending",
+        ),
+    )
+    .toBe("180x320");
+  const [cell] = await gridCellGeometry(page);
+  expect(cell).toBeDefined();
+  // Orientation 6 rotates 320x180 to 180x320; a double rotation would show
+  // 320x180. The rendered box keeps the corrected ratio without stretching.
+  expect(cell!.naturalWidth).toBe(180);
+  expect(cell!.naturalHeight).toBe(320);
+  expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
+  expectAspectRatio(cell!);
+  expect(cell!.indicatorsOverlapImage).toBe(false);
+});
+
+test("Grid placeholders and late thumbnails never change cell geometry", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  let holdThumbnails = true;
+  const heldThumbnails: Array<() => void> = [];
+  await page.route("**/api/derivatives/**", async (route) => {
+    if (!holdThumbnails) return route.continue();
+    await new Promise<void>((resolve) => heldThumbnails.push(resolve));
+    return route.continue();
+  });
+  await page.goto(running.url);
+  await expect(page.getByText("Ready · 70 Photos")).toBeVisible();
+  await waitForGridFrame(page);
+  await expect(
+    page.locator(".photo-cell[data-photo-index]").first(),
+  ).toBeVisible();
+  // The thumbnail bytes are still held, so every image box is unresolved.
+  expect(
+    await page.evaluate(() =>
+      Array.from(
+        document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+      ).every((image) => image.naturalWidth === 0),
+    ),
+  ).toBe(true);
+  // Cells exist with final geometry before any thumbnail byte arrives.
+  const beforeThumbnails = await cellBoxes(page);
+  expect(beforeThumbnails.length).toBeGreaterThan(0);
+  holdThumbnails = false;
+  for (const release of heldThumbnails.splice(0)) release();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          Array.from(
+            document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+          ).filter((image) => image.complete && image.naturalWidth > 0).length,
+      ),
+    )
+    .toBeGreaterThan(0);
+  const afterThumbnails = await cellBoxes(page);
+  expect(afterThumbnails).toEqual(beforeThumbnails);
+
+  // A window that has not delivered facts yet keeps the same cell box while
+  // it shows its placeholder.
+  const heldWindows: Array<() => void> = [];
+  let holdWindows = true;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") && url.searchParams.has("start"),
+    async (route) => {
+      if (!holdWindows) return route.continue();
+      await new Promise<void>((resolve) => heldWindows.push(resolve));
+      return route.continue();
+    },
+  );
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = 30 * 178;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(page.locator(".cell-placeholder").first()).toBeVisible();
+  const placeholder = await page
+    .locator(".cell-placeholder")
+    .first()
+    .evaluate((element) => {
+      const cell = element.closest<HTMLElement>(".photo-cell");
+      if (!cell) throw new Error("Placeholder cell is missing");
+      const box = cell.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+  const loaded = beforeThumbnails[0]!;
+  expect(Math.abs(placeholder.width - loaded.width)).toBeLessThan(0.5);
+  expect(Math.abs(placeholder.height - loaded.height)).toBeLessThan(0.5);
+  holdWindows = false;
+  for (const release of heldWindows.splice(0)) release();
+  await expect(page.locator(".cell-placeholder")).toHaveCount(0);
+  const loadedCell = await page
+    .locator(".photo-cell[data-photo-index]")
+    .first()
+    .evaluate((cell) => {
+      const box = cell.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+  expect(Math.abs(loadedCell.width - placeholder.width)).toBeLessThan(0.5);
+  expect(Math.abs(loadedCell.height - placeholder.height)).toBeLessThan(0.5);
 });
 
 test("a completed mutation cannot reopen or advance a superseding source", async ({
