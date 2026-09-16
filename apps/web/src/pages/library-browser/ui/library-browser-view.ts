@@ -534,8 +534,8 @@ export function createLibraryBrowserView(
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   const renderedCells = new Map<number, RenderedGridCell>();
-  // The range the Grid last reported for admission. A render reports only a
-  // changed range, so one scroll path never sends duplicate reports.
+  // The range the Grid last reported for admission. A render reports a
+  // changed range, or the same range again while part of it has no Photo.
   let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
   let membershipManageOpen = false;
   let membershipFocusAlbumId: string | undefined;
