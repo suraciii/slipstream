@@ -10101,17 +10101,16 @@ for (const failure of replacementFirstWindowFailures) {
     });
 
     try {
-      // Dispatch an unloaded middle window, then restore the tail before its
-      // scheduled Grid frame. Reopen admission can assert a real retained
-      // cell without asking pageBusy to render another virtualized range.
-      await viewport.evaluate((element) => {
-        const tailScrollTop = element.scrollTop;
-        element.scrollTop = element.scrollHeight / 2;
-        element.dispatchEvent(new Event("scroll"));
-        element.scrollTop = tailScrollTop;
-      });
+      // Present an unloaded middle window so the first Browse request after
+      // this point fails on the expired Snapshot, then present the loaded tail
+      // again: the reopen is admitted while real retained tail cells are still
+      // rendered, without rendering another virtualized range for it.
+      const middleScrollTop = await viewport.evaluate(
+        (element) => element.scrollHeight / 2,
+      );
+      await scrollGrid(page, middleScrollTop);
       await expect.poll(() => expiredRequested).toBe(true);
-      await waitForGridFrame(page);
+      await scrollGrid(page, "end");
       await expect(tailPhoto).toBeVisible();
       await expect(tailPhoto).toBeEnabled();
       releaseExpired();
