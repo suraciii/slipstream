@@ -91,7 +91,10 @@ defined by Web Async Ownership:
   retry ranges, and publication rebinding independently of source, Grid, and
   Photo changes.
 - The **source and Grid owner** owns the selected Library Browser source, Browse
-  Snapshot lifecycle, bounded Browse Windows, Grid position, Thumbnail work,
+  Snapshot lifecycle, bounded Browse Windows, the visible-range admission
+  contract (one in-flight request and one completion notification per
+  bounded window regardless of joined consumers), the retained-fact cache
+  bound anchored to the latest visible range, Grid position, Thumbnail work,
   and source-scoped image transfers.
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
@@ -105,9 +108,11 @@ defined by Web Async Ownership:
 - The **page UI** owns Library Browser markup, DOM bindings, semantic rendering,
   focus, keyboard, pointer, and responsive presentation. It reports user intent
   to the page model; it does not issue HTTP requests or decide async ownership.
-  It yields Fit-state vertical touch panning to native Photo View scrolling,
-  retains Fit-state horizontal decision gestures, and takes full Preview
-  drag ownership whenever the zoom state is manual.
+  Grid rendering is presentational: it never initiates loading, merges to at
+  most one update per animation frame, and reuses the DOM nodes of Photos that
+  stay visible. It yields Fit-state vertical touch panning to native Photo View
+  scrolling, retains Fit-state horizontal decision gestures, and takes full
+  Preview drag ownership whenever the zoom state is manual.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.

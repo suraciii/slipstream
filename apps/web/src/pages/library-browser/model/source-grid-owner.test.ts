@@ -3,6 +3,7 @@ import {
   createSourceGridOwner,
   type GridThumbnailImage,
   type SourceGridOwner,
+  type SourceWindowOutcome,
 } from "./source-grid-owner.js";
 
 const deferred = <T>() => {
@@ -60,6 +61,8 @@ const openLibrary = async (owner: SourceGridOwner, token = "browse-1") => {
   expect(owner.token).toBe(token);
   return owner.authority;
 };
+
+const flushTasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 class FakeImage implements GridThumbnailImage {
   complete = false;
@@ -801,7 +804,6 @@ describe("SourceGridOwner", () => {
     const first = new FakeImage();
     const replacement = new FakeImage();
 
-    owner.beginGridRender();
     const firstRequest = owner.loadThumbnail("photo-0", first);
     const staleError = first.onerror;
     const secondRequest = owner.loadThumbnail("photo-0", replacement);
@@ -842,7 +844,6 @@ describe("SourceGridOwner", () => {
     await openLibrary(owner);
 
     const failed = new FakeImage();
-    owner.beginGridRender();
     owner.presentThumbnail("photo-0", failed, "/hydrated.jpg", true);
     failed.onerror?.call(
       failed,
@@ -856,14 +857,14 @@ describe("SourceGridOwner", () => {
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
 
     const sameUrl = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-0", failed);
     owner.presentThumbnail("photo-0", sameUrl, "/hydrated.jpg", true);
     expect(sameUrl.deliveryFailed).toBe(true);
     expect(sameUrl.src).toBe("");
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(1);
 
     const changedUrl = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-0", sameUrl);
     owner.presentThumbnail("photo-0", changedUrl, "/replacement.jpg", true);
     expect(changedUrl.deliveryFailed).toBe(false);
     expect(changedUrl.src).toBe("/replacement.jpg");
@@ -889,10 +890,15 @@ describe("SourceGridOwner", () => {
     });
     await openLibrary(owner);
 
+    let previous: Readonly<{ id: string; image: FakeImage }> | undefined;
     for (let index = 0; index < 241; index += 1) {
-      owner.beginGridRender();
-      await owner.loadThumbnail(`photo-${index}`, new FakeImage());
+      const id = `photo-${index}`;
+      const image = new FakeImage();
+      await owner.loadThumbnail(id, image);
+      if (previous) owner.releaseThumbnail(previous.id, previous.image);
+      previous = { id, image };
     }
+    expect(owner.retainedImageCount).toBe(1);
     expect(owner.retainedThumbnailCount).toBe(240);
   });
 
@@ -908,20 +914,73 @@ describe("SourceGridOwner", () => {
       throw new Error(`unexpected request ${url.pathname}`);
     });
     await openLibrary(owner);
+    let previous: Readonly<{ id: string; image: FakeImage }> | undefined;
     for (let index = 0; index < 241; index += 1) {
-      owner.beginGridRender();
+      const id = `photo-${index}`;
       const image = new FakeImage();
-      await owner.loadThumbnail(`photo-${index}`, image);
+      await owner.loadThumbnail(id, image);
       expect(image.deliveryFailed).toBe(true);
+      if (previous) owner.releaseThumbnail(previous.id, previous.image);
+      previous = { id, image };
     }
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(240);
+    expect(owner.retainedImageCount).toBe(1);
 
     const hydrated = new FakeImage();
-    owner.beginGridRender();
+    owner.releaseThumbnail("photo-240", previous!.image);
     owner.presentThumbnail("photo-240", hydrated, "/hydrated.jpg", true);
     expect(hydrated.src).toBe("/hydrated.jpg");
     expect(hydrated.deliveryFailed).toBe(false);
     expect(owner.retainedThumbnailDeliveryFailureCount).toBe(239);
+  });
+
+  test("releases the owner's hold on Grid images the view drops", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 720));
+      if (url.pathname.startsWith("/api/photos/")) {
+        const id = url.pathname.split("/")[3];
+        return Promise.resolve(
+          new Response(JSON.stringify({ state: "ready", url: `/${id}.jpg` }), {
+            status: 200,
+          }),
+        );
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner);
+
+    // A long scroll across twelve windows drops every cell it leaves behind.
+    const rendered: Array<Readonly<{ id: string; image: FakeImage }>> = [];
+    for (let index = 0; index < 720; index += 1) {
+      const id = `photo-${index}`;
+      const image = new FakeImage();
+      await owner.loadThumbnail(id, image);
+      expect(image.src).toBe(`/${id}.jpg`);
+      rendered.push({ id, image });
+      if (rendered.length > 200) {
+        const dropped = rendered.shift()!;
+        owner.releaseThumbnail(dropped.id, dropped.image);
+      }
+      expect(owner.retainedImageCount).toBeLessThanOrEqual(200);
+    }
+    for (const { id, image } of rendered) owner.releaseThumbnail(id, image);
+    expect(owner.retainedImageCount).toBe(0);
+
+    // Releasing a cell with a pending transfer drops the browser-managed
+    // source without touching the rebuildable URL cache.
+    const pending = new FakeImage();
+    owner.presentThumbnail("photo-700", pending, "/pending.jpg", true);
+    expect(pending.src).toBe("/pending.jpg");
+    owner.releaseThumbnail("photo-700", pending);
+    expect(pending.src).toBe("");
+    expect(pending.onload).toBeNull();
+    expect(pending.onerror).toBeNull();
+    expect(owner.retainedThumbnailCount).toBeGreaterThan(0);
+    owner.dispose();
   });
 
   test("cleans a browser-managed image transfer exactly once", async () => {
@@ -935,7 +994,6 @@ describe("SourceGridOwner", () => {
     });
     await openLibrary(owner);
     const image = new FakeImage();
-    owner.beginGridRender();
     owner.presentThumbnail("photo-0", image, "/pending.jpg", true);
     owner.stopGridWork();
     owner.dispose();
@@ -943,5 +1001,412 @@ describe("SourceGridOwner", () => {
     expect(image.removeCalls).toBe(1);
     expect(image.onload).toBeNull();
     expect(image.onerror).toBeNull();
+  });
+
+  test("coalesces concurrent range demands into one fetch and one settlement", async () => {
+    const pendingWindow = deferred<Response>();
+    let windowRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        windowRequests += 1;
+        return windowRequests === 1
+          ? pendingWindow.promise
+          : Promise.resolve(windowResponse(start, 180));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    const unsubscribe = owner.onWindowSettled((outcome) =>
+      settled.push(outcome),
+    );
+
+    for (let demand = 0; demand < 5; demand += 1)
+      owner.ensureRange(0, 60, { kind: "grid", authority });
+    await flushTasks();
+    expect(windowRequests).toBe(1);
+    expect(settled).toHaveLength(0);
+
+    pendingWindow.resolve(windowResponse(0, 180));
+    await flushTasks();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      kind: "loaded",
+      start: 0,
+      changed: true,
+    });
+    expect(windowRequests).toBe(1);
+
+    unsubscribe();
+    owner.ensureRange(60, 120, { kind: "grid", authority });
+    await flushTasks();
+    expect(settled).toHaveLength(1);
+    expect(windowRequests).toBe(2);
+    expect(owner.photoAt(60)?.id).toBe("photo-60");
+    owner.dispose();
+  });
+
+  test("keeps facts for the latest reported range when an older window settles late", async () => {
+    const staleWindow = deferred<Response>();
+    const requests: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 600));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requests.push(start);
+        return start === 0
+          ? staleWindow.promise
+          : Promise.resolve(windowResponse(start, 600));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const staleLoad = owner.loadWindow(0, { kind: "source", authority });
+    await flushTasks();
+
+    owner.ensureRange(240, 420, { kind: "grid", authority });
+    owner.ensureRange(240, 420, { kind: "grid", authority });
+    await flushTasks();
+    expect(requests).toEqual([0, 240, 300, 360]);
+    expect(owner.photoAt(240)?.id).toBe("photo-240");
+    expect(owner.photoAt(419)?.id).toBe("photo-419");
+
+    staleWindow.resolve(windowResponse(0, 600));
+    expect(await staleLoad).toMatchObject({ kind: "loaded", start: 0 });
+    expect(owner.photoAt(240)?.id).toBe("photo-240");
+    expect(owner.photoAt(300)?.id).toBe("photo-300");
+    expect(owner.photoAt(419)?.id).toBe("photo-419");
+    owner.dispose();
+  });
+
+  test("covers a large reported range and stays bounded when distant windows load", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1200));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 1200));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    owner.ensureRange(0, 300, { kind: "grid", authority });
+    await flushTasks();
+    expect(owner.retainedFactCount).toBe(300);
+    expect(owner.photoAt(0)?.id).toBe("photo-0");
+    expect(owner.photoAt(299)?.id).toBe("photo-299");
+
+    for (const index of [600, 660, 720, 780])
+      expect(
+        await owner.loadWindow(index, { kind: "source", authority }),
+      ).toMatchObject({ kind: "loaded" });
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(420);
+    expect(owner.photoAt(0)?.id).toBe("photo-0");
+    expect(owner.photoAt(299)?.id).toBe("photo-299");
+    owner.dispose();
+  });
+
+  test("a settled Photo window keeps its own facts under the retention bound", async () => {
+    const requested: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 600));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requested.push(start);
+        return Promise.resolve(windowResponse(start, 600));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "source", authority });
+    for (const range of [
+      { start: 60, end: 76 },
+      { start: 120, end: 136 },
+      { start: 100, end: 116 },
+    ])
+      owner.ensureRange(range.start, range.end, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 60, 120]);
+    expect(owner.retainedFactCount).toBe(180);
+
+    // The Photo window the caller awaited commits the newest facts; its own
+    // settlement must not evict them for the older Grid range.
+    const photoAuthority = owner.renewPhotoWindow();
+    const outcome = await owner.loadWindow(180, {
+      kind: "photo",
+      authority: photoAuthority,
+    });
+    expect(outcome).toMatchObject({ kind: "loaded", changed: true });
+    expect(owner.photoAt(180)?.id).toBe("photo-180");
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(196);
+    owner.dispose();
+  });
+
+  test("clamps pathological range reports and keeps the fixed floor", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 600));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 600));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+
+    owner.ensureRange(-100_000, 100_000, { kind: "grid", authority });
+    owner.ensureRange(Number.NaN, 100, { kind: "grid", authority });
+    await flushTasks();
+    // One supported large-viewport range is retained with its buffer, not the
+    // whole reported source.
+    expect(owner.retainedFactCount).toBe(420);
+    expect(owner.photoAt(0)?.id).toBe("photo-0");
+    expect(owner.photoAt(359)?.id).toBe("photo-359");
+    expect(owner.photoAt(420)).toBeUndefined();
+
+    owner.ensureRange(300, 360, { kind: "grid", authority });
+    // The reported range and its buffer stay protected while the oldest facts
+    // leave until the bound holds.
+    expect(owner.retainedFactCount).toBe(240);
+    expect(owner.photoAt(300)?.id).toBe("photo-300");
+    expect(owner.photoAt(359)?.id).toBe("photo-359");
+    expect(owner.photoAt(179)).toBeUndefined();
+    expect(owner.photoAt(420)).toBeUndefined();
+    owner.dispose();
+  });
+
+  test("visits the clamped tail window the range start cannot align to", async () => {
+    const rangeWindows = async (
+      total: number,
+      range: Readonly<{ start: number; end: number }>,
+    ): Promise<Readonly<{ requested: number[]; missing: number[] }>> => {
+      const requested: number[] = [];
+      const owner = createSourceGridOwner((input, init) => {
+        const url = requestUrl(input);
+        if (url.pathname === "/api/browse" && init?.method === "POST")
+          return Promise.resolve(opened("browse-1", total));
+        if (url.pathname === "/api/browse/browse-1") {
+          const start = Number(url.searchParams.get("start"));
+          requested.push(start);
+          return Promise.resolve(windowResponse(start, total));
+        }
+        if (init?.method === "DELETE")
+          return Promise.resolve(new Response(null, { status: 204 }));
+        throw new Error(`unexpected request ${url.pathname}`);
+      });
+      const authority = await openLibrary(owner);
+      await owner.loadWindow(0, { kind: "source", authority });
+      const before = requested.length;
+      owner.ensureRange(range.start, range.end, { kind: "grid", authority });
+      await flushTasks();
+      const missing: number[] = [];
+      for (
+        let index = range.start;
+        index < Math.min(range.end, total);
+        index += 1
+      )
+        if (owner.photoAt(index) === undefined) missing.push(index);
+      const result = { requested: requested.slice(before), missing };
+      owner.dispose();
+      return result;
+    };
+
+    // The 400-Photo tail window is [340,400): a range starting at 220 aligns
+    // to 180 and would stop at 300 without the clamped tail step.
+    expect(await rangeWindows(400, { start: 220, end: 400 })).toEqual({
+      requested: [180, 240, 300, 340],
+      missing: [],
+    });
+    expect(await rangeWindows(400, { start: 340, end: 400 })).toEqual({
+      requested: [300, 340],
+      missing: [],
+    });
+    // The 70-Photo tail window is [10,70): the window at 0 is already loaded.
+    expect(await rangeWindows(70, { start: 58, end: 70 })).toEqual({
+      requested: [10],
+      missing: [],
+    });
+    // Multiples of the window size keep their aligned walk.
+    expect(await rangeWindows(300, { start: 180, end: 300 })).toEqual({
+      requested: [180, 240],
+      missing: [],
+    });
+  });
+
+  test("does not re-request a fully loaded tail window", async () => {
+    const requested: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 400));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requested.push(start);
+        return Promise.resolve(windowResponse(start, 400));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    await owner.loadWindow(0, { kind: "source", authority });
+    owner.ensureRange(220, 400, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 180, 240, 300, 340]);
+    expect(owner.photoAt(340)?.id).toBe("photo-340");
+    expect(owner.photoAt(399)?.id).toBe("photo-399");
+    owner.ensureRange(220, 400, { kind: "grid", authority });
+    await flushTasks();
+    expect(requested).toEqual([0, 180, 240, 300, 340]);
+    owner.dispose();
+  });
+
+  test("shares one in-flight window between range admission and a control-flow load", async () => {
+    const pendingWindow = deferred<Response>();
+    let windowRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1") {
+        windowRequests += 1;
+        return pendingWindow.promise;
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled((outcome) => settled.push(outcome));
+
+    owner.ensureRange(0, 60, { kind: "source", authority });
+    const awaiting = owner.loadWindow(0, { kind: "source", authority });
+    await flushTasks();
+    expect(windowRequests).toBe(1);
+
+    pendingWindow.resolve(windowResponse(0, 180));
+    expect(await awaiting).toMatchObject({
+      kind: "loaded",
+      start: 0,
+      changed: true,
+    });
+    await flushTasks();
+    // The awaiting caller settles this window: one completion is presented,
+    // by the caller, and the merged notification reports only the windows no
+    // caller joined.
+    expect(settled).toHaveLength(0);
+    owner.dispose();
+  });
+
+  test("shares one in-flight window between a Grid range and a source load", async () => {
+    const pendingWindow = deferred<Response>();
+    let windowRequests = 0;
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1") {
+        windowRequests += 1;
+        return pendingWindow.promise;
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled((outcome) => settled.push(outcome));
+
+    // A Grid range admission and the source open that awaits the same aligned
+    // window share one in-flight request, and the caller settles it.
+    owner.ensureRange(0, 60, { kind: "grid", authority });
+    const awaiting = owner.loadWindow(0, { kind: "source", authority });
+    await flushTasks();
+    expect(windowRequests).toBe(1);
+
+    pendingWindow.resolve(windowResponse(0, 180));
+    expect(await awaiting).toMatchObject({
+      kind: "loaded",
+      start: 0,
+      changed: true,
+    });
+    await flushTasks();
+    expect(settled).toHaveLength(0);
+    owner.dispose();
+  });
+
+  test("one throwing settlement subscriber cannot silence the others", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(new Response(null, { status: 503 }));
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled(() => {
+      throw new Error("subscriber failed");
+    });
+    owner.onWindowSettled((outcome) => settled.push(outcome));
+
+    owner.ensureRange(0, 60, { kind: "grid", authority });
+    await flushTasks();
+    expect(settled.map((outcome) => outcome.kind)).toEqual(["failed"]);
+    owner.dispose();
+  });
+
+  test("notifies failed and expired range settlements once", async () => {
+    const responses = [
+      new Response(null, { status: 404 }),
+      new Response(null, { status: 503 }),
+    ];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 180));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(responses.shift()!);
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const settled: SourceWindowOutcome[] = [];
+    owner.onWindowSettled((outcome) => settled.push(outcome));
+
+    owner.ensureRange(0, 120, { kind: "grid", authority });
+    await flushTasks();
+    expect(settled.map((outcome) => outcome.kind).sort()).toEqual([
+      "expired",
+      "failed",
+    ]);
+    expect(owner.retryRequired).toBe(true);
+    expect(owner.photoAt(0)).toBeUndefined();
+    owner.dispose();
   });
 });

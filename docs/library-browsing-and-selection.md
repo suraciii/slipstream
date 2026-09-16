@@ -120,7 +120,26 @@ While a window loads, Grid View must show stable placeholders and a truthful sta
 Loading Photos 1–60 of 36,997…
 ```
 
-As the Photographer scrolls, Slipstream must load bounded later windows. The browser must keep the number of retained Photo facts and rendered Grid cells bounded independently of total Library size.
+As the Photographer scrolls, Slipstream loads bounded later windows. The
+browser must keep the number of retained Photo facts and rendered Grid cells
+bounded independently of total Library size.
+
+Loading is range-based and rendering never initiates it:
+
+- scrolling computes the visible range plus a bounded buffer and reports that
+  one range; the Grid requests only the bounded windows still missing for
+  that range, and one completion notification updates everything the range
+  needs — scrolling does not create per-cell loading work;
+- Grid updates are merged to at most one per animation frame while scrolling,
+  and each update reuses the DOM nodes of Photos that remain visible: only
+  cells that enter, leave, or change are added, removed, or updated;
+- already loaded Photos keep their fixed-size cells while later positions
+  load, so stopping the scroll converges to a complete view without repeated
+  placeholder churn; and
+- retained Photo facts are capped at a bound that covers the actual viewport
+  and buffer at supported large viewports; eviction protects the current
+  range and buffer and always uses the latest visible range, never a position
+  captured when an older request started.
 
 A Grid cell must show, when available:
 
