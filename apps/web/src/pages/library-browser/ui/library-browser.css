@@ -256,7 +256,7 @@
 /* Rename and delete are supporting actions. On a device whose primary pointer
    can hover they wait for the row to be hovered or focused, and stay visible
    everywhere else. Opacity keeps them focusable from the keyboard. */
-@media (hover: hover) and (pointer: fine) and (min-width: 761px) {
+@media (hover: hover) and (min-width: 761px) {
   .album-tool {
     opacity: 0;
   }
@@ -320,10 +320,11 @@
 }
 
 .source-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  justify-items: start;
   gap: 0.4rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
 }
 
 /* Library refresh is a recovery action, so it stays reachable but quiet
@@ -811,7 +812,7 @@
 /* The direction labels are a touch affordance. On a device whose primary
    pointer can hover, they stay out of sight until a drag shows the pending
    direction. The reserved columns are kept so nothing shifts mid-drag. */
-@media (hover: hover) and (pointer: fine) {
+@media (hover: hover) {
   .swipe-feedback {
     visibility: hidden;
   }

@@ -1749,14 +1749,20 @@ test("Photo View reshapes Capture Time without reinterpreting it", async ({
   page,
 }) => {
   const { base, root } = await fixture();
-  await writePhotos(root, 2);
+  await writePhotos(root, 5);
   const running = await server(base, root);
-  const [first, second] = await browseIds(running.url);
-  const captureTimes = new Map([
-    [first!, "2026-02-03T04:05:06.000000000"],
+  const ids = await browseIds(running.url);
+  const cases: ReadonlyArray<readonly [string | undefined, string]> = [
+    ["2026-02-03T04:05:06.000000000", "2026-02-03 04:05"],
     // An unrecognized value is shown unchanged instead of an invented time.
-    [second!, "not-a-capture-time"],
-  ]);
+    ["not-a-capture-time", "not-a-capture-time"],
+    ["2026-02-03T04:05", "2026-02-03 04:05"],
+    ["2026-02", "2026-02"],
+    [undefined, "—"],
+  ];
+  const captureTimes = new Map(
+    ids.map((id, index) => [id, cases[index]![0]] as const),
+  );
   await page.route("**/api/photos/*/metadata", (route) => {
     const photoId = new URL(route.request().url()).pathname.split("/")[3];
     return route.fulfill({
@@ -1766,14 +1772,16 @@ test("Photo View reshapes Capture Time without reinterpreting it", async ({
     });
   });
   await startReview(page, running.url, "All Photos");
-  await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
-    "2026-02-03 04:05",
-  );
-  await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByText("2 / 2")).toBeVisible();
-  await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
-    "not-a-capture-time",
-  );
+  for (const [index, [, displayed]] of cases.entries()) {
+    await expect(
+      page.getByText(`${index + 1} / ${cases.length}`),
+    ).toBeVisible();
+    await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
+      displayed,
+    );
+    if (index < cases.length - 1)
+      await page.getByRole("button", { name: "Next" }).click();
+  }
 });
 
 function touchQualification(viewport: { width: number; height: number }) {
@@ -2104,11 +2112,13 @@ test("Album names and management actions do not overlap", async ({ page }) => {
 
   for (const viewport of [
     { width: 1440, height: 900 },
+    { width: 761, height: 800 },
+    { width: 760, height: 800 },
     { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
     await page.goto(running.url);
-    if (viewport.width === 390)
+    if (viewport.width <= 760)
       await page.locator("[data-source-toggle]").click();
 
     const row = page.locator(".album-row").filter({
@@ -8806,6 +8816,7 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   await page.locator('[data-photo-index="1"]').click();
   await expect(page.locator("[data-review]")).toBeVisible();
   await waitForLoadedReviewImage(page);
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.keyboard.press("p");
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
@@ -8816,6 +8827,7 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
 
   await page.locator('[data-photo-index="2"]').click();
   await waitForLoadedReviewImage(page);
+  await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.keyboard.press("x");
   await expect(page.getByText("3 / 3")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
