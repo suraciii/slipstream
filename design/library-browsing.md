@@ -65,7 +65,8 @@ A Browse Window is a bounded consecutive range within one Browse Snapshot. Each 
 - derivative URLs only when current cache identities are known.
 
 The ordering Original filename is a basename only. The relative Location,
-absolute paths, and the Library Folder never cross this boundary.
+absolute paths, and the Library Folder's absolute path never cross this
+boundary.
 
 A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library.
 

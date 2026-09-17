@@ -1580,6 +1580,7 @@ export function createLibraryBrowserView(
     if (!alive) return;
     position.textContent = `${model.index + 1} / ${model.total}`;
     photoFilename.textContent = model.originalFilename ?? "—";
+    photoFilename.title = model.originalFilename ?? "";
     currentSelection = model.selectionState ?? "undecided";
     selection.textContent = selectionLabel(currentSelection);
     const value = model.rating ?? 0;

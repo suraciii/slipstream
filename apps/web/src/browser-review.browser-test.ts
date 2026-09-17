@@ -9252,6 +9252,10 @@ test("Grid and Photo View identify a Photo by its Original filename", async ({
   await expect(page.locator("[data-photo-filename]")).toHaveText(
     "IMG_4521.jpg",
   );
+  await expect(page.locator("[data-photo-filename]")).toHaveAttribute(
+    "title",
+    "IMG_4521.jpg",
+  );
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.locator("[data-photo-filename]")).toHaveText(
     "IMG_4522.jpg",
@@ -9266,7 +9270,7 @@ test("a long Original filename truncates without breaking Grid or Photo View", a
   page,
 }) => {
   const { base, root } = await fixture();
-  const longName = `${`IMG_${String(4521).repeat(12)}`}.jpg`;
+  const longName = `${`IMG_${String(4521).repeat(24)}`}.jpg`;
   await mkdir(join(root, "shoot"), { recursive: true });
   await writeFile(join(root, "shoot", longName), await jpeg());
   const running = await server(base, root);

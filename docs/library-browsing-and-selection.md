@@ -188,7 +188,7 @@ Thumbnail, Preview, scan, and bounded look-ahead loading must run in the backgro
 Photo View must show one current Photo as the primary content. It must also show:
 
 - current position and total Photo count;
-- the Original filename;
+- the Original filename when available;
 - Selection State;
 - Rating;
 - Preview Source;
