@@ -2835,7 +2835,12 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     );
 
     // A Folder source filters the same recursive projection, and Photos
-    // outside the Folder never appear in it.
+    // outside the Folder never appear in it: a matching Photo elsewhere in
+    // the Library must not leak into the Folder view or its counts.
+    assert_eq!(
+        decide_selection(&router, &by_location["outside.jpg"], "selected").await,
+        StatusCode::OK
+    );
     let publication = {
         let guard = application.shared.snapshot.read().unwrap();
         guard.as_ref().unwrap().publication_value()
@@ -2851,9 +2856,114 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     .await;
     assert_eq!(folder_opened.total, 1);
     assert_eq!(folder_photos[0].id, by_location["shoot/p1.jpg"]);
+    // The Folder's counts stay scoped to the Folder: `outside.jpg` is selected
+    // in the Library but is not part of this source.
     assert_eq!(folder_opened.selection_counts.selected, 1);
     assert_eq!(folder_opened.selection_counts.rejected, 1);
     assert_eq!(folder_opened.selection_counts.undecided, 1);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_position() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    capture_metadata_fixture(&root.join("a.jpg"), "2026:01:01 09:00:00");
+    capture_metadata_fixture(&root.join("b.jpg"), "2026:01:01 10:00:00");
+    capture_metadata_fixture(&root.join("c.jpg"), "2026:01:01 11:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    let (a, b, c) = (
+        by_location["a.jpg"].clone(),
+        by_location["b.jpg"].clone(),
+        by_location["c.jpg"].clone(),
+    );
+    let album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Review".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Review")
+        .unwrap()
+        .id;
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: album.clone(),
+            photo_ids: vec![a.clone(), b.clone(), c.clone()],
+        })
+        .await
+        .unwrap();
+    // `c` is the durable saved position and `a` is the browser's current
+    // Photo, so the saved member matches the filter while the anchor does not.
+    application
+        .mutate_album(slipstream_core::AlbumMutation::SetProgress {
+            album_id: album.clone(),
+            photo_id: c.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        decide_selection(&router, &b, "selected").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        decide_selection(&router, &c, "selected").await,
+        StatusCode::OK
+    );
+
+    // A view change reopens with the browser's current Photo as the anchor.
+    // The anchor no longer matches the filter, so the view starts at its first
+    // Photo (`b`) instead of resuming at the saved Photo (`c`).
+    let changed = application
+        .browse_open(
+            BrowseSourceRequest::Album(album.clone()),
+            BrowseViewOrder::AlbumOrder,
+            BrowseSelectionFilter::Selected,
+            Some(&a),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.total, 2);
+    assert_eq!(changed.position, 0);
+    let window = application
+        .browse_window(&changed.token, changed.position, 1)
+        .await
+        .unwrap();
+    assert_eq!(window.photos[0].id, b);
+    application.browse_close(&changed.token);
+
+    // An explicit anchor that matches the filter still outranks the saved
+    // position, and an open without one keeps resuming at it.
+    let anchored = application
+        .browse_open(
+            BrowseSourceRequest::Album(album.clone()),
+            BrowseViewOrder::AlbumOrder,
+            BrowseSelectionFilter::Selected,
+            Some(&c),
+        )
+        .await
+        .unwrap();
+    assert_eq!(anchored.position, 1);
+    application.browse_close(&anchored.token);
+    let plain = application
+        .browse_open(
+            BrowseSourceRequest::Album(album),
+            BrowseViewOrder::AlbumOrder,
+            BrowseSelectionFilter::Selected,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(plain.position, 1);
+    application.browse_close(&plain.token);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -3134,6 +3244,30 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // An Album open is no exception. `album-order` reads persisted membership
+    // position, but anchor, filter membership, and counts still come from the
+    // Published Library, so it fails with the same not-published response
+    // instead of failing later at its first window.
+    let early_album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Early".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Early")
+        .unwrap()
+        .id;
+    let rejected_album = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({"source":"album","albumId": early_album}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(rejected_album.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     drop(gate_sender);
     wait_for_scan_settled(&application).await;

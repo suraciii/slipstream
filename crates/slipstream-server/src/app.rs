@@ -909,8 +909,14 @@ impl Application {
                     .album_browse_target(&id)
                     .await?
                     .ok_or(ServerError::BrowseNotFound)?;
-                let resume_member_id =
-                    album_resume_member(&target.members, target.saved_photo_id.as_deref());
+                // A view change supplies the browser's current Photo as the
+                // anchor; only an open without one resumes at the durable
+                // saved position, so a filter or order change never lands on
+                // a different Photo than the one current in the browser.
+                let resume_member_id = preferred_photo_id
+                    .is_none()
+                    .then(|| album_resume_member(&target.members, target.saved_photo_id.as_deref()))
+                    .flatten();
                 let guard = self
                     .shared
                     .snapshot

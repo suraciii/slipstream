@@ -948,7 +948,12 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
     ),
   ).toBe(0);
   const closedGridHeight = await gridHeight();
-  expect(closedGridHeight).toBeGreaterThan(844 * 0.7);
+  // The narrow header wraps its progress line below the controls, which
+  // costs the fourth row at this viewport: the Grid holds three complete
+  // rows plus most of the fourth. Pin that visible-row floor (178 px row
+  // pitch: a 166 px cell and a 12 px gap) so later header growth cannot
+  // silently eat the Grid.
+  expect(closedGridHeight).toBeGreaterThanOrEqual(3 * 178 + 166 / 2);
 
   await sources.click();
   await expect(sources).toHaveAttribute("aria-expanded", "true");
@@ -10279,6 +10284,88 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   );
   await page.reload();
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+});
+
+test("an Album source filters its members and keeps Album progress", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  expect(allIds).toHaveLength(3);
+  const { albumId } = await createAlbum(running.url, "Picks");
+  await post(running.url, `/api/photos/${allIds[0]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+  await post(running.url, `/api/photos/${allIds[1]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+  await post(running.url, `/api/photos/${allIds[2]!}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await openSources(page);
+  await page.getByRole("button", { name: /^Picks 3 Photos/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Picks");
+
+  const filter = page.locator("[data-filter-select]");
+  const status = page.locator("[data-grid-status]");
+  const progress = page.locator("[data-grid-progress]");
+  const empty = page.locator("[data-grid-empty]");
+  const browseBodies = recordBrowseBodies(page);
+  // Album progress describes the Album's members, not the open view.
+  await expect(status).toHaveText("Ready · 3 Photos");
+  await expect(progress).toHaveText(
+    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+  );
+
+  // The filter applies to the Album's members in membership position, and
+  // the request stays one Album open with the filter.
+  await filter.selectOption("selected");
+  await expectGridOrder(page, [allIds[0]!, allIds[1]!]);
+  await expect(status).toHaveText("Ready · 2 Photos");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    selection: "selected",
+  });
+
+  // Photo View walks the filtered Album view, and its position belongs to
+  // the filtered sequence rather than to the Album or the Library.
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 2/ }),
+  );
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(filter).toHaveValue("selected");
+
+  // A filter no Album member matches reports the filter, not an empty Album.
+  await filter.selectOption("undecided");
+  await expect(empty).toBeVisible();
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
+  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
+  await expect(status).toHaveText("0 Photos");
+  await expect(progress).toHaveText(
+    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+  );
+  await filter.selectOption("rejected");
+  await expectGridOrder(page, [allIds[2]!]);
+  await expect(status).toHaveText("Ready · 1 Photo");
 });
 
 test("Grid progress follows confirmed decisions, Undo, and a reload", async ({

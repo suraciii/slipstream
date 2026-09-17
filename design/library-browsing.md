@@ -271,6 +271,10 @@ filtered view stays one bounded sequence with one meaning for every position.
 
 The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local. Saved position and view order are independent: the position resolves by Photo identity whichever order the open view uses.
 
+The saved position applies only to an open that supplies no explicit anchor. A view change (a new filter or order) anchors on the browser's current Photo by identity; when that Photo does not match the new view, the open starts at the view's first Photo rather than at the durable saved position.
+
+Every source open requires the published Library. An Album open reads the same Published snapshot as `library` and `folder` sources for its anchor, filter membership, and counts, and `album-order` is no exception even though its order comes from persisted membership position. An Album open therefore fails with the not-published response before any Snapshot exists instead of failing later at its first window.
+
 ### Grid Loading
 
 The source/Grid owner owns one range admission path. The visible range plus
