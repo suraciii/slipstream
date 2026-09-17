@@ -317,6 +317,43 @@ A Selection State or Rating mutation updates SQLite through the existing transac
 
 Preview completion must become visible to subsequent window or Photo queries immediately. A stale process-wide scan snapshot must not remain the only source of Preview state after the Preview service has persisted newer facts.
 
+### Batch Selection Writes
+
+Grid multi-selection applies one Selection State to many Photos through
+`POST /api/photos/state`. The request carries `photoIds` and one
+`selectionState`. The server accepts at most 100 unique Photo identifiers and
+rejects an over-limit, duplicate, unknown-state, or malformed request before
+any write. Batch Rating is not part of this contract, and the route carries no
+source, Album, or position: the browser names the Photos it multi-selected.
+
+The operation is one transaction with per-Photo outcomes, so one missing Photo
+never rolls back the confirmed ones. The response reports exactly one outcome
+per requested Photo:
+
+- `applied` with the Selection State the Photo held before the write, so the
+  browser can describe one truthful Undo for the whole batch and can move its
+  counts by the state it believed; and
+- `conflict` with the Photo's current Selection State when that state could
+  not take the write, or without one when the Photo no longer exists in the
+  current Library. A conflicted Photo is reported to the Photographer and
+  keeps its current truth.
+
+The browser moves loaded Photo facts and the source's decision counts only for
+`applied` outcomes. A Photo whose write was not confirmed is never presented
+as decided.
+
+Batch Undo reuses the single-Photo compare-and-set write: the browser sends
+one bounded write per confirmed Photo, each naming the prior value the server
+reported and the batch's value as `expectedCurrent`. One Photo that changed
+does not block the others, and the browser retires only the Photos whose Undo
+cannot apply. A batch Undo route was rejected: it would add a second
+compare-and-set surface for a workflow the existing route already expresses,
+and the per-Photo conflict truthfulness is identical either way.
+
+Batch **Add to Album** reuses the bounded Album membership route with the
+multi-selected identifiers; the server-side membership rules, the membership
+bound, and duplicate suppression are unchanged.
+
 ### Persistent Derivative Cache
 
 The existing cache identity and atomic publication contracts remain authoritative. Both `thumbnail-512` and `review-2560` derivatives persist in the configured cache directory and may be reused across server restart.
@@ -519,6 +556,7 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - reopening the source after rescan uses the new complete order and current Folder subtree;
 - Album saved-position and unavailable-member fallback work without complete membership transfer;
 - Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
+- a batch Selection State write applies to every existing requested Photo in one transaction, reports one outcome per Photo including Photos that changed elsewhere or no longer exist, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;

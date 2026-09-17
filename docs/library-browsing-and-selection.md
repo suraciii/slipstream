@@ -332,7 +332,7 @@ A confirmed membership addition appends the Photo after existing members. Removi
 
 Album mutations must persist before Slipstream presents them as complete. Changing source or Photo must not cancel an admitted persistence operation, but a late response from an obsolete UI generation must not overwrite the current source, current Photo, or current error state.
 
-The first Album-management interface does not require Grid multi-select, drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums. Adding an entire current Folder is supported separately from Grid multi-select.
+The first Album-management interface does not require drag-and-drop, a visual bulk reorder surface, Album covers, sharing, Album Groups, or Smart Albums. Adding an entire current Folder and adding the Grid's multi-selection are supported separately from each other.
 
 ## Photo Album Membership
 
@@ -500,7 +500,7 @@ Slipstream must provide undo for the most recent Selection State or Rating chang
 
 Undo must restore the previous value and return to the affected Photo when the original action advanced away from it.
 
-The first product requires one-level undo. Undo remains available until another Selection State or Rating change occurs, the Photographer changes source, or the browser reloads. The browser holds the one undo description; the server does not persist undo history.
+The first product requires one-level undo. Undo remains available until another Selection State or Rating change occurs, the Photographer changes source, or the browser reloads. One batched Selection State change counts as one change for this rule. The browser holds the one undo description; the server does not persist undo history.
 
 The undo description must identify its affected Photo by stable Photo ID. Any position retained with that description is only a hint for the current Browse Snapshot. When the same source is reopened with a replacement Snapshot, Slipstream must resolve the Photo ID against that Snapshot before loading or applying Undo. The resolution must use one bounded position lookup and must not transfer the complete source or create browser-global state.
 
@@ -536,6 +536,59 @@ Grid View must be operable from a keyboard without opening Photo View.
 - Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
 
 While the Grid is open, undo of a change that did not advance away from the affected Photo must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. Undo of a change that advanced away must return to the affected Photo in Photo View. The browser holds one undo description, shared with Photo View.
+
+## Grid Multi-Selection and Batch Actions
+
+Culling one Photo at a time does not scale to a burst or a shoot. Grid View
+must therefore let the Photographer mark several Photos and apply one decision
+or one Album addition to all of them.
+
+Grid View supports multi-selection in addition to the single open target:
+
+- a shift-click extends the multi-selection over the Photos between the last
+  multi-selection anchor and the clicked Photo;
+- a Control-click or Command-click toggles one Photo;
+- an explicit **Select** mode makes every Grid cell activation toggle that
+  Photo's multi-selection instead of opening Photo View, so a touch device can
+  multi-select without a modifier key.
+
+The **Select** mode must be enterable and leavable from a keyboard, and
+`Escape` must empty the multi-selection. The Grid decision and Rating keys keep
+their existing meaning for the focused Photo.
+
+A range extends over the Photos the Grid has loaded. A position the Grid has
+not loaded cannot join the multi-selection, and the count reports the Photos
+that are actually selected.
+
+While the multi-selection is not empty, the Grid must show its count, one
+clear exit that empties the multi-selection and leaves **Select** mode, and the
+batch actions **Select**, **Reject**, and **Add to Album**. Multi-selection
+must read differently from the single open target and must not depend on color
+alone; a multi-selected Grid cell must expose that state to assistive
+technology.
+
+Batch **Select** and **Reject** apply one Selection State to every selected
+Photo through the same persistence rules as a single decision, as one bounded
+operation. A confirmed Photo moves the decision progress once. A Photo the
+server reports as changed elsewhere keeps its current state, is reported, and
+does not block the other Photos. A failed operation must leave every affected
+Photo recoverable and must not present the batch as complete.
+
+A batched Selection State change is one undoable change: Undo restores the
+prior Selection State of every Photo the batch confirmed, as one unit. The
+one-level Undo rule is unchanged. A Photo whose batch write failed is not part
+of that undo description; its current state is presented truthfully and a
+later decision or retry decides it again. A batch never changes a Rating.
+
+Batch **Add to Album** adds every selected Photo to one Album through the same
+membership rules as a single addition. A Photo that already belongs to the
+Album is skipped without changing its membership position. Membership changes
+stay outside the Undo contract, exactly as they are for a single Photo.
+
+Opening or reopening a source clears the multi-selection; scrolling and Grid
+renders must not. The batch actions must remain reachable from a keyboard, and
+the count and every batch outcome must be announced on the Grid's status
+surface.
 
 ## Failure Behavior
 

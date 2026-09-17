@@ -339,6 +339,19 @@ Undo uses the same classification: `409` reports stale Undo and disconnects;
 other answered non-success reports that Undo was not saved without
 disconnecting; transport failure disconnects.
 
+A Grid batch Selection State write shares that one admission and the
+one-level Undo. Its address is the multi-selected stable Photo identifiers
+captured when it was admitted, so it keeps its identity while the source
+generation remains current; a source change detaches its continuation and the
+confirmed server work stays committed. Its settlement reports the per-Photo
+outcomes from one bounded batch response. A batch Undo is one settlement
+family of sequential single-Photo compare-and-set writes: the browser retires
+only the Photos whose `409` proves the value it would restore is no longer
+current, keeps the remaining Photos retryable after any other answered
+non-success, and keeps the whole description retryable after a transport
+failure. A batch Undo never navigates: the change it restores never advanced
+away from a Photo.
+
 ### Saved Album position
 
 Saved-position writes are admitted writes serialized by the progress queue
