@@ -127,6 +127,7 @@ export type LibraryBrowserIntent =
       name?: string;
     }>
   | Readonly<{ kind: "grid-render" | "grid-resize" }>
+  | Readonly<{ kind: "filmstrip-resize" }>
   | Readonly<{ kind: "grid-range"; start: number; end: number }>
   | Readonly<{ kind: "open-photo"; index: number }>
   | Readonly<{
@@ -268,12 +269,15 @@ const LOADING_CELL_SIGNATURE = "loading";
 
 /// One rendered filmstrip entry. The signature covers the facts and the
 /// current marker, so a strip render rebuilds only the entries that changed
-/// and every other entry keeps its thumbnail transfer.
+/// and every other entry keeps its thumbnail transfer. `presentsPhoto`
+/// separates a real entry from a placeholder, whose disabled state is
+/// permanent instead of following navigation interactivity.
 type RenderedFilmstripCell = {
   readonly button: HTMLButtonElement;
   signature: string;
   deliveryFailed: boolean;
   thumbnail: GridThumbnailBinding | undefined;
+  presentsPhoto: boolean;
 };
 
 type PhotoFactsViewModel = Readonly<{
@@ -302,6 +306,10 @@ type FilmstripCellViewModel = Readonly<{
 
 type FilmstripViewModel = Readonly<{
   total: number;
+  /// True while activating an entry would open its Photo. Every real entry is
+  /// disabled otherwise, so the strip never offers an activation that would
+  /// be refused silently.
+  interactive: boolean;
   cells: ReadonlyArray<FilmstripCellViewModel>;
 }>;
 
@@ -331,6 +339,7 @@ type MembershipViewModel = Readonly<{
 
 type ControlsViewModel = Readonly<{
   gridEnabled: boolean;
+  filmstripEnabled: boolean;
   decisionEnabled: boolean;
   clearEnabled: boolean;
   backEnabled: boolean;
@@ -732,6 +741,10 @@ export function createLibraryBrowserView(
   setSourceWidth(sourceWidth);
 
   const compactSources = window.matchMedia("(max-width: 760px)");
+  // The CSS yields the strip on a short viewport so the Preview and the
+  // decision controls keep their space; the view mirrors that condition so a
+  // hidden strip binds no thumbnails and rebuilds when the space returns.
+  const shortViewport = window.matchMedia("(max-height: 480px)");
   const syncSourcePanel = () => {
     const drawerMode = compactSources.matches || !photoView.hidden;
     const drawerOpen = drawerMode && browser.classList.contains("sources-open");
@@ -1635,6 +1648,16 @@ export function createLibraryBrowserView(
     filmstrip.replaceChildren();
     filmstrip.hidden = true;
   };
+  /// Whether activating a strip entry would open its Photo. A real entry
+  /// mirrors the Grid cell rule: the strip never presents an enabled control
+  /// whose activation would be refused silently. Placeholders stay disabled
+  /// for their own reason, so only entries that present a Photo follow this.
+  let filmstripInteractive = false;
+  const applyFilmstripInteractivity = () => {
+    for (const rendered of renderedFilmstripCells.values())
+      if (rendered.presentsPhoto)
+        rendered.button.disabled = !filmstripInteractive;
+  };
   /// One filmstrip entry. A neighbor whose facts are still loading renders as
   /// a disabled placeholder, exactly like a Grid cell outside the loaded
   /// window, so the bounded strip never invents a Photo.
@@ -1651,13 +1674,14 @@ export function createLibraryBrowserView(
       signature: "",
       deliveryFailed: false,
       thumbnail: undefined,
+      presentsPhoto: false,
     };
     const photo = cell.photo;
     if (!photo) {
       button.disabled = true;
       button.textContent = "…";
       button.setAttribute("aria-label", `Photo ${cell.index + 1} of ${total}`);
-      rendered.signature = LOADING_CELL_SIGNATURE;
+      rendered.signature = filmstripCellSignature(cell, total, false);
       return rendered;
     }
     const image = document.createElement("img");
@@ -1690,9 +1714,15 @@ export function createLibraryBrowserView(
       selectionLabel(photo.selectionState),
       photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
     ].join(" · ");
-    button.addEventListener("click", () =>
-      send({ kind: "open-photo", index: cell.index }),
-    );
+    // The current entry is where the Photographer already is: it is marked as
+    // current and presents no activation, so nothing re-opens the same Photo
+    // and throws away manual zoom.
+    if (!cell.current)
+      button.addEventListener("click", () =>
+        send({ kind: "open-photo", index: cell.index }),
+      );
+    rendered.presentsPhoto = true;
+    button.disabled = !filmstripInteractive;
     if (alive) {
       const binding: GridThumbnailBinding = {
         photoId: photo.id,
@@ -1710,6 +1740,14 @@ export function createLibraryBrowserView(
   };
   const renderFilmstrip = (model: FilmstripViewModel) => {
     if (!alive || photoView.hidden) return;
+    // A strip the CSS hides on a short viewport, or one a source without
+    // neighbors hides, must not bind thumbnails either: presenting entries
+    // for a hidden surface is the work the strip promises never to start.
+    if (shortViewport.matches || model.cells.length <= 1) {
+      clearFilmstripCells();
+      return;
+    }
+    filmstripInteractive = model.interactive;
     // The Photographer keeps their place when the strip rebuilds around a
     // new current Photo: focus follows the current entry like the Grid's
     // keyboard follows its cell.
@@ -1738,7 +1776,8 @@ export function createLibraryBrowserView(
       // so a moved entry never restarts its thumbnail transfer.
       filmstrip.append(rendered.button);
     }
-    filmstrip.hidden = model.cells.length <= 1;
+    applyFilmstripInteractivity();
+    filmstrip.hidden = false;
     if (!hadFocus) return;
     const current = model.cells.find((cell) => cell.current);
     if (!current) return;
@@ -2427,6 +2466,15 @@ export function createLibraryBrowserView(
   };
 
   compactSources.addEventListener("change", onSourceViewportChange);
+  const onShortViewportChange = () => {
+    if (!alive) return;
+    if (shortViewport.matches) {
+      clearFilmstripCells();
+      return;
+    }
+    send({ kind: "filmstrip-resize" });
+  };
+  shortViewport.addEventListener("change", onShortViewportChange);
   sourceToggle.addEventListener("click", () => openSources("grid"));
   photoSourceToggle.addEventListener("click", () => openSources("photo"));
   sourceClose.addEventListener("click", () => closeSources());
@@ -2701,6 +2749,8 @@ export function createLibraryBrowserView(
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
+      filmstripInteractive = model.filmstripEnabled;
+      applyFilmstripInteractivity();
       syncZoomControls();
     },
     renderMembership,
@@ -2827,6 +2877,7 @@ export function createLibraryBrowserView(
       preview.removeEventListener("wheel", wheelZoom);
       cancelGridRender();
       compactSources.removeEventListener("change", onSourceViewportChange);
+      shortViewport.removeEventListener("change", onShortViewportChange);
       gridViewport.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", keydown);

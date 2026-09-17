@@ -344,26 +344,45 @@ Duplicate requests for one cache identity share one in-flight job. Leaving Photo
 
 Photo View presents the current Photo's immediate neighbors from the same
 Browse Snapshot. The strip adds no route, no request shape, and no server
-contract, and it admits no window work of its own. While Photo View owns the
-UI the browser starts no work for a hidden surface, so the strip presents
-the facts the current Photo's loaded window already holds. A neighbor the
-loaded window does not cover stays a placeholder until the Photographer
-navigates to it, which admits that Photo's window through the normal Photo
-path and no more.
+contract. While Photo View owns the UI the browser admits no window work for
+a hidden surface, and the strip admits none itself: it presents the facts
+the current Photo's loaded window already holds. Photo-scoped work the Photo
+surface already runs — the current Preview and its adjacent prefetch — can
+load a neighbor's window too, and the strip presents those facts as they
+arrive. A neighbor no loaded window covers stays a placeholder until the
+Photographer navigates to it, which admits that Photo's window through the
+normal Photo path and no more.
 
 The strip is presentation state of the Photo surface, bounded at five
 entries: two Photos on each side of the current Photo, clamped at the
 source's ends. It renders only while Photo View is visible and draws its
-thumbnails from the single `thumbnail-512` derivative under the existing
-Grid thumbnail rules. An entry whose window has not loaded yet presents a
-quiet placeholder rather than a guessed Photo, and a strip failure cannot
-change the current Photo's transitions.
+thumbnails from the single `thumbnail-512` derivative. It deliberately does
+not reuse the Grid's cell composition: an entry crops that derivative to a
+square and places the Selection State badge over it, where a Grid cell keeps
+the complete image at its true aspect ratio and carries its indicators in
+the footer. An entry whose window has not loaded yet presents a quiet
+placeholder rather than a guessed Photo, and a strip failure cannot change
+the current Photo's transitions.
 
 Five entries is the bound chosen here: more neighbors would enlarge the
 strip's thumbnail demand without changing which Photos the Photographer can
 reach, and an unbounded strip would contradict the bounded window contract
-this design protects. The strip is navigation, not decision: activating an
-entry opens that Photo, and only the open Photo carries a decision.
+this design protects. The strip is navigation, not decision: activating a
+neighbor opens that Photo, and only the open Photo carries a decision. The
+current entry is marked as current and presents no activation, so it can
+never re-open the Photo the Photographer is already viewing and discard
+their zoom.
+
+### Rejected: Let the strip admit its neighbors' windows
+
+A strip that admitted a neighbor's window itself would make a hidden Grid
+range take on work while Photo View owns the UI. The first attempt did
+exactly that and regressed two recovery scenarios: an expired-source reopen
+pulled the tail window behind a hidden Grid, and an expired reopen plus a
+failed adjacent prefetch stopped reaching `Disconnected`. The deferred
+window rule and those recovery paths are worth more than a strip that never
+shows a placeholder, so a neighbor outside the loaded window stays a
+placeholder.
 
 ### Client Work Scheduling
 
