@@ -570,9 +570,9 @@ technology.
 Batch **Select** and **Reject** apply one Selection State to every selected
 Photo through the same persistence rules as a single decision, as one bounded
 operation. A confirmed Photo moves the decision progress once. A Photo the
-server reports as changed elsewhere keeps its current state, is reported, and
-does not block the other Photos. A failed operation must leave every affected
-Photo recoverable and must not present the batch as complete.
+current Library no longer holds is reported and does not block the other
+Photos. A failed operation must leave every affected Photo recoverable and
+must not present the batch as complete.
 
 A batched Selection State change is one undoable change: Undo restores the
 prior Selection State of every Photo the batch confirmed, as one unit. The

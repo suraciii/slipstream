@@ -333,10 +333,12 @@ per requested Photo:
 - `applied` with the Selection State the Photo held before the write, so the
   browser can describe one truthful Undo for the whole batch and can move its
   counts by the state it believed; and
-- `conflict` with the Photo's current Selection State when that state could
-  not take the write, or without one when the Photo no longer exists in the
-  current Library. A conflicted Photo is reported to the Photographer and
-  keeps its current truth.
+- `conflict` with the Photo's current Selection State when it still exists
+  in the current Library, or without one when the Photo no longer exists. The
+  request carries no expectation per Photo, so every Photo the Library still
+  holds takes the write; only a Photo it no longer holds is a conflict. A
+  conflicted Photo is reported to the Photographer and keeps its current
+  truth.
 
 The browser moves loaded Photo facts and the source's decision counts only for
 `applied` outcomes. A Photo whose write was not confirmed is never presented

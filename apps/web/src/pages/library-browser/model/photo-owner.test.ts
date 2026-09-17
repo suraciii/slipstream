@@ -777,4 +777,314 @@ describe("PhotoOwner", () => {
     );
     expect((await write.settlement).kind).toBe("detached");
   });
+
+  test("applies one bounded batch write and records one batch Undo", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    source.facts.set(2, fact("photo-2"));
+    const requests: Array<Readonly<{ path: string; body: string }>> = [];
+    const owner = createPhotoOwner((path, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      requests.push({ path, body });
+      if (path === "/api/photos/state")
+        return Promise.resolve(
+          Response.json({
+            applied: [
+              { photoId: "photo-0", priorValue: "undecided" },
+              { photoId: "photo-2", priorValue: "rejected" },
+            ],
+            conflicts: [],
+          }),
+        );
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }, source);
+    owner.bindSource({
+      sourceAuthority: source.authority,
+      total: 3,
+      index: 0,
+      albumId: "album-1",
+    });
+
+    const admission = owner.mutateBatch(["photo-0", "photo-2"], "selected")!;
+    expect(owner.busy).toBe(true);
+    // One write at a time still serializes a batch with every other write.
+    expect(owner.mutateBatch(["photo-1"], "selected")).toBeUndefined();
+    const outcome = await admission.settlement;
+    expect(outcome.kind).toBe("persisted");
+    expect(requests[0]).toEqual({
+      path: "/api/photos/state",
+      body: JSON.stringify({
+        photoIds: ["photo-0", "photo-2"],
+        selectionState: "selected",
+      }),
+    });
+    expect(source.facts.get(0)?.selectionState).toBe("selected");
+    expect(source.facts.get(2)?.selectionState).toBe("selected");
+    expect(source.facts.get(1)?.selectionState).toBe("undecided");
+    expect(owner.busy).toBe(false);
+    // The batch is one Undo: it replaces the single description and names no
+    // one Photo.
+    expect(owner.canUndo).toBe(true);
+    expect(owner.undoBatch).toBe(true);
+    expect(owner.undoPhotoId).toBeUndefined();
+
+    // Undo restores each confirmed Photo with the same compare-and-set write
+    // a single Undo sends, one Photo at a time.
+    const preparation = owner.prepareBatchUndo()!;
+    expect(preparation.count).toBe(2);
+    const undone = await owner.performBatchUndo(preparation);
+    expect(undone.kind).toBe("settled");
+    expect(undone.kind === "settled" && undone.restored).toEqual([
+      "photo-0",
+      "photo-2",
+    ]);
+    expect(undone.kind === "settled" && undone.failed).toEqual([]);
+    expect(undone.kind === "settled" && undone.conflicts).toEqual([]);
+    expect(requests.slice(1)).toEqual([
+      {
+        path: "/api/photos/photo-0/state",
+        body: JSON.stringify({
+          field: "selectionState",
+          value: "undecided",
+          expectedCurrent: "selected",
+        }),
+      },
+      {
+        path: "/api/photos/photo-2/state",
+        body: JSON.stringify({
+          field: "selectionState",
+          value: "rejected",
+          expectedCurrent: "selected",
+        }),
+      },
+    ]);
+    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(source.facts.get(2)?.selectionState).toBe("rejected");
+    expect(owner.canUndo).toBe(false);
+    expect(owner.undoBatch).toBe(false);
+    owner.dispose();
+  });
+
+  test("presents per-Photo batch conflicts and undoes only confirmed Photos", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    source.facts.set(2, fact("photo-2"));
+    const owner = createPhotoOwner(
+      () =>
+        Promise.resolve(
+          Response.json({
+            applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+            conflicts: [
+              { photoId: "photo-1", current: "rejected" },
+              { photoId: "photo-2" },
+            ],
+          }),
+        ),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 3, index: 0 });
+
+    const admission = owner.mutateBatch(
+      ["photo-0", "photo-1", "photo-2"],
+      "selected",
+    )!;
+    const outcome = await admission.settlement;
+    expect(outcome.kind).toBe("persisted");
+    expect(outcome.kind === "persisted" && outcome.applied).toEqual([
+      { photoId: "photo-0", priorValue: "undecided" },
+    ]);
+    expect(outcome.kind === "persisted" && outcome.conflicts).toEqual([
+      { photoId: "photo-1", current: "rejected" },
+      { photoId: "photo-2" },
+    ]);
+    // A conflict that reports its current state moves the Grid to that truth;
+    // a conflict without one keeps the fact the Grid already presents.
+    expect(source.facts.get(1)?.selectionState).toBe("rejected");
+    expect(source.facts.get(2)?.selectionState).toBe("undecided");
+    // Only the confirmed Photo is part of the one-level Undo description.
+    expect(owner.undoBatch).toBe(true);
+    expect(owner.prepareBatchUndo()!.count).toBe(1);
+    owner.dispose();
+  });
+
+  test("keeps a failed batch Undo retryable and retires its conflicts", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    let statuses: number[] = [];
+    const owner = createPhotoOwner((path) => {
+      if (path === "/api/photos/state")
+        return Promise.resolve(
+          Response.json({
+            applied: [
+              { photoId: "photo-0", priorValue: "undecided" },
+              { photoId: "photo-1", priorValue: "undecided" },
+            ],
+            conflicts: [],
+          }),
+        );
+      const status = statuses.shift() ?? 200;
+      return Promise.resolve(
+        status === 200
+          ? new Response(null, { status: 200 })
+          : new Response(null, { status }),
+      );
+    }, source);
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+
+    await owner.mutateBatch(["photo-0", "photo-1"], "selected")!.settlement;
+    // The first Photo changed elsewhere, so its restore retires; the second
+    // answered a service failure, so it stays part of the description.
+    statuses = [409, 503];
+    const first = await owner.performBatchUndo(owner.prepareBatchUndo()!);
+    expect(first.kind === "settled" && first.conflicts).toEqual(["photo-0"]);
+    expect(first.kind === "settled" && first.failed).toEqual(["photo-1"]);
+    expect(owner.undoBatch).toBe(true);
+
+    // A retry restores what is left and consumes the one-level description.
+    statuses = [200];
+    const retry = owner.prepareBatchUndo()!;
+    expect(retry.count).toBe(1);
+    const second = await owner.performBatchUndo(retry);
+    expect(second.kind === "settled" && second.restored).toEqual(["photo-1"]);
+    expect(source.facts.get(1)?.selectionState).toBe("undecided");
+    expect(owner.canUndo).toBe(false);
+    owner.dispose();
+  });
+
+  test("keeps a batch Undo retryable after a transport failure", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    let batchDone = false;
+    const owner = createPhotoOwner((path) => {
+      if (path === "/api/photos/state") {
+        batchDone = true;
+        return Promise.resolve(
+          Response.json({
+            applied: [
+              { photoId: "photo-0", priorValue: "undecided" },
+              { photoId: "photo-1", priorValue: "undecided" },
+            ],
+            conflicts: [],
+          }),
+        );
+      }
+      return batchDone
+        ? Promise.reject(new Error("offline"))
+        : Promise.resolve(new Response(null, { status: 200 }));
+    }, source);
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+
+    await owner.mutateBatch(["photo-0", "photo-1"], "selected")!.settlement;
+    const outcome = await owner.performBatchUndo(owner.prepareBatchUndo()!);
+    expect(outcome.kind).toBe("settled");
+    expect(outcome.kind === "settled" && outcome.connectivity).toBe("lost");
+    // Neither Photo was attempted, so both stay recoverable.
+    expect(outcome.kind === "settled" && outcome.failed).toEqual([
+      "photo-0",
+      "photo-1",
+    ]);
+    const retry = owner.prepareBatchUndo()!;
+    expect(retry.count).toBe(2);
+    owner.cancelBatchUndo(retry);
+    expect(owner.busy).toBe(false);
+    owner.dispose();
+  });
+
+  test("replaces the one-level Undo in both directions and survives a rebind", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const owner = createPhotoOwner((path) => {
+      if (path === "/api/photos/state")
+        return Promise.resolve(
+          Response.json({
+            applied: [{ photoId: "photo-1", priorValue: "undecided" }],
+            conflicts: [],
+          }),
+        );
+      return Promise.resolve(
+        mutationBody({
+          photoId: "photo-0",
+          field: "rating",
+          priorValue: 0,
+          expectedCurrent: 3,
+        }),
+      );
+    }, source);
+    owner.bindSource({
+      sourceAuthority: source.authority,
+      total: 2,
+      index: 0,
+      albumId: "album-1",
+    });
+
+    await owner.mutateAt(0, "rating", 3)!.settlement;
+    expect(owner.undoBatch).toBe(false);
+    expect(owner.undoPhotoId).toBe("photo-0");
+    // A batch replaces the single description.
+    await owner.mutateBatch(["photo-1"], "selected")!.settlement;
+    expect(owner.undoBatch).toBe(true);
+    expect(owner.undoPhotoId).toBeUndefined();
+    // A same-source Snapshot replacement keeps the stable-identity batch.
+    owner.rebindSource({
+      sourceAuthority: source.authority,
+      total: 2,
+      index: 0,
+    });
+    expect(owner.undoBatch).toBe(true);
+    // A new source drops it, exactly as it drops a single Undo.
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+    expect(owner.canUndo).toBe(false);
+    owner.dispose();
+  });
+
+  test("classifies a batch response that omits a requested Photo as malformed", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const owner = createPhotoOwner(
+      () =>
+        Promise.resolve(
+          Response.json({
+            applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+            conflicts: [],
+          }),
+        ),
+      source,
+    );
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+
+    const outcome = await owner.mutateBatch(["photo-0", "photo-1"], "selected")!
+      .settlement;
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" && outcome.failure).toBe("malformed");
+    // An unreadable answer may still have committed, so the facts are not
+    // patched and no Undo is offered.
+    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+    expect(owner.canUndo).toBe(false);
+    owner.dispose();
+  });
+
+  test("refuses an empty batch and detaches an admitted one on dispose", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const held = deferred<Response>();
+    const owner = createPhotoOwner(() => held.promise, source);
+    owner.bindSource({ sourceAuthority: source.authority, total: 1, index: 0 });
+
+    expect(owner.mutateBatch([], "selected")).toBeUndefined();
+    const admission = owner.mutateBatch(["photo-0"], "selected")!;
+    owner.dispose();
+    held.resolve(
+      Response.json({
+        applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+        conflicts: [],
+      }),
+    );
+    expect((await admission.settlement).kind).toBe("detached");
+  });
 });

@@ -2817,6 +2817,302 @@ test("a Grid Undo keeps the Grid owning the recovery routing", async ({
   await expect(page.locator("[data-review]")).toBeHidden();
 });
 
+test("Grid multi-selection marks Photos with modifiers, Select mode, and one clear exit", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const bar = page.locator("[data-grid-batch]");
+  const count = page.locator("[data-batch-count]");
+  const mode = page.locator("[data-grid-select-mode]");
+
+  // Nothing is multi-selected until the Photographer marks a Photo, so the
+  // batch bar stays out of the layout and no cell claims a selection.
+  await expect(bar).toBeHidden();
+  await expect(mode).toHaveAttribute("aria-pressed", "false");
+  await expect(cell(0)).not.toHaveClass(/multi-selected/);
+
+  // A Control-click toggles one Photo and becomes the range anchor.
+  await cell(0).click({ modifiers: ["Control"] });
+  await expect(bar).toBeVisible();
+  await expect(count).toHaveText("1 selected");
+  await expect(cell(0)).toHaveClass(/multi-selected/);
+  await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("[data-review]")).toBeHidden();
+
+  // A Shift-click extends the multi-selection over the loaded Photos between
+  // the anchor and the clicked Photo.
+  await cell(2).click({ modifiers: ["Shift"] });
+  await expect(count).toHaveText("3 selected");
+  for (const index of [0, 1, 2])
+    await expect(cell(index)).toHaveClass(/multi-selected/);
+  await expect(cell(3)).not.toHaveClass(/multi-selected/);
+
+  // Another Control-click toggles one Photo out and moves the anchor, so the
+  // next range extends from there.
+  await cell(1).click({ modifiers: ["Control"] });
+  await expect(count).toHaveText("2 selected");
+  await expect(cell(1)).not.toHaveClass(/multi-selected/);
+  await cell(3).click({ modifiers: ["Shift"] });
+  await expect(count).toHaveText("4 selected");
+  for (const index of [0, 1, 2, 3])
+    await expect(cell(index)).toHaveClass(/multi-selected/);
+
+  // Escape takes the same exit as the bar's Clear control.
+  await page.keyboard.press("Escape");
+  await expect(bar).toBeHidden();
+  await expect(cell(0)).not.toHaveClass(/multi-selected/);
+
+  // Select mode makes every activation toggle its Photo, so a touch device
+  // multi-selects without a modifier key, and every cell exposes the state
+  // its activation would set.
+  await mode.click();
+  await expect(mode).toHaveAttribute("aria-pressed", "true");
+  await cell(1).click();
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(count).toHaveText("1 selected");
+  await expect(cell(1)).toHaveAttribute("aria-pressed", "true");
+  await expect(cell(2)).toHaveAttribute("aria-pressed", "false");
+  await cell(4).click();
+  await expect(count).toHaveText("2 selected");
+  await page.locator("[data-batch-clear]").click();
+  await expect(bar).toBeHidden();
+  await expect(mode).toHaveAttribute("aria-pressed", "false");
+  await expect(cell(1)).not.toHaveAttribute("aria-pressed", "true");
+});
+
+test("Grid batch Select decides every multi-selected Photo and Undo restores them as one unit", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const count = page.locator("[data-batch-count]");
+  const progress = page.locator("[data-grid-progress]");
+  const batchBodies: Array<Record<string, unknown>> = [];
+  const undoWrites: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/photos/state")
+      batchBodies.push(request.postDataJSON() as Record<string, unknown>);
+    else if (/^\/api\/photos\/[^/]+\/state$/.test(path)) undoWrites.push(path);
+  });
+
+  // Select mode marks three Photos, and one batch decision applies to all of
+  // them through one bounded request.
+  await page.locator("[data-grid-select-mode]").click();
+  for (const index of [0, 1, 2]) await cell(index).click();
+  await expect(count).toHaveText("3 selected");
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "3 Photos selected.",
+  );
+  expect(batchBodies).toEqual([
+    { photoIds: [ids[0], ids[1], ids[2]], selectionState: "selected" },
+  ]);
+  for (const index of [0, 1, 2]) {
+    await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+    expect(await libraryPhoto(running.url, index)).toMatchObject({
+      selectionState: "selected",
+    });
+  }
+  await expect(progress).toContainText("3 selected");
+  // The multi-selection stays, so the same Photos can join an Album next.
+  await expect(count).toHaveText("3 selected");
+
+  // One Undo restores every confirmed Photo as one unit and stays in the
+  // Grid, exactly as a single Grid decision does.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "3 Photos restored.",
+  );
+  expect(undoWrites).toEqual([
+    `/api/photos/${ids[0]}/state`,
+    `/api/photos/${ids[1]}/state`,
+    `/api/photos/${ids[2]}/state`,
+  ]);
+  for (const index of [0, 1, 2]) {
+    await expect(cell(index).locator(".cell-state")).toHaveCount(0);
+    expect(await libraryPhoto(running.url, index)).toMatchObject({
+      selectionState: "undecided",
+    });
+  }
+  await expect(progress).toContainText("0 selected");
+  await expect(page.locator("[data-review]")).toBeHidden();
+
+  // The one-level description is consumed: nothing is left to undo.
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "3 Photos restored.",
+  );
+  expect(undoWrites).toHaveLength(3);
+});
+
+test("Grid batch reports a Photo the current Library no longer holds and decides the rest", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const undoWrites: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /^\/api\/photos\/[^/]+\/state$/.test(new URL(request.url()).pathname)
+    )
+      undoWrites.push(new URL(request.url()).pathname);
+  });
+  // The server's own per-Photo outcome behavior is covered by its tests; this
+  // test owns what the Grid presents for one. The first Photo takes the write
+  // for real, and the Library no longer holds the second.
+  await page.route("**/api/photos/state", async (route) => {
+    const requested = (route.request().postDataJSON() as { photoIds: string[] })
+      .photoIds;
+    await post(running.url, `/api/photos/${requested[0]}/state`, {
+      field: "selectionState",
+      value: "selected",
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        applied: [{ photoId: requested[0], priorValue: "undecided" }],
+        conflicts: [{ photoId: requested[1] }],
+      }),
+    });
+  });
+
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await cell(1).click();
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo selected. 1 Photo kept its current state.",
+  );
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  // The Photo the Library no longer holds keeps the fact the Grid presents
+  // and is never reported as decided.
+  await expect(cell(1).locator(".cell-state")).toHaveCount(0);
+  await expect(page.locator("[data-grid-progress]")).toContainText(
+    "1 selected",
+  );
+
+  // Only the confirmed Photo is undoable: the conflict is not part of the
+  // one-level description.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo restored.",
+  );
+  expect(undoWrites).toEqual([`/api/photos/${ids[0]}/state`]);
+  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  await page.unroute("**/api/photos/state");
+});
+
+test("Grid batch Add to Album adds every multi-selected Photo through one bounded write", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Trip" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const albumId = created.albums.find((album) => album.name === "Trip")!.id;
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const bodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === `/api/albums/${albumId}/members`
+    )
+      bodies.push(request.postDataJSON() as Record<string, unknown>);
+  });
+
+  // Two non-adjacent Photos join the Album as one batch. Membership stays
+  // outside Undo, so the batch decision history is untouched.
+  await cell(0).click({ modifiers: ["Control"] });
+  await cell(3).click({ modifiers: ["Control"] });
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await page.locator("[data-batch-album-select]").selectOption(albumId);
+  await page.locator("[data-batch-album-add]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos added to “Trip”.",
+  );
+  expect(bodies).toEqual([{ photoIds: [ids[0], ids[3]] }]);
+  const members = (await state(running.url, albumId)).members.map(
+    (member) => member.photoId,
+  );
+  expect(members).toEqual([ids[0], ids[3]]);
+  // The Album's own count follows, and the multi-selection stays for the next
+  // batch action.
+  await openSources(page);
+  await expect(
+    page.getByRole("button", { name: /^Trip 2 Photos$/ }),
+  ).toBeVisible();
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+});
+
+test("Opening another source clears the Grid multi-selection", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const bar = page.locator("[data-grid-batch]");
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(1).click();
+  await expect(bar).toBeVisible();
+
+  // A reopen of the same source is a new Snapshot, so the multi-selection
+  // starts empty and the mode ends.
+  await openSources(page);
+  await page.getByRole("button", { name: /^All Photos / }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(/^Ready · 3/);
+  await expect(bar).toBeHidden();
+  await expect(page.locator("[data-grid-select-mode]")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  await expect(cell(1)).not.toHaveClass(/multi-selected/);
+});
+
 test("Undo of a Photo View Rating that did not advance stays in the open Grid", async ({
   page,
 }) => {
@@ -7199,8 +7495,11 @@ test("Grid sort offers one explicit Capture Time order and refreshes in that ord
   await expect(sort).toHaveValue("source-default");
   await expectGridOrder(page, ascending);
 
-  // The control sits in the Grid's keyboard order.
+  // The control sits in the Grid's keyboard order, after the Select mode
+  // toggle the header ends with.
   await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-grid-select-mode]")).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(sort).toBeFocused();
 
@@ -10970,7 +11269,8 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   const sort = page.locator("[data-sort-select]");
   const browseBodies = recordBrowseBodies(page);
   // The filter offers every Choice plus the unfiltered default, and the
-  // three view controls sit in the Grid's keyboard order.
+  // view controls sit in the Grid's keyboard order, after the Select mode
+  // toggle the header ends with.
   await expect(filter).toBeVisible();
   await expect(filter).toBeEnabled();
   await expect(filter).toHaveAccessibleName("Show");
@@ -10982,6 +11282,8 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   ]);
   await expect(filter).toHaveValue("all");
   await viewport.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-grid-select-mode]")).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(sort).toBeFocused();
   await page.keyboard.press("Shift+Tab");

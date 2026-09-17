@@ -1789,6 +1789,11 @@ export function mountLibraryBrowser(
     });
   };
 
+  /// One Photo count with its noun, so every batch message reads correctly
+  /// for a single Photo and for many.
+  const photoCountText = (count: number): string =>
+    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
+
   /// Empties the Grid's multi-selection and leaves Select mode. The caller
   /// owns the render, so a source open that clears it presents the cleared
   /// Grid in its own render.
@@ -2407,7 +2412,7 @@ export function mountLibraryBrowser(
     const admission = photoOwner.mutateBatch(photoIds, value);
     if (!admission) return;
     renderGrid();
-    setDecisionStatus(`Saving ${photoIds.length.toLocaleString()} Photos…`);
+    setDecisionStatus(`Saving ${photoCountText(photoIds.length)}…`);
     const outcome = await admission.settlement;
     // The write settled, so the Grid is interactive again whatever the
     // outcome; the merged render re-enables the bar and rebuilds the decided
@@ -2436,8 +2441,8 @@ export function mountLibraryBrowser(
     const decision = value === "selected" ? "selected" : "rejected";
     setDecisionStatus(
       conflicts === 0
-        ? `${applied.toLocaleString()} Photos ${decision}.`
-        : `${applied.toLocaleString()} Photos ${decision}. ${conflicts.toLocaleString()} changed elsewhere and kept their current state.`,
+        ? `${photoCountText(applied)} ${decision}.`
+        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} kept ${conflicts === 1 ? "its" : "their"} current state.`,
     );
     updateControls();
   };
@@ -2453,7 +2458,7 @@ export function mountLibraryBrowser(
     batchAlbumPending = true;
     renderBatchAlbums();
     setDecisionStatus(
-      `Adding ${photoIds.length.toLocaleString()} Photos to “${name}”…`,
+      `Adding ${photoCountText(photoIds.length)} to “${name}”…`,
     );
     const result = await mutateAlbum(
       (context) => albumActions.addMemberships(albumId, photoIds, context),
@@ -2467,8 +2472,8 @@ export function mountLibraryBrowser(
     if (!result.admitted) return;
     setDecisionStatus(
       result.ok
-        ? `${photoIds.length.toLocaleString()} Photos added to “${name}”.`
-        : `Could not add those Photos to “${name}”. Try again.`,
+        ? `${photoCountText(photoIds.length)} added to “${name}”.`
+        : `Could not add the selected Photos to “${name}”. Try again.`,
     );
   };
   /// Restores every Photo one batch Selection State change confirmed. The
@@ -2479,9 +2484,7 @@ export function mountLibraryBrowser(
     const preparation = photoOwner.prepareBatchUndo();
     if (!preparation) return;
     updateControls();
-    setDecisionStatus(
-      `Restoring ${preparation.count.toLocaleString()} Photos…`,
-    );
+    setDecisionStatus(`Restoring ${photoCountText(preparation.count)}…`);
     const outcome = await photoOwner.performBatchUndo(preparation);
     renderGrid();
     updateControls();
@@ -2493,10 +2496,10 @@ export function mountLibraryBrowser(
     const failed = outcome.failed.length;
     setDecisionStatus(
       failed > 0
-        ? `${restored.toLocaleString()} Photos restored. ${failed.toLocaleString()} were not restored; Undo again to retry.`
+        ? `${photoCountText(restored)} restored. ${photoCountText(failed)} not restored; Undo again to retry.`
         : conflicts > 0
-          ? `${restored.toLocaleString()} Photos restored. ${conflicts.toLocaleString()} changed elsewhere and kept their current state.`
-          : `${restored.toLocaleString()} Photos restored.`,
+          ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} kept ${conflicts === 1 ? "its" : "their"} current state.`
+          : `${photoCountText(restored)} restored.`,
     );
   };
   const performUndo = async () => {
