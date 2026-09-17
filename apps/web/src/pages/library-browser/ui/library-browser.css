@@ -903,9 +903,17 @@
   background: #15181d;
 }
 
-.filmstrip-cell:hover:not(:disabled) {
+.filmstrip-cell:hover:not([aria-disabled="true"]) {
   border-color: var(--focus);
   background: #191d23;
+}
+
+/* A closed activation reads as closed: the entry keeps its place in the Tab
+   order and announces itself as unavailable instead of being disabled, and it
+   dims like a Grid cell that cannot be activated. The current Photo keeps the
+   position marker's own presentation. */
+.filmstrip-cell[aria-disabled="true"]:not([aria-current="true"]) {
+  opacity: 0.38;
 }
 
 /* The current Photo is the strip's position marker, not an activation

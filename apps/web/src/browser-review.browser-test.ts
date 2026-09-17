@@ -13868,9 +13868,7 @@ test("a strip entry rebuilt under the keyboard gives the position back", async (
     });
 
     releasePreview();
-    await expect(
-      page.getByRole("img", { name: "Photo 1 of 8" }),
-    ).toBeVisible();
+    await expect(page.getByRole("img", { name: "Photo 1 of 8" })).toBeVisible();
     await expect(
       page.locator('.filmstrip-cell[data-filmstrip-index="0"]'),
     ).not.toHaveAttribute("data-test-stamp", "before");
@@ -13879,6 +13877,52 @@ test("a strip entry rebuilt under the keyboard gives the position back", async (
   } finally {
     releasePreview();
     await page.unroute("**/api/photos/*/preview");
+  }
+});
+
+test("a closed filmstrip entry reads as a closed control without dropping focus", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 8");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5]);
+
+  // A Rating write settles while a neighbor holds the keyboard position: the
+  // strip closes every activation for the moment, and the entry the
+  // Photographer is on must both read as closed and keep the position.
+  const neighbor = page.locator('.filmstrip-cell[data-filmstrip-index="2"]');
+  const opacity = () =>
+    neighbor.evaluate((element) => Number(getComputedStyle(element).opacity));
+  await neighbor.focus();
+  await expect(neighbor).toBeFocused();
+  expect(await opacity()).toBe(1);
+  let releaseWrite!: () => void;
+  const writeGate = new Promise<void>((resolve) => {
+    releaseWrite = resolve;
+  });
+  await page.route("**/api/photos/*/state", async (route) => {
+    await writeGate;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await page.keyboard.press("3");
+    await expect(page.locator("[data-status]")).toHaveText("Saving Rating…");
+    await expect(neighbor).toHaveAttribute("aria-disabled", "true");
+    await expect(neighbor).toBeFocused();
+    expect(await opacity()).toBeLessThan(1);
+
+    releaseWrite();
+    await expect(page.locator("[data-rating]")).toHaveText("3 stars");
+    await expect(neighbor).not.toHaveAttribute("aria-disabled", "true");
+    await expect(neighbor).toBeFocused();
+    await expect.poll(opacity).toBe(1);
+  } finally {
+    releaseWrite();
+    await page.unroute("**/api/photos/*/state");
   }
 });
 
