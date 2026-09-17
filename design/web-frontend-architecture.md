@@ -214,6 +214,29 @@ the current Photo, a late response for another Photo is discarded, and
 failure does not affect decision readiness. Membership mutations continue
 to run through the Album action owner's admitted-write contract.
 
+### Grid presentation state
+
+The page UI owns the Grid's thumbnail size as presentation state of the open
+Grid. One step set in the page UI is the single source for both the CSS cell
+box and the virtualized layout: column count, row and column pitch, cell
+positions, scroll anchors, canvas height, and keyboard row movement all
+derive from the chosen step, so a size change cannot leave the layout and its
+cells disagreeing about geometry.
+
+A size change re-anchors the Grid on the topmost visible row, re-renders
+through the same merged render as scrolling, and reports the new range
+through the normal admission path. It is not a source open: it changes no
+wire contract, keeps the current Browse Snapshot, and leaves Selection State,
+Rating, and Album state untouched.
+
+Thumbnail requests keep the single `thumbnail-512` derivative at every step.
+The largest step still displays within that derivative at 1× and 2× device
+pixel ratios; above 2× the Grid scales the derivative up inside the cell
+instead of requesting another rendition: per-step renditions would fragment
+the rebuildable cache and add derivative work for no visible gain. The Preview
+scheduling priority
+in [Scalable Library Browsing](library-browsing.md) is unchanged.
+
 ### Styling
 
 Global tokens, reset rules, and the application mount surface belong to `app`.

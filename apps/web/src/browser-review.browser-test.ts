@@ -970,12 +970,14 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
     ),
   ).toBe(0);
   const closedGridHeight = await gridHeight();
-  // The narrow header wraps its progress line below the controls, which
-  // costs the fourth row at this viewport: the Grid holds three complete
-  // rows plus most of the fourth. Pin that visible-row floor (178 px row
-  // pitch: a 166 px cell and a 12 px gap) so later header growth cannot
-  // silently eat the Grid.
-  expect(closedGridHeight).toBeGreaterThanOrEqual(3 * 178 + 166 / 2);
+  // The narrow header wraps its progress line below the controls, and the
+  // Show, Size, and Sort controls need two rows at this viewport width, so
+  // the Grid holds three complete Medium rows plus the top of the fourth.
+  // Pin that measured floor (178 px row pitch: a 166 px cell and a 12 px
+  // gap) with a little margin, so later header growth cannot silently eat
+  // the Grid. The dense thumbnail size fits a fourth complete row here and
+  // is the Photographer's own choice at this viewport.
+  expect(closedGridHeight).toBeGreaterThanOrEqual(3 * 178 + 40);
 
   await sources.click();
   await expect(sources).toHaveAttribute("aria-expanded", "true");
@@ -2845,6 +2847,58 @@ test("Undo of a Photo View Rating that did not advance stays in the open Grid", 
   );
   await expect(cell(0)).toBeFocused();
   expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 0 });
+});
+
+test("Grid keyboard movement follows the rendered row at every thumbnail size", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const size = page.locator("[data-size-select]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const focusedCell = page.locator(".photo-cell:focus");
+  const heights = { small: 130, medium: 166, large: 256 } as const;
+  for (const step of ["small", "medium", "large"] as const) {
+    await selectGridThumbnailSize(page, { value: step, height: heights[step] });
+    const { columns } = await gridThumbnailLayout(page);
+    await viewport.focus();
+    // Down and Up move one complete rendered row at this size; the movement
+    // addresses the same cells the layout renders.
+    await page.keyboard.press("ArrowRight");
+    // The merged render focuses the cell the arrow addresses.
+    await expect(focusedCell).toHaveCount(1);
+    const focused = Number(await focusedCell.getAttribute("data-photo-index"));
+    await page.keyboard.press("ArrowDown");
+    // The merged render re-focuses the target cell once it is rendered.
+    await expect(cell(focused + columns)).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(cell(focused)).toBeFocused();
+  }
+
+  // The size control keeps its own keys: Grid decision and Rating keys never
+  // act on the focused Photo while the control holds focus.
+  const statePosts: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/state"))
+      statePosts.push(request.url());
+  });
+  await size.focus();
+  await page.keyboard.press("p");
+  await page.keyboard.press("x");
+  await page.keyboard.press("3");
+  expect(statePosts).toEqual([]);
+  await expect(size).toBeFocused();
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({
+    selectionState: "undecided",
+    rating: 0,
+  });
 });
 
 test("Grid keyboard movement works at a compact viewport and yields to the Sources drawer", async ({
@@ -9819,6 +9873,63 @@ async function cellBoxes(
   );
 }
 
+/**
+ * One rendered thumbnail size as the Grid lays it out: the uniform cell box,
+ * the column count, the row pitch, the Photo at the top of the viewport, and
+ * the rendered Photo range.
+ */
+async function gridThumbnailLayout(page: Page) {
+  return page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>(
+      "[data-grid-viewport]",
+    )!;
+    const cells = Array.from(
+      document.querySelectorAll<HTMLElement>(".photo-cell"),
+    );
+    const columns = new Set(cells.map((cell) => cell.style.left)).size;
+    const rowTops = Array.from(
+      new Set(cells.map((cell) => Number.parseFloat(cell.style.top))),
+    ).sort((left, right) => left - right);
+    const box = cells[0]?.getBoundingClientRect();
+    const pitch =
+      rowTops.length > 1 ? rowTops[1]! - rowTops[0]! : (box?.height ?? 0);
+    const scrolled = viewport.scrollTop;
+    const visibleTop = Math.max(
+      0,
+      ...rowTops.filter((top) => top <= scrolled + 0.5),
+    );
+    const renderedStart =
+      rowTops.length > 0 ? (rowTops[0]! / pitch) * columns : 0;
+    return {
+      columns,
+      cellWidth: Math.round(box?.width ?? 0),
+      cellHeight: Math.round(box?.height ?? 0),
+      rowPitch: Math.round(pitch),
+      topVisibleIndex: Math.round(visibleTop / pitch) * columns,
+      renderedStart,
+      renderedEnd: renderedStart + cells.length,
+      cells: cells.length,
+    };
+  });
+}
+
+/**
+ * Selects one Grid thumbnail size and waits for the merged render that lays
+ * the Grid out at it.
+ */
+async function selectGridThumbnailSize(
+  page: Page,
+  step: Readonly<{ value: string; height: number }>,
+) {
+  await page.locator("[data-size-select]").selectOption(step.value);
+  await expect
+    .poll(async () => {
+      const layout = await gridThumbnailLayout(page);
+      return [layout.cellHeight, layout.rowPitch];
+    })
+    .toEqual([step.height, step.height + 12]);
+}
+
 /** Ratio tolerance for rendered pixels versus the derivative's natural size. */
 function expectAspectRatio(geometry: GridCellGeometry): void {
   const rendered = geometry.imageWidth / geometry.imageHeight;
@@ -9953,6 +10064,241 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
   }
 });
 
+test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  const windows = recordWindowRequests(page);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 300 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const size = page.locator("[data-size-select]");
+  await expect(size).toHaveAccessibleName("Size");
+  await expect(size.locator("option")).toHaveText(["Small", "Medium", "Large"]);
+  await expect(size).toHaveValue("medium");
+  const medium = await gridThumbnailLayout(page);
+  expect([medium.cellWidth, medium.cellHeight]).toEqual([140, 166]);
+  expect(medium.rowPitch).toBe(178);
+  expect(medium.topVisibleIndex).toBe(0);
+
+  // The dense size fits more columns and a larger Photo range, so the Grid
+  // admits the window that range needs exactly as scrolling does.
+  const admitted = windows.requested.length;
+  const retainedThumbnail = await page
+    .locator('[data-photo-index="0"] img')
+    .elementHandle();
+  const retainedSource = await retainedThumbnail!.getAttribute("src");
+  await selectGridThumbnailSize(page, { value: "small", height: 130 });
+  await expectGridConverged(page, windows);
+  // A size change re-lays out the cells the Grid still shows without
+  // restarting their thumbnail transfers.
+  expect(await retainedThumbnail!.evaluate((node) => node.isConnected)).toBe(
+    true,
+  );
+  expect(await retainedThumbnail!.getAttribute("src")).toBe(retainedSource);
+  const small = await gridThumbnailLayout(page);
+  expect([small.cellWidth, small.cellHeight]).toEqual([108, 130]);
+  expect(small.rowPitch).toBe(142);
+  expect(small.columns).toBeGreaterThan(medium.columns);
+  expect(windows.requested.length).toBeGreaterThan(admitted);
+  expect(
+    coveringWindowStarts(small.renderedStart, small.renderedEnd, 300).every(
+      (start) => windows.requested.includes(start),
+    ),
+  ).toBe(true);
+
+  // Changing the size keeps the reader's place: the topmost visible row stays
+  // the first visible row, and the Virtualized layout follows the new pitch.
+  await viewport.evaluate((element) => {
+    element.scrollTop = 30 * 142;
+  });
+  await waitForGridFrame(page);
+  const anchor = (await gridThumbnailLayout(page)).topVisibleIndex;
+  expect(anchor).toBe(30 * small.columns);
+  await selectGridThumbnailSize(page, { value: "large", height: 256 });
+  await expectGridConverged(page, windows);
+  const large = await gridThumbnailLayout(page);
+  expect([large.cellWidth, large.cellHeight]).toEqual([216, 256]);
+  expect(large.rowPitch).toBe(268);
+  expect(large.columns).toBeLessThan(medium.columns);
+  // The Grid preserves the anchored Photo's row, so the anchor stays inside
+  // the first visible row even when the new column count does not divide it.
+  expect(large.topVisibleIndex).toBeLessThanOrEqual(anchor);
+  expect(anchor).toBeLessThan(large.topVisibleIndex + large.columns);
+  const anchoredBox = await page
+    .locator(`[data-photo-index="${anchor}"]`)
+    .boundingBox();
+  const viewportBox = await viewport.boundingBox();
+  expect(Math.abs(anchoredBox!.y - viewportBox!.y)).toBeLessThan(1);
+
+  // The size belongs to the browser session: another source keeps it, and a
+  // reload starts again at Medium.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText(
+    "Library Folder · Folder",
+  );
+  await expect(size).toHaveValue("large");
+  await expect
+    .poll(async () => (await gridThumbnailLayout(page)).cellWidth)
+    .toBe(216);
+  await page.reload();
+  await expect(page.getByText(/^Ready · 300 Photos$/)).toBeVisible();
+  await expect(page.locator("[data-size-select]")).toHaveValue("medium");
+  await expect
+    .poll(async () => (await gridThumbnailLayout(page)).cellWidth)
+    .toBe(140);
+});
+
+test("every Grid thumbnail size keeps uniform cards, true aspect ratios, and even narrow rows", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  const samples = [
+    { name: "a-landscape", width: 320, height: 180 },
+    { name: "b-portrait", width: 180, height: 320 },
+    { name: "c-square", width: 256, height: 256 },
+    { name: "d-panorama", width: 960, height: 160 },
+  ];
+  // Three copies of each sample: every size renders more than one row, so
+  // the rendered row pitch is real geometry instead of a single row.
+  for (const sample of samples)
+    for (let copy = 0; copy < 3; copy += 1)
+      await writeFile(
+        join(root, `${sample.name}-${copy}.jpg`),
+        await jpegWithSize(page, sample.width, sample.height),
+      );
+  const running = await server(base, root);
+  const steps = [
+    { value: "small", width: 108, height: 130 },
+    { value: "medium", width: 140, height: 166 },
+    { value: "large", width: 216, height: 256 },
+  ] as const;
+  for (const viewport of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+  ]) {
+    const narrow = viewport.width <= 760;
+    await page.setViewportSize(viewport);
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 12 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    for (const step of steps) {
+      await selectGridThumbnailSize(page, step);
+      // Every rendered cell shows its derivative before geometry is read.
+      await expect
+        .poll(() =>
+          page.evaluate(() =>
+            Array.from(
+              document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+            ).every((image) => image.complete && image.naturalWidth > 0),
+          ),
+        )
+        .toBe(true);
+      const boxes = await cellBoxes(page);
+      expect(boxes.length).toBeGreaterThanOrEqual(4);
+      // Cell identity survives every size: the position number keeps leading
+      // the caption and the caption stays a real, laid-out element.
+      const caption = await page.evaluate(() => {
+        const element = document.querySelector<HTMLDivElement>(
+          ".photo-cell .cell-caption",
+        );
+        return {
+          text: element?.textContent ?? "",
+          laidOut: Boolean(element && element.clientWidth > 0),
+        };
+      });
+      expect(caption.text).toMatch(/^\d+ · \S/);
+      expect(caption.laidOut).toBe(true);
+      expect(new Set(boxes.map((box) => Math.round(box.height)))).toEqual(
+        new Set([step.height]),
+      );
+      expect(new Set(boxes.map((box) => Math.round(box.width))).size).toBe(1);
+      // A fixed pitch keeps the cell box at its published size; the narrow
+      // layout divides the row evenly instead.
+      if (!narrow) expect(Math.round(boxes[0]!.width)).toBe(step.width);
+      const cells = await gridCellGeometry(page);
+      for (const cell of cells) {
+        expectAspectRatio(cell);
+        expect(cell.imageInsideMedia).toBe(true);
+        expect(cell.indicatorsOverlapImage).toBe(false);
+      }
+      const landscape = cells.find(
+        (cell) => cell.imageWidth > cell.imageHeight,
+      );
+      const portrait = cells.find((cell) => cell.imageHeight > cell.imageWidth);
+      expect(landscape && portrait).toBeTruthy();
+      const row = await page
+        .locator("[data-grid-viewport]")
+        .evaluate((element) => {
+          const viewportBox = element.getBoundingClientRect();
+          const rendered = Array.from(
+            element.querySelectorAll<HTMLElement>(".photo-cell"),
+          ).map((cell) => cell.getBoundingClientRect());
+          const top = Math.min(...rendered.map((box) => box.top));
+          const firstRow = rendered.filter(
+            (box) => Math.abs(box.top - top) < 1,
+          );
+          return {
+            columns: firstRow.length,
+            leadingEdge: firstRow[0]!.left - viewportBox.left,
+            trailingSpace: viewportBox.right - firstRow.at(-1)!.right,
+          };
+        });
+      expect(row.leadingEdge).toBeLessThanOrEqual(1);
+      if (narrow) {
+        // A complete row divides the available Grid width evenly, so the
+        // trailing edge carries no more than the ordinary inter-cell gap.
+        expect(row.trailingSpace).toBeGreaterThanOrEqual(9);
+        expect(row.trailingSpace).toBeLessThanOrEqual(11);
+      } else {
+        expect(row.trailingSpace).toBeGreaterThanOrEqual(10);
+        expect(row.trailingSpace).toBeLessThan(step.width + 20);
+      }
+    }
+  }
+});
+
+test("a large viewport stays bounded at every thumbnail size", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  const windows = recordWindowRequests(page);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 300 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const pitches = { small: 130, medium: 166, large: 256 } as const;
+  for (const step of ["small", "medium", "large"] as const) {
+    await selectGridThumbnailSize(page, { value: step, height: pitches[step] });
+    await expectGridConverged(page, windows);
+    const layout = await gridThumbnailLayout(page);
+    // Rendering stays proportional to the viewport, not the source: the
+    // rendered Grid covers the visible rows plus the renderer's buffer, not
+    // the whole Library, at every size.
+    const boundedRows = Math.ceil(1440 / layout.rowPitch) + 6;
+    expect(layout.cells).toBeGreaterThan(0);
+    expect(layout.cells).toBeLessThanOrEqual(layout.columns * boundedRows);
+    expect(layout.renderedEnd).toBeGreaterThan(layout.renderedStart);
+    expect(
+      coveringWindowStarts(layout.renderedStart, layout.renderedEnd, 300).every(
+        (start) => windows.requested.includes(start),
+      ),
+    ).toBe(true);
+  }
+});
+
 test("Grid cells badge only recorded Selection States", async ({ page }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 3);
@@ -10028,10 +10374,11 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   const filter = page.locator("[data-filter-select]");
   const progress = page.locator("[data-grid-progress]");
+  const size = page.locator("[data-size-select]");
   const sort = page.locator("[data-sort-select]");
   const browseBodies = recordBrowseBodies(page);
-  // The filter offers every Choice plus the unfiltered default, and both
-  // view controls sit in the Grid's keyboard order.
+  // The filter offers every Choice plus the unfiltered default, and the
+  // three view controls sit in the Grid's keyboard order.
   await expect(filter).toBeVisible();
   await expect(filter).toBeEnabled();
   await expect(filter).toHaveAccessibleName("Show");
@@ -10045,6 +10392,8 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await viewport.focus();
   await page.keyboard.press("Shift+Tab");
   await expect(sort).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(size).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(filter).toBeFocused();
 

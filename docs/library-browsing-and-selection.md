@@ -188,6 +188,28 @@ and must not cause Grid layout to jump when the thumbnail arrives.
 
 Thumbnail, Preview, scan, and bounded look-ahead loading must run in the background. Rebuildable or superseded loading must not delay source changes, navigation, already available controls, or returning between Grid View and Photo View. Changing source or view must cancel pending image transfers and requests owned only by the previous source, Photo, or view; hiding obsolete loading is not sufficient when it would continue consuming capacity. Slipstream may wait only when the requested action depends on confirmed facts or persistence, such as opening a source's first bounded window or safely completing a Selection State change before advancing.
 
+## Grid Thumbnail Size
+
+The Photographer judges focus and expression from the thumbnails themselves,
+and one fixed thumbnail size forces a choice between seeing too few Photos and
+seeing them too small. Grid View must therefore offer Small, Medium, and Large
+thumbnail sizes, and a newly loaded Library Browser starts at Medium.
+
+The size is a presentation option of the open Grid. It must not create a
+source, and it must not change source order, Album membership, Selection
+State, Rating, saved Album position, or Original Files. The chosen size
+applies while the Library Browser stays open: opening another source keeps
+it, and a browser reload starts again at Medium.
+
+Changing the size must keep the Photographer's place: the topmost visible row
+of Photos stays the first visible row, and the Grid then loads the bounded
+windows of the new layout exactly as scrolling does. Every size keeps the
+cell rules of Grid Composition and Orientation and the bounded rendering and
+loading rules of Progressive Grid Loading.
+
+The size control must be operable from a keyboard. Grid keys act only while
+the Grid owns keyboard focus, so the control receives its own keys unchanged.
+
 ## Photo View
 
 Photo View must show one current Photo as the primary content. It must also show:
