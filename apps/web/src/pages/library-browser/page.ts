@@ -44,6 +44,7 @@ import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
   createLibraryBrowserView,
   type AlbumFormReference,
+  type FilmstripEntryViewModel,
   type FolderViewModel,
   type LibraryBrowserIntent,
   type LibraryBrowserView,
@@ -71,6 +72,11 @@ type AlbumRecoveryRecord = Readonly<{
   claim: RecoveryClaim;
   sourceAuthority: SourceAuthority;
 }>;
+
+/// How many Photos the Photo View neighbor filmstrip presents on each side of
+/// the current Photo. The bound keeps the strip independent of source size: it
+/// presents at most eleven positions however many Photos the source holds.
+const FILMSTRIP_NEIGHBOR_BOUND = 5;
 export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
@@ -599,6 +605,9 @@ export function mountLibraryBrowser(
     renderSortControl();
     renderFilterControl();
     renderProgress();
+    // The strip is enabled only while its activation can immediately make the
+    // neighbor current, so it follows the same admission as a Grid cell.
+    renderPhotoStrip();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -2017,6 +2026,74 @@ export function mountLibraryBrowser(
     view.renderPhotoMetadata(result.kind === "ok" ? result.value : undefined);
   };
 
+  /// Presents the neighbor filmstrip of the current Photo. It is presentation
+  /// of the open source order: the strip covers the bounded positions around
+  /// the current Photo, and each entry carries the Photo facts the frozen
+  /// Browse Snapshot already resolved for that position. Positions whose
+  /// bounded window is still missing keep a stable placeholder, and the strip
+  /// admits the window that holds them as background look-ahead work, so the
+  /// current Preview, the Photo facts, and navigation never wait for the strip.
+  const renderPhotoStrip = (authority = photoOwner.authority) => {
+    if (!applicationAlive) return;
+    const total = sourceGrid.total;
+    const index = photoOwner.currentIndex;
+    if (view.gridVisible() || !currentPhoto() || total === 0) {
+      view.renderFilmstrip({
+        total,
+        currentIndex: index,
+        enabled: false,
+        entries: [],
+      });
+      return;
+    }
+    const start = Math.max(0, index - FILMSTRIP_NEIGHBOR_BOUND);
+    const end = Math.min(total, index + FILMSTRIP_NEIGHBOR_BOUND + 1);
+    const entries: FilmstripEntryViewModel[] = [];
+    let missing: number | undefined;
+    for (let position = start; position < end; position += 1) {
+      const neighbor = sourceGrid.photoAt(position);
+      if (!neighbor) {
+        // The first missing position owns the look-ahead window admission;
+        // the strip re-renders when that window settles and asks for the next
+        // one if the bound still crosses a window boundary.
+        missing ??= position;
+        entries.push({ index: position });
+        continue;
+      }
+      entries.push({ index: position, photo: neighbor });
+    }
+    view.renderFilmstrip({
+      total,
+      currentIndex: index,
+      enabled: canOpenGridPhoto(),
+      entries,
+    });
+    if (missing !== undefined) void loadStripWindow(missing, authority);
+  };
+
+  /// Admits the one bounded window that holds a neighbor position the strip is
+  /// still missing, at look-ahead priority, and re-renders the strip once it
+  /// settles. This is the path adjacent Preview preparation already uses, so a
+  /// failure keeps its existing reporting and never blocks navigation.
+  const loadStripWindow = async (
+    index: number,
+    authority: PhotoAuthority,
+  ): Promise<void> => {
+    const windowAuthority = photoOwner.windowAuthority;
+    if (!windowAuthority || !photoOwner.isCurrent(authority)) return;
+    const loaded = await loadWindow(
+      index,
+      { kind: "photo", authority: windowAuthority },
+      true,
+      "low",
+      undefined,
+      authority,
+    );
+    if (!loaded || !photoOwner.isCurrent(authority) || view.gridVisible())
+      return;
+    renderPhotoStrip(authority);
+  };
+
   const renderPhotoShell = (authority = photoOwner.authority): boolean => {
     const photo = currentPhoto();
     renderMembershipControls();
@@ -2033,6 +2110,7 @@ export function mountLibraryBrowser(
       limitedDetail: photo?.preview.limitedDetail,
       previewUrl: photo?.preview.url,
     });
+    renderPhotoStrip(authority);
     void loadPhotoMetadata(authority, photo?.id);
     void loadPhotoAlbums(authority, photo?.id);
     if (image)

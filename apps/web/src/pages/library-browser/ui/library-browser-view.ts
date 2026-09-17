@@ -250,6 +250,22 @@ type GridViewModel = Readonly<{
   photoAt(index: number): GridPhotoViewModel | undefined;
 }>;
 
+/// One position in the Photo View neighbor filmstrip. `photo` is undefined
+/// while the bounded window that holds the position has not loaded yet, so the
+/// strip presents a stable placeholder instead of a missing or substituted
+/// Photo.
+export type FilmstripEntryViewModel = Readonly<{
+  index: number;
+  photo?: GridPhotoViewModel;
+}>;
+
+export type FilmstripViewModel = Readonly<{
+  total: number;
+  currentIndex: number;
+  enabled: boolean;
+  entries: ReadonlyArray<FilmstripEntryViewModel>;
+}>;
+
 /// One rendered Grid cell. The signature covers everything the cell presents,
 /// so a merged render rebuilds only the cells whose Photo facts or delivery
 /// state changed and leaves every other button and its image in place.
@@ -260,6 +276,23 @@ type RenderedGridCell = {
   /// The thumbnail ownership this cell holds while it presents a Photo. A
   /// cell that leaves the rendered range or is rebuilt hands it back so the
   /// owner's image state follows the rendered Grid.
+  thumbnail: GridThumbnailBinding | undefined;
+};
+
+/// One rendered filmstrip entry, addressed by its position in the open source
+/// order. The signature covers the Photo identity and the thumbnail source the
+/// entry presents, so a strip update after navigation keeps the buttons and
+/// images of the positions that keep the same Photo and leaves every other
+/// entry untouched. The current position is presentation state the strip
+/// re-applies in place, never a rebuild reason.
+type RenderedFilmstripEntry = {
+  readonly button: HTMLButtonElement;
+  readonly index: number;
+  photo: GridPhotoViewModel | undefined;
+  signature: string;
+  deliveryFailed: boolean;
+  current: boolean;
+  /// The thumbnail ownership this entry holds while it presents a Photo.
   thumbnail: GridThumbnailBinding | undefined;
 };
 
@@ -348,6 +381,10 @@ export interface LibraryBrowserView {
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
   renderGrid(model: GridViewModel, position?: number): void;
+  /// Presents the neighbor filmstrip of Photo View. It is presentational: the
+  /// entries are the positions and Photo facts the page reports, and the strip
+  /// never resolves source order, navigation, or loading itself.
+  renderFilmstrip(model: FilmstripViewModel): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
   clearGridCells(): void;
@@ -436,6 +473,7 @@ export function createLibraryBrowserView(
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
+          <section class="filmstrip" data-filmstrip aria-label="Neighbor Photos" hidden><div class="filmstrip-track" data-filmstrip-track></div></section>
           <section class="review-bar" aria-label="Photo review">
             <div class="review-state"><dl class="facts"><div><dt>File</dt><dd data-photo-filename>—</dd></div><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
@@ -509,6 +547,8 @@ export function createLibraryBrowserView(
     "[data-grid-empty-action]",
   );
   const photoView = required<HTMLElement>(root, "[data-photo-view]");
+  const filmstrip = required<HTMLElement>(root, "[data-filmstrip]");
+  const filmstripTrack = required<HTMLElement>(root, "[data-filmstrip-track]");
   const photoTitle = required<HTMLElement>(root, "[data-photo-title]");
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
@@ -616,6 +656,20 @@ export function createLibraryBrowserView(
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   const renderedCells = new Map<number, RenderedGridCell>();
+  // The strip the Photo View presents. The view keeps the last reported model
+  // so an entry the owner rebuilds or re-presents reads the current position
+  // and activation admission instead of the one captured when it was built.
+  let filmstripModel: FilmstripViewModel = {
+    total: 0,
+    currentIndex: 0,
+    enabled: false,
+    entries: [],
+  };
+  const renderedFilmstripEntries = new Map<number, RenderedFilmstripEntry>();
+  // The current position the rendered strip already centered on. A strip that
+  // scrolls keeps that position in sight, and a manual strip scroll is left
+  // alone until the current Photo moves it again.
+  let renderedFilmstripCurrent: number | undefined;
   // The range the Grid last reported for admission. A render reports a
   // changed range, or the same range again while part of it has no Photo.
   let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
@@ -1790,6 +1844,207 @@ export function createLibraryBrowserView(
     }
   };
 
+  /// Everything one strip entry presents at its position, apart from the
+  /// current position and activation admission. Two updates with the same
+  /// signature leave the entry's button and thumbnail image in place, so
+  /// navigation only rebuilds the entries whose Photo changed.
+  const filmstripSignature = (
+    entry: FilmstripEntryViewModel,
+    total: number,
+    deliveryFailed: boolean,
+  ): string =>
+    [
+      String(entry.index),
+      String(total),
+      entry.photo?.id ?? "loading",
+      entry.photo?.originalFilename ?? "",
+      entry.photo && entry.photo.available ? "available" : "unavailable",
+      entry.photo?.preview.state ?? "pending",
+      entry.photo?.preview.thumbnailUrl ?? "",
+      deliveryFailed ? "delivery-failed" : "delivered",
+    ].join("|");
+
+  const filmstripEntryLabel = (
+    entry: RenderedFilmstripEntry,
+    current: boolean,
+  ): string => {
+    const photo = entry.photo;
+    if (!photo) return `Photo ${entry.index + 1} of ${filmstripModel.total}`;
+    return [
+      `Photo ${entry.index + 1} of ${filmstripModel.total}`,
+      ...(current ? ["Current Photo"] : []),
+      ...(photo.originalFilename ? [photo.originalFilename] : []),
+      ...gridPhotoFacts(photo, entry.deliveryFailed),
+    ].join(" — ");
+  };
+
+  /// Applies the presentation the strip owns to one retained entry: whether it
+  /// is the current position, whether activation is admitted, and the complete
+  /// accessible name. A current entry stays focusable so keyboard focus is not
+  /// thrown away when the Photo it names becomes current, but it announces
+  /// itself as unavailable because under review it has nowhere to navigate.
+  const presentFilmstripEntry = (entry: RenderedFilmstripEntry) => {
+    if (!entry.photo) {
+      entry.button.disabled = true;
+      return;
+    }
+    const current = entry.index === filmstripModel.currentIndex;
+    entry.current = current;
+    entry.button.disabled = !filmstripModel.enabled;
+    if (current) entry.button.setAttribute("aria-current", "true");
+    else entry.button.removeAttribute("aria-current");
+    if (current) entry.button.setAttribute("aria-disabled", "true");
+    else entry.button.removeAttribute("aria-disabled");
+    entry.button.setAttribute(
+      "aria-label",
+      filmstripEntryLabel(entry, current),
+    );
+  };
+
+  /// Detaches one entry's image and hands its thumbnail ownership back to the
+  /// owner. Only the rendered strip owns thumbnail images: an entry that leaves
+  /// the strip or is rebuilt in place releases its transfer.
+  const releaseFilmstripEntry = (entry: RenderedFilmstripEntry) => {
+    const image = entry.button.querySelector<HTMLImageElement>("img");
+    if (image) {
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+    }
+    if (entry.thumbnail) {
+      releaseThumbnail(entry.thumbnail);
+      entry.thumbnail = undefined;
+    }
+  };
+
+  const buildFilmstripEntry = (
+    entry: FilmstripEntryViewModel,
+  ): RenderedFilmstripEntry => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.filmstripIndex = String(entry.index);
+    const rendered: RenderedFilmstripEntry = {
+      button,
+      index: entry.index,
+      photo: entry.photo,
+      signature: "",
+      deliveryFailed: false,
+      current: false,
+      thumbnail: undefined,
+    };
+    rendered.signature = filmstripSignature(entry, filmstripModel.total, false);
+    const photo = entry.photo;
+    if (!photo) {
+      button.className = "filmstrip-cell filmstrip-placeholder";
+      button.textContent = "Loading…";
+      presentFilmstripEntry(rendered);
+      return rendered;
+    }
+    button.className = "filmstrip-cell";
+    const media = document.createElement("span");
+    media.className = "filmstrip-media";
+    const image = document.createElement("img");
+    image.alt = `Photo ${entry.index + 1} of ${filmstripModel.total}`;
+    image.loading = "lazy";
+    image.fetchPriority = "low";
+    image.decoding = "async";
+    image.draggable = false;
+    image.className = "thumbnail";
+    media.append(image);
+    button.append(media);
+    button.addEventListener("click", () => {
+      // The current Photo's own entry is the strip's position marker, so it
+      // never navigates: Previous and Next keep one meaning for a change of
+      // current Photo.
+      if (!alive || rendered.current) return;
+      send({ kind: "open-photo", index: rendered.index });
+    });
+    presentFilmstripEntry(rendered);
+    if (alive) {
+      const binding: GridThumbnailBinding = {
+        photoId: photo.id,
+        preview: photo.preview,
+        target: gridThumbnailTarget(image, (failed) => {
+          rendered.deliveryFailed = failed;
+          rendered.signature = filmstripSignature(
+            entry,
+            filmstripModel.total,
+            failed,
+          );
+          presentFilmstripEntry(rendered);
+        }),
+      };
+      rendered.thumbnail = binding;
+      bindThumbnail(binding);
+    }
+    return rendered;
+  };
+
+  /// Releases every rendered strip entry. Leaving Photo View drops the strip
+  /// with the Grid cells Photo View detached at the same boundary.
+  const clearFilmstrip = () => {
+    for (const entry of renderedFilmstripEntries.values())
+      releaseFilmstripEntry(entry);
+    renderedFilmstripEntries.clear();
+    renderedFilmstripCurrent = undefined;
+    filmstripTrack.replaceChildren();
+    filmstrip.hidden = true;
+  };
+
+  const renderFilmstrip = (model: FilmstripViewModel) => {
+    if (!alive) return;
+    filmstripModel = model;
+    const rendered: RenderedFilmstripEntry[] = [];
+    for (const entry of model.entries) {
+      const existing = renderedFilmstripEntries.get(entry.index);
+      const signature = filmstripSignature(
+        entry,
+        model.total,
+        existing?.deliveryFailed ?? false,
+      );
+      if (existing && existing.signature === signature) {
+        presentFilmstripEntry(existing);
+        rendered.push(existing);
+        continue;
+      }
+      if (existing) {
+        releaseFilmstripEntry(existing);
+        existing.button.remove();
+        renderedFilmstripEntries.delete(entry.index);
+      }
+      const built = buildFilmstripEntry(entry);
+      renderedFilmstripEntries.set(entry.index, built);
+      rendered.push(built);
+    }
+    const presented = new Set(rendered.map((entry) => entry.index));
+    for (const [index, entry] of [...renderedFilmstripEntries])
+      if (!presented.has(index)) {
+        releaseFilmstripEntry(entry);
+        entry.button.remove();
+        renderedFilmstripEntries.delete(index);
+      }
+    // The strip is the open source order: appending in ascending position also
+    // moves the entries of a shifted strip back into order.
+    for (const entry of rendered) filmstripTrack.append(entry.button);
+    // A strip that has to scroll keeps the current position in sight. Only a
+    // moved or newly rendered current position scrolls the strip, so a
+    // Photographer's own strip scroll is not taken back between renders.
+    if (renderedFilmstripCurrent !== model.currentIndex) {
+      renderedFilmstripCurrent = model.currentIndex;
+      const current = renderedFilmstripEntries.get(model.currentIndex);
+      if (current && !filmstrip.hidden) {
+        const stripBox = filmstrip.getBoundingClientRect();
+        const entryBox = current.button.getBoundingClientRect();
+        filmstrip.scrollLeft +=
+          entryBox.left -
+          stripBox.left -
+          (filmstrip.clientWidth - entryBox.width) / 2;
+      }
+    }
+    // A source with no neighbor has no strip to present.
+    filmstrip.hidden = model.entries.length <= 1;
+  };
+
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
     position.textContent = `${model.index + 1} / ${model.total}`;
@@ -2549,6 +2804,7 @@ export function createLibraryBrowserView(
       gridView.hidden = false;
       photoView.hidden = true;
       clearGridCells();
+      clearFilmstrip();
       closeSources(false);
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
@@ -2564,6 +2820,7 @@ export function createLibraryBrowserView(
       gridKeyboardIndex = undefined;
     },
     renderGrid,
+    renderFilmstrip,
     scheduleGridRender,
     cancelGridRender,
     clearGridCells,
@@ -2589,6 +2846,7 @@ export function createLibraryBrowserView(
       // Photo View detached the owner's Grid images, so the visible Grid
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
+      clearFilmstrip();
       closeSources(false);
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
@@ -2658,6 +2916,7 @@ export function createLibraryBrowserView(
       stageObserver.disconnect();
       preview.removeEventListener("wheel", wheelZoom);
       cancelGridRender();
+      clearFilmstrip();
       compactSources.removeEventListener("change", onSourceViewportChange);
       gridViewport.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onResize);

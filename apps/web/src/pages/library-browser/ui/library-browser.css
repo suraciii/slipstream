@@ -675,7 +675,7 @@
   min-height: 0;
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto;
+  grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto auto;
   overflow-y: auto;
   background: var(--canvas);
 }
@@ -868,6 +868,73 @@
   .swipe-feedback.pending {
     visibility: visible;
   }
+}
+
+/* The neighbor strip is a bounded row of thumbnails below the Preview. It
+   centers itself while its entries fit and scrolls horizontally when they do
+   not, so it never widens Photo View or shrinks a thumbnail below a usable
+   target. Its own height is content-sized: an `auto` track gives a scroll
+   container no minimum, so the strip states the minimum it needs instead of
+   collapsing on a short viewport. */
+.filmstrip {
+  display: flex;
+  min-height: 3.95rem;
+  padding: 0.35rem 0.5rem;
+  border-top: 1px solid var(--border);
+  background: var(--canvas);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.filmstrip-track {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-inline: auto;
+}
+
+.filmstrip-cell {
+  flex: none;
+  width: 4.25rem;
+  height: 3.25rem;
+  padding: 0.15rem;
+  border-color: transparent;
+  border-radius: 0.25rem;
+  background: #15181d;
+}
+
+.filmstrip-cell:hover:not(:disabled) {
+  border-color: var(--focus);
+  background: #191d23;
+}
+
+/* The current Photo is the strip's position marker, not an activation
+   target: it reads as the current entry rather than as an enabled button. */
+.filmstrip-cell[aria-current="true"] {
+  border-color: var(--focus);
+  box-shadow: inset 0 0 0 1px var(--focus);
+  background: #1b2028;
+}
+
+.filmstrip-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 0.125rem;
+  background: #050607;
+}
+
+.filmstrip-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.62rem;
+  background: #0b0d10;
 }
 
 .review-bar {
@@ -1169,6 +1236,17 @@
     min-height: 2.75rem;
   }
 
+  /* A constrained viewport yields strip space to the Preview while every
+     entry keeps a usable target. */
+  .filmstrip {
+    min-height: 3.45rem;
+  }
+
+  .filmstrip-cell {
+    width: 3.5rem;
+    height: 2.75rem;
+  }
+
   .preview[data-zoom-state="fit"] {
     touch-action: pan-y;
   }
@@ -1332,7 +1410,7 @@
   }
 
   .photo-view {
-    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto;
+    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto auto;
   }
 
   .photo-header {
