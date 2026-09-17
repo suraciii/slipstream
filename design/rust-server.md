@@ -82,6 +82,8 @@ request headers in 0.1.
 
 The checked-in files under [`../compatibility/`](../compatibility/) are the authority for JSON omission behavior, startup configuration, canonical SQLite migration inputs and shapes, Capture Time vectors, ordering examples, and legacy deterministic IDs that must survive migration. Rust compatibility tests consume these vectors, and the real Playwright suite remains the final browser authority.
 
+**Fixture coverage boundary.** The protocol vector suite currently runs against an empty fixture Library, so it pins validation, error, and empty shapes and the contract envelope. Success shapes and non-empty windows are pinned by the server test suite and the browser suite until Issue #266 lands. Every file under [`../compatibility/`](../compatibility/) must have an executing consumer; Issue #266 tracks the inventory check that enforces this rule.
+
 HTTP response shapes, SQLite v2 and v3 migration inputs, cache records, and existing persisted IDs remain compatible. Deterministic v3 identity vectors define preserved legacy values, not the allocator for new v4 records. SQLite v5 is the writable Album state defined by [Photo Library Identity and Expansion](library-identity.md) and [Photo Organization](photo-organization.md); older binaries reject it. Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
 
 Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
