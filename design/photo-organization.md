@@ -135,7 +135,7 @@ Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures a
 
 ### Presentation
 
-Wide and narrow navigation both use separate `File Locations` and `Albums` sections. A same-name Folder and Album remain distinguishable by section and current-source labeling. Folder sources identify that they include subfolders. Album deletion confirmation identifies that Photos and Original Files remain unchanged.
+Wide and narrow navigation both use separate `Folders` and `Albums` sections. `Folders` is the UI label for the File Location source defined by this document. A same-name Folder and Album remain distinguishable by section and current-source labeling. Folder sources identify that they include subfolders. Album deletion confirmation identifies that Photos and Original Files remain unchanged.
 
 The first management surface supports Album create, rename, delete, current-Photo add, current-Album removal, and adding the current recursive Folder to an Album. Grid multi-select, drag-and-drop, visual bulk reorder, Album covers, sharing, Album Groups, and Smart Albums are not required.
 

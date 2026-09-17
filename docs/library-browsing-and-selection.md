@@ -7,21 +7,25 @@ A Photographer opens Slipstream to browse the Photo Library, find Photos, and re
 The Library Browser is Slipstream's primary screen. It must open directly to the `All Photos` Grid rather than an Album landing page. Source navigation must show:
 
 - the Photo Library as the `All Photos` source;
-- the read-only Library Folder root and its Original Folders under a `File Locations` section;
+- the read-only Library Folder root and its Original Folders under a `Folders` section;
 - each Album under a separate `Albums` section;
 - the Photo count for each displayed source;
 - current Library loading or scan status; and
 - whether an Album has a saved position.
 
+The `Folders` section presents the File Locations source defined by [Physical File Locations and Virtual Albums](../design/photo-organization.md). The bounded File Location windows and their design contract keep that name.
+
 The active Grid status and every source card must use `1 Photo` for one and `N Photos` for every other count in both visible and accessible text.
 
-A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `File Locations` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
+A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
+
+On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation in the drawer.
 
 The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
 
 A source name that is visually truncated must expose its complete name on hover. An Original Folder with no descendant Folders must not present an expand control; affected rows must keep their alignment without it.
 
-Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. File Locations must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
+Opening Slipstream must not require the browser to download every Photo fact, every Album member, or the complete Original Folder tree. Album summaries may arrive with the bounded Library Overview. The `Folders` section must show a root labeled `Library Folder` without exposing its absolute server path, then load descendants as bounded direct-child Folder windows. A Folder window must report its real parent, range, direct-child count, and recursive Photo counts without returning complete recursive membership.
 
 All Folder windows retained together must come from the same Published Library. Library summary counts and Albums must also be revalidated against that publication before they replace visible shared facts. If a rescan replaces the publication while an older summary or File Locations are loading, Slipstream must discard the older summary and refresh File Locations rather than append or present facts from different publications. Opening a Folder from an expired publication must refresh navigation and require the Photographer to open the current Folder projection; it must not silently reinterpret the stale Location against a different publication.
 
@@ -261,7 +265,7 @@ Slipstream must distinguish these user-visible states:
 
 Slipstream must show a numeric count or percentage only when it knows the corresponding total and completed amount. Otherwise it must show the current phase without inventing progress.
 
-An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. If the check fails, Slipstream must retain the prior Published Library and offer **Retry Library Check**. When a replacement publishes, a completion notice must offer **Refresh Current Source**. Shared counts and File Locations may refresh immediately, but Photos discovered by that scan appear in the open source only after the Photographer refreshes or reopens it; they must not move the current open view.
+An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. If the check fails, Slipstream must retain the prior Published Library and offer **Retry Library Check**. When a replacement publishes, a completion notice must offer **Refresh Current Source**. Shared counts and the `Folders` section may refresh immediately, but Photos discovered by that scan appear in the open source only after the Photographer refreshes or reopens it; they must not move the current open view.
 
 On a new state store with no published Library, the browser may show initialization progress until the first scan publishes the Library.
 
@@ -285,7 +289,7 @@ The first product does not persist an `All Photos` or Original Folder position a
 
 ## Album Management
 
-The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique case-insensitively within the flat Album list. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
+The Photographer must be able to create an Album from source navigation. Album names must be nonempty, at most 120 characters, and unique within the flat Album list under ASCII letter-case folding, exactly as SQLite's NOCASE collation performs it; scripts without letter case, such as Chinese, are unaffected. [Physical File Locations and Virtual Albums](../design/photo-organization.md) owns that naming boundary. A newly created empty Album must open to a usable empty Grid with controls to rename or delete it.
 
 Opening Album creation or rename must focus the Album name input and select its current value. Closing an Album form after cancellation or a completed action must return focus to the control that opened it when that control remains available, or to the nearest stable Album action. A validation or persistence failure must keep the form and its input recoverable; closing that form follows the same focus rule.
 

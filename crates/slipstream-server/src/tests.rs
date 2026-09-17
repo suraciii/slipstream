@@ -1,7 +1,7 @@
 use super::*;
 use crate::folders::MAXIMUM_FILE_LOCATION_WINDOW;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read, Write},
     path::PathBuf,
@@ -673,12 +673,166 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
 }
 
 #[tokio::test]
+async fn cache_protocol_fixtures_execute_with_declared_headers() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(
+        &config.library_root.join("photo.jpg"),
+        90,
+        45,
+        [192, 64, 32],
+    );
+    let web_root = config.web_root();
+    fs::create_dir_all(web_root.join("assets")).unwrap();
+    fs::write(web_root.join("assets/app.js"), b"console.log(1)").unwrap();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let vectors: Vec<serde_json::Value> = serde_json::from_slice(
+        &fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compatibility/protocol/cache-vectors.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(vectors.len(), 2);
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let preview = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(preview["state"], "ready");
+    assert_eq!(preview["source"], "matching-jpeg");
+    let preview_url = preview["url"].as_str().unwrap().to_owned();
+    for vector in vectors {
+        let name = vector["name"].as_str().unwrap();
+        let request_definition = &vector["request"];
+        let method = request_definition["method"].as_str().unwrap();
+        let target = match vector["setup"].as_str().unwrap() {
+            "matching-jpeg" => {
+                assert_eq!(request_definition["target"], "generated-derivative");
+                format!("http://camera.local{preview_url}")
+            }
+            "web-asset" => {
+                assert_eq!(request_definition["path"], "/assets/app.js");
+                "http://camera.local/assets/app.js".to_owned()
+            }
+            other => panic!("unknown cache fixture setup {other}"),
+        };
+        let expected = &vector["expected"];
+        let response = send(
+            &router,
+            Request::builder()
+                .method(method)
+                .uri(target.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            response.status().as_u16(),
+            expected["status"].as_u64().unwrap() as u16,
+            "{name}"
+        );
+        for (header_name, value) in expected["headers"].as_object().unwrap() {
+            assert_eq!(
+                response.headers()[header_name.as_str()],
+                value.as_str().unwrap(),
+                "{name} {header_name}"
+            );
+        }
+        if let Some(pattern) = expected["etagPattern"].as_str() {
+            assert_etag_pattern(
+                pattern,
+                response.headers()[header::ETAG].to_str().unwrap(),
+                name,
+            );
+        }
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .map(|value| value.to_str().unwrap().to_owned());
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+            .await
+            .unwrap();
+        if let Some(minimum) = expected["minimumBodyBytes"].as_u64() {
+            assert!(body.len() >= minimum as usize, "{name}");
+        }
+        if let Some(revalidation) = vector.get("revalidation") {
+            assert_eq!(revalidation["header"], "if-none-match");
+            let revalidated = send(
+                &router,
+                Request::builder()
+                    .method(method)
+                    .uri(target)
+                    .header(header::IF_NONE_MATCH, etag.unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                revalidated.status().as_u16(),
+                revalidation["expectedStatus"].as_u64().unwrap() as u16,
+                "{name} revalidation"
+            );
+            assert_eq!(
+                axum::body::to_bytes(revalidated.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .len(),
+                0,
+                "{name} revalidation body"
+            );
+        }
+    }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+fn assert_etag_pattern(pattern: &str, etag: &str, name: &str) {
+    assert_eq!(pattern, "^\"[a-f0-9]{64}\"$", "{name} etag pattern");
+    let key = etag
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or_else(|| panic!("{name} etag must be quoted"));
+    assert_eq!(key.len(), 64, "{name} etag key length");
+    assert!(
+        key.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{name} etag key must be lowercase hex"
+    );
+}
+
+#[tokio::test]
 async fn photo_json_omits_optional_values_and_preserves_original_order() {
     let contract: serde_json::Value = serde_json::from_str(include_str!(
         "../../../compatibility/protocol/capture-order-omission.json"
     ))
     .unwrap();
     let ordered_paths = contract["orderedPaths"].as_array().unwrap();
+    let allowed_keys = contract["allowedKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let optional_keys = contract["optionalKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
     let (base, config) = prepare_fixture();
     capture_metadata_fixture(&config.library_root.join("z.JPG"), "2026:01:01 09:00:00");
     capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 10:00:00");
@@ -730,9 +884,17 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
             serde_json::json!({"state": "inspection-pending"})
         );
         assert!(!photo.to_string().contains(":null"));
-        for hidden in contract["hiddenFields"].as_array().unwrap() {
-            let hidden = hidden.as_str().unwrap();
-            assert!(photo.get(hidden).is_none(), "{hidden} leaked into protocol");
+        let keys = photo
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for key in &keys {
+            assert!(allowed_keys.contains(key), "{key} leaked into protocol");
+        }
+        for key in allowed_keys.difference(&optional_keys) {
+            assert!(keys.contains(key), "{key} missing from protocol");
         }
         assert!(
             !photo

@@ -2,7 +2,7 @@
 //! This crate is not a production server.
 
 #[cfg(test)]
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{ffi::CStr, os::raw::c_char, path::PathBuf};
 
@@ -61,8 +61,6 @@ pub fn source_revision(path: &str, size: u64, mtime_ms: f64) -> String {
 #[cfg(test)]
 #[derive(Deserialize)]
 struct IdentityContract {
-    #[serde(rename = "algorithmVersion")]
-    algorithm_version: String,
     vectors: Vec<IdentityVector>,
     paired: PairedVector,
 }
@@ -71,22 +69,15 @@ struct IdentityContract {
 #[derive(Deserialize)]
 struct IdentityVector {
     path: String,
-    source: String,
     size: u64,
     #[serde(rename = "mtimeMs")]
     mtime_ms: f64,
-    candidate: Option<String>,
-    edge: u16,
     #[serde(rename = "originalId")]
     original_id: String,
     #[serde(rename = "photoId")]
     photo_id: String,
     #[serde(rename = "sourceRevision")]
     source_revision: String,
-    #[serde(rename = "cacheKey")]
-    cache_key: String,
-    #[serde(rename = "manifestIdentity")]
-    manifest_identity: String,
 }
 
 #[cfg(test)]
@@ -98,27 +89,6 @@ struct PairedVector {
     jpeg_original_id: String,
     #[serde(rename = "photoId")]
     photo_id: String,
-}
-
-#[cfg(test)]
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CacheKeyInput<'a> {
-    version: &'a str,
-    photo: &'a str,
-    source: &'a str,
-    path: &'a str,
-    size: u64,
-    mtime_ms: f64,
-    candidate: &'a Option<String>,
-    edge: u16,
-}
-
-#[cfg(test)]
-#[derive(Serialize)]
-struct ManifestKeyInput<'a> {
-    photo: &'a str,
-    edge: u16,
 }
 
 #[cfg(test)]
@@ -638,28 +608,6 @@ mod tests {
             assert_eq!(
                 source_revision(&vector.path, vector.size, vector.mtime_ms),
                 vector.source_revision
-            );
-            let cache = CacheKeyInput {
-                version: &contract.algorithm_version,
-                photo: &vector.photo_id,
-                source: &vector.source,
-                path: &vector.path,
-                size: vector.size,
-                mtime_ms: vector.mtime_ms,
-                candidate: &vector.candidate,
-                edge: vector.edge,
-            };
-            assert_eq!(
-                digest(serde_json::to_string(&cache).unwrap().as_bytes()),
-                vector.cache_key
-            );
-            let manifest = ManifestKeyInput {
-                photo: &vector.photo_id,
-                edge: vector.edge,
-            };
-            assert_eq!(
-                digest(serde_json::to_string(&manifest).unwrap().as_bytes()),
-                vector.manifest_identity
             );
         }
         let pair_seed = format!(

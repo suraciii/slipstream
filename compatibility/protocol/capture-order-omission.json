@@ -1,13 +1,14 @@
 {
   "orderedPaths": ["z.JPG", "a.jpg"],
-  "hiddenFields": [
-    "captureTime",
-    "captureOffset",
-    "captureMetadataState",
-    "captureOrderKey",
-    "captureTimeField",
-    "captureSourceRevision",
-    "captureDisagreement",
-    "path"
-  ]
+  "allowedKeys": [
+    "id",
+    "available",
+    "ambiguous",
+    "originals",
+    "originalFilename",
+    "selectionState",
+    "rating",
+    "preview"
+  ],
+  "optionalKeys": ["originalFilename"]
 }
