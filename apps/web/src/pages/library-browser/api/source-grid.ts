@@ -75,6 +75,10 @@ const validPhotoSummary = (value: unknown): value is PhotoSummary => {
     value.id.length > 0 &&
     typeof value.available === "boolean" &&
     typeof value.ambiguous === "boolean" &&
+    validOptional(
+      value.originalFilename,
+      (item) => typeof item === "string" && item.length > 0,
+    ) &&
     (value.selectionState === "undecided" ||
       value.selectionState === "selected" ||
       value.selectionState === "rejected") &&

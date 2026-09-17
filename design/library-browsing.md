@@ -60,8 +60,12 @@ A Browse Window is a bounded consecutive range within one Browse Snapshot. Each 
 - availability and ambiguity;
 - Selection State and Rating;
 - Original kinds and availability;
+- the ordering Original Location's filename, because Grid View and Photo View identify a Photo by the Original File the Photographer decides on;
 - current thumbnail and review-Preview facts; and
 - derivative URLs only when current cache identities are known.
+
+The ordering Original filename is a basename only. The relative Location,
+absolute paths, and the Library Folder never cross this boundary.
 
 A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library.
 

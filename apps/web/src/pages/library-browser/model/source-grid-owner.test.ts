@@ -571,6 +571,47 @@ describe("SourceGridOwner", () => {
     expect(owner.retryRequired).toBe(false);
   });
 
+  test("carries the ordering Original filename and rejects a malformed one", async () => {
+    let filename: unknown = "IMG_4521.ARW";
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 1));
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              start: 0,
+              total: 1,
+              photos: [{ ...photo("photo-0"), originalFilename: filename }],
+            }),
+            { status: 200 },
+          ),
+        );
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner);
+    const load = (index: number) =>
+      owner.loadWindow(index, { kind: "source", authority });
+
+    expect(await load(0)).toMatchObject({ kind: "loaded" });
+    expect(owner.photoAt(0)?.originalFilename).toBe("IMG_4521.ARW");
+
+    // The field is optional, but a present value must be a non-empty name.
+    for (const malformed of ["", 42, null]) {
+      filename = malformed;
+      owner.invalidateWindow(0);
+      expect(await load(0)).toMatchObject({
+        kind: "failed",
+        malformed: true,
+        transportLost: false,
+      });
+    }
+  });
+
   test("keeps a replacement source unready until its required window loads", async () => {
     let opens = 0;
     const owner = createSourceGridOwner((input, init) => {

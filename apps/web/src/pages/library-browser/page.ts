@@ -1711,6 +1711,7 @@ export function mountLibraryBrowser(
     view.renderPhotoFacts({
       index: photoOwner.currentIndex,
       total: sourceGrid.total,
+      originalFilename: photo?.originalFilename,
       selectionState: photo?.selectionState,
       rating: photo?.rating,
     });
@@ -1946,6 +1947,7 @@ export function mountLibraryBrowser(
       total: sourceGrid.total,
       photoId: photo?.id,
       available: photo?.available,
+      originalFilename: photo?.originalFilename,
       selectionState: photo?.selectionState,
       rating: photo?.rating,
       previewSource: photo?.preview.source,
