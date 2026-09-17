@@ -188,6 +188,14 @@ export interface PhotoOwner {
     value: PhotoValue,
     advance: boolean,
   ): PhotoMutationAdmission | undefined;
+  mutateAt(
+    index: number,
+    field: PhotoField,
+    value: PhotoValue,
+  ): PhotoMutationAdmission | undefined;
+  /// Whether the pending Undo action advanced away from its Photo. A Grid
+  /// decision never advances, so Undo restores that cell in place.
+  readonly undoAdvanced: boolean;
   prepareUndo(resolvedIndex?: number): PhotoUndoPreparation | undefined;
   discardUndo(): void;
   cancelUndo(preparation: PhotoUndoPreparation): void;
@@ -289,12 +297,19 @@ export function createPhotoOwner(
     return next;
   };
 
-  const exact = (record: Lifetime, expectedPhotoId?: string): boolean =>
+  /// Whether one admitted operation still addresses the same Photo. The
+  /// address is the current Photo for a Photo View write, and the Grid
+  /// position for a Grid write, so neither write is judged by the other's
+  /// position.
+  const exact = (
+    record: Lifetime,
+    expectedPhotoId?: string,
+    index: number = binding?.index ?? 0,
+  ): boolean =>
     isCurrent(record.authority) &&
     binding?.sourceAuthority === record.sourceAuthority &&
     (expectedPhotoId === undefined ||
-      source.photoAt(record.sourceAuthority, binding.index)?.id ===
-        expectedPhotoId);
+      source.photoAt(record.sourceAuthority, index)?.id === expectedPhotoId);
 
   const currentOperation = (): PhotoOperation | undefined =>
     lifetime && binding ? operation(lifetime) : undefined;
@@ -334,6 +349,101 @@ export function createPhotoOwner(
     lastCurrentPhotoId = next.preferredPhotoId;
     renewLifetime(next.sourceAuthority);
     return latestAuthority;
+  };
+
+  /// Admits one Selection State or Rating write and settles it with the
+  /// shared classification. Photo View and Grid writes differ only in the
+  /// Photo they address and in whether a committed write advances the current
+  /// Photo; they share the admission, the one-level Undo, and every failure
+  /// rule.
+  const admitStateWrite = (
+    record: Lifetime,
+    index: number,
+    photo: PhotoSummary,
+    field: PhotoField,
+    value: PhotoValue,
+    advance: boolean,
+  ): PhotoMutationAdmission => {
+    const admitted = operation(record, index);
+    const captured = Object.freeze({ ...admitted, photoId: photo.id });
+    const priorUndo = undo;
+    undo = undefined;
+    busyAuthority = record.authority;
+    const settlement = (async (): Promise<PhotoMutationOutcome> => {
+      let result;
+      try {
+        result = await persistPhotoState(fetcher, {
+          photoId: photo.id,
+          field,
+          value,
+          ...(binding?.albumId ? { albumId: binding.albumId } : {}),
+          requireUndo: true,
+        });
+      } catch {
+        if (exact(record, photo.id, index)) undo = undefined;
+        return exact(record, photo.id, index)
+          ? Object.freeze({
+              ...captured,
+              kind: "failed",
+              field,
+              advance,
+              failure: "transport",
+              connectivity: "lost",
+            })
+          : Object.freeze({
+              ...captured,
+              kind: "detached",
+              field,
+              advance,
+            });
+      } finally {
+        if (busyAuthority === record.authority) busyAuthority = undefined;
+      }
+      if (!exact(record, photo.id, index))
+        return Object.freeze({
+          ...captured,
+          kind: "detached",
+          field,
+          advance,
+        });
+      if (result.kind === "persisted" && result.undo) {
+        const applied = patchState(
+          record,
+          captured.index,
+          photo.id,
+          field,
+          value,
+        );
+        if (applied)
+          undo = Object.freeze({
+            ...result.undo,
+            advanced: advance && captured.index < (binding?.total ?? 0) - 1,
+            snapshotIndex: captured.index,
+          });
+        return Object.freeze({
+          ...captured,
+          kind: "persisted",
+          field,
+          advance: Boolean(undo?.advanced),
+          applied,
+        });
+      }
+      if (result.kind === "rejected") undo = priorUndo;
+      else undo = undefined;
+      return Object.freeze({
+        ...captured,
+        kind: "failed",
+        field,
+        advance,
+        failure: result.kind === "rejected" ? "answered" : "malformed",
+        connectivity:
+          result.kind === "rejected" && result.status !== 409
+            ? "unchanged"
+            : "lost",
+        ...(result.kind === "rejected" ? { status: result.status } : {}),
+      });
+    })();
+    return Object.freeze({ authority: record.authority, settlement });
   };
 
   const owner: PhotoOwner = {
@@ -603,86 +713,32 @@ export function createPhotoOwner(
       const record = lifetime;
       const photo = owner.current;
       if (!record || !photo || !active || owner.busy) return undefined;
-      const admitted = operation(record);
-      const captured = Object.freeze({ ...admitted, photoId: photo.id });
-      const priorUndo = undo;
-      undo = undefined;
-      busyAuthority = record.authority;
-      const settlement = (async (): Promise<PhotoMutationOutcome> => {
-        let result;
-        try {
-          result = await persistPhotoState(fetcher, {
-            photoId: photo.id,
-            field,
-            value,
-            ...(binding?.albumId ? { albumId: binding.albumId } : {}),
-            requireUndo: true,
-          });
-        } catch {
-          if (exact(record, photo.id)) undo = undefined;
-          return exact(record, photo.id)
-            ? Object.freeze({
-                ...captured,
-                kind: "failed",
-                field,
-                advance,
-                failure: "transport",
-                connectivity: "lost",
-              })
-            : Object.freeze({
-                ...captured,
-                kind: "detached",
-                field,
-                advance,
-              });
-        } finally {
-          if (busyAuthority === record.authority) busyAuthority = undefined;
-        }
-        if (!exact(record, photo.id))
-          return Object.freeze({
-            ...captured,
-            kind: "detached",
-            field,
-            advance,
-          });
-        if (result.kind === "persisted" && result.undo) {
-          const applied = patchState(
-            record,
-            captured.index,
-            photo.id,
-            field,
-            value,
-          );
-          if (applied)
-            undo = Object.freeze({
-              ...result.undo,
-              advanced: advance && captured.index < (binding?.total ?? 0) - 1,
-              snapshotIndex: captured.index,
-            });
-          return Object.freeze({
-            ...captured,
-            kind: "persisted",
-            field,
-            advance: Boolean(undo?.advanced),
-            applied,
-          });
-        }
-        if (result.kind === "rejected") undo = priorUndo;
-        else undo = undefined;
-        return Object.freeze({
-          ...captured,
-          kind: "failed",
-          field,
-          advance,
-          failure: result.kind === "rejected" ? "answered" : "malformed",
-          connectivity:
-            result.kind === "rejected" && result.status !== 409
-              ? "unchanged"
-              : "lost",
-          ...(result.kind === "rejected" ? { status: result.status } : {}),
-        });
-      })();
-      return Object.freeze({ authority: record.authority, settlement });
+      return admitStateWrite(
+        record,
+        binding?.index ?? 0,
+        photo,
+        field,
+        value,
+        advance,
+      );
+    },
+    mutateAt: (index, field, value) => {
+      const record = lifetime;
+      if (!record || closed || owner.busy) return undefined;
+      const photo = source.photoAt(record.sourceAuthority, index);
+      if (!photo) return undefined;
+      // Clearing an already-undecided Photo is not a change. Refusing it keeps
+      // the one-level Undo description on the last real change.
+      if (
+        field === "selectionState" &&
+        value === "undecided" &&
+        photo.selectionState === "undecided"
+      )
+        return undefined;
+      return admitStateWrite(record, index, photo, field, value, false);
+    },
+    get undoAdvanced() {
+      return undo?.advanced ?? false;
     },
     prepareUndo: (resolvedIndex) => {
       const record = lifetime;

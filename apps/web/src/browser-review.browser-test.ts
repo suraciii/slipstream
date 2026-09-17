@@ -190,6 +190,22 @@ async function browseIds(url: string): Promise<string[]> {
   return ids;
 }
 
+/// The current Library facts of one Photo, read through a fresh Browse
+/// token.
+async function libraryPhoto(url: string, index: number): Promise<BrowsePhoto> {
+  const opened = (await (
+    await post(url, "/api/browse", { source: "library" })
+  ).json()) as { token: string; total: number };
+  const window = await browseWindow(url, opened.token, 0);
+  await fetch(`${url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: url },
+  });
+  const photo = window.photos[index];
+  if (!photo) throw new Error(`Library has no Photo at ${index}`);
+  return photo;
+}
+
 async function browseOrderedIds(
   url: string,
   request: Record<string, unknown>,
@@ -2077,9 +2093,13 @@ test("current source and Rating are programmatic states and Back to Grid restore
   expect(
     await back.evaluate((button) => {
       (button as HTMLButtonElement).click();
-      return (
-        document.activeElement ===
-        document.querySelector("[data-grid-viewport]")
+      const viewport = document.querySelector("[data-grid-viewport]");
+      // Activating Back to Grid moves focus into the Grid in the same task;
+      // the merged render then returns it to the Photo cell.
+      return Boolean(
+        viewport &&
+          document.activeElement !== button &&
+          viewport.contains(document.activeElement),
       );
     }),
   ).toBe(true);
@@ -2560,6 +2580,318 @@ test("Sources owns the keyboard while the Photo View is inert", async ({
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
   await expect(page.getByText("2 / 3")).toBeVisible();
+});
+
+test("Grid View moves cell focus with the arrow keys and opens the focused Photo", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const { base, root } = await fixture();
+  await writePhotos(root, 300);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 300 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  // The Grid's own column rule: one 150-pixel column per 150 pixels of Grid.
+  const columns = await viewport.evaluate((element) =>
+    Math.max(1, Math.floor(Math.max(320, element.clientWidth) / 150)),
+  );
+
+  // The Grid viewport is the keyboard's entry: the first arrow enters at the
+  // first visible Photo, and later arrows step from the cell it owns.
+  await viewport.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeFocused();
+  // The focused cell announces its position through the existing label.
+  await expect(cell(0)).toHaveAccessibleName(/^Photo 1 of 300/);
+  expect(
+    await cell(0).evaluate((element) => element.matches(":focus-visible")),
+  ).toBe(true);
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(1)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(cell(1 + columns)).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(cell(columns)).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(cell(0)).toBeFocused();
+
+  // Exactly one cell is a Tab stop, so a keyboard reaches the Grid once.
+  await expect(page.locator('.photo-cell[tabindex="0"]')).toHaveCount(1);
+  await expect(cell(0)).toHaveAttribute("tabindex", "0");
+  await expect(cell(1)).toHaveAttribute("tabindex", "-1");
+
+  // Arrow movement loads the bounded window that contains the target row the
+  // same way scrolling does.
+  const windowStarts: number[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (!/^\/api\/browse\/[^/]+$/.test(url.pathname)) return;
+    const start = Number(url.searchParams.get("start"));
+    if (Number.isFinite(start)) windowStarts.push(start);
+  });
+  for (let step = 0; step < 20; step += 1)
+    await page.keyboard.press("ArrowDown");
+  await expect.poll(() => [...new Set(windowStarts)]).toContain(120);
+  const target = 20 * columns;
+  await expect(cell(target)).toBeFocused();
+
+  // Enter opens the focused Photo, and returning restores its cell focus.
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText(
+    `${target + 1} / 300`,
+  );
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(cell(target)).toBeFocused();
+});
+
+test("Grid View decision and Rating keys act on the focused cell without opening Photo View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const statePosts: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/state"))
+      statePosts.push(request.url());
+  });
+
+  await viewport.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeFocused();
+
+  // P decides the focused cell and stays in the Grid.
+  await page.keyboard.press("p");
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(page.locator("[data-review]")).toBeHidden();
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({
+    selectionState: "selected",
+  });
+
+  // Arrow movement keeps the focused cell, and later keys act on it. The
+  // rebuilt focused cell keeps its focus through the merged render.
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(1)).toBeFocused();
+  await page.keyboard.press("x");
+  await expect(cell(1).locator(".cell-state.rejected")).toHaveText("×");
+  await expect(cell(1)).toBeFocused();
+  await page.keyboard.press("3");
+  await expect(cell(1)).toHaveAttribute("aria-label", /3 stars/);
+  expect(await libraryPhoto(running.url, 1)).toMatchObject({
+    selectionState: "rejected",
+    rating: 3,
+  });
+
+  // U clears the recorded decision, and clearing an already-undecided Photo
+  // is not a write.
+  await page.keyboard.press("u");
+  await expect(cell(1).locator(".cell-state")).toHaveCount(0);
+  expect(await libraryPhoto(running.url, 1)).toMatchObject({
+    selectionState: "undecided",
+    rating: 3,
+  });
+  const clears = statePosts.length;
+  await page.keyboard.press("u");
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(2)).toBeFocused();
+  expect(statePosts.length).toBe(clears);
+
+  // Ctrl+Z restores that change in place, keeps the Grid, and returns the
+  // keyboard to the affected cell. The one Undo description is shared with
+  // Photo View, so nothing is left to undo there.
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+  await expect(cell(1)).toBeFocused();
+  await expect(cell(1).locator(".cell-state.rejected")).toHaveText("×");
+  expect(await libraryPhoto(running.url, 1)).toMatchObject({
+    selectionState: "rejected",
+  });
+  await cell(1).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+
+  // Typing in another surface never triggers a Grid key.
+  await openSources(page);
+  await page.getByRole("button", { name: "New Album" }).click();
+  const name = page.getByLabel("Album name");
+  await name.click();
+  const typed = statePosts.length;
+  await name.pressSequentially("px5");
+  await expect(name).toHaveValue("px5");
+  expect(statePosts.length).toBe(typed);
+});
+
+test("a Grid Undo keeps the Grid owning the recovery routing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "a.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = page.locator('[data-photo-index="0"]');
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell).toBeFocused();
+  await page.keyboard.press("p");
+  await expect(cell.locator(".cell-state.selected")).toHaveText("✓");
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+
+  // The Undo released Photo View's ownership with it: a lost connection while
+  // the Grid is open routes Retry to the source footer, not into the hidden
+  // Photo View.
+  await page.route("**/api/photos/*/state", (route) =>
+    route.fulfill({ status: 409, body: "conflict" }),
+  );
+  await page.keyboard.press("p");
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry connection" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-review]")).toBeHidden();
+});
+
+test("Undo of a Photo View Rating that did not advance stays in the open Grid", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // A Rating never advances, so its Undo restores in place: the Grid that is
+  // open stays open and takes cell focus back.
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await cell(0).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await page.keyboard.press("3");
+  await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 3 });
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+  await expect(cell(0)).toBeFocused();
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 0 });
+});
+
+test("Grid keyboard movement works at a compact viewport and yields to the Sources drawer", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 12);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 12 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(1)).toBeFocused();
+
+  // The open Sources drawer owns its keys: Grid movement and Grid decisions
+  // must not act behind it.
+  await openSources(page);
+  await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("p");
+  await expect(cell(1)).not.toBeFocused();
+  expect(await libraryPhoto(running.url, 1)).toMatchObject({
+    selectionState: "undecided",
+  });
+  await page.keyboard.press("Escape");
+  // A dismissed drawer returns focus to its Sources control, as specified.
+  await expect(page.locator("[data-source-toggle]")).toBeFocused();
+  await expect(cell(1).locator(".cell-state")).toHaveCount(0);
+  // Back inside the Grid, the decision key applies to the focused cell.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("p");
+  // The Grid kept its keyboard position through the drawer round trip, so
+  // the decision still addresses that Photo and focuses its cell.
+  await expect(cell(1)).toBeFocused();
+  await expect(cell(1).locator(".cell-state.selected")).toHaveText("✓");
+});
+
+test("a failed Grid decision reports on the Grid status line and keeps Photo View closed", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "a.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const focusedCell = page.locator('[data-photo-index="0"]');
+  const focusFirstCell = async () => {
+    await page.locator("[data-grid-viewport]").focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(focusedCell).toBeFocused();
+  };
+
+  // An answered conflict reports where the Photographer is and keeps the
+  // Photo recoverable instead of switching to Photo View.
+  await page.route("**/api/photos/*/state", (route) =>
+    route.fulfill({ status: 409, body: "conflict" }),
+  );
+  await focusFirstCell();
+  await page.keyboard.press("p");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "The Photo changed elsewhere. Open it to confirm its current state.",
+  );
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(focusedCell.locator(".cell-state")).toHaveCount(0);
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+
+  // A transport failure reports its uncertainty on the same line.
+  await page.unroute("**/api/photos/*/state");
+  await page.route("**/api/photos/*/state", (route) => route.abort());
+  await page.reload();
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await focusFirstCell();
+  await page.keyboard.press("x");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Connection lost before the change was confirmed.",
+  );
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(focusedCell.locator(".cell-state")).toHaveCount(0);
 });
 
 test("fit-mode Pointer Events show pending feedback, ignore below threshold, and commit right/left only on release", async ({

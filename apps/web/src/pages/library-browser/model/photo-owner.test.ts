@@ -395,6 +395,88 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
+  test("addresses a Grid write by position and records the same one-level Undo", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    source.facts.set(2, fact("photo-2"));
+    const requests: string[] = [];
+    const gridOwner = createPhotoOwner((path, init) => {
+      requests.push(
+        `${path}:${typeof init?.body === "string" ? init.body : ""}`,
+      );
+      return Promise.resolve(
+        mutationBody({
+          photoId: "photo-2",
+          field: "selectionState",
+          priorValue: "undecided",
+          expectedCurrent: "selected",
+        }),
+      );
+    }, source);
+    gridOwner.bindSource({
+      sourceAuthority: source.authority,
+      total: 3,
+      index: 0,
+      albumId: "album-1",
+    });
+
+    const admission = gridOwner.mutateAt(2, "selectionState", "selected")!;
+    expect(gridOwner.busy).toBe(true);
+    const outcome = await admission.settlement;
+    expect(outcome.kind).toBe("persisted");
+    expect(outcome.advance).toBe(false);
+    expect(source.facts.get(2)?.selectionState).toBe("selected");
+    // A Grid write never moves the current Photo or its Photo View position.
+    expect(gridOwner.currentIndex).toBe(0);
+    expect(gridOwner.undoPhotoId).toBe("photo-2");
+    expect(gridOwner.undoAdvanced).toBe(false);
+    expect(gridOwner.busy).toBe(false);
+    expect(requests[0]).toContain('"albumId":"album-1"');
+
+    // Undo restores the same address and returns that Photo.
+    const preparation = gridOwner.prepareUndo()!;
+    expect(preparation).toMatchObject({ photoId: "photo-2", index: 2 });
+    const undone = await gridOwner.performUndo(preparation);
+    expect(undone.kind).toBe("persisted");
+    expect(source.facts.get(2)?.selectionState).toBe("undecided");
+    expect(gridOwner.currentIndex).toBe(2);
+    gridOwner.dispose();
+  });
+
+  test("refuses Grid writes that address no change or no Photo", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const held = deferred<Response>();
+    let writes = 0;
+    const owner = createPhotoOwner((path, init) => {
+      writes += 1;
+      void path;
+      void init;
+      return held.promise;
+    }, source);
+    owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
+
+    // Clearing an already-undecided Photo is not a change and not a write.
+    expect(owner.mutateAt(0, "selectionState", "undecided")).toBeUndefined();
+    expect(writes).toBe(0);
+    // A Grid position without a Photo is not an address.
+    expect(owner.mutateAt(5, "rating", 3)).toBeUndefined();
+    expect(writes).toBe(0);
+
+    // One write at a time still serializes Grid writes with Photo View writes.
+    const admission = owner.mutateAt(1, "rating", 4)!;
+    expect(owner.busy).toBe(true);
+    expect(owner.mutateAt(0, "rating", 5)).toBeUndefined();
+    held.resolve(new Response(null, { status: 503 }));
+    const outcome = await admission.settlement;
+    expect(outcome.kind).toBe("failed");
+    expect(writes).toBe(1);
+    expect(owner.busy).toBe(false);
+    owner.dispose();
+  });
+
   test("keeps Retry authority current while its Photo fact is reloaded", () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
