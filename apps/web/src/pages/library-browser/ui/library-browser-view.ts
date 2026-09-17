@@ -266,6 +266,16 @@ type RenderedGridCell = {
 /// Placeholder cells present no Photo: they never initiate loading.
 const LOADING_CELL_SIGNATURE = "loading";
 
+/// One rendered filmstrip entry. The signature covers the facts and the
+/// current marker, so a strip render rebuilds only the entries that changed
+/// and every other entry keeps its thumbnail transfer.
+type RenderedFilmstripCell = {
+  readonly button: HTMLButtonElement;
+  signature: string;
+  deliveryFailed: boolean;
+  thumbnail: GridThumbnailBinding | undefined;
+};
+
 type PhotoFactsViewModel = Readonly<{
   index: number;
   total: number;
@@ -280,6 +290,19 @@ type PhotoMetadataViewModel = Readonly<{
   iso?: number;
   shutterSpeed?: string;
   focalLength?: string;
+}>;
+
+/// One bounded neighbor entry. `photo` is absent while its facts are still
+/// loading, so the entry renders a quiet placeholder instead of guessing.
+type FilmstripCellViewModel = Readonly<{
+  index: number;
+  current: boolean;
+  photo: GridPhotoViewModel | undefined;
+}>;
+
+type FilmstripViewModel = Readonly<{
+  total: number;
+  cells: ReadonlyArray<FilmstripCellViewModel>;
 }>;
 
 type PhotoShellViewModel = PhotoFactsViewModel &
@@ -362,6 +385,10 @@ export interface LibraryBrowserView {
   focusGridIndex(index: number): void;
   showGrid(index?: number): void;
   enterPhoto(): void;
+  /// Presents the bounded neighbor entries around the current Photo. The
+  /// strip rebuilds only the entries whose facts or delivery state changed,
+  /// so navigating keeps every other entry's thumbnail in place.
+  renderFilmstrip(model: FilmstripViewModel): void;
   renderPhotoFacts(model: PhotoFactsViewModel): void;
   renderPhotoMetadata(model?: PhotoMetadataViewModel): void;
   renderPhotoShell(
@@ -436,6 +463,7 @@ export function createLibraryBrowserView(
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
+          <div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div>
           <section class="review-bar" aria-label="Photo review">
             <div class="review-state"><dl class="facts"><div><dt>File</dt><dd data-photo-filename>—</dd></div><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
@@ -521,6 +549,7 @@ export function createLibraryBrowserView(
   const zoomLevel = required<HTMLElement>(root, "[data-zoom-level]");
   const zoom100 = required<HTMLButtonElement>(root, "[data-zoom-100]");
   const selection = required<HTMLElement>(root, "[data-selection]");
+  const filmstrip = required<HTMLElement>(root, "[data-filmstrip]");
   const photoFilename = required<HTMLElement>(root, "[data-photo-filename]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
@@ -616,6 +645,7 @@ export function createLibraryBrowserView(
   let renderedViewportHeight = 0;
   let gridRenderFrame: number | undefined;
   const renderedCells = new Map<number, RenderedGridCell>();
+  const renderedFilmstripCells = new Map<number, RenderedFilmstripCell>();
   // The range the Grid last reported for admission. A render reports a
   // changed range, or the same range again while part of it has no Photo.
   let reportedGridRange: Readonly<{ start: number; end: number }> | undefined;
@@ -1586,6 +1616,140 @@ export function createLibraryBrowserView(
     }
     return rendered;
   };
+  const releaseFilmstripCell = (rendered: RenderedFilmstripCell) => {
+    const image = rendered.button.querySelector<HTMLImageElement>("img");
+    if (image) {
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+    }
+    if (rendered.thumbnail) {
+      releaseThumbnail(rendered.thumbnail);
+      rendered.thumbnail = undefined;
+    }
+  };
+  const clearFilmstripCells = () => {
+    for (const rendered of renderedFilmstripCells.values())
+      releaseFilmstripCell(rendered);
+    renderedFilmstripCells.clear();
+    filmstrip.replaceChildren();
+    filmstrip.hidden = true;
+  };
+  /// One filmstrip entry. A neighbor whose facts are still loading renders as
+  /// a disabled placeholder, exactly like a Grid cell outside the loaded
+  /// window, so the bounded strip never invents a Photo.
+  const buildFilmstripCell = (
+    cell: FilmstripCellViewModel,
+    total: number,
+  ): RenderedFilmstripCell => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "filmstrip-cell";
+    button.dataset.filmstripIndex = String(cell.index);
+    const rendered: RenderedFilmstripCell = {
+      button,
+      signature: "",
+      deliveryFailed: false,
+      thumbnail: undefined,
+    };
+    const photo = cell.photo;
+    if (!photo) {
+      button.disabled = true;
+      button.textContent = "…";
+      button.setAttribute("aria-label", `Photo ${cell.index + 1} of ${total}`);
+      rendered.signature = LOADING_CELL_SIGNATURE;
+      return rendered;
+    }
+    const image = document.createElement("img");
+    image.alt = "";
+    image.loading = "lazy";
+    image.fetchPriority = "low";
+    image.decoding = "async";
+    image.draggable = false;
+    image.className = "thumbnail";
+    button.append(image);
+    if (photo.selectionState !== "undecided") {
+      const badge = document.createElement("span");
+      badge.className = `cell-state ${photo.selectionState}`;
+      badge.textContent = photo.selectionState === "selected" ? "✓" : "×";
+      button.append(badge);
+    }
+    if (cell.current) button.setAttribute("aria-current", "true");
+    // The entry is named by its position and identity, and its decision and
+    // Rating travel in the description instead. A name carrying "Selected" or
+    // "Undecided" would make the entry indistinguishable from the Select,
+    // Reject, and Undo controls for anything that addresses controls by name.
+    button.setAttribute(
+      "aria-label",
+      [
+        `Photo ${cell.index + 1} of ${total}`,
+        ...(photo.originalFilename ? [photo.originalFilename] : []),
+      ].join(" — "),
+    );
+    button.title = [
+      selectionLabel(photo.selectionState),
+      photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
+    ].join(" · ");
+    button.addEventListener("click", () =>
+      send({ kind: "open-photo", index: cell.index }),
+    );
+    if (alive) {
+      const binding: GridThumbnailBinding = {
+        photoId: photo.id,
+        preview: photo.preview,
+        target: gridThumbnailTarget(image, (failed) => {
+          rendered.deliveryFailed = failed;
+          rendered.signature = filmstripCellSignature(cell, total, failed);
+        }),
+      };
+      rendered.thumbnail = binding;
+      bindThumbnail(binding);
+    }
+    rendered.signature = filmstripCellSignature(cell, total, false);
+    return rendered;
+  };
+  const renderFilmstrip = (model: FilmstripViewModel) => {
+    if (!alive || photoView.hidden) return;
+    // The Photographer keeps their place when the strip rebuilds around a
+    // new current Photo: focus follows the current entry like the Grid's
+    // keyboard follows its cell.
+    const hadFocus = filmstrip.contains(document.activeElement);
+    const wanted = new Set(model.cells.map((cell) => cell.index));
+    for (const [index, rendered] of [...renderedFilmstripCells]) {
+      if (wanted.has(index)) continue;
+      releaseFilmstripCell(rendered);
+      rendered.button.remove();
+      renderedFilmstripCells.delete(index);
+    }
+    for (const cell of model.cells) {
+      const signature = filmstripCellSignature(cell, model.total, false);
+      let rendered = renderedFilmstripCells.get(cell.index);
+      if (rendered && rendered.signature !== signature) {
+        releaseFilmstripCell(rendered);
+        rendered.button.remove();
+        rendered = undefined;
+        renderedFilmstripCells.delete(cell.index);
+      }
+      if (!rendered) {
+        rendered = buildFilmstripCell(cell, model.total);
+        renderedFilmstripCells.set(cell.index, rendered);
+      }
+      // Appending an entry the strip already holds keeps its image element,
+      // so a moved entry never restarts its thumbnail transfer.
+      filmstrip.append(rendered.button);
+    }
+    filmstrip.hidden = model.cells.length <= 1;
+    if (!hadFocus) return;
+    const current = model.cells.find((cell) => cell.current);
+    if (!current) return;
+    const entry = renderedFilmstripCells.get(current.index)?.button;
+    if (
+      entry &&
+      entry.offsetParent !== null &&
+      document.activeElement !== entry
+    )
+      entry.focus();
+  };
   /// True while the Grid owns keyboard focus, so Grid keys never act while
   /// another surface (the Sources drawer, an Album form, the Photo View) has
   /// it.
@@ -2549,6 +2713,7 @@ export function createLibraryBrowserView(
       gridView.hidden = false;
       photoView.hidden = true;
       clearGridCells();
+      clearFilmstripCells();
       closeSources(false);
       if (returnFocus) gridViewport.focus();
       gridTitle.textContent = name;
@@ -2589,6 +2754,7 @@ export function createLibraryBrowserView(
       // Photo View detached the owner's Grid images, so the visible Grid
       // rebuilds its cells and re-attaches every thumbnail it still shows.
       clearGridCells();
+      clearFilmstripCells();
       closeSources(false);
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
@@ -2608,6 +2774,7 @@ export function createLibraryBrowserView(
       resetZoomForImage();
       photoSurface = {};
     },
+    renderFilmstrip,
     renderPhotoFacts,
     renderPhotoMetadata,
     renderPhotoShell,
@@ -2656,6 +2823,7 @@ export function createLibraryBrowserView(
       alive = false;
       resetGestures();
       stageObserver.disconnect();
+      clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
       cancelGridRender();
       compactSources.removeEventListener("change", onSourceViewportChange);
@@ -2720,6 +2888,19 @@ function gridCellSignature(
   ].join("|");
 }
 
+function filmstripCellSignature(
+  cell: FilmstripCellViewModel,
+  total: number,
+  deliveryFailed: boolean,
+): string {
+  const photo = cell.photo;
+  return [
+    String(cell.index),
+    String(total),
+    cell.current ? "current" : "neighbor",
+    photo ? gridCellSignature(cell.index, photo, deliveryFailed) : "loading",
+  ].join("|");
+}
 function gridThumbnailTarget(
   image: HTMLImageElement,
   setDeliveryFailed: (failed: boolean) => void,

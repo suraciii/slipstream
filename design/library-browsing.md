@@ -340,6 +340,31 @@ Slipstream must not automatically prepare every Library Preview. Full precomputa
 
 Duplicate requests for one cache identity share one in-flight job. Leaving Photo View may leave a nearly complete reusable job running, but queued speculative work with no consumer may be dropped.
 
+### Filmstrip Neighbors
+
+Photo View presents the current Photo's immediate neighbors from the same
+Browse Snapshot. The strip adds no route, no request shape, and no server
+contract, and it admits no window work of its own. While Photo View owns the
+UI the browser starts no work for a hidden surface, so the strip presents
+the facts the current Photo's loaded window already holds. A neighbor the
+loaded window does not cover stays a placeholder until the Photographer
+navigates to it, which admits that Photo's window through the normal Photo
+path and no more.
+
+The strip is presentation state of the Photo surface, bounded at five
+entries: two Photos on each side of the current Photo, clamped at the
+source's ends. It renders only while Photo View is visible and draws its
+thumbnails from the single `thumbnail-512` derivative under the existing
+Grid thumbnail rules. An entry whose window has not loaded yet presents a
+quiet placeholder rather than a guessed Photo, and a strip failure cannot
+change the current Photo's transitions.
+
+Five entries is the bound chosen here: more neighbors would enlarge the
+strip's thumbnail demand without changing which Photos the Photographer can
+reach, and an unbounded strip would contradict the bounded window contract
+this design protects. The strip is navigation, not decision: activating an
+entry opens that Photo, and only the open Photo carries a decision.
+
 ### Client Work Scheduling
 
 The browser treats source control and current-Photo requests as foreground work. Grid thumbnail transfer, bounded look-ahead, adjacent Preview preparation, and scan progress are background work. Background work must not occupy browser network or rendering capacity in a way that delays a new source request or an already available control.

@@ -1677,6 +1677,9 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     // A window request captured before a source change never commits here.
     if (!sourceGrid.isCurrent(outcome.authority)) return;
+    // A settled window can hand the strip neighbor facts from either scope,
+    // so the strip re-renders whenever the loaded facts change.
+    if (outcome.kind === "loaded") renderFilmstrip();
     // Photo windows present through the Photo surface that awaits them.
     if (outcome.owner.scope !== "source") return;
     const generation = String(outcome.owner.generation);
@@ -1794,6 +1797,7 @@ export function mountLibraryBrowser(
       selectionState: photo?.selectionState,
       rating: photo?.rating,
     });
+    renderFilmstrip();
     updateControls();
   };
 
@@ -1810,6 +1814,38 @@ export function mountLibraryBrowser(
       image.resolvedUrl,
       image.surface,
     );
+  };
+
+  /// The bounded neighbor radius of the filmstrip. The strip stays this
+  /// bounded however large the source is, and its entries follow the open
+  /// source's own order, so an Album order or a Selection State filter shows
+  /// the neighbors the Photographer actually moves through.
+  ///
+  /// The strip presents the facts the current Photo's loaded window already
+  /// holds and admits nothing itself: Photo View owns the UI while it is
+  /// open, so it starts no window work for a hidden surface, and a neighbor
+  /// outside the loaded window stays a placeholder until navigating to it
+  /// loads that window through the normal Photo path.
+  const FILMSTRIP_RADIUS = 2;
+  const filmstripRange = (
+    index: number,
+  ): Readonly<{ first: number; last: number }> => ({
+    first: Math.max(0, index - FILMSTRIP_RADIUS),
+    last: Math.min(sourceGrid.total - 1, index + FILMSTRIP_RADIUS),
+  });
+  const renderFilmstrip = () => {
+    if (!applicationAlive || view.gridVisible()) return;
+    const index = photoOwner.currentIndex;
+    if (!photoOwner.current || index < 0 || sourceGrid.total === 0) return;
+    const { first, last } = filmstripRange(index);
+    const cells = [];
+    for (let position = first; position <= last; position += 1)
+      cells.push({
+        index: position,
+        current: position === index,
+        photo: sourceGrid.photoAt(position),
+      });
+    view.renderFilmstrip({ total: sourceGrid.total, cells });
   };
 
   type MembershipFacts =
@@ -2042,6 +2078,7 @@ export function mountLibraryBrowser(
         image.resolvedUrl,
         image.surface,
       );
+    renderFilmstrip();
     updateControls();
     return Boolean(image);
   };

@@ -243,6 +243,22 @@ explanation of the limit must remain available to assistive technology.
 
 The next and previous Photos must remain reachable without recording a decision.
 
+Photo View must show the current Photo's immediate neighbors as a bounded
+strip of thumbnails centered on the current Photo. Activating an entry
+navigates to that Photo, and the entry for the current Photo is marked.
+The strip is bounded independently of source size and follows the open
+source's order, so an Album's explicit order and a Selection State filter
+show the neighbors the Photographer actually moves through.
+
+The strip is supporting content. On a short viewport it yields so the
+Preview, the decisions, and Rating keep their space, and it must never widen
+Photo View or clip a control. A neighbor the browser has not loaded must
+appear as an unavailable entry rather than a guessed Photo. Moving through
+the strip is navigation: it must not record a decision, and it must not
+replace the Previous and Next controls. Every entry must be reachable and
+operable with the keyboard, and the strip must not take over a Photo View
+shortcut.
+
 Slipstream must prioritize the current Photo's Preview. After the current Preview is ready, it may prepare the immediately next and previous Previews in the background. This preparation must not change saved position or selection state.
 
 Photo View must keep the Preview inside the available viewport width. The
