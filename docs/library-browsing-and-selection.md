@@ -193,8 +193,9 @@ thumbnail sizes, and a newly loaded Library Browser starts at Medium.
 
 The size is a presentation option of the open Grid. It must not create a
 source, and it must not change source order, Album membership, Selection
-State, Rating, saved Album position, or Original Files. The first product does
-not keep the chosen size across a browser reload.
+State, Rating, saved Album position, or Original Files. The chosen size
+applies while the Library Browser stays open: opening another source keeps
+it, and a browser reload starts again at Medium.
 
 Changing the size must keep the Photographer's place: the topmost visible row
 of Photos stays the first visible row, and the Grid then loads the bounded

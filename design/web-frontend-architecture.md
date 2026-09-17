@@ -230,10 +230,11 @@ wire contract, keeps the current Browse Snapshot, and leaves Selection State,
 Rating, and Album state untouched.
 
 Thumbnail requests keep the single `thumbnail-512` derivative at every step.
-The largest step still displays within that derivative at the common device
-pixel ratios, and the Grid scales it inside the cell instead of requesting
-another rendition: per-step renditions would fragment the rebuildable cache
-and add derivative work for no visible gain. The Preview scheduling priority
+The largest step still displays within that derivative at 1× and 2× device
+pixel ratios; above 2× the Grid scales the derivative up inside the cell
+instead of requesting another rendition: per-step renditions would fragment
+the rebuildable cache and add derivative work for no visible gain. The Preview
+scheduling priority
 in [Scalable Library Browsing](library-browsing.md) is unchanged.
 
 ### Styling

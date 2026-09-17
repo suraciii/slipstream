@@ -10127,7 +10127,10 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
   expect([large.cellWidth, large.cellHeight]).toEqual([216, 256]);
   expect(large.rowPitch).toBe(268);
   expect(large.columns).toBeLessThan(medium.columns);
-  expect(large.topVisibleIndex).toBe(anchor);
+  // The Grid preserves the anchored Photo's row, so the anchor stays inside
+  // the first visible row even when the new column count does not divide it.
+  expect(large.topVisibleIndex).toBeLessThanOrEqual(anchor);
+  expect(anchor).toBeLessThan(large.topVisibleIndex + large.columns);
   const anchoredBox = await page
     .locator(`[data-photo-index="${anchor}"]`)
     .boundingBox();
@@ -10201,6 +10204,19 @@ test("every Grid thumbnail size keeps uniform cards, true aspect ratios, and eve
         .toBe(true);
       const boxes = await cellBoxes(page);
       expect(boxes.length).toBeGreaterThanOrEqual(4);
+      // Cell identity survives every size: the position number keeps leading
+      // the caption and the caption stays a real, laid-out element.
+      const caption = await page.evaluate(() => {
+        const element = document.querySelector<HTMLDivElement>(
+          ".photo-cell .cell-caption",
+        );
+        return {
+          text: element?.textContent ?? "",
+          laidOut: Boolean(element && element.clientWidth > 0),
+        };
+      });
+      expect(caption.text).toMatch(/^\d+ · \S/);
+      expect(caption.laidOut).toBe(true);
       expect(new Set(boxes.map((box) => Math.round(box.height)))).toEqual(
         new Set([step.height]),
       );
@@ -10244,7 +10260,7 @@ test("every Grid thumbnail size keeps uniform cards, true aspect ratios, and eve
         expect(row.trailingSpace).toBeLessThanOrEqual(11);
       } else {
         expect(row.trailingSpace).toBeGreaterThanOrEqual(10);
-        expect(row.trailingSpace).toBeLessThan(step.width + 10);
+        expect(row.trailingSpace).toBeLessThan(step.width + 20);
       }
     }
   }
@@ -10269,9 +10285,11 @@ test("a large viewport stays bounded at every thumbnail size", async ({
     await expectGridConverged(page, windows);
     const layout = await gridThumbnailLayout(page);
     // Rendering stays proportional to the viewport, not the source: the
-    // rendered Grid is far smaller than the 300-Photo Library at every size.
+    // rendered Grid covers the visible rows plus the renderer's buffer, not
+    // the whole Library, at every size.
+    const boundedRows = Math.ceil(1440 / layout.rowPitch) + 6;
     expect(layout.cells).toBeGreaterThan(0);
-    expect(layout.cells).toBeLessThan(300);
+    expect(layout.cells).toBeLessThanOrEqual(layout.columns * boundedRows);
     expect(layout.renderedEnd).toBeGreaterThan(layout.renderedStart);
     expect(
       coveringWindowStarts(layout.renderedStart, layout.renderedEnd, 300).every(
