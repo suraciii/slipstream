@@ -7,6 +7,7 @@ import type {
 import {
   fetchPreview,
   persistPhotoState,
+  persistPhotoStateBatch,
   type PhotoFetch,
 } from "../api/photo.js";
 import { TaskScope } from "./async-ownership.js";
@@ -58,6 +59,16 @@ export interface PhotoSourcePort {
     sourceAuthority: SourceAuthority,
     index: number,
     photoId: string,
+    selectionState: SelectionState,
+  ): boolean;
+  /// Applies one confirmed batch outcome by stable Photo identity. A loaded
+  /// fact is patched and moves the source counts by the state the Grid
+  /// believed; a Photo the Grid no longer holds moves the counts by the
+  /// server's own prior value instead, so an evicted Photo still moves once.
+  applyBatchSelection(
+    sourceAuthority: SourceAuthority,
+    photoId: string,
+    priorValue: SelectionState,
     selectionState: SelectionState,
   ): boolean;
   patchRating(
@@ -129,6 +140,51 @@ export type PhotoMutationAdmission = Readonly<{
   settlement: Promise<PhotoMutationOutcome>;
 }>;
 
+/// One bounded batch Selection State write from the Grid's multi-selection.
+/// It shares the single write admission and the one-level Undo, and it reports
+/// the per-Photo outcomes the Grid presents.
+export type PhotoBatchOutcome =
+  | Readonly<{
+      kind: "persisted";
+      value: SelectionState;
+      applied: ReadonlyArray<
+        Readonly<{ photoId: string; priorValue: SelectionState }>
+      >;
+      conflicts: ReadonlyArray<
+        Readonly<{ photoId: string; current?: SelectionState }>
+      >;
+    }>
+  | Readonly<{
+      kind: "failed";
+      failure: "answered" | "malformed" | "transport";
+      connectivity: "unchanged" | "lost";
+      status?: number;
+    }>
+  | Readonly<{ kind: "detached" }>;
+
+export type PhotoBatchAdmission = Readonly<{
+  settlement: Promise<PhotoBatchOutcome>;
+}>;
+
+declare const batchUndoOperationBrand: unique symbol;
+type BatchUndoOperation = Readonly<{ [batchUndoOperationBrand]: true }>;
+
+export type PhotoBatchUndoPreparation = Readonly<{
+  authority: PhotoAuthority;
+  operation: BatchUndoOperation;
+  count: number;
+}>;
+
+export type PhotoBatchUndoOutcome =
+  | Readonly<{
+      kind: "settled";
+      restored: ReadonlyArray<string>;
+      conflicts: ReadonlyArray<string>;
+      failed: ReadonlyArray<string>;
+      connectivity: "unchanged" | "lost";
+    }>
+  | Readonly<{ kind: "detached" }>;
+
 export type PhotoUndoPreparation = PhotoOperation &
   Readonly<{
     operation: UndoOperation;
@@ -196,6 +252,17 @@ export interface PhotoOwner {
   /// Whether the pending Undo action advanced away from its Photo. A Grid
   /// decision never advances, so Undo restores that cell in place.
   readonly undoAdvanced: boolean;
+  /// Whether the pending Undo action is one batch Selection State change.
+  readonly undoBatch: boolean;
+  mutateBatch(
+    photoIds: ReadonlyArray<string>,
+    value: SelectionState,
+  ): PhotoBatchAdmission | undefined;
+  prepareBatchUndo(): PhotoBatchUndoPreparation | undefined;
+  cancelBatchUndo(preparation: PhotoBatchUndoPreparation): void;
+  performBatchUndo(
+    preparation: PhotoBatchUndoPreparation,
+  ): Promise<PhotoBatchUndoOutcome>;
   prepareUndo(resolvedIndex?: number): PhotoUndoPreparation | undefined;
   discardUndo(): void;
   cancelUndo(preparation: PhotoUndoPreparation): void;
@@ -220,6 +287,22 @@ type UndoRecord = Readonly<{
   action: SessionUndo;
 }>;
 
+/// The one-level Undo description for a batch Selection State change: the
+/// value the batch wrote and the state each confirmed Photo held before it.
+/// A Photo whose write failed is never part of it.
+type SessionBatchUndo = Readonly<{
+  value: SelectionState;
+  entries: ReadonlyArray<
+    Readonly<{ photoId: string; priorValue: SelectionState }>
+  >;
+}>;
+
+type BatchUndoRecord = Readonly<{
+  operation: BatchUndoOperation;
+  preparation: PhotoBatchUndoPreparation;
+  action: SessionBatchUndo;
+}>;
+
 type ReviewImageLease = Readonly<{
   image: ReviewImageTransferPort;
   resolvedUrl: string;
@@ -241,6 +324,8 @@ export function createPhotoOwner(
   let busyAuthority: PhotoAuthority | undefined;
   let undo: SessionUndo | undefined;
   let undoRecord: UndoRecord | undefined;
+  let batchUndo: SessionBatchUndo | undefined;
+  let batchUndoRecord: BatchUndoRecord | undefined;
   let lastCurrentPhotoId: string | undefined;
   let reviewImage: ReviewImageLease | undefined;
 
@@ -294,6 +379,7 @@ export function createPhotoOwner(
     opening = false;
     busyAuthority = undefined;
     undoRecord = undefined;
+    batchUndoRecord = undefined;
     return next;
   };
 
@@ -345,7 +431,11 @@ export function createPhotoOwner(
     opening = false;
     busyAuthority = undefined;
     undoRecord = undefined;
-    if (clearUndo) undo = undefined;
+    batchUndoRecord = undefined;
+    if (clearUndo) {
+      undo = undefined;
+      batchUndo = undefined;
+    }
     lastCurrentPhotoId = next.preferredPhotoId;
     renewLifetime(next.sourceAuthority);
     return latestAuthority;
@@ -367,7 +457,9 @@ export function createPhotoOwner(
     const admitted = operation(record, index);
     const captured = Object.freeze({ ...admitted, photoId: photo.id });
     const priorUndo = undo;
+    const priorBatchUndo = batchUndo;
     undo = undefined;
+    batchUndo = undefined;
     busyAuthority = record.authority;
     const settlement = (async (): Promise<PhotoMutationOutcome> => {
       let result;
@@ -430,6 +522,8 @@ export function createPhotoOwner(
       }
       if (result.kind === "rejected") undo = priorUndo;
       else undo = undefined;
+      if (result.kind === "rejected") batchUndo = priorBatchUndo;
+      else batchUndo = undefined;
       return Object.freeze({
         ...captured,
         kind: "failed",
@@ -444,6 +538,93 @@ export function createPhotoOwner(
       });
     })();
     return Object.freeze({ authority: record.authority, settlement });
+  };
+
+  /// Admits one batch Selection State write. It shares the one admission, the
+  /// one-level Undo, and every failure classification with a single write; its
+  /// address is the stable Photo identifiers the Grid multi-selected, so it
+  /// keeps its identity while the source generation remains current.
+  const admitBatchWrite = (
+    record: Lifetime,
+    photoIds: ReadonlyArray<string>,
+    value: SelectionState,
+  ): PhotoBatchAdmission => {
+    const priorUndo = undo;
+    const priorBatchUndo = batchUndo;
+    undo = undefined;
+    batchUndo = undefined;
+    busyAuthority = record.authority;
+    const settlement = (async (): Promise<PhotoBatchOutcome> => {
+      let result;
+      try {
+        result = await persistPhotoStateBatch(fetcher, { photoIds, value });
+      } catch {
+        if (isCurrent(record.authority)) {
+          undo = priorUndo;
+          batchUndo = priorBatchUndo;
+        }
+        return isCurrent(record.authority)
+          ? Object.freeze({
+              kind: "failed",
+              failure: "transport",
+              connectivity: "lost",
+            })
+          : Object.freeze({ kind: "detached" });
+      } finally {
+        if (busyAuthority === record.authority) busyAuthority = undefined;
+      }
+      if (!isCurrent(record.authority))
+        return Object.freeze({ kind: "detached" });
+      if (result.kind === "persisted") {
+        for (const entry of result.applied)
+          source.applyBatchSelection(
+            record.sourceAuthority,
+            entry.photoId,
+            entry.priorValue,
+            value,
+          );
+        // A conflicted Photo still holds a state the server reported, so the
+        // Grid presents that current truth instead of its stale belief.
+        for (const entry of result.conflicts)
+          if (entry.current)
+            source.applyBatchSelection(
+              record.sourceAuthority,
+              entry.photoId,
+              entry.current,
+              entry.current,
+            );
+        const entries = result.applied.filter(
+          (entry) => entry.priorValue !== value,
+        );
+        if (entries.length > 0)
+          batchUndo = Object.freeze({
+            value,
+            entries: Object.freeze(entries),
+          });
+        return Object.freeze({
+          kind: "persisted",
+          value,
+          applied: result.applied,
+          conflicts: result.conflicts,
+        });
+      }
+      // The route rejects before any write, so a rejected batch never
+      // happened and the prior Undo description stays available.
+      if (result.kind === "rejected") {
+        undo = priorUndo;
+        batchUndo = priorBatchUndo;
+      }
+      return Object.freeze({
+        kind: "failed",
+        failure: result.kind === "rejected" ? "answered" : "malformed",
+        connectivity:
+          result.kind === "rejected" && result.status !== 409
+            ? "unchanged"
+            : "lost",
+        ...(result.kind === "rejected" ? { status: result.status } : {}),
+      });
+    })();
+    return Object.freeze({ settlement });
   };
 
   const owner: PhotoOwner = {
@@ -480,10 +661,13 @@ export function createPhotoOwner(
       return active;
     },
     get canUndo() {
-      return undo !== undefined;
+      return undo !== undefined || batchUndo !== undefined;
     },
     get undoPhotoId() {
       return undo?.photoId;
+    },
+    get undoBatch() {
+      return batchUndo !== undefined;
     },
     isCurrent,
     ownsWindow: (authority, windowAuthority) =>
@@ -545,6 +729,7 @@ export function createPhotoOwner(
       opening = false;
       busyAuthority = undefined;
       undoRecord = undefined;
+      batchUndoRecord = undefined;
       if (binding) renewLifetime(binding.sourceAuthority);
       else latestAuthority = makeAuthority();
       return latestAuthority;
@@ -740,6 +925,110 @@ export function createPhotoOwner(
     get undoAdvanced() {
       return undo?.advanced ?? false;
     },
+    mutateBatch: (photoIds, value) => {
+      const record = lifetime;
+      if (!record || closed || owner.busy || photoIds.length === 0)
+        return undefined;
+      return admitBatchWrite(record, [...photoIds], value);
+    },
+    prepareBatchUndo: () => {
+      const record = lifetime;
+      const action = batchUndo;
+      if (!record || !action || owner.busy) return undefined;
+      const preparation = Object.freeze({
+        authority: record.authority,
+        operation: Object.freeze({}) as BatchUndoOperation,
+        count: action.entries.length,
+      });
+      busyAuthority = record.authority;
+      batchUndoRecord = Object.freeze({
+        operation: preparation.operation,
+        preparation,
+        action,
+      });
+      return preparation;
+    },
+    cancelBatchUndo: (preparation) => {
+      if (batchUndoRecord?.operation !== preparation.operation) return;
+      batchUndoRecord = undefined;
+      if (busyAuthority === preparation.authority) busyAuthority = undefined;
+    },
+    performBatchUndo: async (preparation) => {
+      const record = lifetime;
+      const captured = batchUndoRecord;
+      if (
+        !record ||
+        !captured ||
+        captured.operation !== preparation.operation ||
+        record.authority !== preparation.authority ||
+        !isCurrent(record.authority)
+      ) {
+        owner.cancelBatchUndo(preparation);
+        return Object.freeze({ kind: "detached" });
+      }
+      const restored: string[] = [];
+      const conflicts: string[] = [];
+      const failed: Array<
+        Readonly<{ photoId: string; priorValue: SelectionState }>
+      > = [];
+      let connectivity: "unchanged" | "lost" = "unchanged";
+      const entries = captured.action.entries;
+      for (let position = 0; position < entries.length; position += 1) {
+        const entry = entries[position]!;
+        if (!isCurrent(record.authority)) {
+          owner.cancelBatchUndo(preparation);
+          return Object.freeze({ kind: "detached" });
+        }
+        let result;
+        try {
+          result = await persistPhotoState(fetcher, {
+            photoId: entry.photoId,
+            field: "selectionState",
+            value: entry.priorValue,
+            expectedCurrent: captured.action.value,
+            requireUndo: false,
+          });
+        } catch {
+          // The connection is gone: this Photo and every Photo after it stay
+          // part of the one-level description so the Photographer can retry.
+          connectivity = "lost";
+          failed.push(...entries.slice(position));
+          break;
+        }
+        if (result.kind === "persisted") {
+          restored.push(entry.photoId);
+          source.applyBatchSelection(
+            record.sourceAuthority,
+            entry.photoId,
+            captured.action.value,
+            entry.priorValue,
+          );
+        } else if (result.kind === "rejected" && result.status === 409) {
+          // The Photo changed elsewhere, so the value this Undo would restore
+          // is no longer the current one. It retires from the description.
+          conflicts.push(entry.photoId);
+        } else {
+          failed.push(entry);
+        }
+      }
+      if (batchUndoRecord?.operation === preparation.operation)
+        batchUndoRecord = undefined;
+      if (busyAuthority === preparation.authority) busyAuthority = undefined;
+      batchUndo =
+        failed.length > 0
+          ? Object.freeze({
+              value: captured.action.value,
+              entries: Object.freeze(failed),
+            })
+          : undefined;
+      return Object.freeze({
+        kind: "settled",
+        restored: Object.freeze(restored),
+        conflicts: Object.freeze(conflicts),
+        failed: Object.freeze(failed.map((entry) => entry.photoId)),
+        connectivity,
+      });
+    },
     prepareUndo: (resolvedIndex) => {
       const record = lifetime;
       const action = undo;
@@ -766,6 +1055,8 @@ export function createPhotoOwner(
     discardUndo: () => {
       undo = undefined;
       undoRecord = undefined;
+      batchUndo = undefined;
+      batchUndoRecord = undefined;
     },
     cancelUndo: (preparation) => {
       if (undoRecord?.operation !== preparation.operation) return;
@@ -888,6 +1179,8 @@ export function createPhotoOwner(
       busyAuthority = undefined;
       undo = undefined;
       undoRecord = undefined;
+      batchUndo = undefined;
+      batchUndoRecord = undefined;
       releaseReviewImage();
       lifetime?.tasks.halt();
       lifetime = undefined;

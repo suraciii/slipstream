@@ -135,6 +135,16 @@ class FakeSource implements PhotoSourcePort {
   ): boolean {
     return this.patch(authority, index, photoId, { rating });
   }
+  applyBatchSelection(
+    authority: SourceAuthority,
+    photoId: string,
+    _priorValue: PhotoSummary["selectionState"],
+    selectionState: PhotoSummary["selectionState"],
+  ): boolean {
+    const index = this.findPhotoIndex(photoId);
+    if (index === undefined) return this.isSourceCurrent(authority);
+    return this.patch(authority, index, photoId, { selectionState });
+  }
   trimFacts(authority: SourceAuthority, anchor: number): void {
     if (this.isSourceCurrent(authority)) this.trimmed.push(anchor);
   }

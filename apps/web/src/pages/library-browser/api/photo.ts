@@ -29,6 +29,23 @@ export type PhotoStateResult =
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
 
+/// One bounded batch Selection State write. The server reports exactly one
+/// outcome per requested Photo: an applied entry carries the state the Photo
+/// held before the write, and a conflict carries the Photo's current state
+/// only while that Photo still exists in the current Library.
+export type PhotoStateBatchResult =
+  | Readonly<{
+      kind: "persisted";
+      applied: ReadonlyArray<
+        Readonly<{ photoId: string; priorValue: SelectionState }>
+      >;
+      conflicts: ReadonlyArray<
+        Readonly<{ photoId: string; current?: SelectionState }>
+      >;
+    }>
+  | Readonly<{ kind: "rejected"; status: number }>
+  | Readonly<{ kind: "malformed" }>;
+
 export type PhotoMetadataResult =
   | Readonly<{ kind: "ok"; value: PhotoMetadataResponse }>
   | Readonly<{ kind: "failed"; status?: number }>;
@@ -84,6 +101,24 @@ const validMetadata = (value: unknown): value is PhotoMetadataResponse =>
   optional(value.iso, (item) => Number.isInteger(item) && Number(item) >= 0) &&
   optional(value.shutterSpeed, (item) => typeof item === "string") &&
   optional(value.focalLength, (item) => typeof item === "string");
+
+const validBatchApplied = (
+  value: unknown,
+): value is Readonly<{ photoId: string; priorValue: SelectionState }> =>
+  isRecord(value) &&
+  typeof value.photoId === "string" &&
+  value.photoId.length > 0 &&
+  validStateValue("selectionState", value.priorValue);
+
+const validBatchConflict = (
+  value: unknown,
+): value is Readonly<{ photoId: string; current?: SelectionState }> =>
+  isRecord(value) &&
+  typeof value.photoId === "string" &&
+  value.photoId.length > 0 &&
+  optional(value.current, (current) =>
+    validStateValue("selectionState", current),
+  );
 
 const validPhotoAlbums = (value: unknown): value is PhotoAlbumsResponse =>
   isRecord(value) &&
@@ -196,6 +231,67 @@ export async function fetchPreview(
       }),
     });
   return Object.freeze({ kind: "rejected", status: response.status });
+}
+
+export async function persistPhotoStateBatch(
+  fetcher: PhotoFetch,
+  input: Readonly<{ photoIds: ReadonlyArray<string>; value: SelectionState }>,
+): Promise<PhotoStateBatchResult> {
+  const response = await fetcher("/api/photos/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      photoIds: input.photoIds,
+      selectionState: input.value,
+    }),
+  });
+  if (!response.ok)
+    return Object.freeze({ kind: "rejected", status: response.status });
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    return Object.freeze({ kind: "malformed" });
+  }
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.applied) ||
+    !value.applied.every(validBatchApplied) ||
+    !Array.isArray(value.conflicts) ||
+    !value.conflicts.every(validBatchConflict)
+  )
+    return Object.freeze({ kind: "malformed" });
+  // The batch contract answers exactly one outcome per requested Photo. A
+  // response that omits or invents an identifier cannot be trusted to move
+  // facts or counts, so it is malformed rather than partially applied.
+  const reported = new Set<string>([
+    ...value.applied.map((entry) => entry.photoId),
+    ...value.conflicts.map((entry) => entry.photoId),
+  ]);
+  if (
+    reported.size !== input.photoIds.length ||
+    !input.photoIds.every((photoId) => reported.has(photoId))
+  )
+    return Object.freeze({ kind: "malformed" });
+  return Object.freeze({
+    kind: "persisted",
+    applied: Object.freeze(
+      value.applied.map((entry) =>
+        Object.freeze({
+          photoId: entry.photoId,
+          priorValue: entry.priorValue,
+        }),
+      ),
+    ),
+    conflicts: Object.freeze(
+      value.conflicts.map((entry) =>
+        Object.freeze({
+          photoId: entry.photoId,
+          ...(entry.current ? { current: entry.current } : {}),
+        }),
+      ),
+    ),
+  });
 }
 
 export async function persistPhotoState(
