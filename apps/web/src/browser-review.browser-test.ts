@@ -286,6 +286,43 @@ async function expectGridOrder(page: Page, ids: string[]) {
   await expect.poll(() => gridPhotoIds(page)).toEqual(ids);
 }
 
+/// The filmstrip positions in rendered order.
+const filmstripIndices = (page: Page) =>
+  page
+    .locator(".filmstrip-cell")
+    .evaluateAll((cells) =>
+      cells.map((cell) => Number((cell as HTMLElement).dataset.filmstripIndex)),
+    );
+
+/// The rendered filmstrip entries in order; each thumbnail URL names its Photo.
+const filmstripPhotoIds = (page: Page) =>
+  page
+    .locator(".filmstrip-cell img")
+    .evaluateAll((images) =>
+      images.map((image) =>
+        new URL(image.getAttribute("src") ?? "", location.origin).pathname
+          .split("/")
+          .at(-3),
+      ),
+    );
+
+/// Settles on a strip that presents exactly these entries with every thumbnail
+/// source attached, so a test never reads a placeholder as a Photo.
+async function expectFilmstrip(page: Page, indices: number[]) {
+  await expect(page.locator("[data-filmstrip]")).toBeVisible();
+  await expect.poll(() => filmstripIndices(page)).toEqual(indices);
+  await expect(page.locator(".filmstrip-placeholder")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page
+        .locator(".filmstrip-cell img")
+        .evaluateAll((images) =>
+          images.every((image) => Boolean(image.getAttribute("src"))),
+        ),
+    )
+    .toBe(true);
+}
+
 function recordBrowseBodies(page: Page) {
   const bodies: Array<Record<string, unknown>> = [];
   page.on("request", (request) => {
@@ -13394,6 +13431,300 @@ test("navigation promotes an aborted adjacent window to current priority", async
   } finally {
     releaseFirst();
   }
+});
+
+test("Photo View shows a bounded neighbor filmstrip that navigates the open source order", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 12);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await openGrid(page, running.url, "All Photos");
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 12");
+
+  // The first Photo has only the neighbors that exist, and each entry presents
+  // the Photo at that position in the open source order.
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5]);
+  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(0, 6));
+  const current = page.locator('.filmstrip-cell[aria-current="true"]');
+  await expect(current).toHaveCount(1);
+  await expect(current).toHaveAttribute("data-filmstrip-index", "0");
+  await expect(current).toHaveAttribute("aria-disabled", "true");
+  // The strip reuses the demand-loaded derivative pipeline instead of a new
+  // per-Photo Preview path.
+  expect(
+    await page
+      .locator(".filmstrip-cell img")
+      .evaluateAll((images) =>
+        images.every(
+          (image) =>
+            image.getAttribute("fetchpriority") === "low" &&
+            image.getAttribute("decoding") === "async" &&
+            new URL(image.getAttribute("src") ?? "", location.origin).pathname
+              .split("/")
+              .includes("thumbnail"),
+        ),
+      ),
+  ).toBe(true);
+
+  // The strip follows navigation and stays bounded: the current Photo keeps
+  // five neighbors on each side however far it moves.
+  for (let step = 0; step < 5; step += 1)
+    await page.keyboard.press("ArrowRight");
+  await expect(page.locator("[data-position]")).toHaveText("6 / 12");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(0, 11));
+  await expect(
+    page.locator('.filmstrip-cell[aria-current="true"]'),
+  ).toHaveAttribute("data-filmstrip-index", "5");
+
+  // Activating a neighbor makes it current and re-centers the strip on it.
+  await page.locator('.filmstrip-cell[data-filmstrip-index="8"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("9 / 12");
+  await expectFilmstrip(page, [3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  await expect(
+    page.locator('.filmstrip-cell[aria-current="true"]'),
+  ).toHaveAttribute("data-filmstrip-index", "8");
+
+  // A neighbor is activatable from the keyboard, and the current Photo's own
+  // entry is a position marker instead of a second activation path.
+  await page.locator('.filmstrip-cell[data-filmstrip-index="4"]').focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-position]")).toHaveText("5 / 12");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  // The current Photo's own entry is a position marker: even the click a
+  // forced activation delivers must not navigate.
+  await page
+    .locator('.filmstrip-cell[aria-current="true"]')
+    .click({ force: true });
+  await expect(page.locator("[data-position]")).toHaveText("5 / 12");
+
+  // The last Photo of the source clamps the strip the same way its first does.
+  for (let step = 0; step < 7; step += 1)
+    await page.keyboard.press("ArrowRight");
+  await expect(page.locator("[data-position]")).toHaveText("12 / 12");
+  await expectFilmstrip(page, [6, 7, 8, 9, 10, 11]);
+  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(6));
+});
+
+test("the neighbor filmstrip follows an Album's explicit order", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 10);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Ordered" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const album = created.albums.find(
+    (candidate) => candidate.name === "Ordered",
+  )!;
+  // The explicit membership order is the reverse of the Library order, so a
+  // strip that followed anything but the open source order would show the
+  // wrong Photos.
+  const explicit = [...ids].reverse();
+  await post(running.url, `/api/albums/${album.id}/members`, {
+    photoIds: explicit,
+  });
+
+  await openGrid(page, running.url, "Ordered");
+  await expectGridOrder(page, explicit);
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 10");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5]);
+  expect(await filmstripPhotoIds(page)).toEqual(explicit.slice(0, 6));
+
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("[data-position]")).toHaveText("2 / 10");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6]);
+  expect(await filmstripPhotoIds(page)).toEqual(explicit.slice(0, 7));
+  await expect(
+    page.locator('.filmstrip-cell[aria-current="true"]'),
+  ).toHaveAttribute("data-filmstrip-index", "1");
+});
+
+test("the filmstrip presents no other Photo's image while a neighbor thumbnail is missing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 7);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let heldRequests = 0;
+  await page.route("**/api/photos/*/thumbnail", async (route) => {
+    heldRequests += 1;
+    await held;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    // The Grid's own thumbnails are held too; the cell still presents its
+    // Photo facts and opens Photo View.
+    await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-position]")).toHaveText("1 / 7");
+
+    // Entries await their own Photo's thumbnail: the strip keeps the bounded
+    // positions and names each Photo, and no entry shows another Photo.
+    await expect(page.locator(".filmstrip-cell")).toHaveCount(6);
+    expect(await filmstripIndices(page)).toEqual([0, 1, 2, 3, 4, 5]);
+    for (let index = 0; index < 6; index += 1)
+      await expect(
+        page.locator(`.filmstrip-cell[data-filmstrip-index="${index}"]`),
+      ).toHaveAccessibleName(new RegExp(`Photo ${index + 1} of 7`));
+    expect(heldRequests).toBeGreaterThan(0);
+    expect(await page.locator(".filmstrip-cell img[src]").count()).toBe(0);
+    expect(await page.locator(".filmstrip-placeholder").count()).toBe(0);
+
+    // The thumbnails arrive through the existing pipeline and each entry then
+    // presents its own Photo.
+    release();
+    await expect.poll(() => filmstripPhotoIds(page)).toEqual(ids.slice(0, 6));
+  } finally {
+    release();
+    await page.unroute("**/api/photos/*/thumbnail");
+  }
+});
+
+test("a large source keeps the filmstrip bounded and inside one Browse Window", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 200);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const { albumId } = await createAlbum(running.url, "Large");
+  // Open Photo 101 of 200 through the Album's saved position, so the strip
+  // builds around a middle Photo of a source far larger than its bound.
+  await post(running.url, `/api/albums/${albumId}/progress`, {
+    photoId: ids[100]!,
+  });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const windows = recordWindowRequests(page);
+  await page.goto(running.url);
+  await openSources(page);
+  await page.getByRole("button", { name: /^Large(?: |$)/ }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 200 Photos",
+  );
+  await waitForGridFrame(page);
+  const savedPosition = progressResponse(page, albumId);
+  windows.requested.splice(0);
+  await page.locator('[data-photo-index="100"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("101 / 200");
+  await savedPosition;
+
+  // Eleven entries for a 200-Photo source: the strip is the bound, not the
+  // source.
+  await expectFilmstrip(
+    page,
+    [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105],
+  );
+  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(95, 106));
+  // The Photo and its whole strip stay inside the bounded window that covers
+  // them; the strip never admits a window for the source as a whole.
+  expect(windows.requested.filter((start) => start !== 60)).toEqual([]);
+});
+
+test("the filmstrip yields and scrolls without clipping Photo View controls", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 9);
+  const running = await server(base, root);
+  await openGrid(page, running.url, "All Photos");
+  await page.locator('[data-photo-index="4"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("5 / 9");
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+  const filmstrip = page.locator("[data-filmstrip]");
+  const photoView = page.locator("[data-photo-view]");
+  const preview = page.locator("[data-preview]");
+  const decisions = page.locator(".decision-controls");
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+    { width: 1280, height: 800 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await photoView.evaluate((view) => {
+      view.scrollTop = 0;
+    });
+    const strip = await filmstrip.evaluate((element) => {
+      const view = element.closest<HTMLElement>("[data-photo-view]");
+      if (!view) throw new Error("Photo View is missing");
+      const box = element.getBoundingClientRect();
+      const viewBox = view.getBoundingClientRect();
+      const previewBox = view
+        .querySelector<HTMLElement>("[data-preview]")!
+        .getBoundingClientRect();
+      return {
+        contained:
+          box.left >= viewBox.left - 1 && box.right <= viewBox.right + 1,
+        noViewOverflow: view.scrollWidth <= view.clientWidth + 1,
+        scrollsHorizontally: element.scrollWidth > element.clientWidth,
+        previewDominant: previewBox.height > box.height,
+      };
+    });
+    expect(strip.contained).toBe(true);
+    expect(strip.noViewOverflow).toBe(true);
+    expect(strip.previewDominant).toBe(true);
+    // A viewport narrower than the entries shows fewer of them and scrolls the
+    // strip instead of shrinking an entry below a usable target.
+    if (viewport.width < 600) expect(strip.scrollsHorizontally).toBe(true);
+    else expect(strip.scrollsHorizontally).toBe(false);
+    await expect
+      .poll(() =>
+        filmstrip.evaluate((element) =>
+          Array.from(element.querySelectorAll(".filmstrip-cell")).every(
+            (cell) => {
+              const box = cell.getBoundingClientRect();
+              return box.width >= 44 && box.height >= 44;
+            },
+          ),
+        ),
+      )
+      .toBe(true);
+
+    // Every decision control stays reachable, and a constrained viewport
+    // keeps the 44 by 44 target the Product Spec requires there.
+    await decisions.scrollIntoViewIfNeeded();
+    const constrained = viewport.width < 600 || viewport.height < 480;
+    const controls = await decisions.evaluate((element, requireTarget) => {
+      const view = element.closest<HTMLElement>("[data-photo-view]");
+      if (!view) throw new Error("Photo View is missing");
+      const viewBox = view.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      return {
+        contained:
+          box.left >= viewBox.left &&
+          box.right <= viewBox.right &&
+          box.top >= viewBox.top &&
+          box.bottom <= viewBox.bottom,
+        buttons: Array.from(element.querySelectorAll("button"), (button) => {
+          const buttonBox = button.getBoundingClientRect();
+          return (
+            buttonBox.left >= viewBox.left &&
+            buttonBox.right <= viewBox.right &&
+            (!requireTarget ||
+              (buttonBox.width >= 44 && buttonBox.height >= 44))
+          );
+        }),
+      };
+    }, constrained);
+    expect(controls.contained).toBe(true);
+    expect(controls.buttons).toEqual([true, true, true]);
+  }
+  expect(await preview.count()).toBe(1);
 });
 
 test("stale opaque Photo windows cannot claim Recovery after Back to Grid", async ({
