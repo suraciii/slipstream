@@ -2524,7 +2524,13 @@ export function mountLibraryBrowser(
           authority: sourceGrid.authority,
         };
         sourceGrid.ensureRange(intent.start, intent.end, {
-          kind: "grid",
+          // A source whose establishing window failed has an active claim and
+          // placeholders still presenting its first required window. The
+          // range re-admission of that window must establish readiness — the
+          // same operation kind the recorded range Retry would use — or a
+          // successful reload recovers the claim while every cell stays
+          // disabled and no visible Retry remains.
+          kind: sourceGrid.isReady(admittedRange.authority) ? "grid" : "source",
           authority: admittedRange.authority,
         });
         presentRangeStatus();

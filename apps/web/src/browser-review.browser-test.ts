@@ -12298,3 +12298,72 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   expect(lateWindow.photos).toHaveLength(60);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
 });
+
+test("a range re-admission that recovers a failed source establishment also establishes readiness", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await createAlbum(running.url);
+  // Fail only the Album source's window reads. The Library source
+  // establishes at page load; the Album's establishing window uses the
+  // token its own browse POST allocates, captured synchronously so the
+  // first window GET after the POST cannot race the recording.
+  let windowReady = false;
+  let albumToken: string | undefined;
+  await page.route(/\/api\/browse(\/.*)?$/, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "POST" && url.pathname === "/api/browse") {
+      const body = request.postDataJSON() as { source?: unknown };
+      if (body.source === "album") {
+        const response = await route.fetch();
+        albumToken = ((await response.json()) as { token: string }).token;
+        await route.fulfill({ response });
+        return;
+      }
+      await route.continue();
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      albumToken !== undefined &&
+      url.pathname.endsWith(`/${albumToken}`) &&
+      !windowReady
+    ) {
+      await route.fulfill({ status: 503, body: '{"error":"unavailable"}' });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto(running.url);
+  await expect(
+    page.getByText("Ready · 3 Photos", { exact: true }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Review 3 Photos" }).click();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/could not be loaded \(HTTP 503\)/),
+  ).toBeVisible();
+
+  // Release the failure without clicking Retry: the Grid still presents the
+  // Album's placeholder range, and a scroll re-reports it, so the owner
+  // re-admits the establishing window on its own.
+  windowReady = true;
+  await scrollGrid(page, 1);
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Ready · 3 Photos", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".cell-placeholder")).toHaveCount(0);
+
+  // Readiness is more than recovered facts: the re-established source must
+  // accept Photo opens without a manual Retry.
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(
+    page.getByRole("button", { name: "Back to Grid" }),
+  ).toBeVisible();
+});

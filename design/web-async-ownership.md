@@ -180,6 +180,11 @@ display-only. Their enabled state and Photo-open admission share one
 current-source readiness predicate, so an enabled action is immediately
 admissible. The replacement source's first required window establishes that
 readiness; a failed or superseded reopen follows its existing recovery path.
+When that first required window fails, its placeholder range stays
+presented, so the Grid's own range report re-admits it — that re-admission
+carries the same establishing operation kind a manual Retry would, because
+recovering facts without establishing readiness would leave every cell
+disabled with no visible Retry.
 
 A Folder Browse open additionally captures the bound File Location
 publication. It never sends without that publication, and publication expiry
