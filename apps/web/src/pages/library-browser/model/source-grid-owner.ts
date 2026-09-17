@@ -208,6 +208,16 @@ export interface SourceGridOwner {
     expectedPhotoId: string,
     selectionState: PhotoSummary["selectionState"],
   ): boolean;
+  /// Applies one confirmed batch outcome by stable Photo identity. A loaded
+  /// fact is patched and moves the source counts by the state the Grid
+  /// believed; a Photo the Grid no longer holds moves the counts by the
+  /// server's own prior value instead, so an evicted Photo still moves once.
+  applyBatchSelection(
+    authority: SourceAuthority,
+    photoId: string,
+    priorValue: PhotoSummary["selectionState"],
+    selectionState: PhotoSummary["selectionState"],
+  ): boolean;
   setPhotoRating(
     authority: SourceAuthority,
     index: number,
@@ -1158,6 +1168,28 @@ export function createSourceGridOwner(
         selectionCounts = adjustedSelectionCounts(
           selectionCounts,
           current.selectionState,
+          selectionState,
+        );
+      return true;
+    },
+    applyBatchSelection(candidate, photoId, priorValue, selectionState) {
+      if (!isCurrent(candidate)) return false;
+      const index = findPhotoIndex(photoId);
+      const current = index === undefined ? undefined : facts.get(index);
+      if (index !== undefined && current) {
+        facts.set(index, { ...current, selectionState });
+        if (current.selectionState !== selectionState)
+          selectionCounts = adjustedSelectionCounts(
+            selectionCounts,
+            current.selectionState,
+            selectionState,
+          );
+        return true;
+      }
+      if (priorValue !== selectionState)
+        selectionCounts = adjustedSelectionCounts(
+          selectionCounts,
+          priorValue,
           selectionState,
         );
       return true;

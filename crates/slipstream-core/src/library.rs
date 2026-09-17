@@ -1,7 +1,8 @@
 use crate::{
     AlbumBrowseTarget, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact,
-    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoAlbumMembership, PhotoStateMutation,
-    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
+    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoAlbumMembership,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
+    PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
@@ -449,6 +450,21 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.mutate_photo_state_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    pub async fn mutate_photo_state_batch(
+        &self,
+        mutation: PhotoStateBatchMutation,
+    ) -> Result<PhotoStateBatchResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.mutate_photo_state_batch_receiver(mutation)
         }
         .map_err(LibraryError::from)?;
         receive

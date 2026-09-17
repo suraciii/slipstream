@@ -133,10 +133,17 @@ export const addAlbumMember = (
   fetcher: AlbumActionFetch,
   albumId: string,
   photoId: string,
+): Promise<AlbumWriteResult> => addAlbumMembers(fetcher, albumId, [photoId]);
+
+/// Adds every named Photo to one Album through the bounded membership route.
+/// A Photo that already belongs is skipped without changing its membership
+/// position, exactly as a single addition is.
+export const addAlbumMembers = (
+  fetcher: AlbumActionFetch,
+  albumId: string,
+  photoIds: ReadonlyArray<string>,
 ): Promise<AlbumWriteResult> =>
-  postAlbumAction(fetcher, `/api/albums/${albumId}/members`, {
-    photoIds: [photoId],
-  });
+  postAlbumAction(fetcher, `/api/albums/${albumId}/members`, { photoIds });
 
 export const addFolderToAlbum = async (
   fetcher: AlbumActionFetch,

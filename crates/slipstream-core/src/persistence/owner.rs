@@ -7,9 +7,10 @@ use crate::{
     AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
     DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
     OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
-    PhotoRecord, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo,
-    PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult, PreviewState,
-    RelativeOriginalPath, ScanLimits, ScanSnapshot, SelectionState,
+    PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchConflict, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
+    PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult,
+    PreviewState, RelativeOriginalPath, ScanLimits, ScanSnapshot, SelectionState,
     identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -84,6 +85,9 @@ impl From<StateError> for PersistenceError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MutationError {
+    /// The request itself is malformed: an empty, over-limit, or duplicate
+    /// address set. It is refused before any state is read or written.
+    Invalid,
     NotFound,
     Conflict,
     Persistence,
@@ -94,6 +98,7 @@ pub enum MutationError {
 impl fmt::Display for MutationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Invalid => "Mutation request is not valid",
             Self::NotFound => "Mutation target not found",
             Self::Conflict => "Mutation conflicts with current state",
             Self::Persistence => "Mutation could not be persisted",
@@ -195,6 +200,23 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
     }
 }
 
+fn validate_photo_state_batch_mutation(
+    mutation: &PhotoStateBatchMutation,
+) -> Result<(), MutationError> {
+    if mutation.photo_ids.is_empty()
+        || mutation.photo_ids.len() > crate::PHOTO_STATE_BATCH_MAX
+        || mutation
+            .photo_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != mutation.photo_ids.len()
+    {
+        return Err(MutationError::Invalid);
+    }
+    Ok(())
+}
+
 type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
 
 /// Bounded per-Photo Album membership query result.
@@ -227,6 +249,10 @@ enum Command {
     MutatePhotoState(
         PhotoStateMutation,
         oneshot::Sender<Result<PhotoStateMutationResult, MutationError>>,
+    ),
+    MutatePhotoStateBatch(
+        PhotoStateBatchMutation,
+        oneshot::Sender<Result<PhotoStateBatchResult, MutationError>>,
     ),
     WriteProbe(Reply<()>),
     #[cfg(test)]
@@ -534,6 +560,18 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn mutate_photo_state_batch_receiver(
+        &self,
+        mutation: PhotoStateBatchMutation,
+    ) -> Result<oneshot::Receiver<Result<PhotoStateBatchResult, MutationError>>, MutationError>
+    {
+        validate_photo_state_batch_mutation(&mutation)?;
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::MutatePhotoStateBatch(mutation, send))
+            .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
     pub async fn write_probe(&self) -> Result<(), PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::WriteProbe(send))?;
@@ -660,6 +698,11 @@ fn owner_main(
             }
             Command::MutatePhotoState(mutation, reply) => {
                 let result = mutate_photo_state(&state, &database_name, &mut connection, mutation);
+                let _ = reply.send(result);
+            }
+            Command::MutatePhotoStateBatch(mutation, reply) => {
+                let result =
+                    mutate_photo_state_batch(&state, &database_name, &mut connection, mutation);
                 let _ = reply.send(result);
             }
             Command::WriteProbe(reply) => {
@@ -2523,14 +2566,7 @@ fn mutate_photo_state(
                 transaction
                     .execute(
                         "UPDATE photos SET selection_state=? WHERE id=?",
-                        params![
-                            match value {
-                                SelectionState::Undecided => "undecided",
-                                SelectionState::Selected => "selected",
-                                SelectionState::Rejected => "rejected",
-                            },
-                            mutation.photo_id
-                        ],
+                        params![selection_state_value(value), mutation.photo_id],
                     )
                     .map_err(mutation_error_from_sqlite)?;
             }
@@ -2562,6 +2598,58 @@ fn mutate_photo_state(
             },
         })
     })
+}
+
+/// One bounded batch Selection State write. Every requested Photo is resolved
+/// inside one transaction and reports exactly one outcome, so a Photo the
+/// current Library no longer holds never rolls back the confirmed ones.
+fn mutate_photo_state_batch(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: PhotoStateBatchMutation,
+) -> Result<PhotoStateBatchResult, MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let mut applied = Vec::with_capacity(mutation.photo_ids.len());
+        let mut conflicts = Vec::new();
+        for photo_id in &mutation.photo_ids {
+            let row: Option<String> = transaction
+                .query_row(
+                    "SELECT selection_state FROM photos WHERE id=?",
+                    [photo_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(mutation_error_from_sqlite)?;
+            let Some(selection) = row else {
+                conflicts.push(PhotoStateBatchConflict {
+                    photo_id: photo_id.clone(),
+                });
+                continue;
+            };
+            let prior_value =
+                parse_selection_state(&selection).map_err(|_| MutationError::Persistence)?;
+            transaction
+                .execute(
+                    "UPDATE photos SET selection_state=? WHERE id=?",
+                    params![selection_state_value(mutation.value), photo_id],
+                )
+                .map_err(mutation_error_from_sqlite)?;
+            applied.push(PhotoStateBatchApplied {
+                photo_id: photo_id.clone(),
+                prior_value,
+            });
+        }
+        Ok(PhotoStateBatchResult { applied, conflicts })
+    })
+}
+
+fn selection_state_value(value: SelectionState) -> &'static str {
+    match value {
+        SelectionState::Undecided => "undecided",
+        SelectionState::Selected => "selected",
+        SelectionState::Rejected => "rejected",
+    }
 }
 
 fn table_exists(connection: &Connection, name: &str) -> Result<bool, PersistenceError> {
@@ -3936,6 +4024,40 @@ mod tests {
             .iter()
             .map(|photo| photo.id.clone())
             .collect()
+    }
+
+    /// A batch that names no Photo, names one twice, or exceeds the bound is
+    /// the request's own defect, so it is classified as invalid before any
+    /// state is read or written.
+    #[test]
+    fn batch_photo_state_validation_classifies_malformed_requests_as_invalid() {
+        let valid = PhotoStateBatchMutation {
+            photo_ids: vec!["one".to_owned(), "two".to_owned()],
+            value: SelectionState::Selected,
+        };
+        assert_eq!(validate_photo_state_batch_mutation(&valid), Ok(()));
+        let malformed = [
+            PhotoStateBatchMutation {
+                photo_ids: Vec::new(),
+                value: SelectionState::Rejected,
+            },
+            PhotoStateBatchMutation {
+                photo_ids: vec!["one".to_owned(), "one".to_owned()],
+                value: SelectionState::Rejected,
+            },
+            PhotoStateBatchMutation {
+                photo_ids: (0..=crate::PHOTO_STATE_BATCH_MAX)
+                    .map(|index| format!("photo-{index}"))
+                    .collect(),
+                value: SelectionState::Undecided,
+            },
+        ];
+        for mutation in malformed {
+            assert_eq!(
+                validate_photo_state_batch_mutation(&mutation),
+                Err(MutationError::Invalid)
+            );
+        }
     }
 
     #[tokio::test]
