@@ -320,13 +320,14 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
-  test("uses idle and active poll cadence while status failures stay silent", async () => {
+  test("uses idle and active poll cadence while an answered status failure stays silent", async () => {
     let statusRequests = 0;
     const { owner, events, nextScheduled } = harness((input) => {
       if (input === "/api/overview")
         return Promise.resolve(response(overview("publication-1", "Album")));
       statusRequests += 1;
-      if (statusRequests === 2) return Promise.reject(new Error("offline"));
+      if (statusRequests === 2)
+        return Promise.resolve(new Response(null, { status: 503 }));
       return Promise.resolve(
         response(
           statusRequests === 1
@@ -341,6 +342,7 @@ describe("ApplicationOwner", () => {
     expect(firstPoll.delayMs).toBe(2_000);
     const beforeFailure = events.length;
     await firstPoll.run();
+    // The server answered without a usable status, so the transport is intact.
     expect(events).toHaveLength(beforeFailure);
 
     const secondPoll = nextScheduled();
@@ -348,6 +350,123 @@ describe("ApplicationOwner", () => {
     await secondPoll.run();
     expect(latestSummary(events)?.text).toBe("Checking Library Folder…");
     expect(nextScheduled().delayMs).toBe(500);
+    owner.dispose();
+  });
+
+  test("reports the transport outcome of every status probe to the application", async () => {
+    let statusRequests = 0;
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(response(overview("publication-1", "Album")));
+      statusRequests += 1;
+      if (statusRequests === 2 || statusRequests === 3)
+        return Promise.reject(new Error("offline"));
+      if (statusRequests === 4)
+        return Promise.resolve(new Response(null, { status: 503 }));
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+    const transportEvents = () =>
+      events.filter(
+        (event) =>
+          event.kind === "transport-lost" || event.kind === "mark-reachable",
+      );
+
+    await owner.refreshOverview();
+    expect(transportEvents()).toHaveLength(0);
+
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+    ]);
+
+    // The probe owns no reachability state: it reports what it observed, and
+    // the application decides whether that changes the shared connection.
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+      "transport-lost",
+    ]);
+
+    // An answered error is a server-side condition, not a transport outcome.
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+      "transport-lost",
+    ]);
+
+    await nextScheduled().run();
+    expect(transportEvents().map((event) => event.kind)).toEqual([
+      "transport-lost",
+      "transport-lost",
+      "mark-reachable",
+    ]);
+    owner.dispose();
+  });
+
+  test("keeps probing reachability while the Library check stays failed", async () => {
+    let statusRequests = 0;
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(response(overview("publication-1", "Album")));
+      statusRequests += 1;
+      if (statusRequests === 1)
+        return Promise.resolve(response(scan("idle", "publication-1")));
+      if (statusRequests === 2 || statusRequests === 3)
+        return Promise.resolve(response(scan("failed", "publication-1")));
+      return Promise.reject(new Error("offline"));
+    });
+    const failureClaims = () =>
+      summaryEvents(events).filter(
+        (event) => event.summary.action?.kind === "retry-library-check",
+      );
+
+    await owner.refreshOverview();
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // A failed Library check is a resting surface, not the end of the
+    // monitor: the same failure is claimed once and the resting cadence
+    // applies while the monitor keeps probing the server.
+    expect(nextScheduled().delayMs).toBe(2_000);
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // A server that stops answering is still reported from that surface.
+    await nextScheduled().run();
+    expect(
+      events.filter((event) => event.kind === "transport-lost"),
+    ).toHaveLength(1);
+    owner.dispose();
+  });
+
+  test("claims the Retry action when the committed overview is already failed", async () => {
+    const { owner, events, nextScheduled } = harness((input) => {
+      if (input === "/api/overview")
+        return Promise.resolve(
+          response(overview("publication-1", "Album", { scanState: "failed" })),
+        );
+      return Promise.resolve(response(scan("failed", "publication-1")));
+    });
+    const failureClaims = () =>
+      summaryEvents(events).filter(
+        (event) => event.summary.action?.kind === "retry-library-check",
+      );
+
+    // The committed overview already reports the failure, so the monitor's
+    // baseline state is `failed` before its first poll. The overview summary
+    // is background presentation without an action.
+    await owner.refreshOverview();
+    expect(failureClaims()).toHaveLength(0);
+
+    // The first failed poll is the transition that claims the actionable
+    // notice even though the observed scan state never changed.
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
+
+    // The claimed notice is the claim: the next failed poll keeps polling and
+    // keeps that one notice instead of claiming again.
+    await nextScheduled().run();
+    expect(failureClaims()).toHaveLength(1);
     owner.dispose();
   });
 

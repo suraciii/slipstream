@@ -5,8 +5,10 @@ import type {
 import {
   fetchLibraryOverview,
   fetchLibraryStatus,
+  probeLibraryStatus,
   requestLibraryScan,
   type ApplicationFetch,
+  type LibraryStatusOutcome,
 } from "../api/application.js";
 import {
   SettlementFamily,
@@ -66,7 +68,8 @@ export type ApplicationCoordination =
       kind: "recover";
       recovery: ApplicationRecovery;
     }>
-  | Readonly<{ kind: "mark-reachable" }>;
+  | Readonly<{ kind: "mark-reachable" }>
+  | Readonly<{ kind: "transport-lost" }>;
 
 export type ApplicationEvent =
   | ApplicationPresentation
@@ -283,6 +286,20 @@ export function createApplicationOwner(
     if (!closed) void emit({ kind: "mark-reachable" });
   };
 
+  /// The status probe is the browser's continuous reachability signal. The
+  /// transport outcome is reported as observed: the current probe is the only
+  /// evidence this owner has, so the state owner decides whether that outcome
+  /// changes the shared reachability it maintains. An answered error is a
+  /// server-side condition that reports neither transition.
+  const reportProbeReachability = (outcome: LibraryStatusOutcome): void => {
+    if (closed) return;
+    if (outcome.kind === "unreachable") {
+      void emit({ kind: "transport-lost" });
+      return;
+    }
+    if (outcome.kind === "answered") markReachable();
+  };
+
   const retainOverviewFailure = (): void => {
     if (overviewRecovery) return;
     overviewRecovery = recovery();
@@ -482,16 +499,20 @@ export function createApplicationOwner(
     const queueNext = (): void => {
       if (!monitor.isCurrent()) return;
       cancelScheduled = schedule(
-        observedScanState === "idle" ? 2_000 : 500,
+        observedScanState === "idle" || observedScanState === "failed"
+          ? 2_000
+          : 500,
         async () => {
           cancelScheduled = undefined;
           if (!monitor.isCurrent()) return;
           const background = notices.backgroundEpoch();
           let settled = false;
-          let keepMonitoring = true;
           try {
-            const scan = await fetchLibraryStatus(fetcher);
+            const outcome = await probeLibraryStatus(fetcher);
             if (!monitor.isCurrent()) return;
+            reportProbeReachability(outcome);
+            if (outcome.kind !== "answered") return;
+            const scan = outcome.scan;
             const active = scan.state !== "idle" && scan.state !== "failed";
             if (active) {
               releaseScanFailure();
@@ -522,8 +543,12 @@ export function createApplicationOwner(
             if (scan.state === "failed") {
               if (activeScanCycle) activeScanCycle.consumed = true;
               activeScanCycle = undefined;
-              claimScanFailure();
-              keepMonitoring = false;
+              // Claiming the failure is a transition, not a poll result, so a
+              // Library that stays failed keeps one claim while the monitor
+              // keeps probing the server for reachability. A first committed
+              // overview can already report the failure, so the missing notice
+              // claims it even though the observed state did not change.
+              if (prior !== "failed" || !scanFailureNotice) claimScanFailure();
             } else if (
               scan.state === "idle" &&
               prior &&
@@ -539,10 +564,10 @@ export function createApplicationOwner(
               completeScan(undefined, scan.publication);
             }
           } catch {
-            /* answered and transport status failures stay silent */
+            /* unexpected monitor failures stay silent; the probe owns transport */
           } finally {
             if (!settled) notices.discardBackground(background);
-            if (monitor.isCurrent() && keepMonitoring) queueNext();
+            if (monitor.isCurrent()) queueNext();
             else monitor.finish();
           }
         },
