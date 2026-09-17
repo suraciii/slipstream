@@ -312,6 +312,10 @@ export function mountLibraryBrowser(
   // stable Photo identities the Photographer marked, the anchor a range
   // extends from, and whether Select mode makes every cell activation toggle
   // its Photo instead of opening it. Opening or reopening a source clears it.
+  // One batch addresses at most MULTI_SELECTION_LIMIT Photos: the Grid refuses
+  // to grow the selection past the bound the server enforces, so an invalid
+  // batch can never be built.
+  const MULTI_SELECTION_LIMIT = 100;
   let multiSelection = new Set<string>();
   let multiAnchorId: string | undefined;
   let selectMode = false;
@@ -1764,6 +1768,7 @@ export function mountLibraryBrowser(
         multi: {
           mode: selectMode,
           count: multiSelection.size,
+          limit: MULTI_SELECTION_LIMIT,
           // A batch action is presented only while it would be admitted: the
           // same source readiness, connection, and idle owner a Grid decision
           // needs, so an activation is never refused silently.
@@ -1796,17 +1801,34 @@ export function mountLibraryBrowser(
 
   /// Empties the Grid's multi-selection and leaves Select mode. The caller
   /// owns the render, so a source open that clears it presents the cleared
-  /// Grid in its own render.
+  /// Grid in its own render; the view is told here as well, because an open
+  /// that fails leaves the Grid its retained cells and must never keep a bar
+  /// or a marker for Photos that open no longer presents.
   const clearMultiSelection = () => {
     multiSelection = new Set();
     multiAnchorId = undefined;
     selectMode = false;
+    view.resetGridMultiSelection();
+  };
+
+  /// The shared refusal for a multi-selection that would pass the batch
+  /// bound: the bound is named, and the selection is left exactly as it was.
+  const refuseBeyondBatchBound = () => {
+    setDecisionStatus(
+      `A batch holds up to ${MULTI_SELECTION_LIMIT} Photos. Decide or clear this selection first.`,
+    );
   };
 
   /// Toggles one Photo's membership of the multi-selection and moves the
   /// anchor there, so a following shift-click extends from the last mark.
   const toggleMultiSelection = (photoId: string) => {
-    if (!multiSelection.delete(photoId)) multiSelection.add(photoId);
+    if (!multiSelection.delete(photoId)) {
+      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
+        refuseBeyondBatchBound();
+        return;
+      }
+      multiSelection.add(photoId);
+    }
     multiAnchorId = photoId;
     renderGrid();
   };
@@ -1814,25 +1836,37 @@ export function mountLibraryBrowser(
   /// Extends the multi-selection over the loaded Photos between the anchor and
   /// the clicked Photo. A position the Grid has not loaded cannot join, and an
   /// anchor the Grid no longer holds makes the clicked Photo the new anchor.
+  /// An extension that would pass the batch bound is refused whole, so the
+  /// Grid never presents a selection its own batch would be refused for.
   const extendMultiSelection = (index: number, photoId: string) => {
     const anchorIndex =
       multiAnchorId === undefined
         ? undefined
         : sourceGrid.findPhotoIndex(multiAnchorId);
     if (anchorIndex === undefined) {
+      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
+        refuseBeyondBatchBound();
+        return;
+      }
       multiSelection.add(photoId);
       multiAnchorId = photoId;
       renderGrid();
       return;
     }
+    const joined: string[] = [];
     for (
       let position = Math.min(anchorIndex, index);
       position <= Math.max(anchorIndex, index);
       position += 1
     ) {
       const photo = sourceGrid.photoAt(position);
-      if (photo) multiSelection.add(photo.id);
+      if (photo && !multiSelection.has(photo.id)) joined.push(photo.id);
     }
+    if (multiSelection.size + joined.length > MULTI_SELECTION_LIMIT) {
+      refuseBeyondBatchBound();
+      return;
+    }
+    for (const photoIdToAdd of joined) multiSelection.add(photoIdToAdd);
     multiAnchorId = photoId;
     renderGrid();
   };
@@ -2424,7 +2458,7 @@ export function mountLibraryBrowser(
         setDecisionStatus(
           outcome.status === 409
             ? "Those Photos changed elsewhere. Retry to confirm their current state."
-            : "The change could not be saved.",
+            : `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`,
         );
       } else {
         setDecisionStatus(
@@ -2439,10 +2473,13 @@ export function mountLibraryBrowser(
     const applied = outcome.applied.length;
     const conflicts = outcome.conflicts.length;
     const decision = value === "selected" ? "selected" : "rejected";
+    // A conflict is a Photo the current Library no longer holds: the batch
+    // wrote no fact for it, so the Grid reports exactly that and claims no
+    // knowledge of any state it never refreshed.
     setDecisionStatus(
       conflicts === 0
         ? `${photoCountText(applied)} ${decision}.`
-        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} kept ${conflicts === 1 ? "its" : "their"} current state.`,
+        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} no longer in this Library.`,
     );
     updateControls();
   };
@@ -2473,7 +2510,7 @@ export function mountLibraryBrowser(
     setDecisionStatus(
       result.ok
         ? `${photoCountText(photoIds.length)} added to “${name}”.`
-        : `Could not add the selected Photos to “${name}”. Try again.`,
+        : `Could not add the selected Photos to “${name}”. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`,
     );
   };
   /// Restores every Photo one batch Selection State change confirmed. The
@@ -2498,7 +2535,7 @@ export function mountLibraryBrowser(
       failed > 0
         ? `${photoCountText(restored)} restored. ${photoCountText(failed)} not restored; Undo again to retry.`
         : conflicts > 0
-          ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} kept ${conflicts === 1 ? "its" : "their"} current state.`
+          ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} could not be restored because ${conflicts === 1 ? "it changed" : "they changed"} elsewhere.`
           : `${photoCountText(restored)} restored.`,
     );
   };

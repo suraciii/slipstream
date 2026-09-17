@@ -552,6 +552,11 @@ Grid View supports multi-selection in addition to the single open target:
   Photo's multi-selection instead of opening Photo View, so a touch device can
   multi-select without a modifier key.
 
+One batch addresses at most 100 Photos. The Grid refuses to grow the
+multi-selection past that bound, names the bound when it does, and keeps the
+selection it already holds, so a batch the server would refuse can never be
+built.
+
 The **Select** mode must be enterable and leavable from a keyboard, and
 `Escape` must empty the multi-selection. The Grid decision and Rating keys keep
 their existing meaning for the focused Photo.
@@ -571,8 +576,10 @@ Batch **Select** and **Reject** apply one Selection State to every selected
 Photo through the same persistence rules as a single decision, as one bounded
 operation. A confirmed Photo moves the decision progress once. A Photo the
 current Library no longer holds is reported and does not block the other
-Photos. A failed operation must leave every affected Photo recoverable and
-must not present the batch as complete.
+Photos. A batch overwrites a Photo whose Selection State changed elsewhere:
+the write carries no expectation per Photo and is not compared against the
+state the browser last saw. A failed operation must leave every affected Photo
+recoverable and must not present the batch as complete.
 
 A batched Selection State change is one undoable change: Undo restores the
 prior Selection State of every Photo the batch confirmed, as one unit. The
@@ -586,9 +593,11 @@ Album is skipped without changing its membership position. Membership changes
 stay outside the Undo contract, exactly as they are for a single Photo.
 
 Opening or reopening a source clears the multi-selection; scrolling and Grid
-renders must not. The batch actions must remain reachable from a keyboard, and
-the count and every batch outcome must be announced on the Grid's status
-surface.
+renders must not. A batch decision or one batch Album addition keeps the
+multi-selection, so the same Photos can take another decision or join another
+Album; only the clear exit, `Escape`, and opening or reopening a source empty
+it. The batch actions must remain reachable from a keyboard, and the count and
+every batch outcome must be announced on the Grid's status surface.
 
 ## Failure Behavior
 

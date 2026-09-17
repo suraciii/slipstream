@@ -258,12 +258,14 @@ type GridPhotoViewModel = Readonly<{
 type GridViewModel = Readonly<{
   total: number;
   /// The Grid's multi-selection: whether every cell activation toggles its
-  /// Photo, how many Photos are multi-selected, and whether a batch action
-  /// would be admitted now. `selected` is asked per rendered index, so the
-  /// Grid presents exactly the Photos the page model holds.
+  /// Photo, how many Photos are multi-selected, the bound one batch may
+  /// address, and whether a batch action would be admitted now. `selected` is
+  /// asked per rendered index, so the Grid presents exactly the Photos the
+  /// page model holds.
   multi: Readonly<{
     mode: boolean;
     count: number;
+    limit: number;
     enabled: boolean;
     selected(index: number): boolean;
   }>;
@@ -406,6 +408,11 @@ export interface LibraryBrowserView {
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
   renderGrid(model: GridViewModel, position?: number): void;
+  /// Presents the multi-selection the page model has just emptied: the batch
+  /// bar hides and the retained cells drop their markers. A failed source open
+  /// or reopen calls it instead of a render, so a bar can never name Photos
+  /// the Grid no longer holds.
+  resetGridMultiSelection(): void;
   /// Presents the batch bar's Album list and its pending state. The list is
   /// the bounded Album summary the Sources panel already presents.
   renderBatchAlbums(model: BatchAlbumsViewModel): void;
@@ -720,8 +727,23 @@ export function createLibraryBrowserView(
   // build, a keyboard key, and a merged render all read one state.
   let gridMultiMode = false;
   let gridMultiCount = 0;
+  let gridMultiLimit = 0;
   let gridMultiEnabled = false;
   let gridMultiSelected: (index: number) => boolean = () => false;
+  /// Presents the multi-selection the page model has just emptied, or one
+  /// whose bound the page model reports. A hidden bar clears the markers too,
+  /// so a cell never keeps a marker the bar no longer names, and a hidden Grid
+  /// keeps its retained DOM: only the visible Grid touches it.
+  const resetGridMultiSelection = () => {
+    if (!alive) return;
+    gridMultiMode = false;
+    gridMultiCount = 0;
+    gridMultiEnabled = false;
+    gridMultiSelected = () => false;
+    if (gridView.hidden) return;
+    renderBatch();
+    applyGridMultiSelection();
+  };
   // Whether one batch Add to Album is settling: its control stays disabled
   // until the outcome is presented.
   let batchAlbumsPending = false;
@@ -1788,6 +1810,9 @@ export function createLibraryBrowserView(
       batchAlbumSelect.replaceChildren();
       renderedBatchAlbumSignature = "";
       batchAlbumSelection = "";
+      // A hidden bar names no Photo, so no cell keeps a multi-selection
+      // marker beside it.
+      applyGridMultiSelection();
       return;
     }
     const signature = batchAlbums.map((album) => album.id).join(",");
@@ -1805,7 +1830,12 @@ export function createLibraryBrowserView(
         }),
       );
     }
-    batchCount.textContent = `${count.toLocaleString()} selected`;
+    // The bar names the bound only once the selection reaches it, so the
+    // Photographer learns the batch limit before an action is refused.
+    batchCount.textContent =
+      count >= gridMultiLimit && gridMultiLimit > 0
+        ? `${count.toLocaleString()} of ${gridMultiLimit.toLocaleString()} selected`
+        : `${count.toLocaleString()} selected`;
     const enabled = gridMultiEnabled && !batchAlbumsPending;
     batchSelect.disabled = !enabled;
     batchReject.disabled = !enabled;
@@ -2076,6 +2106,7 @@ export function createLibraryBrowserView(
     gridTotal = model.total;
     gridMultiMode = model.multi.mode;
     gridMultiCount = model.multi.count;
+    gridMultiLimit = model.multi.limit;
     gridMultiEnabled = model.multi.enabled;
     gridMultiSelected = model.multi.selected;
     if (!alive || gridView.hidden) return;
@@ -2993,17 +3024,14 @@ export function createLibraryBrowserView(
       gridKeyboardIndex = undefined;
       // A new source starts with no multi-selection: the bar presents nothing
       // until the page model marks Photos again.
-      gridMultiMode = false;
-      gridMultiCount = 0;
-      gridMultiEnabled = false;
-      gridMultiSelected = () => false;
-      renderBatch();
+      resetGridMultiSelection();
     },
     renderGrid,
     scheduleGridRender,
     cancelGridRender,
     clearGridCells,
     rebindDetachedGridCells,
+    resetGridMultiSelection,
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
       if (alive)
