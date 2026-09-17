@@ -6,6 +6,7 @@ import {
 import type {
   AlbumSummary,
   FolderChild,
+  SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
 import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
@@ -248,7 +249,12 @@ export function mountLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(remembered, undefined, sourceGrid.order);
+        await openSourceDescriptor(
+          remembered,
+          undefined,
+          sourceGrid.order,
+          sourceGrid.selection,
+        );
       } else if (coordination.isCurrent()) {
         setGridStatusText("Could not load this source. Retry to continue.");
       }
@@ -314,6 +320,13 @@ export function mountLibraryBrowser(
     if (text === rangeStatusText) return;
     rangeStatusText = text;
     view.setGridStatus(text);
+  };
+  /// Decision, Undo, and retry messages have one visible surface: the Photo
+  /// View status while it is open, and the Grid status line otherwise, so a
+  /// Grid keyboard decision reports its failure where the Photographer is.
+  const setDecisionStatus = (text: string) => {
+    if (view.gridVisible()) setGridStatusText(text);
+    else view.setPhotoStatus(text);
   };
   // The range the Grid last reported for admission, with the source it was
   // reported for: window settlements present status only for that source.
@@ -522,6 +535,36 @@ export function mountLibraryBrowser(
     });
   };
 
+  /// The Selection State filter is a view option of the open source, so the
+  /// control shows the filter that snapshot was built with and stays disabled
+  /// while an open is already busy.
+  const renderFilterControl = () => {
+    if (!applicationAlive) return;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
+    view.renderFilter({
+      value: sourceGrid.selection,
+      enabled: !interactionBusy && !photoOwner.opening,
+    });
+  };
+
+  /// Decision progress for the open source. The counts come from the server
+  /// when the source opens and follow confirmed decisions and Undo
+  /// afterwards; the loaded Grid windows are never their source.
+  const renderProgress = () => {
+    if (!applicationAlive) return;
+    const counts = sourceGrid.selectionCounts;
+    view.renderProgress({
+      // The counts belong to a source the Grid presents: an open Snapshot, or
+      // the same source's retained total across a reopen. A source
+      // replacement clears the reported total, so the line never presents
+      // another source's counts.
+      visible: sourceGrid.token !== "" || sourceGrid.total > 0,
+      selected: counts.selected,
+      rejected: counts.rejected,
+      undecided: counts.undecided,
+    });
+  };
+
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
@@ -554,6 +597,8 @@ export function mountLibraryBrowser(
         photoOwner.canUndo,
     });
     renderSortControl();
+    renderFilterControl();
+    renderProgress();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -1163,6 +1208,7 @@ export function mountLibraryBrowser(
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
     order: SourceViewOrder = "source-default",
+    selection: SelectionFilter = "all",
   ) => {
     const descriptor: SourceGridSource =
       kind === "library"
@@ -1177,13 +1223,14 @@ export function mountLibraryBrowser(
               folder: folder!,
               publication: fileLocations.publication!,
             };
-    return openSourceDescriptor(descriptor, preferredPhotoId, order);
+    return openSourceDescriptor(descriptor, preferredPhotoId, order, selection);
   };
 
   async function openSourceDescriptor(
     requested: SourceGridSource,
     preferredPhotoId?: string,
     order: SourceViewOrder = "source-default",
+    selection: SelectionFilter = "all",
   ): Promise<void> {
     const descriptor: SourceGridSource =
       requested.kind === "folder" && fileLocations.publication
@@ -1197,6 +1244,7 @@ export function mountLibraryBrowser(
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
       order,
+      selection,
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
@@ -1270,9 +1318,14 @@ export function mountLibraryBrowser(
       renderGrid(gridPosition);
       if (sourceGrid.total) {
         presentRangeStatus();
-      } else {
+      } else if (sourceGrid.selection === "all") {
         setGridStatusText(formatPhotoCount(0));
         view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
+      } else {
+        // A filtered view that matches nothing leaves its source intact, so
+        // it must not report an empty source or offer a Library check.
+        setGridStatusText(formatPhotoCount(0));
+        view.setGridEmpty("No Photos match this filter.");
       }
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
@@ -1314,6 +1367,32 @@ export function mountLibraryBrowser(
       sourceGrid.source,
       photoOwner.lastCurrentPhotoId,
       order,
+      sourceGrid.selection,
+    );
+  };
+
+  /// A filter change reopens the same source in the new view and keeps the
+  /// browser-local current Photo by identity when that Photo still matches the
+  /// new filter. Otherwise the reopened view starts at its first Photo.
+  const changeFilter = async (selection: SelectionFilter): Promise<void> => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    if (selection === sourceGrid.selection) return;
+    // A Folder reopen needs the current File Location binding: without it a
+    // filter change can only send a stale publication and fail as a false
+    // disconnection. Match the refresh/reopen precondition.
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive || !bound) {
+        if (applicationAlive)
+          setGridStatusText("Could not load this source. Retry to continue.");
+        return;
+      }
+    }
+    await openSourceDescriptor(
+      sourceGrid.source,
+      photoOwner.lastCurrentPhotoId,
+      sourceGrid.order,
+      selection,
     );
   };
 
@@ -1387,6 +1466,7 @@ export function mountLibraryBrowser(
     const pendingOpen = sourceGrid.open(descriptor, {
       mode: "reopen",
       order: sourceGrid.order,
+      selection: sourceGrid.selection,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     // The reopen detaches the images the Grid had in flight and keeps its
@@ -1641,7 +1721,7 @@ export function mountLibraryBrowser(
         return;
     }
   });
-  const renderGrid = (position?: number, consumeFocusRequest = true) => {
+  const renderGrid = (position?: number) => {
     if (!applicationAlive) return;
     view.renderGrid(
       {
@@ -1649,7 +1729,6 @@ export function mountLibraryBrowser(
         photoAt: (index) => sourceGrid.photoAt(index),
       },
       position,
-      consumeFocusRequest,
     );
     updateControls();
   };
@@ -2038,7 +2117,7 @@ export function mountLibraryBrowser(
     const gridAuthority = sourceGrid.authority;
     const gridPosition = sourceGrid.readGridPosition(gridAuthority);
     view.showGrid(gridPosition);
-    renderGrid(undefined, false);
+    renderGrid(undefined);
     presentRangeStatus();
     updateControls();
   };
@@ -2139,6 +2218,41 @@ export function mountLibraryBrowser(
     else renderPhotoFacts();
     updateControls();
   };
+  /// Applies one Grid keyboard decision or Rating to the focused Photo
+  /// without opening Photo View. The write shares the Photo View admission,
+  /// the one-level Undo, and every failure rule; nothing advances, so the
+  /// Photographer keeps the focused cell and moves it with the arrow keys.
+  const mutateGridPhoto = async (
+    index: number,
+    field: "selectionState" | "rating",
+    value: SelectionState | number,
+  ) => {
+    if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
+      return;
+    const admission = photoOwner.mutateAt(index, field, value);
+    if (!admission) return;
+    updateControls();
+    const outcome = await admission.settlement;
+    // The write settled, so the Grid is interactive again whatever the
+    // outcome; the merged render re-enables the cells, rebuilds the decided
+    // cell in place, and returns focus to it. A detached write stays silent.
+    renderGrid();
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      if (outcome.failure === "answered") {
+        setDecisionStatus(
+          outcome.status === 409
+            ? "The Photo changed elsewhere. Open it to confirm its current state."
+            : "The change could not be saved.",
+        );
+      } else {
+        setDecisionStatus("Connection lost before the change was confirmed.");
+      }
+      if (outcome.connectivity === "lost")
+        failPhotoRecovery(outcome.authority, "photo-write");
+      updateControls();
+    }
+  };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
     const targetPhotoId = photoOwner.undoPhotoId;
@@ -2174,14 +2288,14 @@ export function mountLibraryBrowser(
       }
       if (resolution.kind === "missing") {
         photoOwner.discardUndo();
-        view.setPhotoStatus(
+        setDecisionStatus(
           "Undo is no longer available because that Photo is no longer in this source.",
         );
         updateControls();
         return;
       }
       if (resolution.kind === "failed") {
-        view.setPhotoStatus(
+        setDecisionStatus(
           resolution.transportLost
             ? "Connection lost while locating the Photo for Undo. Retry to refresh."
             : resolution.malformed
@@ -2197,9 +2311,12 @@ export function mountLibraryBrowser(
     }
     const preparation = photoOwner.prepareUndo(targetIndex);
     if (!preparation) return;
+    // A Grid decision never advanced, so Undo restores that cell in place and
+    // returns the Grid keyboard to the affected Photo instead of opening it.
+    const gridUndo = view.gridVisible() && !photoOwner.undoAdvanced;
     updateControls();
     if (preparation.needsWindow) {
-      view.setPhotoStatus("Loading Photo for Undo…");
+      setDecisionStatus("Loading Photo for Undo…");
       const windowReady = await loadWindow(
         preparation.index,
         { kind: "photo", authority: preparation.windowAuthority },
@@ -2218,17 +2335,34 @@ export function mountLibraryBrowser(
     if (outcome.kind === "detached") return;
     if (outcome.kind === "failed") {
       if (outcome.failure === "transport") {
-        view.setPhotoStatus("Connection lost before Undo was confirmed.");
+        setDecisionStatus("Connection lost before Undo was confirmed.");
       } else if (outcome.status === 409) {
-        view.setPhotoStatus(
+        setDecisionStatus(
           "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
         );
       } else {
-        view.setPhotoStatus("Undo could not be saved. Try Undo again.");
+        setDecisionStatus("Undo could not be saved. Try Undo again.");
       }
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "undo");
       updateControls();
+      return;
+    }
+    if (gridUndo) {
+      // The Grid owns this surface: release Photo View's ownership and re-key
+      // the recovery gate exactly as returning to the Grid does, so recovery
+      // routing and a source reopen keep the Grid.
+      const gridAuthority = photoOwner.leave();
+      const gridTransition = recoveryGate.beginTransition(
+        "photo",
+        photoRecoveryKey(gridAuthority),
+      );
+      recoveryGate.succeedTransition(gridTransition);
+      syncConnection();
+      updateControls();
+      renderGrid();
+      view.focusGridIndex(outcome.index);
+      setGridStatusText("Last change undone.");
       return;
     }
     view.enterPhoto();
@@ -2280,10 +2414,16 @@ export function mountLibraryBrowser(
           undefined,
           undefined,
           sourceGrid.order,
+          sourceGrid.selection,
         );
       return;
     }
-    await openSourceDescriptor(sourceGrid.source, undefined, sourceGrid.order);
+    await openSourceDescriptor(
+      sourceGrid.source,
+      undefined,
+      sourceGrid.order,
+      sourceGrid.selection,
+    );
   };
 
   /// The Grid index a retry replays a failed window with. `loadWindow` and
@@ -2377,7 +2517,12 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(remembered, undefined, sourceGrid.order);
+      await openSourceDescriptor(
+        remembered,
+        undefined,
+        sourceGrid.order,
+        sourceGrid.selection,
+      );
     })();
   };
 
@@ -2468,6 +2613,9 @@ export function mountLibraryBrowser(
       }
       case "sort-change":
         void changeSort(intent.order);
+        return;
+      case "filter-change":
+        void changeFilter(intent.selection);
         return;
       case "source-open": {
         const source = intent.source;
@@ -2573,6 +2721,9 @@ export function mountLibraryBrowser(
         return;
       case "photo-mutation":
         void mutate(intent.field, intent.value, intent.advance);
+        return;
+      case "grid-photo-mutation":
+        void mutateGridPhoto(intent.index, intent.field, intent.value);
         return;
       case "membership-toggle":
         toggleMembership(intent.albumId, intent.member);

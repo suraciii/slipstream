@@ -43,12 +43,14 @@ It contains:
 
 - one opaque token;
 - source identity: `All Photos`, one Original Folder, or one Album;
+- the view order and Selection State filter it was created with;
 - an immutable ordered array of Photo IDs;
 - total count;
+- the source's per-state Selection counts when it was created;
 - the Album's initial saved position when applicable; and
 - last-access time for bounded cleanup.
 
-Creating a Snapshot copies only ordered Photo IDs. It does not copy Photo facts, thumbnails, or Preview bytes. Current Photo facts are queried from the Library owner when a window is requested.
+Creating a Snapshot copies only ordered Photo IDs and bounded counts. It does not copy Photo facts, thumbnails, or Preview bytes. Current Photo facts are queried from the Library owner when a window is requested.
 
 One process may retain only a bounded number of Snapshots. Explicit close, idle expiration, server restart, and bounded oldest-idle eviction may remove one. Losing a Snapshot never loses Selection State, Rating, Album membership, or saved position because those remain in SQLite.
 
@@ -211,7 +213,18 @@ sources the values are `"capture-time-asc"` (the default when omitted) and
 `"capture-time-desc"`. An order value that is invalid for the source is
 rejected before any Snapshot is created.
 
-It returns the opaque token, total count, initial position, and optionally one bounded first window. The exact JSON belongs to the protocol compatibility fixtures; database rows and absolute Original Locations do not cross this boundary.
+It optionally accepts one Selection State filter. The values are `"all"`
+(the default when omitted), `"undecided"`, `"selected"`, and `"rejected"`. An
+unknown value is rejected before any Snapshot is created. The filter is
+applied once, server-side, to the complete ordered source before the Snapshot
+is frozen, so a filtered Snapshot is one frozen bounded sequence with its own
+total and positions. The source's per-state Selection counts describe the
+unfiltered source order and are reported even for an unfiltered open.
+
+It returns the opaque token, total count, initial position, per-state
+Selection counts, and optionally one bounded first window. The exact JSON
+belongs to the protocol compatibility fixtures; database rows and absolute
+Original Locations do not cross this boundary.
 
 The protocol has no route that materializes every Photo fact, every Album member, every Original Folder, or complete recursive Folder membership. The legacy unbounded complete-Photo and complete-membership routes remain retired. Album mutations return bounded Album summaries in the same shape as the Library Overview's Album list, never member lists. Legacy Photo Set routes and source values are retired rather than aliased. A triggered scan reports Loading Status and returns no Photo facts. Operator verification uses bounded traversal or an explicit offline state projection from the owned SQLite state rather than any production route that materializes every Photo fact.
 
@@ -231,9 +244,36 @@ source before the Snapshot is frozen:
   through the Published Library's Photo facts while leaving persisted
   membership positions untouched.
 
-After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library, and an explicit refresh reuses the currently selected order.
+After creation, a Snapshot's ID order never changes. A rescan may change facts returned for those IDs, including availability and Preview state, but cannot insert, remove, or reorder them. Reopening the source creates a new Snapshot from the latest Published Library, and an explicit refresh reuses the currently selected order and Selection State filter.
+
+### Selection Filtering
+
+The Selection State filter is a view option of one open source. It is applied
+after the view order has been resolved to the complete source order and before
+the Snapshot is frozen, so it selects from that order and never rewrites it.
+Filtering writes no persisted state: Album membership, Album member position,
+Selection State, and Original Files are unaffected.
+
+The Snapshot's per-state Selection counts are computed over the same complete
+ordered source before the filter is applied. A filtered Snapshot therefore
+reports the filtered total while its counts still describe the whole source,
+which is what makes progress readable inside a filtered view. Both are plain
+Library facts read at creation time: a Photo that the Published Library cannot
+resolve is not counted, and no count is derived from requested windows.
+
+Membership is frozen with the Snapshot order. A decision that changes a
+Photo's Selection State does not add that Photo to, or remove it from, an open
+Snapshot; the Photographer sees the change after reopening the source, which
+applies the filter to the latest facts and re-anchors the current Photo by
+identity. Positions, `GET /api/browse/{token}/position`, windows, and Previous
+and Next navigation all resolve inside the frozen filtered sequence, so a
+filtered view stays one bounded sequence with one meaning for every position.
 
 The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local. Saved position and view order are independent: the position resolves by Photo identity whichever order the open view uses.
+
+The saved position applies only to an open that supplies no explicit anchor. A view change (a new filter or order) anchors on the browser's current Photo by identity; when that Photo does not match the new view, the open starts at the view's first Photo rather than at the durable saved position.
+
+Every source open requires the published Library. An Album open reads the same Published snapshot as `library` and `folder` sources for its anchor, filter membership, and counts, and `album-order` is no exception even though its order comes from persisted membership position. An Album open therefore fails with the not-published response before any Snapshot exists instead of failing later at its first window.
 
 ### Grid Loading
 
@@ -370,6 +410,25 @@ Streaming could show early rows sooner, but total transfer and browser memory wo
 
 Sending only IDs is smaller than sending every fact, but it still makes startup transfer and browser memory proportional to the whole Library and leaves Snapshot lifecycle and Album resume rules in the client.
 
+### Selected: Freeze the Filter into the Browse Snapshot
+
+The Selection State filter is resolved with the view order against the same
+complete source and stored in the Snapshot. Every position, window, and
+identity lookup keeps one meaning for the life of the open view, a filter
+change reuses the existing reopen and anchor paths, and the browser never
+derives membership from loaded windows.
+
+### Rejected: Filter as a Per-Window Request Parameter
+
+Letting each `GET /api/browse/{token}` request carry its own filter would avoid
+reopening the source on a filter change. It fails the Snapshot contract: two
+requests for one token could then return different memberships, totals, and
+positions, and the browser would have to fence its retained windows against a
+parameter instead of against the frozen Snapshot. Positions, saved-position
+anchoring, and Previous and Next navigation would all need a filter argument to
+stay coherent. Freezing the filter into the Snapshot keeps one meaning for
+"the open view" and reuses the existing reopen, anchor, and retry paths.
+
 ### Selected: Persistent Demand Cache with Adjacent Prefetch
 
 This makes repeat and next-Photo browsing fast while keeping I/O proportional to actual use.
@@ -409,6 +468,7 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - every Browse Window respects the enforced maximum;
 - browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
 - `All Photos` and Original Folder order match Capture Time rules, while Album order matches membership position;
+- a Selection State filter returns exactly the matching Photos of the source order, its total and positions describe the filtered sequence, its counts describe the unfiltered source, an unknown filter value is rejected before a Snapshot exists, and no filter value changes Album membership, member position, or Original Files;
 - each source's default order is used when no order is requested, `capture-time-desc` and Album time views order the complete source before pagination, missing-time Photos stay last in both directions, tie-breakers keep their direction, and persisted Album positions are unchanged;
 - the per-Photo Album membership query answers from membership tables without materializing member lists, and an unknown Photo is a distinct not-found failure;
 - a rescan refreshes facts and File Location navigation but cannot reorder or insert into an open Browse Snapshot;

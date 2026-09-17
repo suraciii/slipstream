@@ -130,10 +130,11 @@ bounded independently of total Library size.
 
 Loading is range-based and rendering never initiates it:
 
-- scrolling computes the visible range plus a bounded buffer and reports that
-  one range; the Grid requests only the bounded windows still missing for
-  that range, and one completion notification updates everything the range
-  needs — scrolling does not create per-cell loading work;
+- scrolling or Grid keyboard movement computes the visible range plus a
+  bounded buffer and reports that one range; the Grid requests only the
+  bounded windows still missing for that range, and one completion
+  notification updates everything the range needs — neither scrolling nor
+  keyboard movement creates per-cell loading work;
 - Grid updates are merged to at most one per animation frame while scrolling,
   and each update reuses the DOM nodes of Photos that remain visible: only
   cells that enter, leave, or change are added, removed, or updated;
@@ -337,6 +338,49 @@ Selecting a rejected Photo changes it to `selected`. Rejecting a selected Photo 
 
 A selection action must persist before Slipstream treats navigation caused by that action as safely completed. The interface may animate immediately, but a persistence failure must restore or retain the prior visible state and keep the affected Photo recoverable.
 
+## Selection Filter and Progress
+
+A second reviewing pass works on one Selection State at a time: the
+Photographer re-checks rejects, then finishes the undecided Photos. Grid View
+must therefore offer an `All`, `Undecided`, `Selected`, or `Rejected` view of
+the open source, and must show how much of that source is decided.
+
+The filter is a view option of the open source. It must not create a source or
+an Album, and it must not change Album membership, Album member position, or
+Original Files. The filter and the view order are independent: changing one
+keeps the other. The first product does not keep the filter across a browser
+reload.
+
+The server applies the filter to the open source's complete order before the
+view is frozen, so the reported Photo count is the filtered count and the
+browser must not decide membership from the loaded Grid windows. A filtered
+view pages and navigates like an unfiltered one: Previous and Next move
+through the filtered Photos only. A filtered view that matches no Photos must
+report that no Photos match the filter; it must not report an empty source,
+offer a Library check, or show the previous filter's Photos.
+
+Changing the filter reopens the same source in the new view. When the current
+Photo matches the new filter, the reopened view keeps that Photo; otherwise it
+starts at its first Photo. A rescan must not insert, remove, or reorder Photos
+in an open filtered view. A decision that makes a Photo stop matching the open
+filter leaves that Photo visible until the source is reopened.
+
+Grid View must show decision progress for the open source: the number of
+decided Photos against the source total, and the per-state counts. The counts
+describe the source rather than the open filtered view, so they still answer
+how much review remains while the Photographer works inside one Selection
+State. They come from the server's source facts; the loaded Grid window must
+not be their only source. A confirmed decision and Undo update them without a
+reload, and reopening the source replaces them with the server's counts.
+
+The filter control must be operable from a keyboard and must receive its own
+keys unchanged. Grid decision and Rating keys must not act on the focused
+Photo while the filter control holds focus.
+
+While a Library scan runs, the counts describe the open source's bounded
+published state. They must not imply that the whole Library is decided or that
+the source is final.
+
 ## Touch Gestures
 
 While the Preview zoom state is Fit:
@@ -427,7 +471,7 @@ Undo must fail without changing state when the Photo's current value no longer m
 
 ## Keyboard Behavior
 
-On a device with a keyboard:
+On a device with a keyboard, Photo View provides:
 
 - Right Arrow moves to the next Photo without changing it.
 - Left Arrow moves to the previous Photo without changing it.
@@ -439,11 +483,31 @@ On a device with a keyboard:
 
 Keyboard actions must follow the same persistence and undo rules as visible controls and gestures.
 
+## Grid View Keyboard
+
+Grid View must be operable from a keyboard without opening Photo View.
+
+- The Grid is entered once by Tab: the Grid viewport is its entry and fallback Tab stop, and at most one rendered cell is a Tab stop at a time (the cell the keyboard owns). Arrow keys move cell focus. Left and Right move one Photo; Up and Down move one complete row.
+- Moving cell focus must load the bounded window that contains the target row, exactly as scrolling does. Cell focus must not stop at the edge of a loaded window.
+- While the focused Photo's bounded window is loading, the Grid keeps keyboard focus and returns it to the cell once that cell renders.
+- The focused cell must keep its visible focus ring when a window replacement or a merged render rebuilds it.
+- `Enter` opens the focused Photo in Photo View.
+- `P`, `X`, `U`, and `0` through `5` apply to the focused Photo, with the same persistence and undo rules as their Photo View equivalents. A decision must not move cell focus, and `U` must perform no write while the focused Photo is already `undecided`.
+- A failed Grid decision must report on the Grid's status line and must keep the affected Photo recoverable. It must not open Photo View.
+- Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
+
+While the Grid is open, undo of a change that did not advance away from the affected Photo must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. Undo of a change that advanced away must return to the affected Photo in Photo View. The browser holds one undo description, shared with Photo View.
+
 ## Failure Behavior
 
 If a File Location window fails to load, Slipstream must retain already loaded Folder nodes, identify the failed range, and offer retry without collapsing unrelated navigation. If its publication expired, Slipstream must replace the retained File Locations with one coherent current publication and identify that scan results changed them.
 
 If a Grid or Photo window fails to load, Slipstream must retain already loaded content, identify the failed range, and offer retry without returning to an empty application screen.
+
+If a filter change cannot open its view, Slipstream must report the failure on
+the Grid and keep the requested view recoverable through the source Retry,
+like any other source open. It must not present the previous filter's Photos
+as the requested filter's result.
 
 Photo navigation must commit a new current Photo only after its bounded Photo facts are available. If navigation cannot commit its target, Slipstream must retain the prior visible current Photo and position as the Photo Retry target. The displayed Photo, recovery target, and retried bounded window must refer to the same Photo.
 

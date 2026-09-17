@@ -90,12 +90,13 @@ defined by Web Async Ownership:
 - The **File Location owner** owns root binding, bounded direct-child windows,
   retry ranges, and publication rebinding independently of source, Grid, and
   Photo changes.
-- The **source and Grid owner** owns the selected Library Browser source, Browse
-  Snapshot lifecycle, bounded Browse Windows, the visible-range admission
-  contract (one in-flight request and one completion notification per
-  bounded window regardless of joined consumers), the retained-fact cache
-  bound anchored to the latest visible range, Grid position, Thumbnail work,
-  and source-scoped image transfers.
+- The **source and Grid owner** owns the selected Library Browser source, the
+  source's view order and Selection State filter, per-state Selection counts
+  for the open source, Browse Snapshot lifecycle, bounded Browse Windows, the
+  visible-range admission contract (one in-flight request and one completion
+  notification per bounded window regardless of joined consumers), the
+  retained-fact cache bound anchored to the latest visible range, Grid
+  position, Thumbnail work, and source-scoped image transfers.
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.
@@ -110,7 +111,12 @@ defined by Web Async Ownership:
   to the page model; it does not issue HTTP requests or decide async ownership.
   Grid rendering is presentational: it never initiates loading, merges to at
   most one update per animation frame, and reuses the DOM nodes of Photos that
-  stay visible. It yields Fit-state vertical touch panning to native Photo View
+  stay visible. Grid keyboard focus is presentation state: one rendered cell
+  holds the Tab stop, arrow keys move cell focus and report the target row's
+  range through the same merged render, and the page UI owns the focus
+  restoration required by
+  [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
+  It yields Fit-state vertical touch panning to native Photo View
   scrolling, retains Fit-state horizontal decision gestures, and takes full
   Preview drag ownership whenever the zoom state is manual.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
