@@ -251,6 +251,43 @@ controls need more room, but it must remain large enough to inspect the image
 and must never create horizontal overflow. The Photo View may scroll
 vertically on a short viewport so every existing control remains reachable.
 
+## Neighbor Filmstrip
+
+Comparing adjacent frames is the most common selection question, and moving
+between Photos with Previous and Next leaves no visual memory of the frames on
+either side. Photo View must therefore present the current Photo's neighbors
+as a filmstrip of thumbnails.
+
+The filmstrip shows the current Photo and at most five Photos on each side of
+it, taken from the open source order. It must not grow with the source size
+and must not become a second Grid: an entry presents a thumbnail and its
+position, with no Selection State, Rating, or Preview detail of its own.
+
+- Activating a neighbor entry makes that Photo current under the same rules
+  as Previous and Next navigation. It must record no decision.
+- The current Photo must be identified as the filmstrip's current position,
+  and its own entry must not navigate.
+- A neighbor entry must be reachable and activatable from a keyboard without a
+  pointer.
+- The filmstrip must follow the current Photo and the open source order,
+  including an Album's explicit order. It must not reorder Photos, and it must
+  not change the current source.
+- At the first and last Photo the filmstrip shows only the neighbors that
+  exist.
+- A neighbor whose thumbnail is not available yet must keep a stable
+  placeholder that presents no other Photo's image.
+
+The Preview remains the dominant surface. The filmstrip must stay inside the
+available viewport width: when its entries do not fit, the strip scrolls
+horizontally instead of shrinking thumbnails below a usable target or widening
+Photo View. On a short viewport it yields space to the Preview and the
+decision controls, which stay reachable through the existing vertical path to
+every control.
+
+The filmstrip is neither a comparison surface nor a zoom loupe. Detail review
+stays in the Preview, and activating a filmstrip entry only changes the
+current Photo.
+
 ## Loading Feedback
 
 Slipstream must distinguish these user-visible states:

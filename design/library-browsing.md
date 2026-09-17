@@ -317,6 +317,35 @@ A Selection State or Rating mutation updates SQLite through the existing transac
 
 Preview completion must become visible to subsequent window or Photo queries immediately. A stale process-wide scan snapshot must not remain the only source of Preview state after the Preview service has persisted newer facts.
 
+### Photo View Neighbor Strip
+
+Photo View presents the current Photo's neighbors from the open Browse
+Snapshot as one bounded strip. It is browser presentation of facts the
+Snapshot already owns: it adds no route, no identity, and no persisted state.
+
+A strip covers the current position plus at most five positions on each side,
+so it holds at most eleven entries whatever the source size. Entries read the
+same retained Browse Window facts that Grid View reads, which is what makes the
+strip follow the frozen open order, whether that is `All Photos` or Original
+Folder Capture Time order or Album membership order. The strip resolves no
+order of its own, and it presents the neighbors that exist when the current
+Photo is at either end of the source.
+
+A neighbor position whose bounded window is not retained is look-ahead work.
+The browser admits the aligned window through the existing range admission path
+at background priority and keeps a stable placeholder for that entry until the
+window settles. A failed look-ahead window leaves its placeholder in place; it
+must not displace the current Preview, the current Photo's facts, decisions, or
+navigation.
+
+Thumbnails reuse the existing derivative pipeline. An entry presents the
+identity-bearing thumbnail URL already returned by its Photo facts, and
+otherwise requests the thumbnail through the same bounded, coalesced retrieval
+Grid View uses. Strip transfer is background work: it stays below the current
+Photo's Preview, must not delay source control, navigation, or already
+available controls, and must not extend adjacent review Preview preparation to
+every neighbor it shows.
+
 ### Persistent Derivative Cache
 
 The existing cache identity and atomic publication contracts remain authoritative. Both `thumbnail-512` and `review-2560` derivatives persist in the configured cache directory and may be reused across server restart.
@@ -476,6 +505,10 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - Album saved-position and unavailable-member fallback work without complete membership transfer;
 - Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
+- the Photo View neighbor strip stays bounded independently of source size,
+  follows the open view order and the current Photo, reuses the already
+  hydrated thumbnail URLs without a new route, and keeps a stable placeholder
+  for a neighbor whose window or thumbnail has not arrived;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;
 - cache removal rebuilds derivatives without changing SQLite user state or Original File hashes;
