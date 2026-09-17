@@ -13694,6 +13694,194 @@ test("a Photo View navigation repairs the strip thumbnails it detached mid-trans
   }
 });
 
+test("a failed strip look-ahead keeps its placeholder and asks once", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  // Window loads are told apart by the priority the page admitted them with:
+  // a Grid range is foreground work, the strip's look-ahead is background.
+  await page.addInitScript(() => {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = ((input, init) => {
+      if (typeof input !== "string") return nativeFetch(input, init);
+      const url = new URL(input, window.location.href);
+      if (!url.pathname.startsWith("/api/browse/") || init?.method)
+        return nativeFetch(input, init);
+      const headers = new Headers(init?.headers);
+      headers.set(
+        "x-slipstream-test-priority",
+        init?.priority ?? "unspecified",
+      );
+      return nativeFetch(input, { ...init, headers });
+    }) as typeof window.fetch;
+  });
+  let releaseLookahead!: () => void;
+  const lookaheadGate = new Promise<void>((resolve) => {
+    releaseLookahead = resolve;
+  });
+  const lookaheadAdmissions: Array<{ priority: string }> = [];
+  await page.route(/\/api\/browse\/[^/]+/, async (route) => {
+    const request = route.request();
+    if (
+      request.method() !== "GET" ||
+      new URL(request.url()).searchParams.get("start") !== "60"
+    ) {
+      await route.continue();
+      return;
+    }
+    lookaheadAdmissions.push({
+      priority:
+        request.headers()["x-slipstream-test-priority"] ?? "unspecified",
+    });
+    await lookaheadGate;
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: '{"error":"failed"}',
+    });
+  });
+  let previewRequests = 0;
+  await page.route("**/api/photos/*/preview", async (route) => {
+    previewRequests += 1;
+    await route.continue();
+  });
+  try {
+    await openGrid(page, running.url, "All Photos");
+    // The Grid presents up to Photo 60 and no further, so the window that
+    // holds Photo 61 and its neighbors is the strip's look-ahead alone.
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      Object.defineProperty(element, "clientWidth", {
+        configurable: true,
+        value: 900,
+      });
+      Object.defineProperty(element, "clientHeight", {
+        configurable: true,
+        value: 900,
+      });
+      window.dispatchEvent(new Event("resize"));
+    });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await viewport.evaluate((element) => {
+      element.scrollTop = 4 * 178;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+    await expect(page.locator('[data-photo-index="59"]')).toHaveCount(1);
+    await expect(page.locator('[data-photo-index="60"]')).toHaveCount(0);
+
+    await page.locator('[data-photo-index="59"]').click();
+    await expect(page.locator("[data-position]")).toHaveText("60 / 130");
+    // Positions 55-60 come from the retained window; the neighbors past it are
+    // placeholders while the window that holds them is in flight. The Grid's
+    // own retained range still asks for that window as foreground work, so the
+    // bounded admission under test is the strip's background one.
+    await expect(page.locator(".filmstrip-cell")).toHaveCount(11);
+    await expect(page.locator(".filmstrip-placeholder")).toHaveCount(5);
+    const placeholder = page.locator(
+      '.filmstrip-cell[data-filmstrip-index="60"]',
+    );
+    await expect(placeholder).toHaveClass(/filmstrip-placeholder/);
+    await expect(placeholder).toHaveAccessibleName("Photo 61 of 130");
+    await expect(placeholder.locator("img")).toHaveCount(0);
+    const backgroundAdmissions = () =>
+      lookaheadAdmissions.filter((one) => one.priority === "low").length;
+    expect(backgroundAdmissions()).toBe(1);
+
+    // The Preview lands while that window is still in flight, and the strip
+    // re-renders with it: the bounded admission must not repeat.
+    await expect(
+      page.getByRole("img", { name: "Photo 60 of 130" }),
+    ).toBeVisible();
+    expect(backgroundAdmissions()).toBe(1);
+    const previewsBeforeFailure = previewRequests;
+    expect(previewsBeforeFailure).toBeGreaterThan(0);
+
+    // The window fails. Its placeholder stays exactly where it was, the
+    // background admission stays one, and the current Photo keeps its Preview
+    // and facts.
+    releaseLookahead();
+    await expect(page.locator("[data-status]")).toHaveText(
+      "Photos 61–120 could not be loaded (HTTP 503). Retry this range.",
+    );
+    await expect(placeholder).toHaveClass(/filmstrip-placeholder/);
+    await expect(placeholder).toHaveAccessibleName("Photo 61 of 130");
+    await expect(placeholder.locator("img")).toHaveCount(0);
+    expect(backgroundAdmissions()).toBe(1);
+    await expect(page.locator("[data-position]")).toHaveText("60 / 130");
+    await expect(page.locator("[data-photo-filename]")).toHaveText("059.jpg");
+    await expect(
+      page.getByRole("img", { name: "Photo 60 of 130" }),
+    ).toBeVisible();
+    expect(previewRequests).toBe(previewsBeforeFailure);
+    expect(ids).toHaveLength(130);
+  } finally {
+    releaseLookahead();
+    await page.unroute(/\/api\/browse\/[^/]+/);
+    await page.unroute("**/api/photos/*/preview");
+  }
+});
+
+test("a strip entry rebuilt under the keyboard gives the position back", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  // The Preview is held so the Photographer reaches the strip before the
+  // current Photo's Preview facts land, and the strip redraws under them.
+  let releasePreview!: () => void;
+  const previewGate = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  await page.route("**/api/photos/*/preview", async (route) => {
+    await previewGate;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await openGrid(page, running.url, "All Photos");
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-position]")).toHaveText("1 / 8");
+    await expectFilmstrip(page, [0, 1, 2, 3, 4, 5], ids.slice(0, 6));
+
+    // The current Photo's own entry is the position marker the Preview facts
+    // rebuild: it is focusable, so the redraw must hand the position back.
+    const current = page.locator('.filmstrip-cell[data-filmstrip-index="0"]');
+    await current.focus();
+    await expect(current).toBeFocused();
+    await current.evaluate((element) => {
+      element.dataset.testStamp = "before";
+    });
+
+    releasePreview();
+    await expect(
+      page.getByRole("img", { name: "Photo 1 of 8" }),
+    ).toBeVisible();
+    await expect(
+      page.locator('.filmstrip-cell[data-filmstrip-index="0"]'),
+    ).not.toHaveAttribute("data-test-stamp", "before");
+    await expect(current).toBeFocused();
+    await expect(current).toHaveAccessibleName(/Photo 1 of 8 — Current/);
+  } finally {
+    releasePreview();
+    await page.unroute("**/api/photos/*/preview");
+  }
+});
+
 test("a large source keeps the filmstrip bounded and inside one Browse Window", async ({
   page,
 }) => {

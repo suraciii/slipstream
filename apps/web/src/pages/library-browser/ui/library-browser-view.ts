@@ -1890,7 +1890,14 @@ export function createLibraryBrowserView(
   /// keyboard position out of the strip.
   const presentFilmstripEntry = (entry: RenderedFilmstripEntry) => {
     if (!entry.photo) {
+      // A position whose window is still missing keeps its place and says
+      // which position it is: a Photographer reading the strip hears where
+      // they are, not that something is loading somewhere.
       entry.button.disabled = true;
+      entry.button.setAttribute(
+        "aria-label",
+        filmstripEntryLabel(entry, false),
+      );
       return;
     }
     const current = entry.index === filmstripModel.currentIndex;
