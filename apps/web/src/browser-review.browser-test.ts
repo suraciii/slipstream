@@ -686,6 +686,28 @@ async function touchDrag(
   }
 }
 
+/// A native touch pan keeps its momentum after the finger lifts, and an offset
+/// restored while that momentum still lands is discarded, so the Photo View
+/// returns to the top only once the pan has come to rest. Repeating the restore
+/// until it holds across animation frames is what makes Preview geometry read
+/// afterwards describe the position the next gesture begins from.
+async function restorePhotoViewTop(page: Page) {
+  await expect
+    .poll(() =>
+      page.locator("[data-photo-view]").evaluate(async (element) => {
+        const view = element as HTMLElement;
+        view.scrollTop = 0;
+        const frame = () =>
+          new Promise((settled) => requestAnimationFrame(settled));
+        await frame();
+        const first = view.scrollTop;
+        await frame();
+        return first === 0 && view.scrollTop === 0;
+      }),
+    )
+    .toBe(true);
+}
+
 async function interactiveGeometry(container: Locator) {
   return container.evaluate((root) => {
     const rootBox = root.getBoundingClientRect();
@@ -1932,9 +1954,11 @@ function touchQualification(viewport: { width: number; height: number }) {
     await expect(page.getByText("1 / 3")).toBeVisible();
     expect(stateRequests).toBe(0);
 
-    await photoView.evaluate((view) => {
-      view.scrollTop = 0;
-    });
+    // The decision gestures below start on the Preview surface: the zoom
+    // controls cover the Preview's top edge and own their gestures, so a swipe
+    // that begins on one is never admitted. Geometry measured after the touch
+    // pan's momentum has ended is the position those gestures begin from.
+    await restorePhotoViewTop(page);
     const horizontal = await preview.evaluate((surface) => {
       const box = surface.getBoundingClientRect();
       return {
@@ -1957,6 +1981,10 @@ function touchQualification(viewport: { width: number; height: number }) {
     await mutation;
     await expect(page.getByText("2 / 3")).toBeVisible();
     expect(stateRequests).toBe(1);
+    // These coordinates are measured against the top of the Photo View, so the
+    // Photo this decision advanced to must present the same scroll position
+    // before the second gesture uses them.
+    await restorePhotoViewTop(page);
 
     mutation = page.waitForResponse(
       (response) =>
