@@ -2022,6 +2022,20 @@ export function createLibraryBrowserView(
         existing?.deliveryFailed ?? false,
       );
       if (existing && existing.signature === signature) {
+        // Every Photo View navigation hands the shared image transfers back to
+        // the owner and to the next Photo, so an entry whose thumbnail bytes
+        // had not arrived loses its source while it stays in the strip. The
+        // retained entry keeps its position and its binding and asks the owner
+        // for the image again: an entry that stayed in the strip must not
+        // present a blank thumbnail for the rest of the visit. A binding whose
+        // delivery already failed is left alone, so a failure cannot turn into
+        // a request on every render.
+        if (
+          existing.thumbnail &&
+          !existing.deliveryFailed &&
+          !existing.thumbnail.target.src
+        )
+          bindThumbnail(existing.thumbnail);
         presentFilmstripEntry(existing);
         rendered.push(existing);
         continue;

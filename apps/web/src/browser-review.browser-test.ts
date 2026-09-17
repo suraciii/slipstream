@@ -13642,6 +13642,58 @@ test("the filmstrip presents no other Photo's image while a neighbor thumbnail i
   }
 });
 
+test("a Photo View navigation repairs the strip thumbnails it detached mid-transfer", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 10);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  let released = false;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let heldRequests = 0;
+  await page.route("**/api/photos/*/thumbnail", async (route) => {
+    if (released) {
+      await route.continue().catch(() => undefined);
+      return;
+    }
+    heldRequests += 1;
+    await held;
+    await route.continue().catch(() => undefined);
+  });
+  try {
+    await page.setViewportSize({ width: 900, height: 900 });
+    await page.goto(running.url);
+    await expect(page.locator('[data-photo-index="0"]')).toBeEnabled();
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-position]")).toHaveText("1 / 10");
+
+    // The strip presents its bounded positions while every thumbnail is still
+    // in flight, so each of these entries is detached mid-transfer by the
+    // navigation below.
+    await expect(page.locator(".filmstrip-cell")).toHaveCount(6);
+    expect(heldRequests).toBeGreaterThan(0);
+    expect(await page.locator(".filmstrip-cell img[src]").count()).toBe(0);
+
+    // One Photo View navigation hands the shared transfers back to the owner.
+    // The entries that stay in the strip must ask for their thumbnail again
+    // instead of presenting a blank entry for the rest of the visit.
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator("[data-position]")).toHaveText("2 / 10");
+    await expect(page.locator(".filmstrip-cell")).toHaveCount(7);
+    released = true;
+    release();
+    await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6], ids.slice(0, 7));
+  } finally {
+    released = true;
+    release();
+    await page.unroute("**/api/photos/*/thumbnail");
+  }
+});
+
 test("a large source keeps the filmstrip bounded and inside one Browse Window", async ({
   page,
 }) => {
