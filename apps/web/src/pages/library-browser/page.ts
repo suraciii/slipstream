@@ -2285,6 +2285,7 @@ export function mountLibraryBrowser(
         photoRecoveryKey(gridAuthority),
       );
       recoveryGate.succeedTransition(gridTransition);
+      syncConnection();
       updateControls();
       renderGrid();
       view.focusGridIndex(outcome.index);
