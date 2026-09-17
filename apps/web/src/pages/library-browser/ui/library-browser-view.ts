@@ -747,6 +747,9 @@ export function createLibraryBrowserView(
   // Whether one batch Add to Album is settling: its control stays disabled
   // until the outcome is presented.
   let batchAlbumsPending = false;
+  /// The batch-bar control that held keyboard focus when a settling batch
+  /// disabled the bar; parked and returned by renderBatch.
+  let heldBatchControl: HTMLButtonElement | HTMLSelectElement | null = null;
   // The Album choices the batch bar presents. A hidden bar binds no options,
   // so an option list never answers a query for a surface the Grid is not
   // presenting.
@@ -1837,12 +1840,39 @@ export function createLibraryBrowserView(
         ? `${count.toLocaleString()} of ${gridMultiLimit.toLocaleString()} selected`
         : `${count.toLocaleString()} selected`;
     const enabled = gridMultiEnabled && !batchAlbumsPending;
+    // Disabling a focused batch control would drop keyboard focus to the
+    // body, so the bar parks focus on the Select mode toggle while a batch
+    // settles and returns it when interactivity resumes, mirroring the
+    // Grid's held-cell hand-off.
+    if (!enabled && heldBatchControl === null) {
+      const active = document.activeElement;
+      if (
+        active === batchSelect ||
+        active === batchReject ||
+        active === batchAlbumSelect ||
+        active === batchAlbumAdd
+      ) {
+        heldBatchControl = active as HTMLButtonElement | HTMLSelectElement;
+        gridSelectMode.focus();
+      }
+    }
     batchSelect.disabled = !enabled;
     batchReject.disabled = !enabled;
     batchClear.disabled = false;
     const albums = batchAlbumSelect.options.length > 0;
     batchAlbumSelect.disabled = !enabled || !albums;
     batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
+    if (enabled && heldBatchControl) {
+      const control = heldBatchControl;
+      heldBatchControl = null;
+      if (
+        control.isConnected &&
+        !control.disabled &&
+        (document.activeElement === document.body ||
+          document.activeElement === gridSelectMode)
+      )
+        control.focus();
+    }
   };
   /// One filmstrip entry. A neighbor whose facts are still loading renders as
   /// a disabled placeholder, exactly like a Grid cell outside the loaded

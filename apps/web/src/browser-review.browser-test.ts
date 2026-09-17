@@ -3212,6 +3212,58 @@ test("Grid Select mode and the batch actions are reachable from the keyboard", a
   await expect(cell(0)).not.toHaveClass(/multi-selected/);
 });
 
+test("a focused batch control keeps a reachable focus while its batch settles", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const mode = page.locator("[data-grid-select-mode]");
+  const batchSelect = page.locator("[data-batch-select]");
+  await mode.click();
+  for (const index of [0, 1])
+    await page.locator(`[data-photo-index="${index}"]`).click();
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+
+  // While the batch decision settles, its controls disable; a focused one
+  // would drop keyboard focus to the body, so the bar parks it on the Select
+  // mode toggle and returns it when interactivity resumes.
+  let releaseBatch!: () => void;
+  const batchReleased = new Promise<void>((resolve) => {
+    releaseBatch = resolve;
+  });
+  await page.route("**/api/photos/state", async (route) => {
+    await batchReleased;
+    await route.continue();
+  });
+  const batchDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/photos/state",
+  );
+  await batchSelect.focus();
+  await page.keyboard.press("Enter");
+  await expect(batchSelect).toBeDisabled();
+  await expect(mode).toBeFocused();
+  releaseBatch();
+  await batchDone;
+  await page.unroute("**/api/photos/state");
+
+  await expect(batchSelect).toBeEnabled();
+  await expect(batchSelect).toBeFocused();
+  await expect(
+    page.locator('[data-photo-index="0"] .cell-state.selected'),
+  ).toHaveText("✓");
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "2 of 3 decided · 2 selected · 0 rejected · 1 undecided",
+  );
+});
+
 test("Opening another source clears the Grid multi-selection", async ({
   page,
 }) => {
