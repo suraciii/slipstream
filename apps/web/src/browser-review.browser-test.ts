@@ -9744,6 +9744,552 @@ test("a long Original filename truncates without breaking Grid or Photo View", a
   expect(facts.browserFits).toBe(true);
 });
 
+/// The bounded strip's entries in presentation order, as their Photo indices.
+const filmstripIndices = (page: Page) =>
+  page
+    .locator("[data-filmstrip] .filmstrip-cell")
+    .evaluateAll((cells) =>
+      cells.map((cell) => Number(cell.getAttribute("data-filmstrip-index"))),
+    );
+
+const waitForFilmstripImages = (page: Page) =>
+  page.waitForFunction(() => {
+    const images = Array.from(
+      document.querySelectorAll<HTMLImageElement>("[data-filmstrip] img"),
+    );
+    return (
+      images.length > 0 &&
+      images.every((image) => image.complete && image.naturalWidth > 0)
+    );
+  });
+
+test("Photo View shows a bounded filmstrip of neighbors and navigates through it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 6);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  await expect(strip).toBeVisible();
+  // Bounded and centered: two neighbors on each side of the current Photo.
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);
+  expect(await filmstripIndices(page)).toEqual([0, 1, 2, 3, 4]);
+  await expect(strip.locator('[data-filmstrip-index="2"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+  await expect(
+    strip.locator('.filmstrip-cell[aria-current="true"]'),
+  ).toHaveCount(1);
+  await waitForFilmstripImages(page);
+
+  // Activating a neighbor navigates there without recording a decision, and
+  // the strip re-centers on the new current Photo. The neighbor is already
+  // in the loaded window, so the strip admits no window request of its own.
+  const windows = recordWindowRequests(page);
+  await strip.locator('[data-filmstrip-index="4"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("5 / 6");
+  expect(windows.requested).toEqual([]);
+  await expect(page.locator("[data-photo-filename]")).toHaveText("004.jpg");
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
+  await expect(page.locator("[data-preview]")).toHaveAttribute(
+    "data-zoom-state",
+    "fit",
+  );
+  // The source's end clamps the strip instead of wrapping around it.
+  expect(await filmstripIndices(page)).toEqual([2, 3, 4, 5]);
+  await expect(strip.locator('[data-filmstrip-index="4"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+
+  // The same path serves the boundary: an edge Photo keeps its clamp and
+  // never wraps around the source.
+  await strip.locator('[data-filmstrip-index="5"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("6 / 6");
+  await waitForLoadedReviewImage(page);
+  expect(await filmstripIndices(page)).toEqual([3, 4, 5]);
+  await expect(strip.locator('[data-filmstrip-index="5"]')).toHaveAttribute(
+    "aria-current",
+    "true",
+  );
+});
+
+test("the filmstrip marks the current Photo and keeps its decisions truthful", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="1"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  const entry = (index: number) =>
+    strip.locator(`[data-filmstrip-index="${index}"]`);
+
+  // Selecting advances, and the strip reports the decision it just made
+  // while the current entry moves with the navigation.
+  await page.getByRole("button", { name: "Select" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 4");
+  await waitForLoadedReviewImage(page);
+  await expect(entry(1).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(entry(1)).toHaveAccessibleName("Photo 2 of 4 — 001.jpg");
+  await expect(entry(1)).toHaveAccessibleDescription("Selected · 0 stars");
+  await expect(entry(2)).toHaveAttribute("aria-current", "true");
+  await expect(entry(2)).toHaveAccessibleName("Photo 3 of 4 — 002.jpg");
+  await expect(entry(2)).toHaveAccessibleDescription("Undecided · 0 stars");
+
+  // Rejecting the current Photo records its own badge.
+  await page.getByRole("button", { name: "Reject" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("4 / 4");
+  await waitForLoadedReviewImage(page);
+  await expect(entry(2).locator(".cell-state.rejected")).toHaveText("×");
+
+  // Undo restores the Photo and the strip stops claiming the decision.
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 4");
+  await expect(entry(2).locator(".cell-state")).toHaveCount(0);
+  await expect(entry(2)).toHaveAccessibleDescription("Undecided · 0 stars");
+});
+
+test("the filmstrip follows the open source's filtered sequence", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+
+  // Decide two Photos, then browse only the filtered sequence.
+  for (const index of [0, 2]) {
+    await page.locator(`[data-photo-index="${index}"]`).click();
+    await waitForLoadedReviewImage(page);
+    await page.getByRole("button", { name: "Select" }).click();
+    await expect(page.locator("[data-position]")).toHaveText(
+      `${index + 2} / 5`,
+    );
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.locator("[data-grid-view]")).toBeVisible();
+  }
+  await page.locator("[data-filter-select]").selectOption("selected");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-photo-filename]")).toHaveText("000.jpg");
+  const strip = page.locator("[data-filmstrip]");
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(2);
+  await expect(
+    strip.locator('[data-filmstrip-index="0"]'),
+  ).toHaveAccessibleName("Photo 1 of 2 — 000.jpg");
+  await expect(
+    strip.locator('[data-filmstrip-index="1"]'),
+  ).toHaveAccessibleName("Photo 2 of 2 — 002.jpg");
+  await expect(
+    strip.locator('[data-filmstrip-index="1"]'),
+  ).toHaveAccessibleDescription("Selected · 0 stars");
+
+  // The neighbor is the filtered sequence's next Photo, not the source's.
+  await waitForFilmstripImages(page);
+  await strip.locator('[data-filmstrip-index="1"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await expect(page.locator("[data-photo-filename]")).toHaveText("002.jpg");
+});
+
+test("the filmstrip follows an Album's explicit order", async ({ page }) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  await writeFile(
+    join(root, "A.jpg"),
+    withCaptureTime(source, "2026:01:01 10:00:00"),
+  );
+  await writeFile(
+    join(root, "B.jpg"),
+    withCaptureTime(source, "2026:01:02 10:00:00"),
+  );
+  await writeFile(
+    join(root, "C.jpg"),
+    withCaptureTime(source, "2026:01:03 10:00:00"),
+  );
+  const running = await server(base, root);
+  const ascending = await browseIds(running.url);
+  const { albumId } = await createAlbum(running.url, "Filmstrip order");
+  // An order that matches no Capture Time view: C, A, B.
+  const albumOrder = [ascending[2]!, ascending[0]!, ascending[1]!];
+  await post(running.url, `/api/albums/${albumId}/order`, {
+    photoIds: albumOrder,
+  });
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await openSources(page);
+  await page.getByRole("button", { name: /^Filmstrip order(?: |$)/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Filmstrip order");
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-photo-filename]")).toHaveText("C.jpg");
+
+  const strip = page.locator("[data-filmstrip]");
+  await expect(
+    strip.locator('[data-filmstrip-index="1"]'),
+  ).toHaveAccessibleName("Photo 2 of 3 — A.jpg");
+  await expect(
+    strip.locator('[data-filmstrip-index="2"]'),
+  ).toHaveAccessibleName("Photo 3 of 3 — B.jpg");
+  await strip.locator('[data-filmstrip-index="2"]').click();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await expect(page.locator("[data-photo-filename]")).toHaveText("B.jpg");
+});
+
+test("the filmstrip yields on a short viewport and stays inside a narrow one", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+
+  // Narrow: the bounded strip fits without widening Photo View, and every
+  // entry keeps the 44 by 44 target.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(strip).toBeVisible();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);
+  const narrow = await page.locator("[data-photo-view]").evaluate((view) => {
+    const viewBox = view.getBoundingClientRect();
+    return {
+      widened: view.scrollWidth > view.clientWidth,
+      viewLeft: viewBox.left,
+      viewRight: viewBox.right,
+      entries: Array.from(
+        view.querySelectorAll<HTMLElement>(".filmstrip-cell"),
+      ).map((entry) => {
+        const box = entry.getBoundingClientRect();
+        return {
+          width: box.width,
+          height: box.height,
+          left: box.left,
+          right: box.right,
+        };
+      }),
+    };
+  });
+  expect(narrow.widened).toBe(false);
+  expect(
+    narrow.entries.every(({ width, height }) => width >= 44 && height >= 44),
+  ).toBe(true);
+  expect(
+    narrow.entries.every(
+      ({ left, right }) =>
+        left >= narrow.viewLeft - 0.5 && right <= narrow.viewRight + 0.5,
+    ),
+  ).toBe(true);
+
+  // The Preview stays the dominant surface beside the strip.
+  const previewHeight = await page
+    .locator("[data-preview]")
+    .evaluate((preview) => preview.getBoundingClientRect().height);
+  const barHeight = await page
+    .locator(".review-bar")
+    .evaluate((bar) => bar.getBoundingClientRect().height);
+  expect(previewHeight).toBeGreaterThan(barHeight);
+
+  // Short: the strip yields so the Preview and the decisions keep their
+  // space, and every control stays reachable. A hidden strip binds nothing,
+  // so it presents no entries while the viewport cannot show them.
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(strip).toBeHidden();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(0);
+  await expect(strip.locator("img")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
+  await expect(page.locator("[data-preview]")).toBeVisible();
+
+  // When the space returns, the strip rebuilds from the loaded facts.
+  await page.setViewportSize({ width: 844, height: 700 });
+  await expect(strip).toBeVisible();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);
+  await expect(
+    strip.locator('.filmstrip-cell[aria-current="true"]'),
+  ).toHaveCount(1);
+  await waitForFilmstripImages(page);
+});
+
+test("the filmstrip is keyboard operable without owning Photo View shortcuts", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  const entry = (index: number) =>
+    strip.locator(`[data-filmstrip-index="${index}"]`);
+
+  // Enter activates a focused entry exactly like a click.
+  await entry(4).focus();
+  await expect(entry(4)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-position]")).toHaveText("5 / 5");
+  await waitForLoadedReviewImage(page);
+
+  // The decision and navigation shortcuts still act while an entry holds
+  // focus: the strip never owns a Photo View key.
+  await entry(3).focus();
+  await page.keyboard.press("p");
+  await expect(entry(4).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(page.locator("[data-selection]")).toHaveText("Selected");
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.locator("[data-position]")).toHaveText("4 / 5");
+  await waitForLoadedReviewImage(page);
+  await expect(entry(3)).toHaveAttribute("aria-current", "true");
+});
+
+test("the filmstrip presents only the neighbors its loaded window holds", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  // A narrow viewport keeps the Grid's own rendered range small, so the
+  // current Photo's window stays the only one loaded when Photo View opens.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+  // Two columns at this width, so Photo 31 sits in the sixteenth row.
+  await scrollGrid(page, 15 * 178);
+  await page.locator('[data-photo-index="30"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  const entry = (index: number) =>
+    strip.locator(`[data-filmstrip-index="${index}"]`);
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);
+  expect(await filmstripIndices(page)).toEqual([28, 29, 30, 31, 32]);
+  await waitForFilmstripImages(page);
+
+  // The window past the loaded range is the current Photo's next neighbor.
+  // The fixture is smaller than two windows, so the server aligns the last
+  // window to total minus its size (start 10) instead of a plain multiple.
+  // Hold it so the placeholder assertion is deterministic and the release
+  // pins that its arrival reaches the strip.
+  let releaseTail!: () => void;
+  const tailGate = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  let tailRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      tailRequests += 1;
+      await tailGate;
+      try {
+        await route.continue();
+      } catch {
+        /* a newer navigation may abort the held request */
+      }
+    },
+  );
+
+  try {
+    // Walk to the last Photo of the aligned window. The next window's
+    // neighbor stays a placeholder: Photo View owns the UI and admits no
+    // window work for it, so the strip presents no guessed Photo and no
+    // invented thumbnail.
+    for (let position = 32; position <= 60; position += 1) {
+      await page.getByRole("button", { name: "Next" }).click();
+      await expect(page.locator("[data-position]")).toHaveText(
+        `${position} / 70`,
+      );
+    }
+    expect(await filmstripIndices(page)).toEqual([57, 58, 59, 60, 61]);
+    await expect(entry(60)).toBeVisible();
+    await expect(entry(60)).toBeDisabled();
+    await expect(entry(60).locator("img")).toHaveCount(0);
+    await expect(entry(60)).toHaveAccessibleName("Photo 61 of 70");
+    await expect.poll(() => tailRequests).toBeGreaterThan(0);
+  } finally {
+    releaseTail();
+  }
+
+  // The held window settles through the prefetch that loaded it, and that
+  // caller re-renders the strip: the neighbor stops being a placeholder
+  // without the Photographer navigating to it.
+  await expect(entry(60)).toBeEnabled();
+  await expect(entry(60)).toHaveAccessibleName("Photo 61 of 70 — 060.jpg");
+  await expect(entry(60).locator("img")).toHaveCount(1);
+
+  // Crossing the boundary is the Photographer's own move: that Photo's window
+  // loads through the normal Photo path and the entry becomes current.
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("61 / 70");
+  await waitForLoadedReviewImage(page);
+  await waitForFilmstripImages(page);
+  expect(await filmstripIndices(page)).toEqual([58, 59, 60, 61, 62]);
+  await expect(entry(60)).toHaveAttribute("aria-current", "true");
+
+  // The neighbor from that window is real: it navigates.
+  await entry(62).click();
+  await expect(page.locator("[data-position]")).toHaveText("63 / 70");
+  await expect(page.locator("[data-photo-filename]")).toHaveText("062.jpg");
+  await waitForLoadedReviewImage(page);
+});
+
+test("a source without neighbors hides the filmstrip and binds nothing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "only.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+
+  // One entry is not a neighbor strip, and a hidden strip must not hold
+  // thumbnails: it binds nothing instead of presenting work behind itself.
+  const strip = page.locator("[data-filmstrip]");
+  await expect(strip).toBeHidden();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(0);
+  await expect(strip.locator("img")).toHaveCount(0);
+
+  // The Photo's own surface is unaffected: the position and the identity a
+  // decision applies to still hold.
+  await expect(page.locator("[data-position]")).toHaveText("1 / 1");
+  await expect(page.locator("[data-photo-filename]")).toHaveText("only.jpg");
+  await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+});
+
+test("activating the current filmstrip entry keeps manual zoom and refetches nothing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  const current = strip.locator('[data-filmstrip-index="2"]');
+  await expect(current).toHaveAttribute("aria-current", "true");
+  await waitForFilmstripImages(page);
+
+  // Manual zoom is the Photographer's own view of this Photo.
+  const preview = page.locator("[data-preview]");
+  const zoomIn = page.getByRole("button", { name: "Zoom in", exact: true });
+  await zoomIn.click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  const level = await page.locator("[data-zoom-level]").textContent();
+  const reviewImage = await page.locator("[data-stage] img").elementHandle();
+
+  let previewRequests = 0;
+  await page.route("**/api/photos/*/preview*", (route) => {
+    previewRequests += 1;
+    return route.continue();
+  });
+  try {
+    // The current entry is where the Photographer already is: it presents no
+    // activation, so nothing re-opens the same Photo.
+    await current.click();
+    await expect(page.locator("[data-position]")).toHaveText("3 / 5");
+    await expect(page.locator("[data-photo-filename]")).toHaveText("002.jpg");
+    await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+    await expect(page.locator("[data-zoom-level]")).toHaveText(level!);
+    // The same image element still carries the Photo: the surface was not
+    // rebuilt, and no replacement Preview was requested.
+    expect(await reviewImage!.evaluate((image) => image.isConnected)).toBe(
+      true,
+    );
+    expect(previewRequests).toBe(0);
+  } finally {
+    await page.unroute("**/api/photos/*/preview*");
+  }
+});
+
+test("the filmstrip disables its entries while a navigation is in flight", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 70);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
+  await scrollGrid(page, 15 * 178);
+  await page.locator('[data-photo-index="30"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  const entry = (index: number) =>
+    strip.locator(`[data-filmstrip-index="${index}"]`);
+
+  // Hold the window the Photo past the loaded range needs, so the navigation
+  // to it stays in flight, and prove the strip is gated on the same busy fact
+  // as Previous: it never offers an activation that would be dropped.
+  let releaseWindow!: () => void;
+  const windowGate = new Promise<void>((resolve) => {
+    releaseWindow = resolve;
+  });
+  let boundaryRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname.startsWith("/api/browse/") &&
+      url.searchParams.get("start") === "10",
+    async (route) => {
+      boundaryRequests += 1;
+      await windowGate;
+      try {
+        await route.continue();
+      } catch {
+        /* a newer navigation may abort the held request */
+      }
+    },
+  );
+  try {
+    // Walk to the last Photo of the loaded window; the strip's next neighbor
+    // is already outside it.
+    for (let position = 32; position <= 60; position += 1) {
+      await page.getByRole("button", { name: "Next" }).click();
+      await expect(page.locator("[data-position]")).toHaveText(
+        `${position} / 70`,
+      );
+    }
+    await expect(entry(58)).toBeEnabled();
+
+    await page.getByRole("button", { name: "Next" }).click();
+    await expect.poll(() => boundaryRequests).toBeGreaterThan(0);
+    await expect(page.locator("[data-position]")).toHaveText("60 / 70");
+    await expect(entry(58)).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
+  } finally {
+    releaseWindow();
+  }
+
+  await expect(page.locator("[data-position]")).toHaveText("61 / 70");
+  await waitForLoadedReviewImage(page);
+  await expect(entry(58)).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Previous" })).toBeEnabled();
+  await expect(entry(60)).toHaveAttribute("aria-current", "true");
+});
+
 test("detached Grid image errors cannot poison the replacement cell", async ({
   page,
 }) => {
@@ -10299,6 +10845,52 @@ test("a large viewport stays bounded at every thumbnail size", async ({
   }
 });
 
+test("a focused filmstrip entry keeps a reachable focus across a decision", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  await waitForFilmstripImages(page);
+  const entry = strip.locator('[data-filmstrip-index="1"]');
+  await expect(entry).toBeEnabled();
+  await entry.focus();
+  await expect(entry).toBeFocused();
+
+  // While the decision is in flight the strip entry is disabled; disabling a
+  // focused button would drop focus to the body, so the Photo View holds it.
+  let releaseState!: () => void;
+  const stateReleased = new Promise<void>((resolve) => {
+    releaseState = resolve;
+  });
+  await page.route("**/api/photos/*/state", async (route) => {
+    await stateReleased;
+    await route.continue();
+  });
+  const stateDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.includes("/state"),
+  );
+  await page.keyboard.press("5");
+  await expect(entry).toBeDisabled();
+  await expect(page.locator("[data-photo-view]")).toBeFocused();
+  releaseState();
+  await stateDone;
+  await page.unroute("**/api/photos/*/state");
+
+  // When interactivity resumes, the entry the Photographer had focused takes
+  // focus back, and the decision landed.
+  await expect(entry).toBeEnabled();
+  await expect(entry).toBeFocused();
+  await expect(page.locator("[data-rating]")).toHaveText("5 stars");
+});
+
 test("Grid cells badge only recorded Selection States", async ({ page }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 3);
@@ -10767,20 +11359,26 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
 
   // A Grid decision advances the source-wide counts once, and a refused
-  // repeat of the same decision does not move them again.
+  // repeat of the same decision does not move them again. A decision key
+  // acts only while the Grid accepts another write, so every press waits for
+  // the cell to be enabled again: a key landing while a write is in flight
+  // would be dropped, which would make this test pass for the wrong reason.
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await expect(progress).toHaveText(
     "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
   );
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(progress).toHaveText(
     "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
   );
 
   // A decision change moves one Photo between the counts.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("x");
   await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
   await expect(progress).toHaveText(
@@ -10789,6 +11387,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
 
   // Undo returns that decision and the counts together: the Photo holds its
   // previous value again, which was selected.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Last change undone.",
@@ -10799,6 +11398,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
 
   // Clearing a decision empties the counts for that Photo.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("u");
   await expect(cell(0).locator(".cell-state")).toHaveCount(0);
   await expect(progress).toHaveText(

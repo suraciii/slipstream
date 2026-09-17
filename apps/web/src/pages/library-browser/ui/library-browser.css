@@ -675,7 +675,7 @@
   min-height: 0;
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto;
+  grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto auto;
   overflow-y: auto;
   background: var(--canvas);
 }
@@ -868,6 +868,60 @@
   .swipe-feedback.pending {
     visibility: visible;
   }
+}
+
+/* The bounded neighbor strip: a quiet navigation aid between the Preview
+   and the review bar. It never widens Photo View and it yields on short
+   viewports so the Preview and the decision controls keep their space. */
+.filmstrip {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.75rem;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.filmstrip-cell {
+  position: relative;
+  flex: 0 0 auto;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  overflow: hidden;
+  border-color: var(--border);
+  border-radius: 0.25rem;
+  background: #050607;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.filmstrip-cell:hover:not(:disabled),
+.filmstrip-cell[aria-current="true"] {
+  border-color: var(--focus);
+}
+
+/* The current Photo is marked by weight as well as color, so the entry
+   stays identifiable without relying on color alone. */
+.filmstrip-cell[aria-current="true"] {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.filmstrip-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 0;
+}
+
+.filmstrip-cell .cell-state {
+  position: absolute;
+  right: 0.1rem;
+  bottom: 0.1rem;
 }
 
 .review-bar {
@@ -1171,6 +1225,14 @@
 
   .preview[data-zoom-state="fit"] {
     touch-action: pan-y;
+  }
+}
+
+/* The strip is supporting content: on a short viewport it yields so the
+   Preview and every decision control keep their space. */
+@media (max-height: 480px) {
+  .filmstrip {
+    display: none;
   }
 }
 

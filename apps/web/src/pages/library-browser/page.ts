@@ -569,6 +569,10 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     const photo = currentPhoto();
     const gridEnabled = canOpenGridPhoto();
+    // The strip's entries open Photos through the same path as the Grid's
+    // cells, so one admission fact gates both: an activation that would be
+    // refused silently is never presented as an enabled control.
+    const filmstripEnabled = gridEnabled;
     const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
     const recoveryEnabled =
       !pageBusy &&
@@ -578,6 +582,7 @@ export function mountLibraryBrowser(
     const enabled = Boolean(photo) && connected && !interactionBusy;
     view.setControls({
       gridEnabled,
+      filmstripEnabled,
       decisionEnabled: enabled,
       clearEnabled: enabled && photo?.selectionState !== "undecided",
       backEnabled: !interactionBusy,
@@ -1677,6 +1682,10 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     // A window request captured before a source change never commits here.
     if (!sourceGrid.isCurrent(outcome.authority)) return;
+    // A fire-and-forget Grid or range window settles here and can hand the
+    // strip neighbor facts from either scope; a window an awaited caller
+    // loaded re-renders the strip through that caller instead.
+    if (outcome.kind === "loaded") renderFilmstrip();
     // Photo windows present through the Photo surface that awaits them.
     if (outcome.owner.scope !== "source") return;
     const generation = String(outcome.owner.generation);
@@ -1794,6 +1803,7 @@ export function mountLibraryBrowser(
       selectionState: photo?.selectionState,
       rating: photo?.rating,
     });
+    renderFilmstrip();
     updateControls();
   };
 
@@ -1810,6 +1820,42 @@ export function mountLibraryBrowser(
       image.resolvedUrl,
       image.surface,
     );
+  };
+
+  /// The bounded neighbor radius of the filmstrip. The strip stays this
+  /// bounded however large the source is, and its entries follow the open
+  /// source's own order, so an Album order or a Selection State filter shows
+  /// the neighbors the Photographer actually moves through.
+  ///
+  /// The strip presents the facts the current Photo's loaded window already
+  /// holds and admits nothing itself: Photo View owns the UI while it is
+  /// open, so it starts no window work for a hidden surface, and a neighbor
+  /// outside the loaded window stays a placeholder until navigating to it
+  /// loads that window through the normal Photo path.
+  const FILMSTRIP_RADIUS = 2;
+  const filmstripRange = (
+    index: number,
+  ): Readonly<{ first: number; last: number }> => ({
+    first: Math.max(0, index - FILMSTRIP_RADIUS),
+    last: Math.min(sourceGrid.total - 1, index + FILMSTRIP_RADIUS),
+  });
+  const renderFilmstrip = () => {
+    if (!applicationAlive || view.gridVisible()) return;
+    const index = photoOwner.currentIndex;
+    if (!photoOwner.current || index < 0 || sourceGrid.total === 0) return;
+    const { first, last } = filmstripRange(index);
+    const cells = [];
+    for (let position = first; position <= last; position += 1)
+      cells.push({
+        index: position,
+        current: position === index,
+        photo: sourceGrid.photoAt(position),
+      });
+    view.renderFilmstrip({
+      total: sourceGrid.total,
+      interactive: canOpenGridPhoto(),
+      cells,
+    });
   };
 
   type MembershipFacts =
@@ -2042,6 +2088,7 @@ export function mountLibraryBrowser(
         image.resolvedUrl,
         image.surface,
       );
+    renderFilmstrip();
     updateControls();
     return Boolean(image);
   };
@@ -2098,6 +2145,11 @@ export function mountLibraryBrowser(
         authority,
       );
       if (!photoOwner.isCurrent(authority)) return;
+      // A window an awaited caller loaded settles through that caller, so the
+      // strip asks for its own render here instead of waiting for a
+      // window-settled notification awaited windows never raise: the neighbor
+      // it just loaded stops being a placeholder now.
+      renderFilmstrip();
       photo = sourceGrid.photoAt(index);
     }
     if (!photo || !photo.available) return;
@@ -2685,6 +2737,12 @@ export function mountLibraryBrowser(
         });
         presentRangeStatus();
         return;
+      case "filmstrip-resize": {
+        // A short viewport hides the strip and releases its entries; when the
+        // space returns, the strip rebuilds from the loaded facts.
+        if (!view.gridVisible()) renderFilmstrip();
+        return;
+      }
       case "grid-resize": {
         const authority = sourceGrid.authority;
         const position = sourceGrid.readGridPosition(authority);
