@@ -110,7 +110,11 @@ defined by Web Async Ownership:
   to the page model; it does not issue HTTP requests or decide async ownership.
   Grid rendering is presentational: it never initiates loading, merges to at
   most one update per animation frame, and reuses the DOM nodes of Photos that
-  stay visible. It yields Fit-state vertical touch panning to native Photo View
+  stay visible. Grid keyboard focus is presentation state: one rendered cell
+  holds the Tab stop, arrow keys move cell focus and report the target row's
+  range through the same merged render, and focus returns to the focused cell
+  after a window replacement or a merged render rebuilds it. It yields
+  Fit-state vertical touch panning to native Photo View
   scrolling, retains Fit-state horizontal decision gestures, and takes full
   Preview drag ownership whenever the zoom state is manual.
 - The **page API** owns Library Browser HTTP calls, wire response types, and

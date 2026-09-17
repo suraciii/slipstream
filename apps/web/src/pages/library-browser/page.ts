@@ -315,6 +315,13 @@ export function mountLibraryBrowser(
     rangeStatusText = text;
     view.setGridStatus(text);
   };
+  /// Decision, Undo, and retry messages have one visible surface: the Photo
+  /// View status while it is open, and the Grid status line otherwise, so a
+  /// Grid keyboard decision reports its failure where the Photographer is.
+  const setDecisionStatus = (text: string) => {
+    if (view.gridVisible()) setGridStatusText(text);
+    else view.setPhotoStatus(text);
+  };
   // The range the Grid last reported for admission, with the source it was
   // reported for: window settlements present status only for that source.
   let admittedRange:
@@ -1641,7 +1648,7 @@ export function mountLibraryBrowser(
         return;
     }
   });
-  const renderGrid = (position?: number, consumeFocusRequest = true) => {
+  const renderGrid = (position?: number) => {
     if (!applicationAlive) return;
     view.renderGrid(
       {
@@ -1649,7 +1656,6 @@ export function mountLibraryBrowser(
         photoAt: (index) => sourceGrid.photoAt(index),
       },
       position,
-      consumeFocusRequest,
     );
     updateControls();
   };
@@ -2038,7 +2044,7 @@ export function mountLibraryBrowser(
     const gridAuthority = sourceGrid.authority;
     const gridPosition = sourceGrid.readGridPosition(gridAuthority);
     view.showGrid(gridPosition);
-    renderGrid(undefined, false);
+    renderGrid(undefined);
     presentRangeStatus();
     updateControls();
   };
@@ -2139,6 +2145,41 @@ export function mountLibraryBrowser(
     else renderPhotoFacts();
     updateControls();
   };
+  /// Applies one Grid keyboard decision or Rating to the focused Photo
+  /// without opening Photo View. The write shares the Photo View admission,
+  /// the one-level Undo, and every failure rule; nothing advances, so the
+  /// Photographer keeps the focused cell and moves it with the arrow keys.
+  const mutateGridPhoto = async (
+    index: number,
+    field: "selectionState" | "rating",
+    value: SelectionState | number,
+  ) => {
+    if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
+      return;
+    const admission = photoOwner.mutateAt(index, field, value);
+    if (!admission) return;
+    updateControls();
+    const outcome = await admission.settlement;
+    // The write settled, so the Grid is interactive again whatever the
+    // outcome; the merged render re-enables the cells, rebuilds the decided
+    // cell in place, and returns focus to it. A detached write stays silent.
+    renderGrid();
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      if (outcome.failure === "answered") {
+        setDecisionStatus(
+          outcome.status === 409
+            ? "The Photo changed elsewhere. Open it to confirm its current state."
+            : "The change could not be saved.",
+        );
+      } else {
+        setDecisionStatus("Connection lost before the change was confirmed.");
+      }
+      if (outcome.connectivity === "lost")
+        failPhotoRecovery(outcome.authority, "photo-write");
+      updateControls();
+    }
+  };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
     const targetPhotoId = photoOwner.undoPhotoId;
@@ -2174,14 +2215,14 @@ export function mountLibraryBrowser(
       }
       if (resolution.kind === "missing") {
         photoOwner.discardUndo();
-        view.setPhotoStatus(
+        setDecisionStatus(
           "Undo is no longer available because that Photo is no longer in this source.",
         );
         updateControls();
         return;
       }
       if (resolution.kind === "failed") {
-        view.setPhotoStatus(
+        setDecisionStatus(
           resolution.transportLost
             ? "Connection lost while locating the Photo for Undo. Retry to refresh."
             : resolution.malformed
@@ -2197,9 +2238,12 @@ export function mountLibraryBrowser(
     }
     const preparation = photoOwner.prepareUndo(targetIndex);
     if (!preparation) return;
+    // A Grid decision never advanced, so Undo restores that cell in place and
+    // returns the Grid keyboard to the affected Photo instead of opening it.
+    const gridUndo = view.gridVisible() && !photoOwner.undoAdvanced;
     updateControls();
     if (preparation.needsWindow) {
-      view.setPhotoStatus("Loading Photo for Undo…");
+      setDecisionStatus("Loading Photo for Undo…");
       const windowReady = await loadWindow(
         preparation.index,
         { kind: "photo", authority: preparation.windowAuthority },
@@ -2218,17 +2262,24 @@ export function mountLibraryBrowser(
     if (outcome.kind === "detached") return;
     if (outcome.kind === "failed") {
       if (outcome.failure === "transport") {
-        view.setPhotoStatus("Connection lost before Undo was confirmed.");
+        setDecisionStatus("Connection lost before Undo was confirmed.");
       } else if (outcome.status === 409) {
-        view.setPhotoStatus(
+        setDecisionStatus(
           "Undo is no longer available because the Photo changed elsewhere. Retry to refresh its current state.",
         );
       } else {
-        view.setPhotoStatus("Undo could not be saved. Try Undo again.");
+        setDecisionStatus("Undo could not be saved. Try Undo again.");
       }
       if (outcome.connectivity === "lost")
         failPhotoRecovery(outcome.authority, "undo");
       updateControls();
+      return;
+    }
+    if (gridUndo) {
+      updateControls();
+      renderGrid();
+      view.focusGridIndex(outcome.index);
+      setGridStatusText("Last change undone.");
       return;
     }
     view.enterPhoto();
@@ -2573,6 +2624,9 @@ export function mountLibraryBrowser(
         return;
       case "photo-mutation":
         void mutate(intent.field, intent.value, intent.advance);
+        return;
+      case "grid-photo-mutation":
+        void mutateGridPhoto(intent.index, intent.field, intent.value);
         return;
       case "membership-toggle":
         toggleMembership(intent.albumId, intent.member);

@@ -314,6 +314,13 @@ key is `(sourceGeneration, photoId, field)`. They always settle after send.
 If source generation or Photo identity changes, their success and failure
 continuations are silent; they do not fallback to the Library summary.
 
+A Grid decision is the same admitted write addressed by Grid position instead
+of by the current Photo. It shares the one admission, the one-level Undo
+description, and every failure classification, and it never advances the
+current Photo. A write keeps its identity while its own address still holds
+the Photo it captured: the current Photo for a Photo View write, and the Grid
+position for a Grid write.
+
 The browser stores an Undo target by stable `photoId`; a Snapshot index is only
 an optimization hint and never establishes identity. After a same-source
 Snapshot replacement, the Photo owner resolves that ID through the current

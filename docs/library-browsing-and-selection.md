@@ -126,10 +126,11 @@ bounded independently of total Library size.
 
 Loading is range-based and rendering never initiates it:
 
-- scrolling computes the visible range plus a bounded buffer and reports that
-  one range; the Grid requests only the bounded windows still missing for
-  that range, and one completion notification updates everything the range
-  needs — scrolling does not create per-cell loading work;
+- scrolling or Grid keyboard movement computes the visible range plus a
+  bounded buffer and reports that one range; the Grid requests only the
+  bounded windows still missing for that range, and one completion
+  notification updates everything the range needs — neither scrolling nor
+  keyboard movement creates per-cell loading work;
 - Grid updates are merged to at most one per animation frame while scrolling,
   and each update reuses the DOM nodes of Photos that remain visible: only
   cells that enter, leave, or change are added, removed, or updated;
@@ -423,7 +424,7 @@ Undo must fail without changing state when the Photo's current value no longer m
 
 ## Keyboard Behavior
 
-On a device with a keyboard:
+On a device with a keyboard, Photo View provides:
 
 - Right Arrow moves to the next Photo without changing it.
 - Left Arrow moves to the previous Photo without changing it.
@@ -434,6 +435,21 @@ On a device with a keyboard:
 - `Ctrl+Z` or `Command+Z` performs undo.
 
 Keyboard actions must follow the same persistence and undo rules as visible controls and gestures.
+
+## Grid View Keyboard
+
+Grid View must be operable from a keyboard without opening Photo View.
+
+- The Grid is one Tab stop: Tab focus enters the Grid viewport, and the arrow keys move cell focus. Left and Right move one Photo; Up and Down move one complete row.
+- Moving cell focus must load the bounded window that contains the target row, exactly as scrolling does. Cell focus must not stop at the edge of a loaded window.
+- While the focused Photo's bounded window is loading, the Grid keeps keyboard focus and returns it to the cell once that cell renders.
+- The focused cell must keep its visible focus ring when a window replacement or a merged render rebuilds it.
+- `Enter` opens the focused Photo in Photo View.
+- `P`, `X`, `U`, and `0` through `5` apply to the focused Photo, with the same persistence and undo rules as their Photo View equivalents. A decision must not move cell focus, and `U` must perform no write while the focused Photo is already `undecided`.
+- A failed Grid decision must report on the Grid's status line and must keep the affected Photo recoverable. It must not open Photo View.
+- Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
+
+Undo of a Grid decision must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. The browser holds one undo description, shared with Photo View.
 
 ## Failure Behavior
 
