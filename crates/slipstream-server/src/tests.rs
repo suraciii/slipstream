@@ -2706,6 +2706,216 @@ async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// One bounded batch Selection State write reports exactly one outcome per
+/// requested Photo, presents the confirmed states in the open Browse Snapshot,
+/// and moves the source's counts when the source is reopened.
+#[tokio::test]
+async fn batch_photo_state_applies_to_every_requested_photo() {
+    let (base, config) = prepare_fixture();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(ids.len(), 3);
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let token = opened["token"].as_str().unwrap().to_owned();
+    assert_eq!(opened["selectionCounts"]["undecided"], 3);
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/photos/state",
+            serde_json::json!({"photoIds": ids, "selectionState": "rejected"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["conflicts"].as_array().unwrap().len(), 0);
+    let entries = applied["applied"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (entry, id) in entries.iter().zip(&ids) {
+        assert_eq!(entry["photoId"], *id);
+        assert_eq!(entry["priorValue"], "undecided");
+    }
+
+    // The open Snapshot presents the confirmed states without a reload.
+    let window = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=10"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        window["photos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|photo| photo["selectionState"] == "rejected")
+    );
+
+    // Repeating the same batch is idempotent: every Photo reports the state it
+    // already holds as its prior value, and the counts do not move twice.
+    let repeated = response_json(
+        post_json(
+            &router,
+            "/api/photos/state",
+            serde_json::json!({"photoIds": ids, "selectionState": "rejected"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        repeated["applied"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["priorValue"] == "rejected")
+    );
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["selectionCounts"]["rejected"], 3);
+    assert_eq!(reopened["selectionCounts"]["undecided"], 0);
+    assert_eq!(reopened["selectionCounts"]["selected"], 0);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A Photo that is no longer in the current Library is reported as a conflict
+/// and never rolls back the confirmed Photos of the same batch.
+#[tokio::test]
+async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
+    let (base, config) = prepare_fixture();
+    for name in ["a.jpg", "b.jpg"] {
+        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let missing = "00000000-0000-4000-8000-000000000000";
+
+    let result = response_json(
+        post_json(
+            &router,
+            "/api/photos/state",
+            serde_json::json!({
+                "photoIds": [ids[0], missing, ids[1]],
+                "selectionState": "selected"
+            }),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let applied = result["applied"].as_array().unwrap();
+    assert_eq!(applied.len(), 2);
+    assert_eq!(applied[0]["photoId"], ids[0]);
+    assert_eq!(applied[1]["photoId"], ids[1]);
+    let conflicts = result["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["photoId"], missing);
+    // The Library no longer holds a state for that Photo, so the conflict
+    // carries no current state instead of an invented one.
+    assert!(conflicts[0].get("current").is_none());
+
+    // The confirmed Photos persisted; the unknown Photo changed nothing.
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["selectionCounts"]["selected"], 2);
+    assert_eq!(reopened["selectionCounts"]["undecided"], 0);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// The batch bound, identifier shape, uniqueness, and value vocabulary are
+/// rejected before any write.
+#[tokio::test]
+async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+
+    let over_limit: Vec<String> = (0..=slipstream_core::PHOTO_STATE_BATCH_MAX)
+        .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
+        .collect();
+    for body in [
+        serde_json::json!({"photoIds": over_limit, "selectionState": "selected"}),
+        serde_json::json!({"photoIds": [ids[0], ids[0]], "selectionState": "selected"}),
+        serde_json::json!({"photoIds": [], "selectionState": "selected"}),
+        serde_json::json!({"photoIds": ids, "selectionState": "maybe"}),
+        serde_json::json!({"photoIds": ids, "rating": 3}),
+        serde_json::json!({"photoIds": ["NOT-A-PHOTO-ID"], "selectionState": "selected"}),
+    ] {
+        assert_eq!(
+            post_json(
+                &router,
+                "/api/photos/state",
+                body,
+                Some("http://camera.local")
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    // No rejected request wrote anything.
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["selectionCounts"]["undecided"], 1);
+    assert_eq!(reopened["selectionCounts"]["selected"], 0);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 /// Commits one Selection State through the HTTP mutation route so a fixture
 /// holds real persisted decisions rather than fabricated facts.
 async fn decide_selection(router: &Router, photo_id: &str, value: &str) -> StatusCode {

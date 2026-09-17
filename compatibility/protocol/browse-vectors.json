@@ -641,5 +641,61 @@
         "error": "Invalid Photo"
       }
     }
+  },
+  {
+    "name": "photo-state-batch-reports-absent-photos-as-conflicts",
+    "request": {
+      "method": "POST",
+      "path": "/api/photos/state",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoIds": [
+          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
+          "00000000-0000-4000-8000-000000000000"
+        ],
+        "selectionState": "selected"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "applied": [],
+        "conflicts": [
+          {
+            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000000"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "photo-state-batch-duplicate-photo-is-rejected",
+    "request": {
+      "method": "POST",
+      "path": "/api/photos/state",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoIds": [
+          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
+          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
+        ],
+        "selectionState": "selected"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid Photo state batch"
+      }
+    }
   }
 ]

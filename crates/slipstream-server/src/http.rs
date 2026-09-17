@@ -178,6 +178,10 @@ pub(crate) fn create_router_with_web_root(
             get(method_not_allowed).post(set_progress),
         )
         .route(
+            "/api/photos/state",
+            get(method_not_allowed).post(mutate_photo_state_batch),
+        )
+        .route(
             "/api/photos/{id}/state",
             get(method_not_allowed).post(mutate_photo_state),
         )
@@ -715,6 +719,59 @@ pub(crate) async fn mutate_photo_state(
         Ok(result) => json_response(StatusCode::OK, &photo_state_wire(&result)),
         Err(error) => ApiError::from(error).into_response(),
     }
+}
+
+/// One bounded batch Selection State write from the Grid's multi-selection.
+/// The request names the Photos; the response reports one outcome per Photo so
+/// the browser moves only confirmed facts and counts.
+pub(crate) async fn mutate_photo_state_batch(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let photo_ids = match valid_ids(body.get("photoIds")) {
+        Some(photo_ids) if !photo_ids.is_empty() => photo_ids,
+        _ => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch"),
+    };
+    let value = match body.get("selectionState").and_then(valid_selection) {
+        Some(value) => value,
+        None => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch"),
+    };
+    let result = state
+        .application
+        .mutate_photo_state_batch(slipstream_core::PhotoStateBatchMutation { photo_ids, value })
+        .await;
+    match result {
+        Ok(result) => json_response(StatusCode::OK, &photo_state_batch_wire(&result)),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+pub(crate) fn photo_state_batch_wire(result: &slipstream_core::PhotoStateBatchResult) -> Value {
+    serde_json::json!({
+        "applied": result
+            .applied
+            .iter()
+            .map(|entry| serde_json::json!({
+                "photoId": entry.photo_id,
+                "priorValue": selection_state(entry.prior_value),
+            }))
+            .collect::<Vec<_>>(),
+        "conflicts": result
+            .conflicts
+            .iter()
+            .map(|entry| match entry.current {
+                Some(current) => serde_json::json!({
+                    "photoId": entry.photo_id,
+                    "current": selection_state(current),
+                }),
+                None => serde_json::json!({ "photoId": entry.photo_id }),
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 pub(crate) fn photo_state_wire(result: &slipstream_core::PhotoStateMutationResult) -> Value {

@@ -1269,6 +1269,22 @@ impl Application {
         Ok(result)
     }
 
+    pub async fn mutate_photo_state_batch(
+        &self,
+        mutation: slipstream_core::PhotoStateBatchMutation,
+    ) -> Result<slipstream_core::PhotoStateBatchResult, ServerError> {
+        let value = mutation.value;
+        let result = self.library.mutate_photo_state_batch(mutation).await?;
+        for applied in &result.applied {
+            self.shared
+                .patch_photo(&applied.photo_id, |photo| {
+                    photo.selection_state = value;
+                })
+                .await;
+        }
+        Ok(result)
+    }
+
     fn published_preview_facts(&self, photo_id: &str) -> Option<PreviewFacts> {
         let guard = self
             .shared

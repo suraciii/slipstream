@@ -277,6 +277,39 @@ pub struct PhotoStateMutationResult {
     pub undo: PhotoStateUndo,
 }
 
+/// The largest number of Photos one bounded batch Selection State write may
+/// address. The Grid's multi-selection names the Photos; the server applies
+/// one state to all of them in one transaction.
+pub const PHOTO_STATE_BATCH_MAX: usize = 100;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchMutation {
+    pub photo_ids: Vec<String>,
+    pub value: SelectionState,
+}
+
+/// One requested Photo that took the batch write, with the Selection State it
+/// held before it, so the browser can describe one truthful Undo.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchApplied {
+    pub photo_id: String,
+    pub prior_value: SelectionState,
+}
+
+/// One requested Photo that could not take the batch write. `current` is
+/// `None` when the Photo no longer exists in the current Library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchConflict {
+    pub photo_id: String,
+    pub current: Option<SelectionState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchResult {
+    pub applied: Vec<PhotoStateBatchApplied>,
+    pub conflicts: Vec<PhotoStateBatchConflict>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewSeed {
     pub photo_id: String,
