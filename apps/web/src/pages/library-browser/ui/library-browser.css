@@ -846,6 +846,8 @@
 .facts div {
   display: flex;
   gap: 0.3rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .facts dt {
@@ -854,6 +856,14 @@
 
 .facts dd {
   color: var(--text);
+}
+
+/* A long Original filename truncates instead of widening the review bar. */
+.facts dd[data-photo-filename] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .metadata {

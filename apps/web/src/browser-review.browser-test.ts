@@ -150,6 +150,7 @@ type BrowsePhoto = {
   available: boolean;
   selectionState: string;
   rating: number;
+  originalFilename?: string;
   originals?: ReadonlyArray<Readonly<{ kind: string }>>;
 };
 type AlbumMember = BrowsePhoto & { photoId: string; position: number };
@@ -9042,7 +9043,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   const facts = cell.locator(".cell-facts");
   const factsText = "Ambiguous pairing · Thumbnail delivery failed";
   const accessibleName =
-    "Photo 1 of 1 — Undecided — 0 stars — Ambiguous pairing — Thumbnail delivery failed";
+    "Photo 1 of 1 — photo.jpg — Undecided — 0 stars — Ambiguous pairing — Thumbnail delivery failed";
   await expect(image).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(facts).toBeVisible();
   await expect(facts).toHaveText(factsText);
@@ -9206,6 +9207,110 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
   expect(thumbnailRequests).toHaveLength(0);
   await first.click();
   await expect(page.getByText("1 / 4")).toBeVisible();
+});
+
+test("Grid and Photo View identify a Photo by its Original filename", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(root, "shoot"), { recursive: true });
+  await writeFile(join(root, "shoot", "IMG_4521.jpg"), await jpeg());
+  await writeFile(join(root, "shoot", "IMG_4522.jpg"), await jpeg());
+  const running = await server(base, root);
+
+  // The bounded Photo facts carry the ordering Original Location's basename
+  // explicitly, so the browser never derives identity from a Preview URL.
+  const opened = (await (
+    await post(running.url, "/api/browse", { source: "library" })
+  ).json()) as { token: string };
+  const window = await browseWindow(running.url, opened.token, 0);
+  expect(window.photos.map((photo) => photo.originalFilename)).toEqual([
+    "IMG_4521.jpg",
+    "IMG_4522.jpg",
+  ]);
+  await fetch(`${running.url}/api/browse/${opened.token}`, {
+    method: "DELETE",
+    headers: { Origin: running.url },
+  });
+
+  await page.goto(running.url);
+  const first = page.locator('[data-photo-index="0"]');
+  const second = page.locator('[data-photo-index="1"]');
+  await expect(first.locator(".cell-caption")).toHaveText("1 · IMG_4521.jpg");
+  await expect(second.locator(".cell-caption")).toHaveText("2 · IMG_4522.jpg");
+  await expect(first).toHaveAccessibleName(
+    /Photo 1 of 2 — IMG_4521\.jpg — Undecided/,
+  );
+  await expect(first.locator(".cell-caption")).toHaveAttribute(
+    "title",
+    "IMG_4521.jpg",
+  );
+
+  // Photo View names the Original File the decision applies to, and the
+  // identity follows the Photo through navigation.
+  await first.click();
+  await expect(page.locator("[data-photo-filename]")).toHaveText(
+    "IMG_4521.jpg",
+  );
+  await expect(page.locator("[data-photo-filename]")).toHaveAttribute(
+    "title",
+    "IMG_4521.jpg",
+  );
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-photo-filename]")).toHaveText(
+    "IMG_4522.jpg",
+  );
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
+});
+
+test("a long Original filename truncates without breaking Grid or Photo View", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const longName = `${`IMG_${String(4521).repeat(24)}`}.jpg`;
+  await mkdir(join(root, "shoot"), { recursive: true });
+  await writeFile(join(root, "shoot", longName), await jpeg());
+  const running = await server(base, root);
+
+  // The narrow viewport makes both containers too small for the name, so a
+  // missing containment shows up as layout growth instead of a silent fit.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  const cell = page.locator('[data-photo-index="0"]');
+  const captionLabel = cell.locator(".cell-caption");
+  await expect(captionLabel).toHaveText(`1 · ${longName}`);
+  const caption = await captionLabel.evaluate((label) => ({
+    text: label.textContent,
+    ellipsis: getComputedStyle(label).textOverflow,
+    clipped: label.scrollWidth > label.clientWidth,
+    insideCell:
+      label.getBoundingClientRect().right <=
+      label.closest(".photo-cell")!.getBoundingClientRect().right + 0.5,
+  }));
+  expect(caption.text).toBe(`1 · ${longName}`);
+  expect(caption.ellipsis).toBe("ellipsis");
+  expect(caption.clipped).toBe(true);
+  expect(caption.insideCell).toBe(true);
+
+  await cell.click();
+  const file = page.locator("[data-photo-filename]");
+  await expect(file).toHaveText(longName);
+  const facts = await file.evaluate((value) => {
+    const view = value.closest("[data-photo-view]") as HTMLElement;
+    return {
+      ellipsis: getComputedStyle(value).textOverflow,
+      clipped: value.scrollWidth > value.clientWidth,
+      viewFits: view.scrollWidth <= view.clientWidth,
+      browserFits: document.body.scrollWidth <= document.body.clientWidth,
+    };
+  });
+  expect(facts.ellipsis).toBe("ellipsis");
+  expect(facts.clipped).toBe(true);
+  expect(facts.viewFits).toBe(true);
+  expect(facts.browserFits).toBe(true);
 });
 
 test("detached Grid image errors cannot poison the replacement cell", async ({

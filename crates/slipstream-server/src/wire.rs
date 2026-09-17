@@ -138,6 +138,8 @@ pub struct PhotoSummary {
     pub available: bool,
     pub ambiguous: bool,
     pub originals: Vec<OriginalWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_filename: Option<String>,
     pub selection_state: &'static str,
     pub rating: u8,
     pub preview: PreviewWire,
@@ -215,6 +217,7 @@ pub(crate) fn photo_summary_indexed_with_url(
                 })
         })
     };
+    let original_filename = ordering_original_filename(photo, originals, originals_by_id);
     let originals = [
         original(&photo.raw_original_id, "raw"),
         original(&photo.jpeg_original_id, "jpeg"),
@@ -229,6 +232,7 @@ pub(crate) fn photo_summary_indexed_with_url(
         available: photo.available,
         ambiguous: photo.ambiguous,
         originals,
+        original_filename,
         selection_state: selection_state(photo.selection_state),
         rating: photo.rating,
         preview: PreviewWire {
@@ -245,6 +249,27 @@ pub(crate) fn photo_summary_indexed_with_url(
             message: (!photo.available).then_some("Original File is unavailable"),
         },
     }
+}
+
+/// The filename of the Photo's ordering Original Location: the RAW Original
+/// when the Photo contains RAW, otherwise the JPEG Original. Only the final
+/// path component crosses the boundary; the relative Location itself never
+/// does.
+fn ordering_original_filename(
+    photo: &slipstream_core::PhotoRecord,
+    originals: &[slipstream_core::OriginalRecord],
+    originals_by_id: &std::collections::HashMap<String, usize>,
+) -> Option<String> {
+    [&photo.raw_original_id, &photo.jpeg_original_id]
+        .into_iter()
+        .flatten()
+        .filter_map(|id| originals_by_id.get(id))
+        .filter_map(|position| originals.get(*position))
+        .find_map(|original| {
+            let path = original.relative_path.as_str();
+            let filename = path.rsplit('/').next().unwrap_or(path);
+            (!filename.is_empty()).then(|| filename.to_owned())
+        })
 }
 
 pub(crate) fn album_summary(summary: slipstream_core::AlbumSummary) -> AlbumSummaryWire {

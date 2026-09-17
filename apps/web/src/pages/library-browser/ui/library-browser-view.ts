@@ -180,6 +180,7 @@ type GridPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
   ambiguous: boolean;
+  originalFilename?: string;
   selectionState: ViewSelectionState;
   rating: number;
   preview: Readonly<{
@@ -212,6 +213,7 @@ const LOADING_CELL_SIGNATURE = "loading";
 type PhotoFactsViewModel = Readonly<{
   index: number;
   total: number;
+  originalFilename?: string | undefined;
   selectionState?: ViewSelectionState | undefined;
   rating?: number | undefined;
 }>;
@@ -378,7 +380,7 @@ export function createLibraryBrowserView(
             <div class="swipe-feedback select" data-select-feedback>Select</div>
           </section>
           <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
+            <div class="review-state"><dl class="facts"><div><dt>File</dt><dd data-photo-filename>—</dd></div><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
             <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
           </section>
           <section class="review-tools" aria-label="Review tools">
@@ -455,6 +457,7 @@ export function createLibraryBrowserView(
   const zoomLevel = required<HTMLElement>(root, "[data-zoom-level]");
   const zoom100 = required<HTMLButtonElement>(root, "[data-zoom-100]");
   const selection = required<HTMLElement>(root, "[data-selection]");
+  const photoFilename = required<HTMLElement>(root, "[data-photo-filename]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
   const metadataCaptureTime = required<HTMLElement>(
@@ -1411,9 +1414,15 @@ export function createLibraryBrowserView(
     footer.className = "cell-footer";
     const caption = document.createElement("span");
     caption.className = "cell-caption";
-    caption.textContent = photo.rating
-      ? `${index + 1} · ${photo.rating}★`
+    // The position number and the Original filename are the visible identity
+    // of the cell; a Rating star follows when one is recorded.
+    const identity = photo.originalFilename
+      ? `${index + 1} · ${photo.originalFilename}`
       : String(index + 1);
+    caption.textContent = photo.rating
+      ? `${identity} · ${photo.rating}★`
+      : identity;
+    if (photo.originalFilename) caption.title = photo.originalFilename;
     const facts = document.createElement("span");
     facts.className = "cell-facts";
     const rendered: RenderedGridCell = {
@@ -1430,6 +1439,7 @@ export function createLibraryBrowserView(
         "aria-label",
         [
           `Photo ${index + 1} of ${total}`,
+          ...(photo.originalFilename ? [photo.originalFilename] : []),
           selectionLabel(photo.selectionState),
           photo.rating === 1 ? "1 star" : `${photo.rating} stars`,
           ...values,
@@ -1569,6 +1579,8 @@ export function createLibraryBrowserView(
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {
     if (!alive) return;
     position.textContent = `${model.index + 1} / ${model.total}`;
+    photoFilename.textContent = model.originalFilename ?? "—";
+    photoFilename.title = model.originalFilename ?? "";
     currentSelection = model.selectionState ?? "undecided";
     selection.textContent = selectionLabel(currentSelection);
     const value = model.rating ?? 0;
@@ -2416,6 +2428,7 @@ function gridCellSignature(
   return [
     String(index),
     photo.id,
+    photo.originalFilename ?? "",
     photo.available ? "available" : "unavailable",
     photo.ambiguous ? "ambiguous" : "paired",
     photo.selectionState,

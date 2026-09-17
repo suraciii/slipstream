@@ -4119,6 +4119,73 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
 }
 
 #[tokio::test]
+async fn browse_windows_report_the_ordering_original_filename() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("shoot")).unwrap();
+    fs::write(root.join("shoot/IMG_4521.ARW"), b"raw-bytes").unwrap();
+    jpeg_fixture(&root.join("shoot/IMG_4521.JPG"), 8, 4, [64, 32, 192]);
+    jpeg_fixture(&root.join("shoot/IMG_4522.JPG"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let opened = post_json(
+        &router,
+        "/api/browse",
+        serde_json::json!({"source":"library"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(opened.status(), StatusCode::OK);
+    let opened: serde_json::Value = response_json(opened).await;
+    let token = opened["token"].as_str().unwrap();
+    let window = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/browse/{}?start=0&limit=60",
+                token
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(window.status(), StatusCode::OK);
+    let window: serde_json::Value = response_json(window).await;
+    let photos = window["photos"].as_array().unwrap();
+    assert_eq!(photos.len(), 2);
+
+    // A RAW/JPEG pair carries the RAW Original filename; a JPEG-only Photo
+    // carries its own. Both are basenames, so the relative Location never
+    // crosses the boundary.
+    let by_name = |name: &str| {
+        photos
+            .iter()
+            .find(|photo| photo["originalFilename"] == name)
+            .unwrap_or_else(|| panic!("window is missing {name}"))
+    };
+    assert_eq!(
+        by_name("IMG_4521.ARW")["originals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        by_name("IMG_4522.JPG")["originals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!window.to_string().contains("shoot/"));
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn browse_windows_hydrate_only_current_thumbnail_manifests() {
     let (base, config) = prepare_fixture();
     let original = config.library_root.join("photo.jpg");

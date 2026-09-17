@@ -144,11 +144,16 @@ Loading is range-based and rendering never initiates it:
 A Grid cell must show, when available:
 
 - a cached or progressively generated thumbnail;
+- the Original filename;
 - Selection State;
 - Rating;
 - Photo unavailability and pairing ambiguity as distinct facts;
 - Preview unavailability or failure without removing the Photo from its position; and
 - thumbnail delivery failure without replacing the Photo or Preview facts above.
+
+The Original filename is the basename of the Photo's ordering Original Location
+defined under Source Order. A Grid cell must keep the position number visible
+and must truncate a long filename instead of breaking the cell layout.
 
 A Grid cell must carry a Selection State badge only while that Photo is `selected` or `rejected`. An `undecided` Photo must show no badge, so the badge always marks a recorded decision.
 
@@ -183,6 +188,7 @@ Thumbnail, Preview, scan, and bounded look-ahead loading must run in the backgro
 Photo View must show one current Photo as the primary content. It must also show:
 
 - current position and total Photo count;
+- the Original filename when available;
 - Selection State;
 - Rating;
 - Preview Source;

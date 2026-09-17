@@ -44,6 +44,7 @@ export type PhotoSummary = Readonly<{
   originals: ReadonlyArray<
     Readonly<{ kind: "raw" | "jpeg"; available: boolean }>
   >;
+  originalFilename?: string;
   selectionState: SelectionState;
   rating: number;
   preview: Readonly<{
