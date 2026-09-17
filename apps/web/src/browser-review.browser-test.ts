@@ -2987,7 +2987,8 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   });
   // The server's own per-Photo outcome behavior is covered by its tests; this
   // test owns what the Grid presents for one. The first Photo takes the write
-  // for real, and the Library no longer holds the second.
+  // for real, and the simulated response reports the second as one the
+  // current Library no longer holds while the fixture still does.
   await page.route("**/api/photos/state", async (route) => {
     const requested = (route.request().postDataJSON() as { photoIds: string[] })
       .photoIds;
@@ -3011,7 +3012,7 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
   await page.locator("[data-batch-select]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
-    "1 Photo selected. 1 Photo kept its current state.",
+    "1 Photo selected. 1 Photo no longer in this Library.",
   );
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   // The Photo the Library no longer holds keeps the fact the Grid presents
@@ -3081,6 +3082,134 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
     page.getByRole("button", { name: /^Trip 2 Photos$/ }),
   ).toBeVisible();
   await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+});
+
+test("Grid multi-selection stops at the batch bound and names it", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 130);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 130 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const count = page.locator("[data-batch-count]");
+  const status = page.locator("[data-grid-status]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const refused =
+    "A batch holds up to 100 Photos. Decide or clear this selection first.";
+  await page.locator("[data-grid-select-mode]").click();
+
+  // The first Photo anchors the range, and scrolling loads the windows the
+  // range will need before it is attempted.
+  await cell(0).click();
+  await expect(count).toHaveText("1 selected");
+  await scrollGrid(page, 16 * 178);
+  await expect(cell(99)).toBeVisible();
+  await cell(99).click({ modifiers: ["Shift"] });
+  await expect(count).toHaveText("100 of 100 selected");
+  await expect(cell(99)).toHaveClass(/multi-selected/);
+
+  // A toggle that would pass the bound is refused whole: the notice names the
+  // bound and the selection it already holds is untouched.
+  await scrollGrid(page, "end");
+  await expect(cell(120)).toBeVisible();
+  await cell(120).click({ modifiers: ["Control"] });
+  await expect(status).toHaveText(refused);
+  await expect(count).toHaveText("100 of 100 selected");
+  await expect(cell(120)).not.toHaveClass(/multi-selected/);
+
+  // A range that would pass the bound is refused the same way, so a batch the
+  // server would reject can never be built.
+  await cell(120).click({ modifiers: ["Shift"] });
+  await expect(status).toHaveText(refused);
+  await expect(count).toHaveText("100 of 100 selected");
+  await expect(cell(120)).not.toHaveClass(/multi-selected/);
+
+  // The selection is held by Photo identity, not by the loaded window: the
+  // first Photo is still marked after the Grid scrolled away from it twice.
+  await scrollGrid(page, 0);
+  await expect(cell(0)).toHaveClass(/multi-selected/);
+  await expect(count).toHaveText("100 of 100 selected");
+});
+
+test("Grid Select mode and the batch actions are reachable from the keyboard", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  await post(running.url, "/api/albums", { name: "Trip" });
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const mode = page.locator("[data-grid-select-mode]");
+  const bar = page.locator("[data-grid-batch]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+
+  // The Select mode toggle is one Shift+Tab behind the Grid's own entry, and
+  // a keyboard toggles it with the same activation a pointer uses.
+  await viewport.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(mode).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(mode).toHaveAttribute("aria-pressed", "true");
+
+  // The keyboard marks a Photo without leaving the Grid, and the bar appears.
+  await page.keyboard.press("Tab");
+  await expect(viewport).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(bar).toBeVisible();
+  await expect(page.locator("[data-batch-count]")).toHaveText("1 selected");
+  await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
+
+  // Every batch action is in the Grid's keyboard order going backwards from
+  // the Grid entry, enabled and ready for its own activation.
+  await page.keyboard.press("Shift+Tab");
+  await expect(viewport).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-clear]")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-album-add]")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-album-select]")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-reject]")).toBeFocused();
+  await expect(page.locator("[data-batch-reject]")).toBeEnabled();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-select]")).toBeFocused();
+  await expect(page.locator("[data-batch-select]")).toBeEnabled();
+
+  // ... and forward from the bar the Grid entry closes the walk, so a
+  // keyboard user reaches every action in both directions.
+  for (const selector of [
+    "[data-batch-reject]",
+    "[data-batch-album-select]",
+    "[data-batch-album-add]",
+    "[data-batch-clear]",
+  ]) {
+    await page.keyboard.press("Tab");
+    await expect(page.locator(selector)).toBeFocused();
+  }
+  await page.keyboard.press("Tab");
+  await expect(viewport).toBeFocused();
+
+  // The clear exit is keyboard-operable too: it empties the selection and
+  // leaves Select mode.
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-batch-clear]")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(bar).toBeHidden();
+  await expect(mode).toHaveAttribute("aria-pressed", "false");
+  await expect(cell(0)).not.toHaveClass(/multi-selected/);
 });
 
 test("Opening another source clears the Grid multi-selection", async ({
@@ -12416,10 +12545,25 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
       element.dispatchEvent(new Event("scroll"));
     });
   try {
+    // A multi-selection is session state of the source that was open: the
+    // failed reopen presents the cleared Grid instead of a bar naming Photos
+    // the retained surface no longer holds.
+    const cell = (index: number) =>
+      page.locator(`[data-photo-index="${index}"]`);
+    await page.locator("[data-grid-select-mode]").click();
+    await cell(0).click();
+    await cell(1).click();
+    await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
     await scrollBoundary();
     await expect.poll(() => reopenAttempts).toBe(1);
     await expect(page.locator("[data-status]")).toHaveText(
       "This source expired and could not be reopened. Retry the connection.",
+    );
+    await expect(page.locator("[data-grid-batch]")).toBeHidden();
+    await expect(page.locator(".photo-cell.multi-selected")).toHaveCount(0);
+    await expect(page.locator("[data-grid-select-mode]")).toHaveAttribute(
+      "aria-pressed",
+      "false",
     );
     const requestsAfterFailure = boundaryTokens.length;
     await scrollBoundary();
