@@ -866,7 +866,7 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
-  test("presents per-Photo batch conflicts and undoes only confirmed Photos", async () => {
+  test("presents per-Photo batch conflicts without moving their facts", async () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
     source.facts.set(1, fact("photo-1"));
@@ -876,10 +876,7 @@ describe("PhotoOwner", () => {
         Promise.resolve(
           Response.json({
             applied: [{ photoId: "photo-0", priorValue: "undecided" }],
-            conflicts: [
-              { photoId: "photo-1", current: "rejected" },
-              { photoId: "photo-2" },
-            ],
+            conflicts: [{ photoId: "photo-1" }, { photoId: "photo-2" }],
           }),
         ),
       source,
@@ -896,16 +893,49 @@ describe("PhotoOwner", () => {
       { photoId: "photo-0", priorValue: "undecided" },
     ]);
     expect(outcome.kind === "persisted" && outcome.conflicts).toEqual([
-      { photoId: "photo-1", current: "rejected" },
+      { photoId: "photo-1" },
       { photoId: "photo-2" },
     ]);
-    // A conflict that reports its current state moves the Grid to that truth;
-    // a conflict without one keeps the fact the Grid already presents.
-    expect(source.facts.get(1)?.selectionState).toBe("rejected");
+    // A conflict means the current Library no longer holds that Photo, so the
+    // batch writes no fact for it and the Grid keeps what it already shows.
+    expect(source.facts.get(1)?.selectionState).toBe("undecided");
     expect(source.facts.get(2)?.selectionState).toBe("undecided");
     // Only the confirmed Photo is part of the one-level Undo description.
     expect(owner.undoBatch).toBe(true);
     expect(owner.prepareBatchUndo()!.count).toBe(1);
+    owner.dispose();
+  });
+
+  test("consumes the prior Undo description when a batch write loses the connection", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    source.facts.set(1, fact("photo-1"));
+    const { owner } = bind(source, (path) => {
+      if (path === "/api/photos/photo-0/state")
+        return Promise.resolve(
+          mutationBody({
+            photoId: "photo-0",
+            field: "selectionState",
+            priorValue: "undecided",
+            expectedCurrent: "selected",
+          }),
+        );
+      return Promise.reject(new Error("offline"));
+    });
+
+    // A single decision records the one-level description a batch inherits.
+    const single = await owner.mutate("selectionState", "selected", false)!
+      .settlement;
+    expect(single.kind).toBe("persisted");
+    expect(owner.canUndo).toBe(true);
+
+    // The batch clears it at admission, and a transport failure cannot prove
+    // the batch did not commit, so the description stays consumed.
+    const batch = await owner.mutateBatch(["photo-1"], "rejected")!.settlement;
+    expect(batch.kind).toBe("failed");
+    if (batch.kind === "failed") expect(batch.connectivity).toBe("lost");
+    expect(owner.canUndo).toBe(false);
+    expect(owner.undoBatch).toBe(false);
     owner.dispose();
   });
 

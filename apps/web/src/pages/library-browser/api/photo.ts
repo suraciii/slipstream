@@ -31,17 +31,16 @@ export type PhotoStateResult =
 
 /// One bounded batch Selection State write. The server reports exactly one
 /// outcome per requested Photo: an applied entry carries the state the Photo
-/// held before the write, and a conflict carries the Photo's current state
-/// only while that Photo still exists in the current Library.
+/// held before the write, and a conflict means the current Library no longer
+/// holds that Photo. A Photo whose state changed elsewhere still takes the
+/// write, so a conflict never reports another Photo's state.
 export type PhotoStateBatchResult =
   | Readonly<{
       kind: "persisted";
       applied: ReadonlyArray<
         Readonly<{ photoId: string; priorValue: SelectionState }>
       >;
-      conflicts: ReadonlyArray<
-        Readonly<{ photoId: string; current?: SelectionState }>
-      >;
+      conflicts: ReadonlyArray<Readonly<{ photoId: string }>>;
     }>
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
@@ -112,13 +111,10 @@ const validBatchApplied = (
 
 const validBatchConflict = (
   value: unknown,
-): value is Readonly<{ photoId: string; current?: SelectionState }> =>
+): value is Readonly<{ photoId: string }> =>
   isRecord(value) &&
   typeof value.photoId === "string" &&
-  value.photoId.length > 0 &&
-  optional(value.current, (current) =>
-    validStateValue("selectionState", current),
-  );
+  value.photoId.length > 0;
 
 const validPhotoAlbums = (value: unknown): value is PhotoAlbumsResponse =>
   isRecord(value) &&
@@ -287,7 +283,6 @@ export async function persistPhotoStateBatch(
       value.conflicts.map((entry) =>
         Object.freeze({
           photoId: entry.photoId,
-          ...(entry.current ? { current: entry.current } : {}),
         }),
       ),
     ),

@@ -323,8 +323,11 @@ Grid multi-selection applies one Selection State to many Photos through
 `POST /api/photos/state`. The request carries `photoIds` and one
 `selectionState`. The server accepts at most 100 unique Photo identifiers and
 rejects an over-limit, duplicate, unknown-state, or malformed request before
-any write. Batch Rating is not part of this contract, and the route carries no
-source, Album, or position: the browser names the Photos it multi-selected.
+any write, as an invalid request rather than a conflict: the request itself is
+the defect. The browser mirrors that bound, so a batch it builds is always one
+the server accepts. Batch Rating is not part of this contract, and the route
+carries no source, Album, or position: the browser names the Photos it
+multi-selected.
 
 The operation is one transaction with per-Photo outcomes, so one missing Photo
 never rolls back the confirmed ones. The response reports exactly one outcome
@@ -333,16 +336,17 @@ per requested Photo:
 - `applied` with the Selection State the Photo held before the write, so the
   browser can describe one truthful Undo for the whole batch and can move its
   counts by the state it believed; and
-- `conflict` with the Photo's current Selection State when it still exists
-  in the current Library, or without one when the Photo no longer exists. The
-  request carries no expectation per Photo, so every Photo the Library still
-  holds takes the write; only a Photo it no longer holds is a conflict. A
-  conflicted Photo is reported to the Photographer and keeps its current
-  truth.
+- `conflict` without any state when the current Library no longer holds that
+  Photo. The request carries no expectation per Photo, so every Photo the
+  Library still holds takes the write, including one whose state changed
+  elsewhere; only a Photo it no longer holds is a conflict. A conflicted Photo
+  is reported to the Photographer and the browser writes no fact for it.
 
 The browser moves loaded Photo facts and the source's decision counts only for
 `applied` outcomes. A Photo whose write was not confirmed is never presented
-as decided.
+as decided. A conflicted Photo keeps the fact the Grid already presents: the
+response reports no state for it, and the browser refreshes nothing on its
+behalf.
 
 Batch Undo reuses the single-Photo compare-and-set write: the browser sends
 one bounded write per confirmed Photo, each naming the prior value the server
@@ -558,7 +562,7 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - reopening the source after rescan uses the new complete order and current Folder subtree;
 - Album saved-position and unavailable-member fallback work without complete membership transfer;
 - Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
-- a batch Selection State write applies to every existing requested Photo in one transaction, reports one outcome per Photo including Photos that changed elsewhere or no longer exist, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
+- a batch Selection State write applies to every existing requested Photo in one transaction, reports one outcome per Photo including Photos the Library no longer holds, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;

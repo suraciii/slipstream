@@ -551,7 +551,7 @@ pub(crate) async fn add_album_members(
         if !valid_id(&id) {
             return Err("Invalid membership batch");
         }
-        valid_ids(body.get("photoIds"))
+        valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX)
             .map(|photo_ids| slipstream_core::AlbumMutation::AddMembers {
                 album_id: id.clone(),
                 photo_ids,
@@ -619,7 +619,7 @@ pub(crate) async fn reorder_album(
         if !valid_id(&id) {
             return Err("Invalid Album order");
         }
-        valid_ids(body.get("photoIds"))
+        valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX)
             .map(|photo_ids| slipstream_core::AlbumMutation::Reorder {
                 album_id: id.clone(),
                 photo_ids,
@@ -721,6 +721,11 @@ pub(crate) async fn mutate_photo_state(
     }
 }
 
+/// The largest number of Photo ids one bounded Album membership write accepts
+/// at the HTTP boundary. The Library enforces the same bound for the album
+/// mutations it applies.
+const ALBUM_PHOTO_IDS_MAX: usize = 100;
+
 /// One bounded batch Selection State write from the Grid's multi-selection.
 /// The request names the Photos; the response reports one outcome per Photo so
 /// the browser moves only confirmed facts and counts.
@@ -732,7 +737,7 @@ pub(crate) async fn mutate_photo_state_batch(
         Ok(body) => body,
         Err(response) => return response,
     };
-    let photo_ids = match valid_ids(body.get("photoIds")) {
+    let photo_ids = match valid_ids(body.get("photoIds"), slipstream_core::PHOTO_STATE_BATCH_MAX) {
         Some(photo_ids) if !photo_ids.is_empty() => photo_ids,
         _ => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch"),
     };
@@ -763,13 +768,7 @@ pub(crate) fn photo_state_batch_wire(result: &slipstream_core::PhotoStateBatchRe
         "conflicts": result
             .conflicts
             .iter()
-            .map(|entry| match entry.current {
-                Some(current) => serde_json::json!({
-                    "photoId": entry.photo_id,
-                    "current": selection_state(current),
-                }),
-                None => serde_json::json!({ "photoId": entry.photo_id }),
-            })
+            .map(|entry| serde_json::json!({ "photoId": entry.photo_id }))
             .collect::<Vec<_>>(),
     })
 }
@@ -1027,9 +1026,9 @@ pub(crate) fn valid_name(value: Option<&Value>) -> Option<String> {
     (!value.is_empty() && value.chars().count() <= 120).then(|| value.to_owned())
 }
 
-pub(crate) fn valid_ids(value: Option<&Value>) -> Option<Vec<String>> {
+pub(crate) fn valid_ids(value: Option<&Value>, max_ids: usize) -> Option<Vec<String>> {
     let values = value?.as_array()?;
-    if values.len() > 100 {
+    if values.len() > max_ids {
         return None;
     }
     let ids = values
@@ -1102,6 +1101,10 @@ impl From<ServerError> for ApiError {
     fn from(error: ServerError) -> Self {
         if let ServerError::Library(LibraryError::Mutation(error)) = error {
             return match error {
+                slipstream_core::MutationError::Invalid => Self {
+                    status: StatusCode::BAD_REQUEST,
+                    message: "Invalid mutation request",
+                },
                 slipstream_core::MutationError::NotFound => Self {
                     status: StatusCode::NOT_FOUND,
                     message: "Mutation target not found",

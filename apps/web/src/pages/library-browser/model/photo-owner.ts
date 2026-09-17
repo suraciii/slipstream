@@ -150,9 +150,7 @@ export type PhotoBatchOutcome =
       applied: ReadonlyArray<
         Readonly<{ photoId: string; priorValue: SelectionState }>
       >;
-      conflicts: ReadonlyArray<
-        Readonly<{ photoId: string; current?: SelectionState }>
-      >;
+      conflicts: ReadonlyArray<Readonly<{ photoId: string }>>;
     }>
   | Readonly<{
       kind: "failed";
@@ -559,10 +557,8 @@ export function createPhotoOwner(
       try {
         result = await persistPhotoStateBatch(fetcher, { photoIds, value });
       } catch {
-        if (isCurrent(record.authority)) {
-          undo = priorUndo;
-          batchUndo = priorBatchUndo;
-        }
+        // A transport failure cannot prove the batch did not commit, so the
+        // prior Undo description is consumed exactly as a single write's is.
         return isCurrent(record.authority)
           ? Object.freeze({
               kind: "failed",
@@ -583,16 +579,8 @@ export function createPhotoOwner(
             entry.priorValue,
             value,
           );
-        // A conflicted Photo still holds a state the server reported, so the
-        // Grid presents that current truth instead of its stale belief.
-        for (const entry of result.conflicts)
-          if (entry.current)
-            source.applyBatchSelection(
-              record.sourceAuthority,
-              entry.photoId,
-              entry.current,
-              entry.current,
-            );
+        // A conflicted Photo is one the current Library no longer holds, so
+        // the batch writes no fact for it and the Grid reports it as it is.
         const entries = result.applied.filter(
           (entry) => entry.priorValue !== value,
         );

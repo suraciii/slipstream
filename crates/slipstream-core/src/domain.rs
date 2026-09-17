@@ -296,12 +296,12 @@ pub struct PhotoStateBatchApplied {
     pub prior_value: SelectionState,
 }
 
-/// One requested Photo that could not take the batch write. `current` is
-/// `None` when the Photo no longer exists in the current Library.
+/// One requested Photo that could not take the batch write because the
+/// current Library no longer holds it. A Photo the Library still holds always
+/// takes the write, so a state that changed elsewhere is not a conflict.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoStateBatchConflict {
     pub photo_id: String,
-    pub current: Option<SelectionState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

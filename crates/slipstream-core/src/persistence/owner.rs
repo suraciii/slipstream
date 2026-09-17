@@ -85,6 +85,9 @@ impl From<StateError> for PersistenceError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MutationError {
+    /// The request itself is malformed: an empty, over-limit, or duplicate
+    /// address set. It is refused before any state is read or written.
+    Invalid,
     NotFound,
     Conflict,
     Persistence,
@@ -95,6 +98,7 @@ pub enum MutationError {
 impl fmt::Display for MutationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Invalid => "Mutation request is not valid",
             Self::NotFound => "Mutation target not found",
             Self::Conflict => "Mutation conflicts with current state",
             Self::Persistence => "Mutation could not be persisted",
@@ -208,7 +212,7 @@ fn validate_photo_state_batch_mutation(
             .len()
             != mutation.photo_ids.len()
     {
-        return Err(MutationError::Conflict);
+        return Err(MutationError::Invalid);
     }
     Ok(())
 }
@@ -2597,8 +2601,8 @@ fn mutate_photo_state(
 }
 
 /// One bounded batch Selection State write. Every requested Photo is resolved
-/// inside one transaction and reports exactly one outcome, so a Photo that
-/// changed elsewhere or no longer exists never rolls back the confirmed ones.
+/// inside one transaction and reports exactly one outcome, so a Photo the
+/// current Library no longer holds never rolls back the confirmed ones.
 fn mutate_photo_state_batch(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -2620,7 +2624,6 @@ fn mutate_photo_state_batch(
             let Some(selection) = row else {
                 conflicts.push(PhotoStateBatchConflict {
                     photo_id: photo_id.clone(),
-                    current: None,
                 });
                 continue;
             };
@@ -4021,6 +4024,40 @@ mod tests {
             .iter()
             .map(|photo| photo.id.clone())
             .collect()
+    }
+
+    /// A batch that names no Photo, names one twice, or exceeds the bound is
+    /// the request's own defect, so it is classified as invalid before any
+    /// state is read or written.
+    #[test]
+    fn batch_photo_state_validation_classifies_malformed_requests_as_invalid() {
+        let valid = PhotoStateBatchMutation {
+            photo_ids: vec!["one".to_owned(), "two".to_owned()],
+            value: SelectionState::Selected,
+        };
+        assert_eq!(validate_photo_state_batch_mutation(&valid), Ok(()));
+        let malformed = [
+            PhotoStateBatchMutation {
+                photo_ids: Vec::new(),
+                value: SelectionState::Rejected,
+            },
+            PhotoStateBatchMutation {
+                photo_ids: vec!["one".to_owned(), "one".to_owned()],
+                value: SelectionState::Rejected,
+            },
+            PhotoStateBatchMutation {
+                photo_ids: (0..=crate::PHOTO_STATE_BATCH_MAX)
+                    .map(|index| format!("photo-{index}"))
+                    .collect(),
+                value: SelectionState::Undecided,
+            },
+        ];
+        for mutation in malformed {
+            assert_eq!(
+                validate_photo_state_batch_mutation(&mutation),
+                Err(MutationError::Invalid)
+            );
+        }
     }
 
     #[tokio::test]
