@@ -11313,20 +11313,26 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
 
   // A Grid decision advances the source-wide counts once, and a refused
-  // repeat of the same decision does not move them again.
+  // repeat of the same decision does not move them again. A decision key
+  // acts only while the Grid accepts another write, so every press waits for
+  // the cell to be enabled again: a key landing while a write is in flight
+  // would be dropped, which would make this test pass for the wrong reason.
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("ArrowRight");
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await expect(progress).toHaveText(
     "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
   );
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(progress).toHaveText(
     "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
   );
 
   // A decision change moves one Photo between the counts.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("x");
   await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
   await expect(progress).toHaveText(
@@ -11335,6 +11341,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
 
   // Undo returns that decision and the counts together: the Photo holds its
   // previous value again, which was selected.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Last change undone.",
@@ -11345,6 +11352,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
 
   // Clearing a decision empties the counts for that Photo.
+  await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("u");
   await expect(cell(0).locator(".cell-state")).toHaveCount(0);
   await expect(progress).toHaveText(
