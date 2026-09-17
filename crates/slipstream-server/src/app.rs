@@ -107,6 +107,35 @@ fn published_capture_key_for_id<'a>(published: &'a Published, id: &str) -> Optio
     published_photo(published, id).and_then(|photo| published_capture_key(published, photo))
 }
 
+/// Per-state Selection counts for one complete source ID list. Photos the
+/// Published Library cannot resolve are not counted, so a count never claims
+/// more than the facts the open source can show.
+fn selection_counts_for_ids(published: &Published, ids: &[String]) -> SelectionCountsWire {
+    SelectionCountsWire::from_selection_states(
+        ids.iter()
+            .filter_map(|id| published_photo(published, id))
+            .map(|photo| photo.selection_state),
+    )
+}
+
+/// Applies one Selection State filter to a complete ordered source ID list.
+/// The filter selects from that order and never rewrites it.
+fn filter_ids_by_selection(
+    published: &Published,
+    ids: Vec<String>,
+    selection: BrowseSelectionFilter,
+) -> Vec<String> {
+    if selection == BrowseSelectionFilter::All {
+        return ids;
+    }
+    ids.into_iter()
+        .filter(|id| {
+            published_photo(published, id)
+                .is_some_and(|photo| selection.matches(photo.selection_state))
+        })
+        .collect()
+}
+
 /// Applies the requested view order to one complete source ID list.
 /// Ascending is the Published Library's natural deterministic order.
 /// Descending reverses only the Capture Time direction: missing-time Photos
@@ -801,6 +830,7 @@ impl Application {
         &self,
         source: BrowseSourceRequest,
         order: BrowseViewOrder,
+        selection: BrowseSelectionFilter,
         preferred_photo_id: Option<&str>,
     ) -> Result<BrowseOpenResponse, ServerError> {
         // Only an Album source owns persisted membership position, so
@@ -810,7 +840,14 @@ impl Application {
         {
             return Err(ServerError::BrowseOrder);
         }
-        let (photo_ids, position): (Vec<String>, usize) = match source {
+        // Each arm resolves the complete source order, its per-state counts,
+        // one Selection State filter, and the identity the open should anchor
+        // on. Counts always describe the unfiltered source.
+        let (photo_ids, selection_counts, anchor_ids): (
+            Vec<String>,
+            SelectionCountsWire,
+            Vec<String>,
+        ) = match source {
             BrowseSourceRequest::Library => {
                 let guard = self
                     .shared
@@ -821,10 +858,13 @@ impl Application {
                     return Err(ServerError::NotPublished);
                 };
                 let photo_ids = ordered_library_ids(published, order);
-                let position = preferred_photo_id
-                    .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
-                    .unwrap_or(0);
-                (photo_ids, position)
+                let selection_counts = selection_counts_for_ids(published, &photo_ids);
+                let photo_ids = filter_ids_by_selection(published, photo_ids, selection);
+                (
+                    photo_ids,
+                    selection_counts,
+                    preferred_photo_id.map(str::to_owned).into_iter().collect(),
+                )
             }
             BrowseSourceRequest::Folder {
                 location,
@@ -855,10 +895,13 @@ impl Application {
                     &location,
                 );
                 let photo_ids = order_ids_by_capture_time(published, photo_ids, order);
-                let position = preferred_photo_id
-                    .and_then(|preferred| photo_ids.iter().position(|id| id == preferred))
-                    .unwrap_or(0);
-                (photo_ids, position)
+                let selection_counts = selection_counts_for_ids(published, &photo_ids);
+                let photo_ids = filter_ids_by_selection(published, photo_ids, selection);
+                (
+                    photo_ids,
+                    selection_counts,
+                    preferred_photo_id.map(str::to_owned).into_iter().collect(),
+                )
             }
             BrowseSourceRequest::Album(id) => {
                 let target = self
@@ -868,39 +911,38 @@ impl Application {
                     .ok_or(ServerError::BrowseNotFound)?;
                 let resume_member_id =
                     album_resume_member(&target.members, target.saved_photo_id.as_deref());
+                let guard = self
+                    .shared
+                    .snapshot
+                    .read()
+                    .expect("published Library poisoned");
+                let Some(published) = guard.as_ref() else {
+                    return Err(ServerError::NotPublished);
+                };
                 let members = if matches!(order, BrowseViewOrder::AlbumOrder) {
                     target.members
                 } else {
-                    let guard = self
-                        .shared
-                        .snapshot
-                        .read()
-                        .expect("published Library poisoned");
-                    let Some(published) = guard.as_ref() else {
-                        return Err(ServerError::NotPublished);
-                    };
                     order_album_members(published, target.members, order)
                 };
-                let preferred = preferred_photo_id.and_then(|preferred| {
-                    members
-                        .iter()
-                        .position(|member| member.photo_id == preferred)
-                });
-                let position = preferred
-                    .or_else(|| {
-                        resume_member_id.and_then(|member_id| {
-                            members
-                                .iter()
-                                .position(|member| member.photo_id == member_id)
-                        })
-                    })
-                    .unwrap_or(0);
-                (
-                    members.into_iter().map(|member| member.photo_id).collect(),
-                    position,
-                )
+                let photo_ids: Vec<String> =
+                    members.into_iter().map(|member| member.photo_id).collect();
+                let selection_counts = selection_counts_for_ids(published, &photo_ids);
+                let photo_ids = filter_ids_by_selection(published, photo_ids, selection);
+                let mut anchor_ids: Vec<String> =
+                    preferred_photo_id.map(str::to_owned).into_iter().collect();
+                if let Some(resume) = resume_member_id {
+                    anchor_ids.push(resume);
+                }
+                (photo_ids, selection_counts, anchor_ids)
             }
         };
+        // Positions resolve inside the view the browser actually opens: a
+        // filtered Snapshot has its own sequence, so one position has one
+        // meaning for windows, identity lookup, and navigation.
+        let position = anchor_ids
+            .into_iter()
+            .find_map(|anchor| photo_ids.iter().position(|id| id == &anchor))
+            .unwrap_or(0);
         let token = format!(
             "b{:032x}{:016x}",
             self.browse_namespace,
@@ -935,6 +977,7 @@ impl Application {
             token,
             total,
             position,
+            selection_counts,
         })
     }
 

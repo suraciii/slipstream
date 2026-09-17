@@ -14,8 +14,19 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-const opened = (token: string, total = 180, position = 0) =>
-  new Response(JSON.stringify({ token, total, position }), { status: 200 });
+const opened = (
+  token: string,
+  total = 180,
+  position = 0,
+  selectionCounts: Readonly<{
+    selected: number;
+    rejected: number;
+    undecided: number;
+  }> = { selected: 0, rejected: 0, undecided: total },
+) =>
+  new Response(JSON.stringify({ token, total, position, selectionCounts }), {
+    status: 200,
+  });
 
 const photo = (id: string) => ({
   id,
@@ -215,6 +226,136 @@ describe("SourceGridOwner", () => {
     });
     expect(owner.order).toBe("capture-time-desc");
     expect(releases).toEqual(["browse-1", "browse-2"]);
+  });
+
+  test("sends only a non-default Selection filter and replaces the open counts", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (url.pathname === "/api/browse" && init?.method === "POST") {
+        if (typeof init.body !== "string") throw new Error("expected a body");
+        bodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        return Promise.resolve(
+          opened(`browse-${bodies.length}`, 180, 0, {
+            selected: 5,
+            rejected: 2,
+            undecided: 173,
+          }),
+        );
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    expect(owner.selection).toBe("all");
+    expect(owner.selectionCounts).toEqual({
+      selected: 0,
+      rejected: 0,
+      undecided: 0,
+    });
+    await owner.open({ kind: "library" });
+    // The default filter is the server's own default, so it stays off the wire.
+    expect(bodies[0]).toEqual({ source: "library" });
+    expect(owner.selection).toBe("all");
+    expect(owner.selectionCounts).toEqual({
+      selected: 5,
+      rejected: 2,
+      undecided: 173,
+    });
+
+    await owner.open(
+      { kind: "library" },
+      { selection: "rejected", preferredPhotoId: "photo-3" },
+    );
+    expect(bodies[1]).toEqual({
+      source: "library",
+      selection: "rejected",
+      photoId: "photo-3",
+    });
+    expect(owner.selection).toBe("rejected");
+
+    // A replace open reports no counts until its own response arrives.
+    const replacement = owner.open({ kind: "library" });
+    expect(owner.selectionCounts).toEqual({
+      selected: 0,
+      rejected: 0,
+      undecided: 0,
+    });
+    await replacement;
+    expect(owner.selection).toBe("all");
+    expect(owner.selectionCounts).toEqual({
+      selected: 5,
+      rejected: 2,
+      undecided: 173,
+    });
+  });
+
+  test("moves the server counts only for one confirmed Selection transition", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+        );
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(windowResponse(0, 10, 10));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner, "browse-1");
+    const authority = owner.authority;
+    const loaded = await owner.loadWindow(0, { kind: "source", authority });
+    expect(loaded.kind).toBe("loaded");
+    const [first] = [owner.photoAt(0)!];
+    expect(first?.selectionState).toBe("undecided");
+
+    // One confirmed transition carries the source counts with it: selected
+    // becomes rejected, and neither count is re-derived from loaded windows.
+    expect(owner.setPhotoSelection(authority, 0, first.id, "selected")).toBe(
+      true,
+    );
+    expect(owner.selectionCounts).toEqual({
+      selected: 4,
+      rejected: 1,
+      undecided: 5,
+    });
+    expect(owner.photoAt(0)?.selectionState).toBe("selected");
+    expect(owner.setPhotoSelection(authority, 0, first.id, "rejected")).toBe(
+      true,
+    );
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 2,
+      undecided: 5,
+    });
+    expect(owner.setPhotoSelection(authority, 0, first.id, "rejected")).toBe(
+      true,
+    );
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 2,
+      undecided: 5,
+    });
+
+    // A patch that does not address the retained Photo changes nothing, and a
+    // patch outside the open source authority is refused.
+    expect(
+      owner.setPhotoSelection(authority, 0, "other-photo", "selected"),
+    ).toBe(false);
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 2,
+      undecided: 5,
+    });
+    const stale = owner.authority;
+    await owner.open({ kind: "library" });
+    expect(owner.setPhotoSelection(stale, 0, first.id, "selected")).toBe(false);
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 1,
+      undecided: 6,
+    });
   });
 
   test("keeps the attempted source and retry state after an open failure", async () => {
@@ -538,9 +679,12 @@ describe("SourceGridOwner", () => {
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(
           mode === "malformed-open"
-            ? new Response('{"token":"","total":60,"position":0}', {
-                status: 200,
-              })
+            ? new Response(
+                '{"token":"","total":60,"position":0,"selectionCounts":{"selected":0,"rejected":0,"undecided":60}}',
+                {
+                  status: 200,
+                },
+              )
             : opened("browse-1", 120),
         );
       if (url.pathname === "/api/browse/browse-1")

@@ -1,4 +1,9 @@
-import type { PhotoSummary } from "../api/contracts.js";
+import type {
+  PhotoSummary,
+  SelectionCounts,
+  SelectionFilter,
+  SelectionState,
+} from "../api/contracts.js";
 import {
   fetchBrowseWindow,
   fetchBrowsePosition,
@@ -155,6 +160,8 @@ export interface SourceGridOwner {
   readonly generation: number;
   readonly source: SourceGridSource;
   readonly order: SourceViewOrder;
+  readonly selection: SelectionFilter;
+  readonly selectionCounts: SelectionCounts;
   readonly lastSource: SourceGridSource | undefined;
   readonly kind: SourceGridSource["kind"];
   readonly albumId: string | undefined;
@@ -176,6 +183,7 @@ export interface SourceGridOwner {
       preferredPhotoId?: string;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
+      selection?: SelectionFilter;
     }>,
   ): Promise<SourceOpenOutcome>;
   establish(authority: SourceAuthority): boolean;
@@ -246,15 +254,33 @@ type PhotoWindowRecord = Readonly<{
   tasks: TaskScope;
 }>;
 
+/// One confirmed Selection State transition applied to the open source's
+/// counts. The counts come from the server when the source opens, so a
+/// confirmed decision moves them by one instead of re-deriving them from
+/// loaded windows.
+const adjustedSelectionCounts = (
+  counts: SelectionCounts,
+  prior: SelectionState,
+  next: SelectionState,
+): SelectionCounts => {
+  if (prior === next) return counts;
+  const adjusted = { ...counts };
+  adjusted[prior] -= 1;
+  adjusted[next] += 1;
+  return Object.freeze(adjusted);
+};
+
 const sourceRequest = (
   source: SourceGridSource,
   order: SourceViewOrder,
+  selection: SelectionFilter,
   preferredPhotoId?: string,
 ): BrowseSourceRequest =>
   source.kind === "library"
     ? {
         kind: "library",
         order,
+        selection,
         ...(preferredPhotoId ? { preferredPhotoId } : {}),
       }
     : source.kind === "album"
@@ -262,6 +288,7 @@ const sourceRequest = (
           kind: "album",
           albumId: source.album.id,
           order,
+          selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
         }
       : {
@@ -269,6 +296,7 @@ const sourceRequest = (
           folderPath: source.folder.location,
           publication: source.publication,
           order,
+          selection,
           ...(preferredPhotoId ? { preferredPhotoId } : {}),
         };
 
@@ -300,6 +328,14 @@ export function createSourceGridOwner(
   let authority = makeAuthority();
   let source: SourceGridSource = freezeSource({ kind: "library" });
   let viewOrder: SourceViewOrder = "source-default";
+  let viewSelection: SelectionFilter = "all";
+  // The server's per-state counts for the open source. They describe the
+  // source order, so a filtered view still reports source-wide progress.
+  let selectionCounts: SelectionCounts = Object.freeze({
+    selected: 0,
+    rejected: 0,
+    undecided: 0,
+  });
   let lastSource: SourceGridSource | undefined;
   let token = "";
   let total = 0;
@@ -486,6 +522,7 @@ export function createSourceGridOwner(
       preferredPhotoId?: string;
       mode?: "replace" | "reopen";
       order?: SourceViewOrder;
+      selection?: SelectionFilter;
     }> = {},
   ): Promise<SourceOpenOutcome> {
     if (closed) return detachedOpen(authority, generation);
@@ -500,6 +537,7 @@ export function createSourceGridOwner(
     const ownerGeneration = generation;
     source = freezeSource(nextSource);
     viewOrder = options.order ?? "source-default";
+    viewSelection = options.selection ?? "all";
     lastSource = source;
     token = "";
     if (priorToken) releaseToken(priorToken);
@@ -510,6 +548,11 @@ export function createSourceGridOwner(
       sourceReady = false;
       total = 0;
       gridPosition = 0;
+      selectionCounts = Object.freeze({
+        selected: 0,
+        rejected: 0,
+        undecided: 0,
+      });
       facts = new Map();
       thumbnails = new Map();
       thumbnailDeliveryFailures = new Map();
@@ -520,7 +563,12 @@ export function createSourceGridOwner(
     try {
       const result = await openBrowse(
         fetcher,
-        sourceRequest(source, viewOrder, options.preferredPhotoId),
+        sourceRequest(
+          source,
+          viewOrder,
+          viewSelection,
+          options.preferredPhotoId,
+        ),
         task.signal!,
       );
       if (result.kind === "ok") {
@@ -531,6 +579,7 @@ export function createSourceGridOwner(
         }
         token = result.value.token;
         total = result.value.total;
+        selectionCounts = Object.freeze({ ...result.value.selectionCounts });
         const position = Math.min(
           result.value.position,
           Math.max(0, result.value.total - 1),
@@ -1016,6 +1065,12 @@ export function createSourceGridOwner(
     get order() {
       return viewOrder;
     },
+    get selection() {
+      return viewSelection;
+    },
+    get selectionCounts() {
+      return selectionCounts;
+    },
     get lastSource() {
       return lastSource;
     },
@@ -1099,6 +1154,12 @@ export function createSourceGridOwner(
       const current = facts.get(index);
       if (!current || current.id !== expectedPhotoId) return false;
       facts.set(index, { ...current, selectionState });
+      if (current.selectionState !== selectionState)
+        selectionCounts = adjustedSelectionCounts(
+          selectionCounts,
+          current.selectionState,
+          selectionState,
+        );
       return true;
     },
     setPhotoRating(candidate, index, expectedPhotoId, rating) {

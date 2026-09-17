@@ -90,12 +90,13 @@ defined by Web Async Ownership:
 - The **File Location owner** owns root binding, bounded direct-child windows,
   retry ranges, and publication rebinding independently of source, Grid, and
   Photo changes.
-- The **source and Grid owner** owns the selected Library Browser source, Browse
-  Snapshot lifecycle, bounded Browse Windows, the visible-range admission
-  contract (one in-flight request and one completion notification per
-  bounded window regardless of joined consumers), the retained-fact cache
-  bound anchored to the latest visible range, Grid position, Thumbnail work,
-  and source-scoped image transfers.
+- The **source and Grid owner** owns the selected Library Browser source, the
+  source's view order and Selection State filter, per-state Selection counts
+  for the open source, Browse Snapshot lifecycle, bounded Browse Windows, the
+  visible-range admission contract (one in-flight request and one completion
+  notification per bounded window regardless of joined consumers), the
+  retained-fact cache bound anchored to the latest visible range, Grid
+  position, Thumbnail work, and source-scoped image transfers.
 - The **Photo owner** owns the current Photo, foreground and adjacent Preview
   work, Photo View navigation, Selection State and Rating writes, browser-local
   undo, and Photo-scoped image transfers.

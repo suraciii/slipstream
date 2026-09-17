@@ -39,7 +39,12 @@
       "body": {
         "token": "$token",
         "total": 0,
-        "position": 0
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
       }
     }
   },
@@ -249,7 +254,12 @@
       "body": {
         "token": "$token",
         "total": 0,
-        "position": 0
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
       }
     }
   },
@@ -362,7 +372,12 @@
       "body": {
         "token": "$token",
         "total": 0,
-        "position": 0
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
       }
     }
   },
@@ -450,7 +465,12 @@
       "body": {
         "token": "$token",
         "total": 0,
-        "position": 0
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
       }
     }
   },
@@ -516,6 +536,83 @@
       "status": 400,
       "body": {
         "error": "Invalid browse order"
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-selection-selected",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "selection": "selected"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 0,
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-selection-all-is-explicit",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "selection": "all"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 0,
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-invalid-selection",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "selection": "maybe"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "body": {
+        "error": "Invalid browse selection"
       }
     }
   },
