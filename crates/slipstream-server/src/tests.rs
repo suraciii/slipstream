@@ -1,7 +1,7 @@
 use super::*;
 use crate::folders::MAXIMUM_FILE_LOCATION_WINDOW;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::{ErrorKind, Read, Write},
     path::PathBuf,
@@ -821,6 +821,18 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
     ))
     .unwrap();
     let ordered_paths = contract["orderedPaths"].as_array().unwrap();
+    let allowed_keys = contract["allowedKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let optional_keys = contract["optionalKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap())
+        .collect::<BTreeSet<_>>();
     let (base, config) = prepare_fixture();
     capture_metadata_fixture(&config.library_root.join("z.JPG"), "2026:01:01 09:00:00");
     capture_metadata_fixture(&config.library_root.join("a.jpg"), "2026:01:01 10:00:00");
@@ -871,9 +883,17 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
             serde_json::json!({"state": "inspection-pending"})
         );
         assert!(!photo.to_string().contains(":null"));
-        for hidden in contract["hiddenFields"].as_array().unwrap() {
-            let hidden = hidden.as_str().unwrap();
-            assert!(photo.get(hidden).is_none(), "{hidden} leaked into protocol");
+        let keys = photo
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for key in &keys {
+            assert!(allowed_keys.contains(key), "{key} leaked into protocol");
+        }
+        for key in allowed_keys.difference(&optional_keys) {
+            assert!(keys.contains(key), "{key} missing from protocol");
         }
         assert!(
             !photo
