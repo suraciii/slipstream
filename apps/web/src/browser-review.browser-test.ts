@@ -10845,6 +10845,52 @@ test("a large viewport stays bounded at every thumbnail size", async ({
   }
 });
 
+test("a focused filmstrip entry keeps a reachable focus across a decision", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  await waitForFilmstripImages(page);
+  const entry = strip.locator('[data-filmstrip-index="1"]');
+  await expect(entry).toBeEnabled();
+  await entry.focus();
+  await expect(entry).toBeFocused();
+
+  // While the decision is in flight the strip entry is disabled; disabling a
+  // focused button would drop focus to the body, so the Photo View holds it.
+  let releaseState!: () => void;
+  const stateReleased = new Promise<void>((resolve) => {
+    releaseState = resolve;
+  });
+  await page.route("**/api/photos/*/state", async (route) => {
+    await stateReleased;
+    await route.continue();
+  });
+  const stateDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.includes("/state"),
+  );
+  await page.keyboard.press("5");
+  await expect(entry).toBeDisabled();
+  await expect(page.locator("[data-photo-view]")).toBeFocused();
+  releaseState();
+  await stateDone;
+  await page.unroute("**/api/photos/*/state");
+
+  // When interactivity resumes, the entry the Photographer had focused takes
+  // focus back, and the decision landed.
+  await expect(entry).toBeEnabled();
+  await expect(entry).toBeFocused();
+  await expect(page.locator("[data-rating]")).toHaveText("5 stars");
+});
+
 test("Grid cells badge only recorded Selection States", async ({ page }) => {
   const { base, root } = await fixture();
   await writePhotos(root, 3);

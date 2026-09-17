@@ -1653,6 +1653,26 @@ export function createLibraryBrowserView(
   /// whose activation would be refused silently. Placeholders stay disabled
   /// for their own reason, so only entries that present a Photo follow this.
   let filmstripInteractive = false;
+  /// The strip entry a keyboard Photographer had focused when the strip
+  /// became non-interactive. Disabling a focused button drops focus to the
+  /// body, so the strip parks focus on the Photo View and returns it when
+  /// interactivity resumes, exactly as the Grid does for its held cell. The
+  /// held entry is remembered by index because a settled decision rebuilds
+  /// the strip and replaces the old button element.
+  let heldStripIndex: number | null = null;
+  const restoreHeldStripFocus = () => {
+    if (heldStripIndex === null || !filmstripInteractive) return;
+    const parked =
+      document.activeElement === document.body ||
+      document.activeElement === photoView;
+    const index = heldStripIndex;
+    heldStripIndex = null;
+    if (!parked) return;
+    const entry = filmstrip.querySelector<HTMLButtonElement>(
+      `[data-filmstrip-index="${index}"]`,
+    );
+    if (entry && !entry.disabled) entry.focus();
+  };
   const applyFilmstripInteractivity = () => {
     for (const rendered of renderedFilmstripCells.values())
       if (rendered.presentsPhoto)
@@ -1778,6 +1798,9 @@ export function createLibraryBrowserView(
     }
     applyFilmstripInteractivity();
     filmstrip.hidden = false;
+    // A settled decision rebuilds the strip after interactivity resumes, so
+    // the held entry's restoration is retried once the rebuilt entry exists.
+    restoreHeldStripFocus();
     if (!hadFocus) return;
     const current = model.cells.find((cell) => cell.current);
     if (!current) return;
@@ -2749,8 +2772,20 @@ export function createLibraryBrowserView(
       previous.disabled = !model.previousEnabled;
       next.disabled = !model.nextEnabled;
       undo.disabled = !model.undoEnabled;
+      const wasStripInteractive = filmstripInteractive;
       filmstripInteractive = model.filmstripEnabled;
+      const heldElement = document.activeElement as HTMLElement | null;
+      const holdsStripFocus =
+        wasStripInteractive &&
+        !model.filmstripEnabled &&
+        heldElement?.dataset.filmstripIndex !== undefined;
       applyFilmstripInteractivity();
+      if (holdsStripFocus) {
+        heldStripIndex = Number(heldElement.dataset.filmstripIndex);
+        photoView.focus();
+      } else if (!wasStripInteractive && model.filmstripEnabled) {
+        restoreHeldStripFocus();
+      }
       syncZoomControls();
     },
     renderMembership,

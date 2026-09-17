@@ -245,7 +245,8 @@ The next and previous Photos must remain reachable without recording a decision.
 
 Photo View must show the current Photo's immediate neighbors as a bounded
 strip of thumbnails centered on the current Photo. Activating an entry
-navigates to that Photo, and the entry for the current Photo is marked.
+navigates to that Photo, and the entry for the current Photo is marked as
+current and presents no activation.
 The strip is bounded independently of source size and follows the open
 source's order, so an Album's explicit order and a Selection State filter
 show the neighbors the Photographer actually moves through.
