@@ -440,7 +440,7 @@ Keyboard actions must follow the same persistence and undo rules as visible cont
 
 Grid View must be operable from a keyboard without opening Photo View.
 
-- The Grid is one Tab stop: Tab focus enters the Grid viewport, and the arrow keys move cell focus. Left and Right move one Photo; Up and Down move one complete row.
+- The Grid is entered once by Tab: the Grid viewport is its entry and fallback Tab stop, and at most one rendered cell is a Tab stop at a time (the cell the keyboard owns). Arrow keys move cell focus. Left and Right move one Photo; Up and Down move one complete row.
 - Moving cell focus must load the bounded window that contains the target row, exactly as scrolling does. Cell focus must not stop at the edge of a loaded window.
 - While the focused Photo's bounded window is loading, the Grid keeps keyboard focus and returns it to the cell once that cell renders.
 - The focused cell must keep its visible focus ring when a window replacement or a merged render rebuilds it.
@@ -449,7 +449,7 @@ Grid View must be operable from a keyboard without opening Photo View.
 - A failed Grid decision must report on the Grid's status line and must keep the affected Photo recoverable. It must not open Photo View.
 - Grid keys must act only while the Grid owns keyboard focus. Another surface with focus, such as an Album name input, must receive its own keys unchanged.
 
-Undo of a Grid decision must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. The browser holds one undo description, shared with Photo View.
+While the Grid is open, undo of a change that did not advance away from the affected Photo must restore the value in place, keep the Grid open, and return cell focus to the affected Photo. Undo of a change that advanced away must return to the affected Photo in Photo View. The browser holds one undo description, shared with Photo View.
 
 ## Failure Behavior
 

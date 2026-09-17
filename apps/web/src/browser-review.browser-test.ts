@@ -2738,6 +2738,74 @@ test("Grid View decision and Rating keys act on the focused cell without opening
   expect(statePosts.length).toBe(typed);
 });
 
+test("a Grid Undo keeps the Grid owning the recovery routing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writeFile(join(root, "a.jpg"), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = page.locator('[data-photo-index="0"]');
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(cell).toBeFocused();
+  await page.keyboard.press("p");
+  await expect(cell.locator(".cell-state.selected")).toHaveText("✓");
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+
+  // The Undo released Photo View's ownership with it: a lost connection while
+  // the Grid is open routes Retry to the source footer, not into the hidden
+  // Photo View.
+  await page.route("**/api/photos/*/state", (route) =>
+    route.fulfill({ status: 409, body: "conflict" }),
+  );
+  await page.keyboard.press("p");
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry connection" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-review]")).toBeHidden();
+});
+
+test("Undo of a Photo View Rating that did not advance stays in the open Grid", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // A Rating never advances, so its Undo restores in place: the Grid that is
+  // open stays open and takes cell focus back.
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await cell(0).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await page.keyboard.press("3");
+  await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 3 });
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-review]")).toBeHidden();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+  await expect(cell(0)).toBeFocused();
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 0 });
+});
+
 test("Grid keyboard movement works at a compact viewport and yields to the Sources drawer", async ({
   page,
 }) => {

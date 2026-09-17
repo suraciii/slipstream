@@ -2276,6 +2276,15 @@ export function mountLibraryBrowser(
       return;
     }
     if (gridUndo) {
+      // The Grid owns this surface: release Photo View's ownership and re-key
+      // the recovery gate exactly as returning to the Grid does, so recovery
+      // routing and a source reopen keep the Grid.
+      const gridAuthority = photoOwner.leave();
+      const gridTransition = recoveryGate.beginTransition(
+        "photo",
+        photoRecoveryKey(gridAuthority),
+      );
+      recoveryGate.succeedTransition(gridTransition);
       updateControls();
       renderGrid();
       view.focusGridIndex(outcome.index);
