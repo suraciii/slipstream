@@ -306,21 +306,46 @@ const filmstripPhotoIds = (page: Page) =>
       ),
     );
 
-/// Settles on a strip that presents exactly these entries with every thumbnail
-/// source attached, so a test never reads a placeholder as a Photo.
-async function expectFilmstrip(page: Page, indices: number[]) {
+/// Settles on a strip that presents exactly these positions with every
+/// thumbnail source attached - and, when the expected Photos are given, on
+/// those sources naming them - so a test never reads a placeholder, a strip in
+/// the middle of a redraw, or another Photo's image as a Photo. Positions,
+/// entries, and sources are read in one observation: Photo View rebuilds the
+/// entry whose Photo facts changed and re-attaches its thumbnail after the
+/// rebuild.
+async function expectFilmstrip(page: Page, indices: number[], ids?: string[]) {
   await expect(page.locator("[data-filmstrip]")).toBeVisible();
-  await expect.poll(() => filmstripIndices(page)).toEqual(indices);
-  await expect(page.locator(".filmstrip-placeholder")).toHaveCount(0);
+  const expected = {
+    indices,
+    placeholders: 0,
+    ids: ids ?? indices.map(() => expect.anything()),
+  };
   await expect
-    .poll(() =>
-      page
-        .locator(".filmstrip-cell img")
-        .evaluateAll((images) =>
-          images.every((image) => Boolean(image.getAttribute("src"))),
-        ),
-    )
-    .toBe(true);
+    .poll(async () => {
+      const cells = await page
+        .locator(".filmstrip-cell")
+        .evaluateAll((elements) =>
+          elements.map((element) => {
+            const source =
+              element.querySelector("img")?.getAttribute("src") ?? null;
+            return {
+              index: Number((element as HTMLElement).dataset.filmstripIndex),
+              placeholder: element.classList.contains("filmstrip-placeholder"),
+              id: source
+                ? (new URL(source, location.origin).pathname
+                    .split("/")
+                    .at(-3) ?? null)
+                : undefined,
+            };
+          }),
+        );
+      return {
+        indices: cells.map((cell) => cell.index),
+        placeholders: cells.filter((cell) => cell.placeholder).length,
+        ids: cells.map((cell) => cell.id),
+      };
+    })
+    .toEqual(expected);
 }
 
 function recordBrowseBodies(page: Page) {
@@ -12436,7 +12461,11 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
   await writePhotos(root, 130);
   const running = await server(base, root);
   await page.addInitScript(() => {
-    const admissions: Array<{ token: string; start: string }> = [];
+    const admissions: Array<{
+      token: string;
+      start: string;
+      priority: string;
+    }> = [];
     Object.defineProperty(window, "__slipstreamGridAdmissions", {
       value: admissions,
     });
@@ -12448,6 +12477,9 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
           admissions.push({
             token: url.pathname.split("/").at(-1) ?? "",
             start: url.searchParams.get("start") ?? "",
+            // Grid range admission is foreground work; the only background
+            // window in Photo View is the neighbor filmstrip's look-ahead.
+            priority: init?.priority === "low" ? "low" : "high",
           });
       }
       return nativeFetch(input, init);
@@ -12601,35 +12633,40 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
         ).__slipstreamHiddenGridMutations.count,
     );
     expect(hiddenGridMutations).toBe(0);
-    const hiddenTailAdmissions = await page.evaluate(
-      (token) =>
-        (
-          window as typeof window & {
-            __slipstreamGridAdmissions: Array<{
-              token: string;
-              start: string;
-            }>;
-          }
-        ).__slipstreamGridAdmissions.filter(
-          (admission) => admission.token === token && admission.start === "60",
-        ),
-      reopenedToken,
-    );
-    expect(hiddenTailAdmissions).toEqual([]);
-
-    const visibleTailRequest = page.waitForRequest((request) => {
-      const url = new URL(request.url());
-      return (
-        request.method() === "GET" &&
-        url.pathname === `/api/browse/${reopenedToken}` &&
-        url.searchParams.get("start") === "60"
+    const tailAdmissions = async () =>
+      page.evaluate(
+        (token) =>
+          (
+            window as typeof window & {
+              __slipstreamGridAdmissions: Array<{
+                token: string;
+                start: string;
+                priority: string;
+              }>;
+            }
+          ).__slipstreamGridAdmissions.filter(
+            (admission) =>
+              admission.token === token && admission.start === "60",
+          ),
+        reopenedToken,
       );
-    });
+    // The reopened window that covers Photo 60 stops at it, so the Photo's own
+    // neighbors are still missing and the filmstrip admits that one window for
+    // them at background priority. The hidden Grid admits nothing of its own:
+    // the deferred tail window has exactly the strip's background admission and
+    // no Grid range admission.
+    const photoViewAdmissions = await tailAdmissions();
+    expect(photoViewAdmissions.map((admission) => admission.priority)).toEqual([
+      "low",
+    ]);
+
     await page.getByRole("button", { name: "Back to Grid" }).click();
-    const tailRequest = await visibleTailRequest;
-    expect(tailRequest.method()).toBe("GET");
     await expect(page.locator("[data-grid-view]")).toBeVisible();
+    // The visible Grid presents the tail Photo from the window that is already
+    // there instead of asking for it a second time, so the bounded admission
+    // stays bounded.
     await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
+    expect(await tailAdmissions()).toEqual(photoViewAdmissions);
   } finally {
     releaseReopen();
     await page.unroute(/\/api\/browse(?:\/|$)/);
@@ -13446,8 +13483,7 @@ test("Photo View shows a bounded neighbor filmstrip that navigates the open sour
 
   // The first Photo has only the neighbors that exist, and each entry presents
   // the Photo at that position in the open source order.
-  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5]);
-  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(0, 6));
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5], ids.slice(0, 6));
   const current = page.locator('.filmstrip-cell[aria-current="true"]');
   await expect(current).toHaveCount(1);
   await expect(current).toHaveAttribute("data-filmstrip-index", "0");
@@ -13474,8 +13510,11 @@ test("Photo View shows a bounded neighbor filmstrip that navigates the open sour
   for (let step = 0; step < 5; step += 1)
     await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("6 / 12");
-  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(0, 11));
+  await expectFilmstrip(
+    page,
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    ids.slice(0, 11),
+  );
   await expect(
     page.locator('.filmstrip-cell[aria-current="true"]'),
   ).toHaveAttribute("data-filmstrip-index", "5");
@@ -13488,14 +13527,26 @@ test("Photo View shows a bounded neighbor filmstrip that navigates the open sour
     page.locator('.filmstrip-cell[aria-current="true"]'),
   ).toHaveAttribute("data-filmstrip-index", "8");
 
-  // A neighbor is activatable from the keyboard, and the current Photo's own
-  // entry is a position marker instead of a second activation path.
-  await page.locator('.filmstrip-cell[data-filmstrip-index="4"]').focus();
+  // A neighbor is activatable from the keyboard, and a neighbor that holds
+  // the keyboard position keeps it while Photo View re-renders the strip
+  // around it: a Rating write settles and redraws the strip, and the
+  // Photographer is still on the entry they tabbed to.
+  const neighborEntry = page.locator(
+    '.filmstrip-cell[data-filmstrip-index="4"]',
+  );
+  await neighborEntry.focus();
+  await expect(neighborEntry).toBeFocused();
+  await page.keyboard.press("3");
+  await expect(page.locator("[data-rating]")).toHaveText("3 stars");
+  await expect(neighborEntry).toBeFocused();
+  await expect(neighborEntry).not.toHaveAttribute("aria-disabled", "true");
   await page.keyboard.press("Enter");
   await expect(page.locator("[data-position]")).toHaveText("5 / 12");
   await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-  // The current Photo's own entry is a position marker: even the click a
-  // forced activation delivers must not navigate.
+  // The current Photo's own entry is a position marker instead of a second
+  // activation path: even the click a forced activation delivers must not
+  // navigate, so Previous and Next keep one meaning for a change of current
+  // Photo.
   await page
     .locator('.filmstrip-cell[aria-current="true"]')
     .click({ force: true });
@@ -13505,8 +13556,7 @@ test("Photo View shows a bounded neighbor filmstrip that navigates the open sour
   for (let step = 0; step < 7; step += 1)
     await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("12 / 12");
-  await expectFilmstrip(page, [6, 7, 8, 9, 10, 11]);
-  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(6));
+  await expectFilmstrip(page, [6, 7, 8, 9, 10, 11], ids.slice(6));
 });
 
 test("the neighbor filmstrip follows an Album's explicit order", async ({
@@ -13534,13 +13584,11 @@ test("the neighbor filmstrip follows an Album's explicit order", async ({
   await expectGridOrder(page, explicit);
   await page.locator('[data-photo-index="0"]').click();
   await expect(page.locator("[data-position]")).toHaveText("1 / 10");
-  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5]);
-  expect(await filmstripPhotoIds(page)).toEqual(explicit.slice(0, 6));
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5], explicit.slice(0, 6));
 
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("2 / 10");
-  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6]);
-  expect(await filmstripPhotoIds(page)).toEqual(explicit.slice(0, 7));
+  await expectFilmstrip(page, [0, 1, 2, 3, 4, 5, 6], explicit.slice(0, 7));
   await expect(
     page.locator('.filmstrip-cell[aria-current="true"]'),
   ).toHaveAttribute("data-filmstrip-index", "1");
@@ -13628,8 +13676,8 @@ test("a large source keeps the filmstrip bounded and inside one Browse Window", 
   await expectFilmstrip(
     page,
     [95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105],
+    ids.slice(95, 106),
   );
-  expect(await filmstripPhotoIds(page)).toEqual(ids.slice(95, 106));
   // The Photo and its whole strip stay inside the bounded window that covers
   // them; the strip never admits a window for the source as a whole.
   expect(windows.requested.filter((start) => start !== 60)).toEqual([]);

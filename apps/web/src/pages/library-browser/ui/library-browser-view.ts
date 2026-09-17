@@ -1880,9 +1880,14 @@ export function createLibraryBrowserView(
 
   /// Applies the presentation the strip owns to one retained entry: whether it
   /// is the current position, whether activation is admitted, and the complete
-  /// accessible name. A current entry stays focusable so keyboard focus is not
-  /// thrown away when the Photo it names becomes current, but it announces
-  /// itself as unavailable because under review it has nowhere to navigate.
+  /// accessible name. Every entry that names a Photo stays focusable - the
+  /// current Photo's own entry, because keyboard focus is not thrown away when
+  /// the Photo it names becomes current, and a neighbor whose activation is
+  /// closed for the moment, because the strip re-renders outside the
+  /// Photographer's typing and a disabled button would drop the focus. Both
+  /// announce themselves as unavailable instead and the activation path
+  /// refuses the intent, so a strip re-render never moves the Photographer's
+  /// keyboard position out of the strip.
   const presentFilmstripEntry = (entry: RenderedFilmstripEntry) => {
     if (!entry.photo) {
       entry.button.disabled = true;
@@ -1890,10 +1895,10 @@ export function createLibraryBrowserView(
     }
     const current = entry.index === filmstripModel.currentIndex;
     entry.current = current;
-    entry.button.disabled = !filmstripModel.enabled;
     if (current) entry.button.setAttribute("aria-current", "true");
     else entry.button.removeAttribute("aria-current");
-    if (current) entry.button.setAttribute("aria-disabled", "true");
+    if (current || !filmstripModel.enabled)
+      entry.button.setAttribute("aria-disabled", "true");
     else entry.button.removeAttribute("aria-disabled");
     entry.button.setAttribute(
       "aria-label",
@@ -1944,7 +1949,10 @@ export function createLibraryBrowserView(
     const media = document.createElement("span");
     media.className = "filmstrip-media";
     const image = document.createElement("img");
-    image.alt = `Photo ${entry.index + 1} of ${filmstripModel.total}`;
+    // The entry is the named control and the thumbnail is its picture, so the
+    // image itself stays decorative: a second element in the strip naming the
+    // Photo would give the Preview image a namesake.
+    image.alt = "";
     image.loading = "lazy";
     image.fetchPriority = "low";
     image.decoding = "async";
@@ -1955,8 +1963,9 @@ export function createLibraryBrowserView(
     button.addEventListener("click", () => {
       // The current Photo's own entry is the strip's position marker, so it
       // never navigates: Previous and Next keep one meaning for a change of
-      // current Photo.
-      if (!alive || rendered.current) return;
+      // current Photo. An entry the page is not admitting activation for is
+      // announced unavailable and refused here for the same reason.
+      if (!alive || rendered.current || !filmstripModel.enabled) return;
       send({ kind: "open-photo", index: rendered.index });
     });
     presentFilmstripEntry(rendered);
@@ -1994,6 +2003,16 @@ export function createLibraryBrowserView(
   const renderFilmstrip = (model: FilmstripViewModel) => {
     if (!alive) return;
     filmstripModel = model;
+    // Remounting or moving a focused entry blurs it, and the strip re-renders
+    // under the Photographer's hands. The pass remembers the entry that held
+    // keyboard focus and gives the position back when it is still rendered, so
+    // a background render, a decision, or a shift of the strip never takes the
+    // Photographer's keyboard position away.
+    const focused = document.activeElement;
+    const heldIndex =
+      focused instanceof HTMLElement && filmstripTrack.contains(focused)
+        ? Number(focused.dataset.filmstripIndex)
+        : undefined;
     const rendered: RenderedFilmstripEntry[] = [];
     for (const entry of model.entries) {
       const existing = renderedFilmstripEntries.get(entry.index);
@@ -2023,16 +2042,26 @@ export function createLibraryBrowserView(
         entry.button.remove();
         renderedFilmstripEntries.delete(index);
       }
-    // The strip is the open source order: appending in ascending position also
-    // moves the entries of a shifted strip back into order.
-    for (const entry of rendered) filmstripTrack.append(entry.button);
+    // The strip is the open source order: placing the entries in ascending
+    // position also moves the entries of a shifted strip back into order. Only
+    // the entries that are not already in place are moved, because remounting
+    // a button blurs it and a background render must not take the
+    // Photographer's keyboard position away.
+    for (const [position, entry] of rendered.entries()) {
+      const placed = filmstripTrack.children[position];
+      if (placed === entry.button) continue;
+      filmstripTrack.insertBefore(entry.button, placed ?? null);
+    }
+    // A source with no neighbor has no strip to present.
+    const visible = model.entries.length > 1;
+    filmstrip.hidden = !visible;
     // A strip that has to scroll keeps the current position in sight. Only a
     // moved or newly rendered current position scrolls the strip, so a
     // Photographer's own strip scroll is not taken back between renders.
-    if (renderedFilmstripCurrent !== model.currentIndex) {
+    if (visible && renderedFilmstripCurrent !== model.currentIndex) {
       renderedFilmstripCurrent = model.currentIndex;
       const current = renderedFilmstripEntries.get(model.currentIndex);
-      if (current && !filmstrip.hidden) {
+      if (current) {
         const stripBox = filmstrip.getBoundingClientRect();
         const entryBox = current.button.getBoundingClientRect();
         filmstrip.scrollLeft +=
@@ -2041,8 +2070,14 @@ export function createLibraryBrowserView(
           (filmstrip.clientWidth - entryBox.width) / 2;
       }
     }
-    // A source with no neighbor has no strip to present.
-    filmstrip.hidden = model.entries.length <= 1;
+    // Only a position the pass dropped takes focus back: anything else means
+    // the Photographer moved focus elsewhere and the strip leaves it there.
+    const held =
+      heldIndex === undefined
+        ? undefined
+        : renderedFilmstripEntries.get(heldIndex);
+    if (held && document.activeElement === document.body)
+      held.button.focus({ preventScroll: true });
   };
 
   const renderPhotoFacts = (model: PhotoFactsViewModel) => {

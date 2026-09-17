@@ -85,6 +85,11 @@ export function mountLibraryBrowser(
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher);
   let photoMetadataAbort: AbortController | undefined;
+  // The one neighbor window the strip has already admitted for the current
+  // Photo, remembered by the Photo's authority and the aligned window start.
+  let stripLookahead:
+    | Readonly<{ authority: PhotoAuthority; start: number }>
+    | undefined;
   const view: LibraryBrowserView = createLibraryBrowserView(
     root,
     handleViewIntent,
@@ -2053,9 +2058,9 @@ export function mountLibraryBrowser(
     for (let position = start; position < end; position += 1) {
       const neighbor = sourceGrid.photoAt(position);
       if (!neighbor) {
-        // The first missing position owns the look-ahead window admission;
-        // the strip re-renders when that window settles and asks for the next
-        // one if the bound still crosses a window boundary.
+        // The first missing position owns the look-ahead admission; the strip
+        // re-renders when that window settles and admits the next one only if
+        // the bound still crosses a window boundary.
         missing ??= position;
         entries.push({ index: position });
         continue;
@@ -2068,13 +2073,26 @@ export function mountLibraryBrowser(
       enabled: canOpenGridPhoto(),
       entries,
     });
-    if (missing !== undefined) void loadStripWindow(missing, authority);
+    // One look-ahead admission per open source view and missing window. A
+    // window that already settled keeps its placeholder instead of retrying on
+    // every control update, so a failed neighbor window cannot become a
+    // request loop while the source view stays open.
+    if (missing === undefined) return;
+    const lookaheadStart = sourceGrid.alignedStart(missing);
+    if (
+      stripLookahead?.authority === authority &&
+      stripLookahead.start === lookaheadStart
+    )
+      return;
+    stripLookahead = { authority, start: lookaheadStart };
+    void loadStripWindow(missing, authority);
   };
 
   /// Admits the one bounded window that holds a neighbor position the strip is
   /// still missing, at look-ahead priority, and re-renders the strip once it
   /// settles. This is the path adjacent Preview preparation already uses, so a
-  /// failure keeps its existing reporting and never blocks navigation.
+  /// failure keeps the existing Photo-window reporting instead of gaining a
+  /// second one.
   const loadStripWindow = async (
     index: number,
     authority: PhotoAuthority,

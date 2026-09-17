@@ -332,11 +332,11 @@ order of its own, and it presents the neighbors that exist when the current
 Photo is at either end of the source.
 
 A neighbor position whose bounded window is not retained is look-ahead work.
-The browser admits the aligned window through the existing range admission path
-at background priority and keeps a stable placeholder for that entry until the
-window settles. A failed look-ahead window leaves its placeholder in place; it
-must not displace the current Preview, the current Photo's facts, decisions, or
-navigation.
+The browser admits, one window at a time, the aligned window that holds the
+first missing entry, at background priority, and keeps a stable placeholder
+for that entry until the window settles. A failed look-ahead window leaves its
+placeholder in place and is reported by the existing Photo-window failure
+rules; it must not displace the current Preview or the current Photo's facts.
 
 Thumbnails reuse the existing derivative pipeline. An entry presents the
 identity-bearing thumbnail URL already returned by its Photo facts, and
