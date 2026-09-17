@@ -4720,13 +4720,11 @@ test("the application status monitor owns scan failure, retry, and completion", 
   await duplicateAlbum;
   await expect(page.getByLabel("Album name")).toHaveValue("Keep");
   await page.getByRole("button", { name: "Close", exact: true }).click();
-  const resumeIdle = statusGate.hold();
   statusMode = "idle";
   await retryCheck.click();
   await expect(page.getByText("Disconnected")).toBeVisible();
   await expect(retryCheck).toBeVisible();
   await expect(page.getByText(/Library check complete/)).toBeHidden();
-  resumeIdle();
 
   command = "held";
   const resumeInspecting = statusGate.hold();
