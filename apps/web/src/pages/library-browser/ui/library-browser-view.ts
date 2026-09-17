@@ -31,13 +31,17 @@ export type ViewSourceOrder =
   | "capture-time-asc"
   | "capture-time-desc";
 
+/// One Selection State filter for the open source. `all` keeps every Photo of
+/// the source order.
+export type ViewSelectionFilter = "all" | ViewSelectionState;
+
 type ViewSourceKind = "library" | "album" | "folder";
 
-type SortOption = Readonly<{ value: ViewSourceOrder; label: string }>;
+type ViewOption<Value> = Readonly<{ value: Value; label: string }>;
 
 /// Capture Time is ascending by default, so only the reversed direction needs
 /// its own option.
-const CAPTURE_TIME_OPTIONS: ReadonlyArray<SortOption> = [
+const CAPTURE_TIME_OPTIONS: ReadonlyArray<ViewOption<ViewSourceOrder>> = [
   { value: "source-default", label: "Capture Time, earliest first" },
   { value: "capture-time-desc", label: "Capture Time, latest first" },
 ];
@@ -45,7 +49,10 @@ const CAPTURE_TIME_OPTIONS: ReadonlyArray<SortOption> = [
 /// The Grid's explicit order selection for the open source. Option labels are
 /// presentation: `source-default` names the order the server applies when no
 /// explicit order is requested (Capture Time earliest first, or Album order).
-const SORT_OPTIONS: Record<ViewSourceKind, ReadonlyArray<SortOption>> = {
+const SORT_OPTIONS: Record<
+  ViewSourceKind,
+  ReadonlyArray<ViewOption<ViewSourceOrder>>
+> = {
   library: CAPTURE_TIME_OPTIONS,
   folder: CAPTURE_TIME_OPTIONS,
   album: [
@@ -61,9 +68,34 @@ export type GridSortViewModel = Readonly<{
   enabled: boolean;
 }>;
 
+/// The Grid's Selection State filter for the open source. The filter is a view
+/// option of every source kind, so no option list depends on the kind.
+const FILTER_OPTIONS: ReadonlyArray<ViewOption<ViewSelectionFilter>> = [
+  { value: "all", label: "All" },
+  { value: "undecided", label: "Undecided" },
+  { value: "selected", label: "Selected" },
+  { value: "rejected", label: "Rejected" },
+];
+
+export type GridFilterViewModel = Readonly<{
+  value: ViewSelectionFilter;
+  enabled: boolean;
+}>;
+
+/// Decision progress for the open source: the per-state counts the server
+/// reports for that source. `visible` is false while the Grid presents no
+/// source, so a source transition never shows the previous source's progress.
+export type GridProgressViewModel = Readonly<{
+  visible: boolean;
+  selected: number;
+  rejected: number;
+  undecided: number;
+}>;
+
 export type LibraryBrowserIntent =
   | Readonly<{ kind: "summary-action"; presentationId: number }>
   | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
+  | Readonly<{ kind: "filter-change"; selection: ViewSelectionFilter }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
@@ -95,6 +127,12 @@ export type LibraryBrowserIntent =
       field: "selectionState" | "rating";
       value: ViewSelectionState | number;
       advance: boolean;
+    }>
+  | Readonly<{
+      kind: "grid-photo-mutation";
+      index: number;
+      field: "selectionState" | "rating";
+      value: ViewSelectionState | number;
     }>
   | Readonly<{ kind: "membership-toggle"; albumId: string; member: boolean }>
   | Readonly<{ kind: "membership-retry" }>;
@@ -286,14 +324,12 @@ export interface LibraryBrowserView {
   renderSources(model: SourceListViewModel): void;
   renderFolderAlbum(model: FolderAlbumViewModel): void;
   renderSort(model: GridSortViewModel): void;
+  renderFilter(model: GridFilterViewModel): void;
+  renderProgress(model: GridProgressViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
-  renderGrid(
-    model: GridViewModel,
-    position?: number,
-    consumeFocusRequest?: boolean,
-  ): void;
+  renderGrid(model: GridViewModel, position?: number): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
   clearGridCells(): void;
@@ -303,6 +339,9 @@ export interface LibraryBrowserView {
   rebindDetachedGridCells(model: GridViewModel): void;
   gridVisible(): boolean;
   scrollToGridIndex(index: number): void;
+  /// Moves the Grid keyboard to one Photo. Used when Undo restores a Grid
+  /// decision and must return the Photographer to the affected Photo.
+  focusGridIndex(index: number): void;
   showGrid(index?: number): void;
   enterPhoto(): void;
   renderPhotoFacts(model: PhotoFactsViewModel): void;
@@ -361,7 +400,7 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -432,6 +471,12 @@ export function createLibraryBrowserView(
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
   const gridSort = required<HTMLElement>(root, "[data-grid-sort]");
   const sortSelect = required<HTMLSelectElement>(root, "[data-sort-select]");
+  const gridProgress = required<HTMLElement>(root, "[data-grid-progress]");
+  const gridFilter = required<HTMLElement>(root, "[data-grid-filter]");
+  const filterSelect = required<HTMLSelectElement>(
+    root,
+    "[data-filter-select]",
+  );
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
@@ -541,8 +586,8 @@ export function createLibraryBrowserView(
   let albumFormCounter = 0;
   let albumForm: AlbumFormState | undefined;
   let albumFocusRequest: AlbumFocusRequest | undefined;
-  let gridFocusIndex: number | undefined;
-  let gridFocusRequested = false;
+  let gridKeyboardIndex: number | undefined;
+  let gridTotal = 0;
   let renderedColumns = 0;
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
@@ -583,6 +628,8 @@ export function createLibraryBrowserView(
   let photoSurface: object = {};
   let currentPhotoId: string | undefined;
   let currentSelection: ViewSelectionState = "undecided";
+  let filterRendered = false;
+  let renderedProgressText = "";
   let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
   let pointer:
@@ -1480,14 +1527,125 @@ export function createLibraryBrowserView(
     }
     return rendered;
   };
-  const renderGrid = (
-    model: GridViewModel,
-    position?: number,
-    consumeFocusRequest = true,
-  ) => {
+  /// True while the Grid owns keyboard focus, so Grid keys never act while
+  /// another surface (the Sources drawer, an Album form, the Photo View) has
+  /// it.
+  const gridHoldsKeyboard = (): boolean => {
+    const active = document.activeElement;
+    return Boolean(active && gridViewport.contains(active));
+  };
+  const firstVisibleGridIndex = (count: number): number => {
+    if (gridTotal === 0) return 0;
+    const first = Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * count;
+    return Math.max(0, Math.min(gridTotal - 1, first));
+  };
+  /// The Photo a Grid key addresses: the cell the keyboard owns while the
+  /// viewport still shows its row, or the first visible Photo after the
+  /// keyboard enters the Grid or a pointer scroll moved away from that row.
+  const gridKeyboardTarget = (count: number): number | undefined => {
+    if (gridTotal === 0) return undefined;
+    const first = firstVisibleGridIndex(count);
+    const index = gridKeyboardIndex;
+    if (index === undefined || index >= gridTotal) return first;
+    const firstRow = Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT);
+    const rows = Math.ceil(effectiveViewportHeight() / GRID_CELL_HEIGHT);
+    const row = Math.floor(index / count);
+    return row >= firstRow && row < firstRow + rows ? index : first;
+  };
+  /// Moves the Grid keyboard to one cell. Scrolling reports the new range
+  /// through the merged render, so keyboard movement loads the same bounded
+  /// windows as scrolling.
+  const focusGridCell = (index: number, count: number) => {
+    gridKeyboardIndex = index;
+    const row = Math.floor(index / count) * GRID_CELL_HEIGHT;
+    if (gridViewport.scrollTop !== row) gridViewport.scrollTop = row;
+    scheduleGridRender();
+  };
+  /// Keeps the Grid keyboard's cell focused across merged re-renders and
+  /// window replacement, and keeps exactly one Grid cell in the Tab order.
+  /// Focus is never taken from another surface that owns it.
+  const restoreGridKeyboardFocus = () => {
+    const index = gridKeyboardIndex;
+    for (const [position, rendered] of renderedCells)
+      rendered.cell.tabIndex = position === index ? 0 : -1;
+    const active = document.activeElement;
+    const owns =
+      active === null ||
+      active === document.body ||
+      gridViewport.contains(active);
+    if (!owns || index === undefined) return;
+    const cell = gridLayer.querySelector<HTMLButtonElement>(
+      `[data-photo-index="${index}"]`,
+    );
+    if (cell && !cell.disabled) {
+      if (active !== cell) cell.focus();
+      return;
+    }
+    // The bounded window that contains the cell is still loading. The Grid
+    // keeps focus and returns it to the cell once the window renders.
+    if (active !== gridViewport) gridViewport.focus();
+  };
+  /// Applies one Grid View key to the focused cell. Arrow keys move the cell
+  /// focus, and the decision and Rating keys address the focused Photo
+  /// through the page model exactly like the Photo View shortcuts.
+  const applyGridKey = (event: KeyboardEvent): void => {
+    const count = columns();
+    const step =
+      event.key === "ArrowRight"
+        ? 1
+        : event.key === "ArrowLeft"
+          ? -1
+          : event.key === "ArrowDown"
+            ? count
+            : event.key === "ArrowUp"
+              ? -count
+              : 0;
+    if (step !== 0) {
+      // The Grid owns arrow movement even at its edges, so a boundary key
+      // never scrolls the viewport by its native amount.
+      event.preventDefault();
+      const current = gridKeyboardTarget(count);
+      if (current === undefined) return;
+      // The first arrow enters the Grid at its first visible Photo instead of
+      // stepping past it.
+      const next = gridKeyboardIndex === current ? current + step : current;
+      if (next < 0 || next >= gridTotal) return;
+      focusGridCell(next, count);
+      return;
+    }
+    const key = event.key.toLowerCase();
+    const field =
+      key === "p" || key === "x" || key === "u"
+        ? "selectionState"
+        : /^[0-5]$/.test(event.key)
+          ? "rating"
+          : undefined;
+    if (!field) return;
+    const index = gridKeyboardTarget(count);
+    if (index === undefined) return;
+    event.preventDefault();
+    // A decision key also moves the keyboard to its Photo, so the focused
+    // cell always shows where the decision or Rating applies.
+    if (gridKeyboardIndex !== index) focusGridCell(index, count);
+    send({
+      kind: "grid-photo-mutation",
+      index,
+      field,
+      value:
+        field === "rating"
+          ? Number(event.key)
+          : key === "p"
+            ? "selected"
+            : key === "x"
+              ? "rejected"
+              : "undecided",
+    });
+  };
+  const renderGrid = (model: GridViewModel, position?: number) => {
     // Photo View may keep the source Grid state alive while it owns the
     // visible workflow. Do not let a retained hidden Grid admit window work;
     // the visible Grid render after showGrid() owns that admission.
+    gridTotal = model.total;
     if (!alive || gridView.hidden) return;
     const count = columns();
     const stride = columnStride(count);
@@ -1550,17 +1708,7 @@ export function createLibraryBrowserView(
         gridLayer.insertBefore(rendered.cell, anchor);
       anchor = rendered.cell;
     }
-    if (consumeFocusRequest && gridFocusRequested) {
-      gridFocusRequested = false;
-      const cell =
-        gridFocusIndex === undefined
-          ? undefined
-          : gridLayer.querySelector<HTMLButtonElement>(
-              `[data-photo-index="${gridFocusIndex}"]`,
-            );
-      gridFocusIndex = undefined;
-      (cell ?? gridViewport).focus();
-    }
+    restoreGridKeyboardFocus();
     // Report the presented range whenever it changes, and keep reporting it
     // while part of it still has no Photo: the owner recomputes the windows
     // it is missing for that range, coalesces them with any request already in
@@ -1824,7 +1972,13 @@ export function createLibraryBrowserView(
       send({ kind: "undo" });
       return;
     }
-    if (modifier || photoView.hidden) return;
+    if (photoView.hidden) {
+      // Grid View keys act only while the Grid owns keyboard focus.
+      if (!modifier && !event.shiftKey && gridHoldsKeyboard())
+        applyGridKey(event);
+      return;
+    }
+    if (modifier) return;
     if (event.key === "+" || event.key === "=") {
       if (!measurableImage()) return;
       event.preventDefault();
@@ -2143,6 +2297,13 @@ export function createLibraryBrowserView(
     if (!alive || sortSelect.disabled) return;
     send({ kind: "sort-change", order: sortSelect.value as ViewSourceOrder });
   });
+  filterSelect.addEventListener("change", () => {
+    if (!alive || filterSelect.disabled) return;
+    send({
+      kind: "filter-change",
+      selection: filterSelect.value as ViewSelectionFilter,
+    });
+  });
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
@@ -2238,8 +2399,50 @@ export function createLibraryBrowserView(
       sortSelect.disabled = !model.enabled;
       gridSort.hidden = false;
     },
+    renderFilter(model) {
+      if (!alive) return;
+      if (!filterRendered) {
+        filterRendered = true;
+        filterSelect.replaceChildren(
+          ...FILTER_OPTIONS.map((option) => {
+            const element = document.createElement("option");
+            element.value = option.value;
+            element.textContent = option.label;
+            return element;
+          }),
+        );
+      }
+      filterSelect.value = model.value;
+      filterSelect.disabled = !model.enabled;
+      gridFilter.hidden = false;
+    },
+    renderProgress(model) {
+      if (!alive) return;
+      const decided = model.selected + model.rejected;
+      const total = decided + model.undecided;
+      // A source whose facts report no Photo has no progress to show.
+      const text =
+        model.visible && total > 0
+          ? `${decided.toLocaleString()} of ${total.toLocaleString()} decided · ${model.selected.toLocaleString()} selected · ${model.rejected.toLocaleString()} rejected · ${model.undecided.toLocaleString()} undecided`
+          : "";
+      if (text === renderedProgressText) return;
+      renderedProgressText = text;
+      gridProgress.textContent = text;
+      gridProgress.hidden = text === "";
+    },
     setControls(model) {
       if (!alive) return;
+      // A disabled cell cannot hold focus. The Grid keeps its keyboard
+      // position on the viewport instead of losing it to the page while a
+      // write settles or a source changes readiness, and takes the cell back
+      // when the Grid becomes interactive again.
+      const focused = document.activeElement;
+      const heldCell = Boolean(
+        focused instanceof HTMLElement &&
+          gridLayer.contains(focused) &&
+          focused.matches("[data-photo-index]"),
+      );
+      const becameInteractive = !gridInteractionEnabled && model.gridEnabled;
       gridInteractionEnabled = model.gridEnabled;
       for (const cell of Array.from(
         gridLayer.querySelectorAll<HTMLButtonElement>(
@@ -2247,6 +2450,8 @@ export function createLibraryBrowserView(
         ),
       ))
         cell.disabled = !gridInteractionEnabled;
+      if (heldCell && !gridInteractionEnabled) gridViewport.focus();
+      else if (becameInteractive) restoreGridKeyboardFocus();
       decisionInteractionEnabled = model.decisionEnabled;
       for (const button of [
         select,
@@ -2286,8 +2491,7 @@ export function createLibraryBrowserView(
       gridEmptyAction.hidden = true;
       currentPhotoId = undefined;
       photoSurface = {};
-      gridFocusRequested = false;
-      gridFocusIndex = undefined;
+      gridKeyboardIndex = undefined;
     },
     renderGrid,
     scheduleGridRender,
@@ -2300,6 +2504,14 @@ export function createLibraryBrowserView(
         gridViewport.scrollTop =
           Math.floor(index / columns()) * GRID_CELL_HEIGHT;
     },
+    focusGridIndex(index) {
+      if (!alive) return;
+      const count = columns();
+      const target = Math.max(0, Math.min(Math.max(gridTotal - 1, 0), index));
+      gridKeyboardIndex = target;
+      gridViewport.scrollTop = Math.floor(target / count) * GRID_CELL_HEIGHT;
+      scheduleGridRender();
+    },
     showGrid(index) {
       if (!alive) return;
       resetZoomForImage();
@@ -2310,11 +2522,12 @@ export function createLibraryBrowserView(
       clearGridCells();
       closeSources(false);
       gridViewport.focus();
+      // Returning from Photo View returns the Grid keyboard to that Photo
+      // cell; the merged render focuses it once it is rendered.
+      gridKeyboardIndex = index;
       if (index !== undefined)
         gridViewport.scrollTop =
           Math.floor(index / columns()) * GRID_CELL_HEIGHT;
-      gridFocusRequested = true;
-      gridFocusIndex = index;
       scheduleGridRender();
     },
     enterPhoto() {

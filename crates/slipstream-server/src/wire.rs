@@ -37,6 +37,36 @@ pub struct BrowseOpenResponse {
     pub token: String,
     pub total: usize,
     pub position: usize,
+    pub selection_counts: SelectionCountsWire,
+}
+
+/// Bounded per-state Selection counts for one Browse Snapshot's source.
+/// The counts describe the source order before any Selection State filter is
+/// applied, so they stay meaningful inside a filtered view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionCountsWire {
+    pub selected: usize,
+    pub rejected: usize,
+    pub undecided: usize,
+}
+
+impl SelectionCountsWire {
+    pub(crate) fn from_selection_states(states: impl Iterator<Item = SelectionState>) -> Self {
+        let mut counts = Self {
+            selected: 0,
+            rejected: 0,
+            undecided: 0,
+        };
+        for state in states {
+            match state {
+                SelectionState::Selected => counts.selected += 1,
+                SelectionState::Rejected => counts.rejected += 1,
+                SelectionState::Undecided => counts.undecided += 1,
+            }
+        }
+        counts
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +102,29 @@ pub enum BrowseViewOrder {
     AlbumOrder,
     CaptureTimeAscending,
     CaptureTimeDescending,
+}
+
+/// The Selection State filter requested for one Browse Snapshot. `All` keeps
+/// every Photo of the source order; every other value keeps only Photos whose
+/// current Selection State matches, resolved server-side against the source
+/// order before the Snapshot is frozen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowseSelectionFilter {
+    All,
+    Undecided,
+    Selected,
+    Rejected,
+}
+
+impl BrowseSelectionFilter {
+    pub(crate) fn matches(self, state: SelectionState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Undecided => state == SelectionState::Undecided,
+            Self::Selected => state == SelectionState::Selected,
+            Self::Rejected => state == SelectionState::Rejected,
+        }
+    }
 }
 
 /// Bounded per-Photo Album membership response: Album identities only.

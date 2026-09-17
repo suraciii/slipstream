@@ -254,6 +254,8 @@ pub(crate) struct BrowseOpenBody {
     photo_id: Option<String>,
     #[serde(default)]
     order: Option<String>,
+    #[serde(default)]
+    selection: Option<String>,
 }
 
 pub(crate) async fn open_browse(
@@ -307,9 +309,16 @@ pub(crate) async fn open_browse(
         Some("capture-time-desc") => BrowseViewOrder::CaptureTimeDescending,
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse order"),
     };
+    let selection = match body.selection.as_deref() {
+        None | Some("all") => BrowseSelectionFilter::All,
+        Some("undecided") => BrowseSelectionFilter::Undecided,
+        Some("selected") => BrowseSelectionFilter::Selected,
+        Some("rejected") => BrowseSelectionFilter::Rejected,
+        Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid browse selection"),
+    };
     match state
         .application
-        .browse_open(source, order, preferred_photo_id.as_deref())
+        .browse_open(source, order, selection, preferred_photo_id.as_deref())
         .await
     {
         Ok(result) => json_response(StatusCode::OK, &result),
