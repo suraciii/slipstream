@@ -376,7 +376,8 @@
   font-size: 0.72rem;
 }
 
-.grid-filter {
+.grid-filter,
+.grid-size {
   flex: 0 0 auto;
   min-width: 0;
   display: flex;
@@ -384,13 +385,15 @@
   gap: 0.35rem;
 }
 
-.grid-filter label {
+.grid-filter label,
+.grid-size label {
   color: var(--muted);
   font-size: 0.68rem;
   white-space: nowrap;
 }
 
-.grid-filter select {
+.grid-filter select,
+.grid-size select {
   min-width: 0;
   max-width: 100%;
   min-height: 2.25rem;
@@ -530,8 +533,10 @@
 
 .photo-cell {
   position: absolute;
-  width: 140px;
-  height: 166px;
+  /* One size step owns the cell box and the virtualized layout together:
+     the view sets these from the chosen thumbnail size. */
+  width: var(--grid-cell-width, 140px);
+  height: var(--grid-cell-height, 166px);
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
@@ -1301,6 +1306,11 @@
   }
 
   .grid-filter select {
+    max-width: 8.5rem;
+    min-height: 2.75rem;
+  }
+
+  .grid-size select {
     max-width: 8.5rem;
     min-height: 2.75rem;
   }

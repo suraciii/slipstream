@@ -6,8 +6,26 @@ import { formatPhotoCount } from "./photo-count.js";
 type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
 
-const GRID_CELL_HEIGHT = 178;
-const GRID_CELL_WIDTH = 150;
+/**
+ * Grid thumbnail sizes. Each step is the cell box the CSS renders; the Grid
+ * adds the ordinary inter-cell gap to get the column and row pitch of its
+ * virtualized layout, so one step drives the CSS cell box and every geometry
+ * calculation together.
+ */
+type GridThumbnailSize = "small" | "medium" | "large";
+const GRID_CELL_GAP_X = 10;
+const GRID_CELL_GAP_Y = 12;
+const GRID_THUMBNAIL_SIZE_STEPS: Readonly<
+  Record<
+    GridThumbnailSize,
+    Readonly<{ width: number; height: number; label: string }>
+  >
+> = {
+  small: { width: 108, height: 130, label: "Small" },
+  medium: { width: 140, height: 166, label: "Medium" },
+  large: { width: 216, height: 256, label: "Large" },
+};
+const DEFAULT_GRID_THUMBNAIL_SIZE: GridThumbnailSize = "medium";
 /** Full wording behind the compact limited-detail marker in the Preview fact. */
 const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
 const SWIPE_PENDING_PIXELS = 24;
@@ -400,7 +418,7 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-size" data-grid-size><label for="grid-size-select">Size</label><select id="grid-size-select" data-size-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -477,6 +495,7 @@ export function createLibraryBrowserView(
     root,
     "[data-filter-select]",
   );
+  const sizeSelect = required<HTMLSelectElement>(root, "[data-size-select]");
   const gridViewport = required<HTMLElement>(root, "[data-grid-viewport]");
   const gridCanvas = required<HTMLElement>(root, "[data-grid-canvas]");
   const gridLayer = required<HTMLElement>(root, "[data-grid-layer]");
@@ -588,6 +607,10 @@ export function createLibraryBrowserView(
   let albumFocusRequest: AlbumFocusRequest | undefined;
   let gridKeyboardIndex: number | undefined;
   let gridTotal = 0;
+  let thumbnailSize: GridThumbnailSize = DEFAULT_GRID_THUMBNAIL_SIZE;
+  // The Photo whose row a pending size change keeps as the first visible row;
+  // the render that applies the new pitch consumes it.
+  let pendingGridAnchor: number | undefined;
   let renderedColumns = 0;
   let renderedColumnStride = 0;
   let renderedViewportHeight = 0;
@@ -714,13 +737,47 @@ export function createLibraryBrowserView(
     setSourcesExpanded(false);
     syncSourcePanel();
   };
+  const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
+  /// The column and row pitch of the virtualized layout: one cell box plus
+  /// the ordinary inter-cell gap. Every geometry calculation derives from
+  /// these, so the CSS cell box and the layout can never disagree.
+  const columnPitch = () => cellBox().width + GRID_CELL_GAP_X;
+  const rowPitch = () => cellBox().height + GRID_CELL_GAP_Y;
+  const applyGridThumbnailSize = () => {
+    const box = cellBox();
+    browser.style.setProperty("--grid-cell-width", `${box.width}px`);
+    browser.style.setProperty("--grid-cell-height", `${box.height}px`);
+  };
+  for (const [size, step] of Object.entries(GRID_THUMBNAIL_SIZE_STEPS)) {
+    const option = document.createElement("option");
+    option.value = size;
+    option.textContent = step.label;
+    sizeSelect.append(option);
+  }
+  sizeSelect.value = thumbnailSize;
+  applyGridThumbnailSize();
+  /// Re-lays out the Grid at another thumbnail size. The size is presentation
+  /// state of the open Grid: it changes cell geometry only, keeps the row the
+  /// Photographer was looking at as the first visible row, and reports the
+  /// new range through the merged render, so window admission follows exactly
+  /// as it does for scrolling.
+  const setGridThumbnailSize = (size: GridThumbnailSize) => {
+    if (!alive || size === thumbnailSize) return;
+    // The anchor is applied by the render that lays the Grid out at the new
+    // pitch: scrolling before that render would clamp against the previous
+    // canvas height.
+    pendingGridAnchor = firstVisibleGridIndex(columns());
+    thumbnailSize = size;
+    applyGridThumbnailSize();
+    scheduleGridRender();
+  };
   const columns = () =>
     Math.max(
       1,
-      Math.floor(Math.max(320, gridViewport.clientWidth) / GRID_CELL_WIDTH),
+      Math.floor(Math.max(320, gridViewport.clientWidth) / columnPitch()),
     );
   const columnStride = (count = columns()) =>
-    compactSources.matches ? gridViewport.clientWidth / count : GRID_CELL_WIDTH;
+    compactSources.matches ? gridViewport.clientWidth / count : columnPitch();
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
 
@@ -1415,8 +1472,10 @@ export function createLibraryBrowserView(
     stride: number,
   ) => {
     cell.style.left = `${(index % count) * stride}px`;
-    cell.style.top = `${Math.floor(index / count) * GRID_CELL_HEIGHT}px`;
-    cell.style.width = compactSources.matches ? `${stride - 10}px` : "";
+    cell.style.top = `${Math.floor(index / count) * rowPitch()}px`;
+    cell.style.width = compactSources.matches
+      ? `${stride - GRID_CELL_GAP_X}px`
+      : "";
   };
   const buildGridCell = (
     index: number,
@@ -1536,7 +1595,7 @@ export function createLibraryBrowserView(
   };
   const firstVisibleGridIndex = (count: number): number => {
     if (gridTotal === 0) return 0;
-    const first = Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) * count;
+    const first = Math.floor(gridViewport.scrollTop / rowPitch()) * count;
     return Math.max(0, Math.min(gridTotal - 1, first));
   };
   /// The Photo a Grid key addresses: the cell the keyboard owns while the
@@ -1547,8 +1606,8 @@ export function createLibraryBrowserView(
     const first = firstVisibleGridIndex(count);
     const index = gridKeyboardIndex;
     if (index === undefined || index >= gridTotal) return first;
-    const firstRow = Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT);
-    const rows = Math.ceil(effectiveViewportHeight() / GRID_CELL_HEIGHT);
+    const firstRow = Math.floor(gridViewport.scrollTop / rowPitch());
+    const rows = Math.ceil(effectiveViewportHeight() / rowPitch());
     const row = Math.floor(index / count);
     return row >= firstRow && row < firstRow + rows ? index : first;
   };
@@ -1557,7 +1616,7 @@ export function createLibraryBrowserView(
   /// windows as scrolling.
   const focusGridCell = (index: number, count: number) => {
     gridKeyboardIndex = index;
-    const row = Math.floor(index / count) * GRID_CELL_HEIGHT;
+    const row = Math.floor(index / count) * rowPitch();
     if (gridViewport.scrollTop !== row) gridViewport.scrollTop = row;
     scheduleGridRender();
   };
@@ -1649,20 +1708,27 @@ export function createLibraryBrowserView(
     if (!alive || gridView.hidden) return;
     const count = columns();
     const stride = columnStride(count);
+    const pitch = rowPitch();
     const viewportHeight = effectiveViewportHeight();
     renderedColumns = count;
     renderedColumnStride = stride;
     renderedViewportHeight = viewportHeight;
-    const height = `${Math.ceil(model.total / count) * GRID_CELL_HEIGHT}px`;
+    const height = `${Math.ceil(model.total / count) * pitch}px`;
     gridCanvas.style.height = height;
     gridLayer.style.height = height;
+    if (pendingGridAnchor !== undefined) {
+      // A size change scrolls the Photo it anchors on into the first row once
+      // the new canvas height can hold it.
+      gridViewport.scrollTop = Math.floor(pendingGridAnchor / count) * pitch;
+      pendingGridAnchor = undefined;
+    }
     if (position !== undefined)
-      gridViewport.scrollTop = Math.floor(position / count) * GRID_CELL_HEIGHT;
+      gridViewport.scrollTop = Math.floor(position / count) * pitch;
     const firstRow = Math.max(
       0,
-      Math.floor(gridViewport.scrollTop / GRID_CELL_HEIGHT) - 2,
+      Math.floor(gridViewport.scrollTop / pitch) - 2,
     );
-    const visibleRows = Math.ceil(viewportHeight / GRID_CELL_HEIGHT) + 4;
+    const visibleRows = Math.ceil(viewportHeight / pitch) + 4;
     const start = firstRow * count;
     const end = Math.min(model.total, start + visibleRows * count);
     // Rendering is presentational: a cell that stays in the range and still
@@ -2304,6 +2370,10 @@ export function createLibraryBrowserView(
       selection: filterSelect.value as ViewSelectionFilter,
     });
   });
+  sizeSelect.addEventListener("change", () => {
+    if (!alive) return;
+    setGridThumbnailSize(sizeSelect.value as GridThumbnailSize);
+  });
   preview.addEventListener("pointerdown", pointerDown);
   preview.addEventListener("pointermove", pointerMove);
   preview.addEventListener("pointerup", (event) => finishPointer(event));
@@ -2501,15 +2571,14 @@ export function createLibraryBrowserView(
     gridVisible: () => alive && !gridView.hidden,
     scrollToGridIndex(index) {
       if (alive)
-        gridViewport.scrollTop =
-          Math.floor(index / columns()) * GRID_CELL_HEIGHT;
+        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
     },
     focusGridIndex(index) {
       if (!alive) return;
       const count = columns();
       const target = Math.max(0, Math.min(Math.max(gridTotal - 1, 0), index));
       gridKeyboardIndex = target;
-      gridViewport.scrollTop = Math.floor(target / count) * GRID_CELL_HEIGHT;
+      gridViewport.scrollTop = Math.floor(target / count) * rowPitch();
       scheduleGridRender();
     },
     showGrid(index) {
@@ -2526,8 +2595,7 @@ export function createLibraryBrowserView(
       // cell; the merged render focuses it once it is rendered.
       gridKeyboardIndex = index;
       if (index !== undefined)
-        gridViewport.scrollTop =
-          Math.floor(index / columns()) * GRID_CELL_HEIGHT;
+        gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
       scheduleGridRender();
     },
     enterPhoto() {
