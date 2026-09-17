@@ -1815,7 +1815,7 @@ export function mountLibraryBrowser(
   /// bound: the bound is named, and the selection is left exactly as it was.
   const refuseBeyondBatchBound = () => {
     setDecisionStatus(
-      `A batch holds up to ${MULTI_SELECTION_LIMIT} Photos. Decide or clear this selection first.`,
+      `A batch holds up to ${MULTI_SELECTION_LIMIT} Photos. Clear this selection, or remove Photos from it, first.`,
     );
   };
 
@@ -2458,7 +2458,12 @@ export function mountLibraryBrowser(
         setDecisionStatus(
           outcome.status === 409
             ? "Those Photos changed elsewhere. Retry to confirm their current state."
-            : `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`,
+            : // Only an over-limit batch answers 400; the client caps the
+              // selection, so the bound clause stays off every other answered
+              // failure it cannot have caused.
+              outcome.status === 400
+              ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
+              : "The change could not be saved.",
         );
       } else {
         setDecisionStatus(
@@ -2510,7 +2515,7 @@ export function mountLibraryBrowser(
     setDecisionStatus(
       result.ok
         ? `${photoCountText(photoIds.length)} added to “${name}”.`
-        : `Could not add the selected Photos to “${name}”. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`,
+        : `Could not add the selected Photos to “${name}”.`,
     );
   };
   /// Restores every Photo one batch Selection State change confirmed. The

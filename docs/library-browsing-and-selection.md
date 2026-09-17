@@ -578,8 +578,9 @@ operation. A confirmed Photo moves the decision progress once. A Photo the
 current Library no longer holds is reported and does not block the other
 Photos. A batch overwrites a Photo whose Selection State changed elsewhere:
 the write carries no expectation per Photo and is not compared against the
-state the browser last saw. A failed operation must leave every affected Photo
-recoverable and must not present the batch as complete.
+state the browser last saw. A batch carries no Album position write even in
+an open Album: it moves no browsing position. A failed operation must leave
+every affected Photo recoverable and must not present the batch as complete.
 
 A batched Selection State change is one undoable change: Undo restores the
 prior Selection State of every Photo the batch confirmed, as one unit. The

@@ -2844,8 +2844,8 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0]["photoId"], missing);
     // The Library no longer holds a state for that Photo, so the conflict
-    // carries no current state instead of an invented one.
-    assert!(conflicts[0].get("current").is_none());
+    // names it and nothing else.
+    assert_eq!(conflicts[0], serde_json::json!({ "photoId": missing }));
 
     // The confirmed Photos persisted; the unknown Photo changed nothing.
     let reopened = response_json(

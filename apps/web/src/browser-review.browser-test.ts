@@ -2964,6 +2964,44 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   expect(undoWrites).toHaveLength(3);
 });
 
+test("Grid batch Undo restores the rest when one Photo changed elsewhere", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await cell(1).click();
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos selected.",
+  );
+
+  // The second Photo moves elsewhere before the Undo, so its compare-and-set
+  // restore conflicts while the first Photo's succeeds.
+  await post(running.url, `/api/photos/${ids[1]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo restored. 1 Photo could not be restored because it changed elsewhere.",
+  );
+  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  // The conflicted Photo keeps the fact the Grid holds: no refresh invents
+  // its state.
+  await expect(cell(1).locator(".cell-state.selected")).toHaveText("✓");
+});
+
 test("Grid batch reports a Photo the current Library no longer holds and decides the rest", async ({
   page,
 }) => {
@@ -3099,7 +3137,7 @@ test("Grid multi-selection stops at the batch bound and names it", async ({
   const status = page.locator("[data-grid-status]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   const refused =
-    "A batch holds up to 100 Photos. Decide or clear this selection first.";
+    "A batch holds up to 100 Photos. Clear this selection, or remove Photos from it, first.";
   await page.locator("[data-grid-select-mode]").click();
 
   // The first Photo anchors the range, and scrolling loads the windows the
