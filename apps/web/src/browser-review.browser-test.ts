@@ -871,7 +871,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   const { albumId } = await createAlbum(running.url, "Picks");
   await startReview(page, running.url, "Picks", albumId);
   await expect(page.getByText("1 / 2")).toBeVisible();
-  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
   await expect(page.getByText("No rating", { exact: true })).toBeVisible();
   await expect(
     page.getByText("JPEG · limited detail", { exact: true }),
@@ -921,7 +921,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
-  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Selected");
 });
 
 test("narrow Grid keeps sources in a dismissible drawer and restores focus", async ({
@@ -935,18 +935,31 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
 
   const sources = page.locator("[data-source-toggle]");
   const panel = page.locator("#source-panel");
+  const gridViewport = page.locator("[data-grid-viewport]");
+  const gridHeight = () => gridViewport.evaluate((node) => node.clientHeight);
   await expect(sources).toBeVisible();
   await expect(sources).toHaveAttribute("aria-expanded", "false");
   await expect(panel).toHaveAttribute("aria-hidden", "true");
+  // The Grid keeps the height the app leaves below the view controls and
+  // reaches the bottom of the window.
   expect(
-    await page
-      .locator("[data-grid-viewport]")
-      .evaluate((node) => node.clientHeight),
-  ).toBeGreaterThan(700);
+    await gridViewport.evaluate((node) =>
+      Math.round(window.innerHeight - node.getBoundingClientRect().bottom),
+    ),
+  ).toBe(0);
+  const closedGridHeight = await gridHeight();
+  // The narrow header wraps its progress line below the controls, which
+  // costs the fourth row at this viewport: the Grid holds three complete
+  // rows plus most of the fourth. Pin that visible-row floor (178 px row
+  // pitch: a 166 px cell and a 12 px gap) so later header growth cannot
+  // silently eat the Grid.
+  expect(closedGridHeight).toBeGreaterThanOrEqual(3 * 178 + 166 / 2);
 
   await sources.click();
   await expect(sources).toHaveAttribute("aria-expanded", "true");
   await expect(panel).toHaveAttribute("aria-hidden", "false");
+  // The drawer overlays the Grid instead of shrinking it.
+  expect(await gridHeight()).toBe(closedGridHeight);
   await expect(
     page.getByRole("button", { name: /^All Photos(?: |$)/ }),
   ).toBeVisible();
@@ -1989,9 +2002,9 @@ function touchQualification(viewport: { width: number; height: number }) {
     await expect(page.getByText("3 / 3")).toBeVisible();
     expect(stateRequests).toBe(2);
     await page.getByRole("button", { name: "Previous" }).click();
-    await expect(page.getByText("Rejected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-selection]")).toHaveText("Rejected");
     await page.getByRole("button", { name: "Previous" }).click();
-    await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
 
     await page.locator("[data-zoom-slider]").fill("400");
     await page.locator("[data-zoom-slider]").dispatchEvent("input");
@@ -2473,7 +2486,7 @@ test("Clear is available only for a decided Photo", async ({ page }) => {
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
-  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Selected");
   await expect(clear).toBeEnabled();
 });
 
@@ -2508,7 +2521,7 @@ test("visible controls and keyboard share mutation, advance, rating independence
     page.keyboard.press("Control+z"),
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
-  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
   await expect(page.getByText("Last change undone.")).toBeVisible();
   await expect(
@@ -3145,7 +3158,7 @@ test("an answered non-conflict Undo failure remains retryable", async ({
   await page.unroute("**/api/photos/*/state");
   await actionWithProgress(page, albumId, () => undo.click());
   await expect(page.getByText("1 / 2")).toBeVisible();
-  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
   await expect(page.getByText("Last change undone.")).toBeVisible();
   await expect(undo).toBeDisabled();
   expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
@@ -3966,7 +3979,7 @@ test("a failed membership read stays retryable without blocking decisions", asyn
   await expect(page.getByText("Disconnected", { exact: true })).toBeHidden();
   await waitForLoadedReviewImage(page);
   await page.getByRole("button", { name: "Select" }).click();
-  await expect(page.getByText("Selected", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Selected");
   await page.getByRole("button", { name: "Rate 3 stars" }).click();
   await expect(page.getByText("3 stars", { exact: true })).toBeVisible();
   await expect(membershipCheckbox(page, "Picks")).toBeVisible();
@@ -9285,6 +9298,10 @@ test("Back to Grid restoration supersedes a queued scroll render", async ({
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 20 Photos$/)).toBeVisible();
 
+  // The Grid renders a bounded range around the fold, so scroll to the row
+  // that holds the target Photo the way a Photographer would; that scroll
+  // loads the bounded window which renders the cell.
+  await scrollGrid(page, 8 * 178);
   const currentCell = page.locator('[data-photo-index="16"]');
   await currentCell.scrollIntoViewIfNeeded();
   await currentCell.click();
@@ -9948,6 +9965,631 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   await expect(stateBadge(0)).toHaveCount(0);
 });
 
+test("Grid filter shows one Selection State at a time and keeps source progress", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  // The server applies the filter to the source before the view is frozen.
+  const selectedOnly = await browseOrderedIds(running.url, {
+    source: "library",
+    selection: "selected",
+  });
+  const rejectedOnly = await browseOrderedIds(running.url, {
+    source: "library",
+    selection: "rejected",
+  });
+  const undecidedOnly = await browseOrderedIds(running.url, {
+    source: "library",
+    selection: "undecided",
+  });
+  expect(allIds).toHaveLength(5);
+  expect(selectedOnly).toEqual([]);
+  expect(rejectedOnly).toEqual([]);
+  expect(undecidedOnly).toEqual(allIds);
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const viewport = page.locator("[data-grid-viewport]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const filter = page.locator("[data-filter-select]");
+  const progress = page.locator("[data-grid-progress]");
+  const sort = page.locator("[data-sort-select]");
+  const browseBodies = recordBrowseBodies(page);
+  // The filter offers every Choice plus the unfiltered default, and both
+  // view controls sit in the Grid's keyboard order.
+  await expect(filter).toBeVisible();
+  await expect(filter).toBeEnabled();
+  await expect(filter).toHaveAccessibleName("Show");
+  await expect(page.locator("[data-filter-select] option")).toHaveText([
+    "All",
+    "Undecided",
+    "Selected",
+    "Rejected",
+  ]);
+  await expect(filter).toHaveValue("all");
+  await viewport.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(sort).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(filter).toBeFocused();
+
+  // The unfiltered Grid reports the source-wide decision progress.
+  await expect(progress).toHaveText(
+    "0 of 5 decided · 0 selected · 0 rejected · 5 undecided",
+  );
+
+  // Decide three Photos from the Grid keyboard, then keep the focus on the
+  // filter to prove Grid decision keys never act through it.
+  await viewport.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("p");
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("x");
+  await expect(cell(1).locator(".cell-state.rejected")).toHaveText("×");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("p");
+  await expect(cell(2).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(progress).toHaveText(
+    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+  );
+  const statePosts: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/state"))
+      statePosts.push(request.url());
+  });
+  await filter.focus();
+  await page.keyboard.press("p");
+  await page.keyboard.press("x");
+  await page.keyboard.press("3");
+  // The filter keeps its own keys: no Grid decision or Rating reaches the
+  // focused Photo while it owns focus.
+  expect(statePosts).toEqual([]);
+  await expect(filter).toBeFocused();
+  await expect(cell(3).locator(".cell-state")).toHaveCount(0);
+  // The focused Photo keeps its facts: the Grid keys never reached it.
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({
+    selectionState: "selected",
+    rating: 0,
+  });
+  await expect(progress).toHaveText(
+    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+  );
+
+  // One Selection State at a time: the filtered view holds only the matching
+  // Photos in the source order, while the progress still counts the source.
+  await filter.selectOption("selected");
+  await expectGridOrder(page, [allIds[0]!, allIds[2]!]);
+  await expect(filter).toHaveValue("selected");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 2 Photos",
+  );
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await expect(progress).toHaveText(
+    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+  );
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    selection: "selected",
+  });
+
+  // Photo View walks the filtered view: navigation and position follow it.
+  await cell(0).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+
+  await filter.selectOption("rejected");
+  await expectGridOrder(page, [allIds[1]!]);
+  await filter.selectOption("undecided");
+  await expectGridOrder(page, [allIds[3]!, allIds[4]!]);
+  await filter.selectOption("all");
+  await expectGridOrder(page, allIds);
+  await expect(progress).toHaveText(
+    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+  );
+
+  // The filter belongs to the open view: a reload starts unfiltered.
+  await page.reload();
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await expect(page.locator("[data-filter-select]")).toHaveValue("all");
+  await expectGridOrder(page, allIds);
+});
+
+test("Grid filter re-anchors the current Photo and survives a refresh, sort, and scan", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  const source = await jpeg();
+  for (let index = 0; index < 8; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(2, "0")}.jpg`),
+      withCaptureTime(source, `2026:01:01 1${index}:00:00`),
+    );
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  expect(allIds).toHaveLength(8);
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const filter = page.locator("[data-filter-select]");
+  const sort = page.locator("[data-sort-select]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const browseBodies = recordBrowseBodies(page);
+
+  // Select three Photos, then filter to the Selection State they hold. The
+  // open view re-anchors on the current Photo by identity, so the filtered
+  // Grid opens at that Photo instead of its first position.
+  await page.locator("[data-grid-viewport]").focus();
+  for (const index of [0, 1, 2]) {
+    await page.keyboard.press("ArrowRight");
+    await expect(cell(index)).toBeFocused();
+    await page.keyboard.press("p");
+    await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+  }
+  const anchorId = allIds[2]!;
+  await cell(2).click();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 8");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await filter.selectOption("selected");
+  await expectGridOrder(page, [allIds[0]!, allIds[1]!, anchorId]);
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    selection: "selected",
+    photoId: anchorId,
+  });
+  // The reopened view holds only the matching Photos and shows the position
+  // of the anchor in its own order.
+  await cell(0).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+
+  // An order change and an explicit refresh keep the filter and its counts.
+  await sort.selectOption("capture-time-desc");
+  await expectGridOrder(page, [anchorId, allIds[1]!, allIds[0]!]);
+  await expect(filter).toHaveValue("selected");
+  // The order change also re-anchors on the current Photo: the last Photo
+  // opened in this source, resolved by identity against the new order.
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    selection: "selected",
+    photoId: allIds[0],
+  });
+  await openSources(page);
+  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await expect(filter).toBeEnabled();
+  await expectGridOrder(page, [anchorId, allIds[1]!, allIds[0]!]);
+  await expect(filter).toHaveValue("selected");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    order: "capture-time-desc",
+    selection: "selected",
+  });
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 3 Photos",
+  );
+
+  // A rescan of the same Library never reorders or extends the open filtered
+  // view: its snapshot stays frozen until the source reopens.
+  await writeFile(join(root, "extra.jpg"), source);
+  await post(running.url, "/api/scan", {});
+  await page.waitForFunction(async () => {
+    const response = await fetch("/api/overview");
+    const overview = (await response.json()) as { scan: { state: string } };
+    return overview.scan.state === "idle";
+  });
+  await expectGridOrder(page, [anchorId, allIds[1]!, allIds[0]!]);
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 3 Photos",
+  );
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "3 of 8 decided · 3 selected · 0 rejected · 5 undecided",
+  );
+
+  // The refresh after the scan publishes the new Photo, keeps the filter,
+  // and reports the new source-wide progress.
+  await openSources(page);
+  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 3 Photos",
+  );
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "3 of 9 decided · 3 selected · 0 rejected · 6 undecided",
+  );
+  await expect(filter).toHaveValue("selected");
+});
+
+test("a decision inside a filtered view keeps its membership and its Photo", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  expect(allIds).toHaveLength(4);
+  await post(running.url, `/api/photos/${allIds[0]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const filter = page.locator("[data-filter-select]");
+  const status = page.locator("[data-grid-status]");
+  const progress = page.locator("[data-grid-progress]");
+  const empty = page.locator("[data-grid-empty]");
+  await filter.selectOption("selected");
+  await expectGridOrder(page, [allIds[0]!]);
+  await expect(status).toHaveText("Ready · 1 Photo");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+  );
+
+  // The decision changes the filtered Photo in place: the open view keeps its
+  // frozen membership, and the write addresses the filtered sequence's Photo
+  // rather than an index in the unfiltered source.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  const cell = page.locator('[data-photo-index="0"]');
+  await expect(cell).toBeFocused();
+  await page.keyboard.press("x");
+  await expect(cell.locator(".cell-state.rejected")).toHaveText("×");
+  await expect(status).toHaveText("Ready · 1 Photo");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  );
+  expect(await libraryPhoto(running.url, 0)).toMatchObject({
+    id: allIds[0],
+    selectionState: "rejected",
+  });
+  expect(await libraryPhoto(running.url, 1)).toMatchObject({
+    id: allIds[1],
+    selectionState: "undecided",
+  });
+
+  // Only reopening the source applies the filter to the changed facts: the
+  // Photo leaves the Selected view, and the view reports its own emptiness
+  // without claiming an empty source or offering a Library check.
+  await filter.selectOption("all");
+  await expectGridOrder(page, allIds);
+  await filter.selectOption("selected");
+  await expect(empty).toBeVisible();
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
+  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
+  await expect(status).toHaveText("0 Photos");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  );
+  await page.reload();
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+});
+
+test("an Album source filters its members and keeps Album progress", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  expect(allIds).toHaveLength(3);
+  const { albumId } = await createAlbum(running.url, "Picks");
+  await post(running.url, `/api/photos/${allIds[0]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+  await post(running.url, `/api/photos/${allIds[1]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+  await post(running.url, `/api/photos/${allIds[2]!}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await openSources(page);
+  await page.getByRole("button", { name: /^Picks 3 Photos/ }).click();
+  await expect(page.locator("[data-grid-title]")).toHaveText("Picks");
+
+  const filter = page.locator("[data-filter-select]");
+  const status = page.locator("[data-grid-status]");
+  const progress = page.locator("[data-grid-progress]");
+  const empty = page.locator("[data-grid-empty]");
+  const browseBodies = recordBrowseBodies(page);
+  // Album progress describes the Album's members, not the open view.
+  await expect(status).toHaveText("Ready · 3 Photos");
+  await expect(progress).toHaveText(
+    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+  );
+
+  // The filter applies to the Album's members in membership position, and
+  // the request stays one Album open with the filter.
+  await filter.selectOption("selected");
+  await expectGridOrder(page, [allIds[0]!, allIds[1]!]);
+  await expect(status).toHaveText("Ready · 2 Photos");
+  expect(browseBodies.at(-1)).toEqual({
+    source: "album",
+    albumId,
+    selection: "selected",
+  });
+
+  // Photo View walks the filtered Album view, and its position belongs to
+  // the filtered sequence rather than to the Album or the Library.
+  await openPhotoAndWaitForProgress(
+    page,
+    albumId,
+    page.getByRole("button", { name: /^Photo 1 of 2/ }),
+  );
+  await expect(page.locator("[data-position]")).toHaveText("1 / 2");
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(filter).toHaveValue("selected");
+
+  // A filter no Album member matches reports the filter, not an empty Album.
+  await filter.selectOption("undecided");
+  await expect(empty).toBeVisible();
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
+  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
+  await expect(status).toHaveText("0 Photos");
+  await expect(progress).toHaveText(
+    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+  );
+  await filter.selectOption("rejected");
+  await expectGridOrder(page, [allIds[2]!]);
+  await expect(status).toHaveText("Ready · 1 Photo");
+});
+
+test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg", "d.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(4);
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const progress = page.locator("[data-grid-progress]");
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await expect(progress).toHaveText(
+    "0 of 4 decided · 0 selected · 0 rejected · 4 undecided",
+  );
+
+  // A Grid decision advances the source-wide counts once, and a refused
+  // repeat of the same decision does not move them again.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("p");
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+  );
+  await page.keyboard.press("p");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+  );
+
+  // A decision change moves one Photo between the counts.
+  await page.keyboard.press("x");
+  await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  );
+
+  // Undo returns that decision and the counts together: the Photo holds its
+  // previous value again, which was selected.
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Last change undone.",
+  );
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
+  await expect(progress).toHaveText(
+    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+  );
+
+  // Clearing a decision empties the counts for that Photo.
+  await page.keyboard.press("u");
+  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  await expect(progress).toHaveText(
+    "0 of 4 decided · 0 selected · 0 rejected · 4 undecided",
+  );
+
+  // Photo View decides with the same counts, and the values come from the
+  // server again after a reload.
+  await cell(3).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  await page.getByRole("button", { name: "Reject" }).click();
+  await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  );
+  await page.reload();
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  );
+});
+
+test("a failed filter change keeps the requested view recoverable through Retry", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+    await writeFile(join(root, name), await jpeg());
+  const running = await server(base, root);
+  const allIds = await browseIds(running.url);
+  expect(allIds).toHaveLength(3);
+  await post(running.url, `/api/photos/${allIds[0]!}/state`, {
+    field: "selectionState",
+    value: "selected",
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // The requested filtered open fails: the Grid reports the failure on the
+  // status line and presents no Photos from the previous view as the
+  // requested filter's result.
+  await page.route(
+    /\/api\/browse$/,
+    async (route) => {
+      const body = route.request().postDataBuffer()?.toString() ?? "";
+      if (route.request().method() === "POST" && body.includes('"selected"'))
+        await route.abort();
+      else await route.continue();
+    },
+    { times: 1 },
+  );
+  await page.locator("[data-filter-select]").selectOption("selected");
+  await expect(
+    page.getByText("Could not load this source. Retry to continue."),
+  ).toBeVisible();
+  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-photo-index]")).toHaveCount(0);
+  await expect(page.locator("[data-grid-progress]")).toBeHidden();
+
+  // Retry reopens the requested filtered view, not the previous one.
+  const browseBodies = recordBrowseBodies(page);
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectGridOrder(page, [allIds[0]!]);
+  await expect(page.locator("[data-filter-select]")).toHaveValue("selected");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  expect(browseBodies.at(-1)).toEqual({
+    source: "library",
+    selection: "selected",
+  });
+});
+
+test("a filtered view larger than one window pages through its own sequence", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  for (let index = 0; index < 240; index += 1)
+    await writeFile(
+      join(root, `${String(index).padStart(3, "0")}.jpg`),
+      await jpeg(),
+    );
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  expect(ids).toHaveLength(240);
+  // The last 120 Photos hold the selected state; the first 120 stay
+  // undecided, so the filtered view needs more than one window.
+  for (const id of ids.slice(120))
+    await post(running.url, `/api/photos/${id}/state`, {
+      field: "selectionState",
+      value: "selected",
+    });
+  const selectedIds = await browseOrderedIds(running.url, {
+    source: "library",
+    selection: "selected",
+  });
+  expect(selectedIds).toEqual(ids.slice(120));
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 240 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // One token carries the whole filtered view, whatever window a scroll
+  // admits, and the reported total is the filtered total.
+  const windowRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "GET" || !url.pathname.startsWith("/api/browse/"))
+      return;
+    windowRequests.push(`${url.pathname}#${url.searchParams.get("start")}`);
+  });
+
+  await page.locator("[data-filter-select]").selectOption("selected");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 120 Photos",
+  );
+  await expect(page.locator("[data-grid-progress]")).toHaveText(
+    "120 of 240 decided · 120 selected · 0 rejected · 120 undecided",
+  );
+
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  const lastPhoto = await (async () => {
+    const opened = (await (
+      await post(running.url, "/api/browse", { source: "library" })
+    ).json()) as { token: string };
+    const window = await browseWindow(running.url, opened.token, 180);
+    await fetch(`${running.url}/api/browse/${opened.token}`, {
+      method: "DELETE",
+      headers: { Origin: running.url },
+    });
+    return window.photos[59]!;
+  })();
+  expect(lastPhoto.id).toBe(selectedIds[119]);
+  const lastCell = page.locator('[data-photo-index="119"]');
+  await expect(lastCell).toBeVisible();
+  // The caption names the filtered position, so the last selected Photo is
+  // position 120 of the filtered view rather than of the source.
+  await expect(lastCell.locator(".cell-caption")).toHaveText(
+    `120 · ${lastPhoto.originalFilename}`,
+  );
+  const tokenPaths = new Set(
+    windowRequests.map((entry) => entry.split("#")[0]),
+  );
+  expect(tokenPaths.size).toBe(1);
+  expect(windowRequests.some((entry) => entry.endsWith("#0"))).toBe(true);
+  expect(
+    windowRequests.some((entry) => {
+      const start = Number(entry.split("#")[1]);
+      return start > 0 && start < 120;
+    }),
+  ).toBe(true);
+  // A window start in the filtered sequence addresses the filtered total.
+  expect(
+    windowRequests.every((entry) => Number(entry.split("#")[1]) < 120),
+  ).toBe(true);
+});
+
 test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({
   page,
 }) => {
@@ -10299,7 +10941,7 @@ test("Undo returns to the affected Photo and refreshes its Preview and facts", a
     page.getByRole("button", { name: "Undo" }).click(),
   );
   await expect(page.getByText("1 / 3")).toBeVisible();
-  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
   await expect(page.getByText("Last change undone.")).toBeVisible();
   await expect(page.locator("[data-stage] img")).toBeVisible();
 });
@@ -10345,7 +10987,7 @@ test("Undo reloads the affected Photo after its facts leave the loaded window", 
   ]);
 
   await expect(page.getByText("1 / 200")).toBeVisible();
-  await expect(page.getByText("Undecided", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-selection]")).toHaveText("Undecided");
   await expect(page.getByText("Last change undone.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(

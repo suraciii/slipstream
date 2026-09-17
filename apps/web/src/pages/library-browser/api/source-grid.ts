@@ -3,6 +3,8 @@ import type {
   BrowsePositionResponse,
   BrowseWindowResponse,
   PhotoSummary,
+  SelectionCounts,
+  SelectionFilter,
 } from "./contracts.js";
 
 export type SourceGridFetch = (
@@ -23,12 +25,14 @@ export type BrowseSourceRequest =
       kind: "library";
       preferredPhotoId?: string;
       order?: SourceViewOrder;
+      selection?: SelectionFilter;
     }>
   | Readonly<{
       kind: "album";
       albumId: string;
       preferredPhotoId?: string;
       order?: SourceViewOrder;
+      selection?: SelectionFilter;
     }>
   | Readonly<{
       kind: "folder";
@@ -36,6 +40,7 @@ export type BrowseSourceRequest =
       publication: string;
       preferredPhotoId?: string;
       order?: SourceViewOrder;
+      selection?: SelectionFilter;
     }>;
 
 export type SourceGridApiResult<T> =
@@ -98,6 +103,12 @@ const validPhotoSummary = (value: unknown): value is PhotoSummary => {
   );
 };
 
+const validSelectionCounts = (value: unknown): value is SelectionCounts =>
+  isRecord(value) &&
+  [value.selected, value.rejected, value.undecided].every(
+    (count) => Number.isInteger(count) && Number(count) >= 0,
+  );
+
 export async function openBrowse(
   fetcher: SourceGridFetch,
   source: BrowseSourceRequest,
@@ -108,6 +119,10 @@ export async function openBrowse(
     source.order && source.order !== "source-default"
       ? { order: source.order }
       : {};
+  const selection =
+    source.selection && source.selection !== "all"
+      ? { selection: source.selection }
+      : {};
   try {
     response = await fetcher("/api/browse", {
       method: "POST",
@@ -117,6 +132,7 @@ export async function openBrowse(
           ? {
               source: "library",
               ...order,
+              ...selection,
               ...(source.preferredPhotoId
                 ? { photoId: source.preferredPhotoId }
                 : {}),
@@ -127,6 +143,7 @@ export async function openBrowse(
                 folderPath: source.folderPath,
                 publication: source.publication,
                 ...order,
+                ...selection,
                 ...(source.preferredPhotoId
                   ? { photoId: source.preferredPhotoId }
                   : {}),
@@ -135,6 +152,7 @@ export async function openBrowse(
                 source: "album",
                 albumId: source.albumId,
                 ...order,
+                ...selection,
                 ...(source.preferredPhotoId
                   ? { photoId: source.preferredPhotoId }
                   : {}),
@@ -157,6 +175,7 @@ export async function openBrowse(
       Number(value.total) < 0 ||
       !Number.isInteger(value.position) ||
       Number(value.position) < 0 ||
+      !validSelectionCounts(value.selectionCounts) ||
       (Number(value.total) === 0
         ? Number(value.position) !== 0
         : Number(value.position) >= Number(value.total))

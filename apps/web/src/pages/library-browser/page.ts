@@ -6,6 +6,7 @@ import {
 import type {
   AlbumSummary,
   FolderChild,
+  SelectionFilter,
   SelectionState,
 } from "./api/contracts.js";
 import { fetchPhotoAlbums, fetchPhotoMetadata } from "./api/photo.js";
@@ -248,7 +249,12 @@ export function mountLibraryBrowser(
       const bindable =
         remembered.kind !== "folder" || fileLocations.publication !== undefined;
       if (bindable) {
-        await openSourceDescriptor(remembered, undefined, sourceGrid.order);
+        await openSourceDescriptor(
+          remembered,
+          undefined,
+          sourceGrid.order,
+          sourceGrid.selection,
+        );
       } else if (coordination.isCurrent()) {
         setGridStatusText("Could not load this source. Retry to continue.");
       }
@@ -529,6 +535,36 @@ export function mountLibraryBrowser(
     });
   };
 
+  /// The Selection State filter is a view option of the open source, so the
+  /// control shows the filter that snapshot was built with and stays disabled
+  /// while an open is already busy.
+  const renderFilterControl = () => {
+    if (!applicationAlive) return;
+    const interactionBusy = pageBusy || photoRetryPending || photoOwner.busy;
+    view.renderFilter({
+      value: sourceGrid.selection,
+      enabled: !interactionBusy && !photoOwner.opening,
+    });
+  };
+
+  /// Decision progress for the open source. The counts come from the server
+  /// when the source opens and follow confirmed decisions and Undo
+  /// afterwards; the loaded Grid windows are never their source.
+  const renderProgress = () => {
+    if (!applicationAlive) return;
+    const counts = sourceGrid.selectionCounts;
+    view.renderProgress({
+      // The counts belong to a source the Grid presents: an open Snapshot, or
+      // the same source's retained total across a reopen. A source
+      // replacement clears the reported total, so the line never presents
+      // another source's counts.
+      visible: sourceGrid.token !== "" || sourceGrid.total > 0,
+      selected: counts.selected,
+      rejected: counts.rejected,
+      undecided: counts.undecided,
+    });
+  };
+
   const updateControls = () => {
     if (!applicationAlive) return;
     const photo = currentPhoto();
@@ -561,6 +597,8 @@ export function mountLibraryBrowser(
         photoOwner.canUndo,
     });
     renderSortControl();
+    renderFilterControl();
+    renderProgress();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -1170,6 +1208,7 @@ export function mountLibraryBrowser(
     preferredPhotoId?: string,
     folder?: { location: string; name: string },
     order: SourceViewOrder = "source-default",
+    selection: SelectionFilter = "all",
   ) => {
     const descriptor: SourceGridSource =
       kind === "library"
@@ -1184,13 +1223,14 @@ export function mountLibraryBrowser(
               folder: folder!,
               publication: fileLocations.publication!,
             };
-    return openSourceDescriptor(descriptor, preferredPhotoId, order);
+    return openSourceDescriptor(descriptor, preferredPhotoId, order, selection);
   };
 
   async function openSourceDescriptor(
     requested: SourceGridSource,
     preferredPhotoId?: string,
     order: SourceViewOrder = "source-default",
+    selection: SelectionFilter = "all",
   ): Promise<void> {
     const descriptor: SourceGridSource =
       requested.kind === "folder" && fileLocations.publication
@@ -1204,6 +1244,7 @@ export function mountLibraryBrowser(
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
       order,
+      selection,
     });
     const authority = sourceGrid.authority;
     const generation = sourceGrid.generation;
@@ -1277,9 +1318,14 @@ export function mountLibraryBrowser(
       renderGrid(gridPosition);
       if (sourceGrid.total) {
         presentRangeStatus();
-      } else {
+      } else if (sourceGrid.selection === "all") {
         setGridStatusText(formatPhotoCount(0));
         view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
+      } else {
+        // A filtered view that matches nothing leaves its source intact, so
+        // it must not report an empty source or offer a Library check.
+        setGridStatusText(formatPhotoCount(0));
+        view.setGridEmpty("No Photos match this filter.");
       }
     } catch {
       if (!sourceGrid.isCurrent(authority)) return;
@@ -1321,6 +1367,32 @@ export function mountLibraryBrowser(
       sourceGrid.source,
       photoOwner.lastCurrentPhotoId,
       order,
+      sourceGrid.selection,
+    );
+  };
+
+  /// A filter change reopens the same source in the new view and keeps the
+  /// browser-local current Photo by identity when that Photo still matches the
+  /// new filter. Otherwise the reopened view starts at its first Photo.
+  const changeFilter = async (selection: SelectionFilter): Promise<void> => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    if (selection === sourceGrid.selection) return;
+    // A Folder reopen needs the current File Location binding: without it a
+    // filter change can only send a stale publication and fail as a false
+    // disconnection. Match the refresh/reopen precondition.
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive || !bound) {
+        if (applicationAlive)
+          setGridStatusText("Could not load this source. Retry to continue.");
+        return;
+      }
+    }
+    await openSourceDescriptor(
+      sourceGrid.source,
+      photoOwner.lastCurrentPhotoId,
+      sourceGrid.order,
+      selection,
     );
   };
 
@@ -1394,6 +1466,7 @@ export function mountLibraryBrowser(
     const pendingOpen = sourceGrid.open(descriptor, {
       mode: "reopen",
       order: sourceGrid.order,
+      selection: sourceGrid.selection,
       ...(anchorId ? { preferredPhotoId: anchorId } : {}),
     });
     // The reopen detaches the images the Grid had in flight and keeps its
@@ -2341,10 +2414,16 @@ export function mountLibraryBrowser(
           undefined,
           undefined,
           sourceGrid.order,
+          sourceGrid.selection,
         );
       return;
     }
-    await openSourceDescriptor(sourceGrid.source, undefined, sourceGrid.order);
+    await openSourceDescriptor(
+      sourceGrid.source,
+      undefined,
+      sourceGrid.order,
+      sourceGrid.selection,
+    );
   };
 
   /// The Grid index a retry replays a failed window with. `loadWindow` and
@@ -2438,7 +2517,12 @@ export function mountLibraryBrowser(
           return;
         }
       }
-      await openSourceDescriptor(remembered, undefined, sourceGrid.order);
+      await openSourceDescriptor(
+        remembered,
+        undefined,
+        sourceGrid.order,
+        sourceGrid.selection,
+      );
     })();
   };
 
@@ -2529,6 +2613,9 @@ export function mountLibraryBrowser(
       }
       case "sort-change":
         void changeSort(intent.order);
+        return;
+      case "filter-change":
+        void changeFilter(intent.selection);
         return;
       case "source-open": {
         const source = intent.source;
