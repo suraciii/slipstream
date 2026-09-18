@@ -90,7 +90,7 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
-**Fixture coverage boundary.** The browse and validation protocol vectors run against an empty fixture Library, so they pin validation, error, and empty shapes and the contract envelope; the cache vectors seed one Photo and one web asset and pin the derivative and web-asset response headers, ETag shape, and revalidation. Other success shapes and non-empty windows are pinned by the server test suite and the browser suite until Issue #266 lands. Every file under `compatibility/` must have an executing consumer; Issue #266 tracks the inventory check that enforces this rule.
+**Fixture coverage boundary.** The shared validation protocol vectors run against an empty fixture Library and pin validation, error, and contract-envelope shapes. The Browse vectors use a generated RAW/JPEG pair and Album to pin non-empty windows, ordering, Preview and Thumbnail hydration, metadata, status, membership, Browse position, and Album mutations. The cache vectors seed one Photo and one web asset and pin derivative and web-asset response headers, ETag identity, and revalidation. Every file under `compatibility/` must have an executing consumer; the compatibility inventory test enforces this rule.
 
 ## Photo fixtures
 
