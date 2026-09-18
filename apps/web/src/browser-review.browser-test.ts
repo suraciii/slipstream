@@ -3359,6 +3359,9 @@ test("Grid batch Review refreshes changed Photos before a retry", async ({
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "1 Photo selected. 1 Photo changed elsewhere. Review them before retrying.",
   );
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 1 selected · 0 rejected · 1 undecided",
+  );
   await expect(
     page.getByRole("button", { name: "Review 1 Photo" }),
   ).toBeVisible();
@@ -3370,11 +3373,17 @@ test("Grid batch Review refreshes changed Photos before a retry", async ({
     "1 Photo reviewed. Retry the batch when ready.",
   );
   await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 1 selected · 1 rejected · 0 undecided",
+  );
   await expect(
     page.getByRole("button", { name: "Review 1 Photo" }),
   ).toBeHidden();
 
   await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 2 selected · 0 rejected · 0 undecided",
+  );
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "2 Photos selected.",
   );

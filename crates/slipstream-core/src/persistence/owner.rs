@@ -243,7 +243,8 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
 fn validate_photo_state_batch_mutation(
     mutation: &PhotoStateBatchMutation,
 ) -> Result<(), MutationError> {
-    if mutation.photos.is_empty()
+    if mutation.value == SelectionState::Undecided
+        || mutation.photos.is_empty()
         || mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX
         || mutation
             .photos
@@ -4259,10 +4260,14 @@ mod tests {
                 value: SelectionState::Rejected,
             },
             PhotoStateBatchMutation {
+                photos: vec![item("one")],
+                value: SelectionState::Undecided,
+            },
+            PhotoStateBatchMutation {
                 photos: (0..=crate::PHOTO_STATE_BATCH_MAX)
                     .map(|index| item(&format!("photo-{index}")))
                     .collect(),
-                value: SelectionState::Undecided,
+                value: SelectionState::Selected,
             },
         ];
         for mutation in malformed {

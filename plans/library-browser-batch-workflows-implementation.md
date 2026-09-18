@@ -239,6 +239,8 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `apps/web/src/pages/library-browser/api/photo.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.test.ts`
+- `apps/web/src/pages/library-browser/model/source-grid-owner.ts`
+- `apps/web/src/pages/library-browser/model/source-grid-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
 - `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
 - `apps/web/src/browser-review.browser-test.ts`

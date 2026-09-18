@@ -2590,14 +2590,12 @@ export function mountLibraryBrowser(
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
         setDecisionStatus(
-          outcome.status === 409
-            ? "Those Photos changed elsewhere. Review them before retrying."
-            : // Only an over-limit batch answers 400; the client caps the
-              // selection, so the bound clause stays off every other answered
-              // failure it cannot have caused.
-              outcome.status === 400
-              ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
-              : "The change could not be saved.",
+          // Only an over-limit batch answers 400; the client caps the
+          // selection, so the bound clause stays off every other answered
+          // failure it cannot have caused.
+          outcome.status === 400
+            ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
+            : "The change could not be saved.",
         );
       } else {
         setDecisionStatus(
@@ -2699,6 +2697,7 @@ export function mountLibraryBrowser(
           }
           index = position.position;
         }
+        const believedState = multiExpectedSelection.get(photoId);
         const { start } = sourceGrid.describeWindow(index);
         if (!loadedWindows.has(start)) {
           sourceGrid.invalidateWindow(index);
@@ -2722,6 +2721,19 @@ export function mountLibraryBrowser(
         if (!photo) {
           becameMissing.add(photoId);
           continue;
+        }
+        if (
+          believedState !== undefined &&
+          !sourceGrid.reconcilePhotoSelection(
+            sourceAuthority,
+            refreshedIndex!,
+            photoId,
+            believedState,
+            photo.selectionState,
+          )
+        ) {
+          failed = true;
+          break;
         }
         multiExpectedSelection.set(photoId, photo.selectionState);
         reviewed.add(photoId);

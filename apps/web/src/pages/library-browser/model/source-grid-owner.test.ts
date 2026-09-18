@@ -434,6 +434,63 @@ describe("SourceGridOwner", () => {
     });
   });
 
+  test("reconciles a refreshed Photo fact against the source counts", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+        );
+      if (url.pathname === "/api/browse/browse-1") {
+        const photos = Array.from({ length: 10 }, (_, index) =>
+          index === 0
+            ? { ...photo("photo-0"), selectionState: "rejected" as const }
+            : photo(`photo-${index}`),
+        );
+        return Promise.resolve(
+          new Response(JSON.stringify({ start: 0, total: 10, photos }), {
+            status: 200,
+          }),
+        );
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner, "browse-1");
+    const authority = owner.authority;
+    expect(
+      (await owner.loadWindow(0, { kind: "source", authority })).kind,
+    ).toBe("loaded");
+    const first = owner.photoAt(0)!;
+    expect(first.selectionState).toBe("rejected");
+    // The open counts still contain the browser's prior undecided belief. A
+    // Review refresh reconciles that one contribution to the observed fact.
+    expect(
+      owner.reconcilePhotoSelection(
+        authority,
+        0,
+        first.id,
+        "undecided",
+        "rejected",
+      ),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 2,
+      undecided: 5,
+    });
+    const stale = owner.authority;
+    await owner.open({ kind: "library" });
+    expect(
+      owner.reconcilePhotoSelection(
+        stale,
+        0,
+        first.id,
+        "undecided",
+        "rejected",
+      ),
+    ).toBe(false);
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

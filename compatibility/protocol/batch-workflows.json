@@ -159,6 +159,20 @@
       "error": "Invalid Photo state batch"
     },
     {
+      "name": "photo-state-batch-undecided-state",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "undecided",
+        "photos": [
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "undecided"
+          }
+        ]
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
       "name": "album-compensation-duplicate-photo",
       "route": "/api/albums/$albumId/members/batch-remove",
       "body": {

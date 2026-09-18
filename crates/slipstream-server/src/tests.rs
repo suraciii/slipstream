@@ -3457,6 +3457,7 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
             "selectionState": "selected"
         }),
         serde_json::json!({"photos": [], "selectionState": "selected"}),
+        serde_json::json!({"photos": valid_items(), "selectionState": "undecided"}),
         serde_json::json!({"photos": valid_items(), "selectionState": "maybe"}),
         serde_json::json!({"photos": valid_items(), "rating": 3}),
         serde_json::json!({

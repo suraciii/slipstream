@@ -218,6 +218,16 @@ export interface SourceGridOwner {
     priorValue: PhotoSummary["selectionState"],
     selectionState: PhotoSummary["selectionState"],
   ): boolean;
+  /// Reconciles one refreshed fact with the Selection State belief that the
+  /// source counts already include. The caller supplies the pre-refresh
+  /// belief because the refreshed fact has already replaced the retained one.
+  reconcilePhotoSelection(
+    authority: SourceAuthority,
+    index: number,
+    expectedPhotoId: string,
+    believedState: PhotoSummary["selectionState"],
+    observedState: PhotoSummary["selectionState"],
+  ): boolean;
   setPhotoRating(
     authority: SourceAuthority,
     index: number,
@@ -1192,6 +1202,30 @@ export function createSourceGridOwner(
           priorValue,
           selectionState,
         );
+      return true;
+    },
+    reconcilePhotoSelection(
+      candidate,
+      index,
+      expectedPhotoId,
+      believedState,
+      observedState,
+    ) {
+      if (
+        !isCurrent(candidate) ||
+        index < 0 ||
+        index >= total ||
+        !expectedPhotoId
+      )
+        return false;
+      const current = facts.get(index);
+      if (!current || current.id !== expectedPhotoId) return false;
+      if (current.selectionState !== observedState) return false;
+      selectionCounts = adjustedSelectionCounts(
+        selectionCounts,
+        believedState,
+        observedState,
+      );
       return true;
     },
     setPhotoRating(candidate, index, expectedPhotoId, rating) {

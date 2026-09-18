@@ -781,7 +781,7 @@ pub(crate) async fn mutate_photo_state_batch(
     if !has_exact_keys(body, &["selectionState", "photos"]) {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
     }
-    let Some(value) = body.get("selectionState").and_then(valid_selection) else {
+    let Some(value) = body.get("selectionState").and_then(valid_batch_selection) else {
         return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
     };
     let Some(items) = body.get("photos").and_then(Value::as_array) else {
@@ -1136,6 +1136,14 @@ pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {
         "undecided" => Some(SelectionState::Undecided),
         "selected" => Some(SelectionState::Selected),
         "rejected" => Some(SelectionState::Rejected),
+        _ => None,
+    }
+}
+
+fn valid_batch_selection(value: &Value) -> Option<SelectionState> {
+    match valid_selection(value) {
+        Some(SelectionState::Selected) => Some(SelectionState::Selected),
+        Some(SelectionState::Rejected) => Some(SelectionState::Rejected),
         _ => None,
     }
 }

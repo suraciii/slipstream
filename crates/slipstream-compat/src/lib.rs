@@ -800,7 +800,7 @@ mod tests {
         let invalid = contract["invalidRequests"]
             .as_array()
             .expect("invalid request examples");
-        assert_eq!(invalid.len(), 7);
+        assert_eq!(invalid.len(), 8);
         for example in invalid {
             assert!(example["name"].is_string());
             let route = example["route"].as_str().expect("invalid request route");
