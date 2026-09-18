@@ -441,6 +441,7 @@ mod tests {
             "metadata/capture-order.json",
             "metadata/capture-time.json",
             "preview/fixtures.json",
+            "protocol/batch-workflows.json",
             "protocol/browse-vectors.json",
             "protocol/cache-vectors.json",
             "protocol/capture-order-omission.json",
@@ -482,6 +483,10 @@ mod tests {
             (
                 "metadata/capture-order.json",
                 "crates/slipstream-core/src/capture.rs",
+            ),
+            (
+                "protocol/batch-workflows.json",
+                "crates/slipstream-compat/src/lib.rs",
             ),
             (
                 "protocol/browse-vectors.json",
@@ -659,6 +664,207 @@ mod tests {
         );
         assert!(values.iter().any(|v| v["state"] == "failed"));
         assert!(values.iter().any(|v| v["undo"]["field"] == "rating"));
+    }
+
+    #[test]
+    fn batch_workflow_contract_examples_match_wire_rules() {
+        fn keys(value: &Value) -> BTreeSet<String> {
+            value
+                .as_object()
+                .expect("contract value is an object")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        let contract: Value = serde_json::from_slice(
+            &fs::read(contract_path("protocol/batch-workflows.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(!contains_null(&contract));
+
+        let photo_state_cases = contract["photoStateBatch"]
+            .as_array()
+            .expect("photo state batch examples");
+        assert_eq!(photo_state_cases.len(), 2);
+        let photo_state_response_keys = BTreeSet::from([
+            "applied".to_owned(),
+            "changedElsewhere".to_owned(),
+            "missing".to_owned(),
+        ]);
+        for case in photo_state_cases {
+            let request = &case["request"];
+            assert_eq!(request["method"], "POST");
+            assert_eq!(request["path"], "/api/photos/state");
+            assert_eq!(
+                keys(&request["body"]),
+                BTreeSet::from(["selectionState".to_owned(), "photos".to_owned()])
+            );
+            assert!(matches!(
+                request["body"]["selectionState"].as_str(),
+                Some("selected" | "rejected")
+            ));
+            let photos = request["body"]["photos"]
+                .as_array()
+                .expect("batch request photos");
+            assert!(!photos.is_empty());
+            let mut requested_ids = BTreeSet::new();
+            for photo in photos {
+                assert_eq!(
+                    keys(photo),
+                    BTreeSet::from(["photoId".to_owned(), "expectedCurrent".to_owned()])
+                );
+                assert!(requested_ids.insert(photo["photoId"].as_str().unwrap()));
+                assert!(matches!(
+                    photo["expectedCurrent"].as_str(),
+                    Some("undecided" | "selected" | "rejected")
+                ));
+            }
+
+            let response = &case["response"];
+            assert_eq!(keys(response), photo_state_response_keys);
+            let applied = response["applied"].as_array().unwrap();
+            let changed = response["changedElsewhere"].as_array().unwrap();
+            let missing = response["missing"].as_array().unwrap();
+            assert_eq!(applied.len() + changed.len() + missing.len(), photos.len());
+            let mut outcome_ids = BTreeSet::new();
+            for item in applied {
+                assert_eq!(
+                    keys(item),
+                    BTreeSet::from(["photoId".to_owned(), "priorValue".to_owned()])
+                );
+                assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
+                assert!(matches!(
+                    item["priorValue"].as_str(),
+                    Some("undecided" | "selected" | "rejected")
+                ));
+            }
+            for item in changed {
+                assert_eq!(
+                    keys(item),
+                    BTreeSet::from(["photoId".to_owned(), "currentValue".to_owned()])
+                );
+                assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
+                assert!(matches!(
+                    item["currentValue"].as_str(),
+                    Some("undecided" | "selected" | "rejected")
+                ));
+            }
+            for item in missing {
+                assert_eq!(keys(item), BTreeSet::from(["photoId".to_owned()]));
+                assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
+            }
+            assert_eq!(outcome_ids.len(), requested_ids.len());
+        }
+
+        let album_cases = contract["albumMembership"]
+            .as_array()
+            .expect("Album membership examples");
+        assert_eq!(album_cases.len(), 2);
+        for case in album_cases {
+            let request = &case["request"];
+            assert_eq!(request["method"], "POST");
+            assert!(request["path"].as_str().unwrap().contains("$albumId"));
+            assert!(request["body"]["photoIds"].as_array().unwrap().len() <= 100);
+            let response = &case["response"];
+            assert!(response["albumId"].is_string());
+            let albums = response["albums"].as_array().unwrap();
+            assert!(!albums.is_empty());
+            assert!(albums[0]["id"].is_string());
+            assert!(albums[0]["name"].is_string());
+            assert!(albums[0]["photoCount"].is_number());
+            assert!(albums[0]["hasSavedPosition"].is_boolean());
+            match case["name"].as_str().unwrap() {
+                "add-result" => assert_eq!(
+                    keys(response),
+                    BTreeSet::from([
+                        "albumId".to_owned(),
+                        "addedPhotoIds".to_owned(),
+                        "alreadyMemberPhotoIds".to_owned(),
+                        "albums".to_owned(),
+                    ])
+                ),
+                "remove-added-result" => assert_eq!(
+                    keys(response),
+                    BTreeSet::from([
+                        "albumId".to_owned(),
+                        "removedPhotoIds".to_owned(),
+                        "alreadyAbsentPhotoIds".to_owned(),
+                        "albums".to_owned(),
+                    ])
+                ),
+                other => panic!("unexpected Album contract example: {other}"),
+            }
+        }
+
+        let invalid = contract["invalidRequests"]
+            .as_array()
+            .expect("invalid request examples");
+        assert_eq!(invalid.len(), 7);
+        for example in invalid {
+            assert!(example["name"].is_string());
+            let route = example["route"].as_str().expect("invalid request route");
+            assert!(example["body"].is_object());
+            assert_eq!(
+                example["error"],
+                if route.starts_with("/api/albums/") {
+                    "Invalid membership batch"
+                } else {
+                    "Invalid Photo state batch"
+                }
+            );
+        }
+        let over_limit = invalid
+            .iter()
+            .find(|example| example["name"] == "photo-state-batch-over-limit")
+            .expect("over-limit invalid request example");
+        let over_limit_photos = over_limit["body"]["photos"].as_array().unwrap();
+        assert_eq!(over_limit_photos.len(), 101);
+        assert_eq!(
+            over_limit_photos
+                .iter()
+                .filter_map(|photo| photo["photoId"].as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            101
+        );
+
+        let malformed = contract["malformedResponses"]
+            .as_array()
+            .expect("malformed response examples");
+        assert_eq!(malformed.len(), 7);
+        for example in malformed {
+            assert!(example["name"].is_string());
+            assert!(matches!(
+                example["kind"].as_str(),
+                Some("photoStateBatch" | "albumMembership")
+            ));
+            assert!(example["response"].is_object());
+            assert_eq!(example["classification"], "malformed");
+        }
+        assert!(malformed[0]["response"].get("missing").is_none());
+        assert!(malformed[1]["response"].get("conflicts").is_some());
+        assert!(malformed[2]["response"].get("addedCount").is_some());
+        assert_eq!(
+            malformed[3]["response"]["applied"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            malformed[4]["response"]["applied"][0]["photoId"],
+            "$unrequestedPhotoId"
+        );
+        assert!(
+            malformed[5]["response"]["applied"][0]
+                .get("unexpected")
+                .is_some()
+        );
+        assert_eq!(
+            malformed[6]["response"]["applied"][0]["photoId"],
+            malformed[6]["response"]["missing"][0]["photoId"]
+        );
     }
 
     #[test]

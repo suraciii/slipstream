@@ -552,13 +552,22 @@ Grid View supports multi-selection in addition to the single open target:
   Photo's multi-selection instead of opening Photo View, so a touch device can
   multi-select without a modifier key.
 
-One batch addresses at most 100 Photos. The Grid refuses to grow the
-multi-selection past that bound, names the bound when it does, and keeps the
-selection it already holds, so a batch the server would refuse can never be
-built.
+One batch addresses at most 100 Photos. When **Select** mode is active, the
+Grid must show a selection tray even when it is empty, with `0 / 100 Photos`.
+The Grid refuses to grow the multi-selection past that bound, names the bound
+when it does, and keeps the selection it already holds, so a batch the server
+would refuse can never be built. A refused toggle or range is one operation:
+the selection and its anchor do not change. The Grid must say: `Selection limit
+reached. Remove a Photo to extend the range.`
 
-The **Select** mode must be enterable and leavable from a keyboard, and
-`Escape` must empty the multi-selection. The Grid decision and Rating keys keep
+The selection tray must state `Selection remains active` after a batch
+operation. It must show the active source and must distinguish the visible
+filtered result count from the Selection State counts for the complete source.
+
+The **Select** mode must be enterable and leavable from a keyboard. `Clear`
+and `Escape` empty the multi-selection and leave **Select** mode, including
+when the tray currently shows `0 / 100 Photos`. Opening or reopening a source
+also leaves Select mode. The Grid decision and Rating keys keep
 their existing meaning for the focused Photo.
 
 A range extends over the Photos the Grid has loaded. A position the Grid has
@@ -574,13 +583,27 @@ technology.
 
 Batch **Select** and **Reject** apply one Selection State to every selected
 Photo through the same persistence rules as a single decision, as one bounded
-operation. A confirmed Photo moves the decision progress once. A Photo the
-current Library no longer holds is reported and does not block the other
-Photos. A batch overwrites a Photo whose Selection State changed elsewhere:
-the write carries no expectation per Photo and is not compared against the
-state the browser last saw. A batch carries no Album position write even in
-an open Album: it moves no browsing position. A failed operation must leave
-every affected Photo recoverable and must not present the batch as complete.
+operation. Each selected Photo carries the last Selection State the browser
+confirmed for it. A Photo whose current Selection State differs from that
+expected value is reported as changed elsewhere and is not overwritten. A
+Photo the current Library no longer holds is reported as missing and does not
+block the other Photos. A confirmed Photo moves the decision progress once. A
+batch carries no Album position write even in an open Album: it moves no
+browsing position. A failed or partial operation must leave every affected
+Photo recoverable and must not present the batch as complete.
+
+The Grid must report applied, changed-elsewhere, and missing Photos separately.
+A changed-elsewhere Photo remains selected for review or retry. The result must
+identify missing Photos as `no longer in this Library`, identify concurrent
+state differences as `changed elsewhere`, and offer a `Review N` action for the
+latter, where `N` is the number of affected Photos. `Review N` focuses the
+affected cells and opens no modal. Review must refresh each affected Photo's
+current facts before another decision can be confirmed.
+
+A missing Photo remains visible in the selection result and the tray count
+until the Photographer clears it or opens another source, but it is marked
+`no longer in this Library` and is excluded from later batch requests. It does
+not consume a retry or create a new decision count.
 
 A batched Selection State change is one undoable change: Undo restores the
 prior Selection State of every Photo the batch confirmed, as one unit. The
@@ -590,15 +613,30 @@ later decision or retry decides it again. A batch never changes a Rating.
 
 Batch **Add to Album** adds every selected Photo to one Album through the same
 membership rules as a single addition. A Photo that already belongs to the
-Album is skipped without changing its membership position. Membership changes
-stay outside the Undo contract, exactly as they are for a single Photo.
+Album is skipped without changing its membership position. The confirmed
+result must identify Photos newly added and Photos already belonging to the
+Album.
+
+The result must offer a scoped **Remove added Photos** action for Photos newly
+added by that operation. It must not remove Photos that were already members,
+and it must not be called **Undo** because removing and re-adding a member may
+change its Album position. The action remains available while its result is
+visible and may expire on source change, a new membership operation, or page
+reload. Membership changes stay outside the global Selection State Undo
+contract.
 
 Opening or reopening a source clears the multi-selection; scrolling and Grid
 renders must not. A batch decision or one batch Album addition keeps the
 multi-selection, so the same Photos can take another decision or join another
 Album; only the clear exit, `Escape`, and opening or reopening a source empty
-it. The batch actions must remain reachable from a keyboard, and the count and
-every batch outcome must be announced on the Grid's status surface.
+it. After a batch Selection State decision or batch Album addition settles in
+an Album, the Grid must report that the durable Photo View resume position is
+unchanged, for example `Album resume point unchanged: Photo 12.` The
+**Remove added Photos** compensation reports the ordinary Album removal result
+instead. If it removes the saved Photo, it reports the resulting saved
+position, or that no saved position remains. The batch actions must remain
+reachable from a keyboard, and the count and every batch outcome must be
+announced on the Grid's status surface.
 
 ## Failure Behavior
 
@@ -620,6 +658,20 @@ If an Album creation, rename, delete, or membership change cannot persist, Slips
 If the current Photo's Album membership cannot load, Slipstream must keep the prior or empty membership presentation truthful, identify the failure beside the membership panel, and offer a retry. The failure must not affect selection, Rating, navigation, or Preview behavior.
 
 If a selection or Rating change cannot persist, Slipstream must identify the affected action. It must not silently advance as if the decision were saved.
+
+If a batch contains both confirmed and unsuccessful Photos, Slipstream must
+present the confirmed result and the unsuccessful Photos separately. A
+changed-elsewhere Photo must remain recoverable through Review and retry. A
+transport failure must leave the admitted batch retryable without claiming
+which Photos the server confirmed. A malformed or incomplete batch response is
+untrusted: Slipstream must move no Photo facts, progress counts, or Undo
+entries from it, must keep the selection retryable, and must identify the
+batch as needing retry rather than inventing per-Photo outcomes.
+
+If a scoped **Remove added Photos** compensation cannot persist, Slipstream
+must identify the Album and retain the compensation action for retry when the
+same operation remains current. A late compensation result must not replace a
+newer Album action or source status.
 
 A disconnected browser may continue displaying already loaded thumbnails and Previews. An already loaded Preview must remain available for local Detail Review zoom and pan while disconnected, but the browser must stop accepting new decisions until both the connection and the current Photo state are confirmed. Fit-mode decision gestures and persisted controls remain unavailable while disconnected. Success from an unrelated request, such as another File Location range, does not confirm the current Photo state or re-enable decisions. Reconnect must refresh only the current source window and affected state; it must not require a full-Library transfer.
 

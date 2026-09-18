@@ -92,7 +92,59 @@ Album create, rename, delete, membership, reorder, and saved-position mutations 
 
 New members append in supplied order. Adding an existing member is an idempotent product action and must not create a duplicate row or position. Removing one member compacts later positions while preserving relative order. Only explicit reorder changes existing relative positions.
 
-The browser may update presentation after confirmation. It must not abort an admitted Album or Photo-state persistence operation solely because the current source or Photo changes. UI continuation still belongs to the generation that initiated it and cannot overwrite a newer current source or error.
+A bounded batch membership result identifies `addedPhotoIds` and
+`alreadyMemberPhotoIds` in request order:
+
+```json
+{
+  "albumId": "album-1",
+  "addedPhotoIds": ["photo-1"],
+  "alreadyMemberPhotoIds": ["photo-2"],
+  "albums": [
+    {
+      "id": "album-1",
+      "name": "Review",
+      "photoCount": 2,
+      "hasSavedPosition": false
+    }
+  ]
+}
+```
+
+The browser may retain the returned `addedPhotoIds` as a page-level
+compensation record. The dedicated bounded command
+`POST /api/albums/{albumId}/members/batch-remove` accepts only that record,
+removes the listed members that are still present, and reports
+`removedPhotoIds` and `alreadyAbsentPhotoIds`:
+
+```json
+{
+  "albumId": "album-1",
+  "removedPhotoIds": ["photo-1"],
+  "alreadyAbsentPhotoIds": ["photo-2"],
+  "albums": [
+    {
+      "id": "album-1",
+      "name": "Review",
+      "photoCount": 1,
+      "hasSavedPosition": false
+    }
+  ]
+}
+```
+
+It is idempotent for retries, never removes an ID that was reported as already
+a member, and is not part of global Selection State Undo. The browser expires
+the record on source change, a new membership operation, or application
+teardown. Removing the saved Photo updates the Album's saved position through
+the existing removal-compaction rule.
+
+The browser may update presentation after confirmation. It must not abort an
+admitted Album or Photo-state persistence operation solely because the current
+source or Photo changes. UI continuation still belongs to the generation that
+initiated it and cannot overwrite a newer current source or error. A late
+compensation result is applied only while its page-level record and Album
+source remain current.
 
 ### Folder-to-Album Add
 
