@@ -702,6 +702,46 @@ async function touchDrag(
   }
 }
 
+async function touchRateWithClock(
+  page: Page,
+  value: number,
+  pointerId: number,
+) {
+  const preview = page.locator("[data-preview]");
+  const wheel = page.locator("[data-rating-wheel]");
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await page.clock.fastForward(449);
+  await expect(wheel).toBeHidden();
+  await page.clock.fastForward(1);
+  await expect(wheel).toBeVisible();
+  const option = page.locator(`[data-rating-wheel-value="${value}"]`);
+  const target = await option.boundingBox();
+  expect(target).not.toBeNull();
+  const point = {
+    x: target!.x + target!.width / 2,
+    y: target!.y + target!.height / 2,
+  };
+  await preview.dispatchEvent("pointermove", {
+    pointerId,
+    isPrimary: true,
+    clientX: point.x,
+    clientY: point.y,
+    pointerType: "touch",
+  });
+  await expect(option).toHaveAttribute("aria-pressed", "true");
+  return { preview, point, wheel };
+}
+
 /// A native touch pan keeps its momentum after the finger lifts, and an offset
 /// restored while that momentum still lands is discarded, so the Photo View
 /// returns to the top only once the pan has come to rest. Repeating the restore
@@ -4031,6 +4071,354 @@ test("mobile Photo View presents the Quick Action Dock and reachable secondary t
   await expect(dock).toBeHidden();
   await expect(page.locator("[data-secondary-toggle]")).toBeHidden();
   await expect(page.locator(".photo-controls")).toBeVisible();
+});
+
+test("mobile qualification measures the continuous touch path and action surfaces", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url, "Mobile Qualification");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await startReview(page, running.url, "Mobile Qualification", albumId);
+  await waitForLoadedReviewImage(page);
+
+  const photoView = page.locator("[data-photo-view]");
+  const dock = page.locator("[data-quick-action-dock]");
+  const viewports = [
+    { width: 390, height: 844, hierarchy: true },
+    { width: 667, height: 375, hierarchy: true },
+    { width: 844, height: 390, hierarchy: true },
+    { width: 1024, height: 768, hierarchy: false },
+    { width: 1280, height: 800, hierarchy: false },
+  ] as const;
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await expect(photoView).toBeVisible();
+    await restorePhotoViewTop(page);
+    const layout = await photoView.evaluate((view) => {
+      const preview = view.querySelector<HTMLElement>("[data-preview]");
+      const dock = view.querySelector<HTMLElement>("[data-quick-action-dock]");
+      const secondaryRow = view.querySelector<HTMLElement>(
+        "[data-secondary-action-row]",
+      );
+      const secondary = view.querySelector<HTMLElement>(
+        "[data-secondary-sheet]",
+      );
+      if (!preview || !dock || !secondaryRow || !secondary)
+        throw new Error("Photo View qualification surfaces are missing");
+      const readPadding = (element: HTMLElement) => {
+        const style = getComputedStyle(element);
+        return {
+          left: Number.parseFloat(style.paddingLeft),
+          right: Number.parseFloat(style.paddingRight),
+          bottom: Number.parseFloat(style.paddingBottom),
+        };
+      };
+      const previewBox = preview.getBoundingClientRect();
+      const dockBox = dock.getBoundingClientRect();
+      return {
+        clientWidth: view.clientWidth,
+        scrollWidth: view.scrollWidth,
+        previewBottom: previewBox.bottom,
+        dockTop: dockBox.top,
+        dock: readPadding(dock),
+        secondaryRow: readPadding(secondaryRow),
+        secondary: readPadding(secondary),
+      };
+    });
+    expect(layout.scrollWidth).toBe(layout.clientWidth);
+    if (viewport.hierarchy) {
+      // The measured padding is the narrow-surface safe-area contract. The
+      // max() floor remains visible in Chromium where the emulated inset is
+      // zero, and a device inset can only increase it.
+      expect(layout.dock.left).toBeGreaterThanOrEqual(8);
+      expect(layout.dock.right).toBeGreaterThanOrEqual(8);
+      expect(layout.secondaryRow.bottom).toBeGreaterThanOrEqual(4);
+      expect(layout.secondary.bottom).toBeGreaterThanOrEqual(10);
+      expect(layout.previewBottom).toBeLessThanOrEqual(layout.dockTop + 1);
+      await expect(dock).toBeVisible();
+      await expect(dock.locator("button")).toHaveText([
+        "Previous",
+        "Reject",
+        "Rating",
+        "Select",
+        "Next",
+      ]);
+      const targets = await interactiveGeometry(photoView);
+      expect(
+        targets.filter(({ width, height }) => width < 44 || height < 44),
+      ).toEqual([]);
+      expect(targets.filter(({ contained }) => !contained)).toEqual([]);
+      await expect(
+        page.getByRole("button", { name: "More Photo Tools" }),
+      ).toBeVisible();
+      await expect(page.locator("[data-secondary-zoom-controls]")).toBeHidden();
+      await page.getByRole("button", { name: "More Photo Tools" }).click();
+      await expect(
+        page.locator("[data-secondary-zoom-controls]"),
+      ).toBeVisible();
+      await expect(page.locator("[data-secondary-details]")).toBeVisible();
+      await expect(page.locator("[data-ratings] button")).toHaveCount(6);
+      await expect(page.locator("[data-secondary-close]")).toBeFocused();
+      await page.locator("[data-secondary-close]").click();
+      await expect(
+        page.getByRole("button", { name: "More Photo Tools" }),
+      ).toBeFocused();
+    } else {
+      await expect(dock).toBeHidden();
+      await expect(
+        page.getByRole("button", { name: "More Photo Tools" }),
+      ).toBeHidden();
+      await expect(page.locator(".rating-controls")).toBeVisible();
+      await expect(page.locator(".photo-controls")).toBeVisible();
+    }
+  }
+
+  // The hold threshold is driven by Playwright's fake clock. The Wheel only
+  // previews a Rating: the current Photo, Selection State, and position stay
+  // unchanged until release commits the existing mutation.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await waitForLoadedReviewImage(page);
+  await page.clock.install();
+  const ratingWrite = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/state") &&
+      response.status() === 200,
+  );
+  const wheel = await touchRateWithClock(page, 4, 301);
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  expect((await state(running.url, albumId)).members[0]!).toMatchObject({
+    selectionState: "undecided",
+    rating: 0,
+  });
+  await wheel.preview.dispatchEvent("pointerup", {
+    pointerId: 301,
+    isPrimary: true,
+    clientX: wheel.point.x,
+    clientY: wheel.point.y,
+    pointerType: "touch",
+  });
+  await ratingWrite;
+  await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await expect(page.locator("[data-rating]")).toHaveText("4 stars");
+  expect((await state(running.url, albumId)).members[0]!).toMatchObject({
+    selectionState: "undecided",
+    rating: 4,
+  });
+
+  // The Dock's Select keeps the established advance behavior; its Next then
+  // moves through the same source without a hidden Rating side effect.
+  const selectionWrite = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/state") &&
+      response.status() === 200,
+  );
+  await page.locator("[data-dock-select]").click();
+  await selectionWrite;
+  await expect(page.locator("[data-position]")).toHaveText("2 / 3");
+  await page.locator("[data-dock-next]").click();
+  await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  expect((await state(running.url, albumId)).members).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        selectionState: "selected",
+        rating: 4,
+      }),
+      expect.objectContaining({
+        selectionState: "undecided",
+        rating: 0,
+      }),
+    ]),
+  );
+});
+
+test("mobile qualification measures delayed Preview and explicit recovery", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  let previewStarted!: () => void;
+  const previewStartedGate = new Promise<void>((resolve) => {
+    previewStarted = resolve;
+  });
+  let releasePreview!: () => void;
+  const previewGate = new Promise<void>((resolve) => {
+    releasePreview = resolve;
+  });
+  let heldCurrentPreview = false;
+  await page.route("**/api/photos/*/preview", async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "GET" && url.search === "") {
+      if (!heldCurrentPreview) {
+        heldCurrentPreview = true;
+        previewStarted();
+        await previewGate;
+        try {
+          await route.continue();
+        } catch {
+          /* The test teardown may cancel the held transfer. */
+        }
+        return;
+      }
+    }
+    await route.continue();
+  });
+
+  try {
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+    await page.locator('[data-photo-index="0"]').click();
+    await previewStartedGate;
+    await expect(page.locator("[data-photo-view]")).toBeVisible();
+    await expect(page.locator("[data-stage] img")).toHaveCount(0);
+    await expect(page.locator("[data-rating-wheel]")).toBeHidden();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry", exact: true }),
+    ).toBeHidden();
+
+    // A delayed Preview does not manufacture a Rating candidate or claim a
+    // transport failure. The Preview response, not a timer, settles readiness.
+    releasePreview();
+    await waitForLoadedReviewImage(page);
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await page.unroute("**/api/photos/*/preview");
+
+    let failedCurrentPreview = false;
+    await page.route("**/api/photos/*/preview", async (route) => {
+      const url = new URL(route.request().url());
+      if (
+        route.request().method() === "GET" &&
+        url.search === "" &&
+        !failedCurrentPreview
+      ) {
+        failedCurrentPreview = true;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"error":"qualification failure"}',
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.locator("[data-dock-next]").click();
+    await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Retry", exact: true }),
+    ).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
+
+    await page.unroute("**/api/photos/*/preview");
+    await page.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await waitForLoadedReviewImage(page);
+    await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
+  } finally {
+    releasePreview();
+    await page.unroute("**/api/photos/*/preview");
+  }
+});
+
+test("mobile qualification fences a delayed Rating write after source navigation", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const { albumId: reviewAlbumId } = await createAlbum(
+    running.url,
+    "Pending Rating",
+  );
+  const otherAlbum = (await (
+    await post(running.url, "/api/albums", { name: "Other Photo" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const otherAlbumId = otherAlbum.albums.find(
+    (album) => album.name === "Other Photo",
+  )!.id;
+  await post(running.url, `/api/albums/${otherAlbumId}/members`, {
+    photoIds: [ids[1]],
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await startReview(page, running.url, "Pending Rating", reviewAlbumId);
+  await waitForLoadedReviewImage(page);
+
+  let releaseState!: () => void;
+  const stateGate = new Promise<void>((resolve) => {
+    releaseState = resolve;
+  });
+  let stateStarted!: () => void;
+  const stateStartedGate = new Promise<void>((resolve) => {
+    stateStarted = resolve;
+  });
+  let heldState = false;
+  await page.route("**/api/photos/*/state", async (route) => {
+    if (!heldState) {
+      heldState = true;
+      const response = await route.fetch();
+      stateStarted();
+      await stateGate;
+      try {
+        await route.fulfill({ response });
+      } catch {
+        /* The source switch may cancel delivery after the server commits. */
+      }
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.clock.install();
+  const wheel = await touchRateWithClock(page, 5, 501);
+  const stateSettled = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/state") &&
+      response.status() === 200,
+  );
+  await wheel.preview.dispatchEvent("pointerup", {
+    pointerId: 501,
+    isPrimary: true,
+    clientX: wheel.point.x,
+    clientY: wheel.point.y,
+    pointerType: "touch",
+  });
+  await stateStartedGate;
+  await expect(page.locator("[data-rating]")).toHaveText("No rating");
+  await expect(page.locator("[data-dock-select]")).toBeDisabled();
+  await expect(page.locator("[data-dock-next]")).toBeDisabled();
+
+  // The source switch is allowed to replace the current Photo lifetime while
+  // the admitted write remains in flight. Its late settlement must not paint
+  // the replacement Photo's facts or status.
+  await openSources(page);
+  await page.getByRole("button", { name: /^Other Photo 1 Photo/ }).click();
+  await expect(
+    page.getByText("Ready · 1 Photo", { exact: true }),
+  ).toBeVisible();
+  releaseState();
+  await stateSettled;
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  await expect(page.locator("[data-rating]")).toHaveText("No rating");
+  await expect(page.getByText("Rating saved.", { exact: true })).toHaveCount(0);
+  expect((await state(running.url, otherAlbumId)).members[0]!).toMatchObject({
+    rating: 0,
+    selectionState: "undecided",
+  });
+
+  await page.unroute("**/api/photos/*/state");
 });
 
 test("Rating Wheel hands off before the hold and cancels on competing touch input", async ({
