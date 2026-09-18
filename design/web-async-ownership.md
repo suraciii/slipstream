@@ -281,10 +281,16 @@ detached image error cannot mark a replacement cell or Photo unavailable.
 
 ### Album persistence
 
-Album create, rename, delete, membership add, and membership remove are
-admitted writes. They share one global settlement family key,
-`album-mutation`, because a newer Album action owns Album notices and
-connectivity presentation regardless of which Album it targets.
+Album create, rename, delete, membership add, membership remove, and
+scoped batch compensation are admitted writes. They share one global
+settlement family key, `album-mutation`, because a newer Album action owns
+Album notices and connectivity presentation regardless of which Album it
+targets. A batch Add to Album stores its returned `addedPhotoIds` in a
+page-level compensation record. The record is owned by the source generation
+and Album operation that created it; a new membership operation, source
+change, or application teardown expires it. A compensation request may
+settle, but its local result can write only while that record and Album remain
+current.
 
 The write always settles. Immediately after success it advances the overview
 data floor. Its shared-data refresh is a separate owner-tagged overview
@@ -341,16 +347,19 @@ disconnecting; transport failure disconnects.
 
 A Grid batch Selection State write shares that one admission and the
 one-level Undo. Its address is the multi-selected stable Photo identifiers
-captured when it was admitted, so it keeps its identity while the source
-generation remains current; a source change detaches its continuation and the
-confirmed server work stays committed. Its settlement reports the per-Photo
-outcomes from one bounded batch response. A batch Undo is one settlement
-family of sequential single-Photo compare-and-set writes: the browser retires
-only the Photos whose `409` proves the value it would restore is no longer
-current, keeps the remaining Photos retryable after any other answered
-non-success, and keeps the whole description retryable after a transport
-failure. A batch Undo never navigates: the change it restores never advanced
-away from a Photo.
+and their last browser-confirmed Selection States captured when it was
+admitted, so it keeps its identity while the source generation remains
+current; a source change detaches its continuation and the confirmed server
+work stays committed. Its settlement reports `applied`, `changedElsewhere`,
+and `missing` outcomes from one bounded batch response. The server never
+silently overwrites a changed expected value. Applied Photos enter the one
+Undo description; unsuccessful Photos remain selected for review or retry.
+A batch Undo is one settlement family of sequential single-Photo
+compare-and-set writes: the browser retires only the Photos whose `409` proves
+the value it would restore is no longer current, keeps the remaining Photos
+retryable after any other answered non-success, and keeps the whole
+description retryable after a transport failure. A batch Undo never
+navigates: the change it restores never advanced away from a Photo.
 
 ### Saved Album position
 

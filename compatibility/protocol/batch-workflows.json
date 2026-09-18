@@ -1,0 +1,189 @@
+{
+  "photoStateBatch": [
+    {
+      "name": "complete",
+      "request": {
+        "method": "POST",
+        "path": "/api/photos/state",
+        "body": {
+          "selectionState": "selected",
+          "photos": [
+            {
+              "photoId": "$photoId",
+              "expectedCurrent": "undecided"
+            },
+            {
+              "photoId": "$secondPhotoId",
+              "expectedCurrent": "rejected"
+            }
+          ]
+        }
+      },
+      "response": {
+        "applied": [
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided"
+          },
+          {
+            "photoId": "$secondPhotoId",
+            "priorValue": "rejected"
+          }
+        ],
+        "changedElsewhere": [],
+        "missing": []
+      }
+    },
+    {
+      "name": "partial-changed-elsewhere-and-missing",
+      "request": {
+        "method": "POST",
+        "path": "/api/photos/state",
+        "body": {
+          "selectionState": "rejected",
+          "photos": [
+            {
+              "photoId": "$photoId",
+              "expectedCurrent": "undecided"
+            },
+            {
+              "photoId": "$secondPhotoId",
+              "expectedCurrent": "undecided"
+            },
+            {
+              "photoId": "$missingPhotoId",
+              "expectedCurrent": "selected"
+            }
+          ]
+        }
+      },
+      "response": {
+        "applied": [
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided"
+          }
+        ],
+        "changedElsewhere": [
+          {
+            "photoId": "$secondPhotoId",
+            "currentValue": "rejected"
+          }
+        ],
+        "missing": [
+          {
+            "photoId": "$missingPhotoId"
+          }
+        ]
+      }
+    }
+  ],
+  "albumMembership": [
+    {
+      "name": "add-result",
+      "request": {
+        "method": "POST",
+        "path": "/api/albums/$albumId/members",
+        "body": {
+          "photoIds": ["$photoId", "$secondPhotoId"]
+        }
+      },
+      "response": {
+        "albumId": "$albumId",
+        "addedPhotoIds": ["$photoId"],
+        "alreadyMemberPhotoIds": ["$secondPhotoId"],
+        "albums": []
+      }
+    },
+    {
+      "name": "remove-added-result",
+      "request": {
+        "method": "POST",
+        "path": "/api/albums/$albumId/members/remove-added",
+        "body": {
+          "photoIds": ["$photoId", "$secondPhotoId"]
+        }
+      },
+      "response": {
+        "albumId": "$albumId",
+        "removedPhotoIds": ["$photoId"],
+        "alreadyAbsentPhotoIds": ["$secondPhotoId"],
+        "albums": []
+      }
+    }
+  ],
+  "invalidRequests": [
+    {
+      "name": "photo-state-batch-missing-expected-current",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "selected",
+        "photos": [
+          {
+            "photoId": "$photoId"
+          }
+        ]
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
+      "name": "photo-state-batch-duplicate-photo",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "selected",
+        "photos": [
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "undecided"
+          }
+        ]
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
+      "name": "album-compensation-duplicate-photo",
+      "route": "/api/albums/$albumId/members/remove-added",
+      "body": {
+        "photoIds": ["$photoId", "$photoId"]
+      },
+      "error": "Invalid membership batch"
+    }
+  ],
+  "malformedResponses": [
+    {
+      "name": "photo-state-batch-omits-missing-array",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [],
+        "changedElsewhere": []
+      },
+      "error": "Invalid Photo state batch response"
+    },
+    {
+      "name": "photo-state-batch-uses-obsolete-conflicts",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [],
+        "changedElsewhere": [],
+        "missing": [],
+        "conflicts": []
+      },
+      "error": "Invalid Photo state batch response"
+    },
+    {
+      "name": "album-add-uses-counts-without-identities",
+      "kind": "albumMembership",
+      "response": {
+        "albumId": "$albumId",
+        "addedCount": 1,
+        "alreadyMemberCount": 0,
+        "albums": []
+      },
+      "error": "Invalid Album membership response"
+    }
+  ]
+}

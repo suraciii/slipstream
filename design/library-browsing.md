@@ -320,33 +320,37 @@ Preview completion must become visible to subsequent window or Photo queries imm
 ### Batch Selection Writes
 
 Grid multi-selection applies one Selection State to many Photos through
-`POST /api/photos/state`. The request carries `photoIds` and one
-`selectionState`. The server accepts at most 100 unique Photo identifiers and
-rejects an over-limit, duplicate, unknown-state, or malformed request before
-any write, as an invalid request rather than a conflict: the request itself is
-the defect. The browser mirrors that bound, so a batch it builds is always one
-the server accepts. Batch Rating is not part of this contract, and the route
-carries no source, Album, or position: the browser names the Photos it
-multi-selected.
+`POST /api/photos/state`. The request carries one bounded item per selected
+Photo and one `selectionState` value:
 
-The operation is one transaction with per-Photo outcomes, so one missing Photo
-never rolls back the confirmed ones. The response reports exactly one outcome
-per requested Photo:
+```json
+{
+  "selectionState": "selected",
+  "photos": [{ "photoId": "photo-1", "expectedCurrent": "undecided" }]
+}
+```
 
-- `applied` with the Selection State the Photo held before the write, so the
-  browser can describe one truthful Undo for the whole batch and can move its
-  counts by the state it believed; and
-- `conflict` without any state when the current Library no longer holds that
-  Photo. The request carries no expectation per Photo, so every Photo the
-  Library still holds takes the write, including one whose state changed
-  elsewhere; only a Photo it no longer holds is a conflict. A conflicted Photo
-  is reported to the Photographer and the browser writes no fact for it.
+The server accepts at most 100 unique Photo identifiers and rejects an empty,
+duplicate, over-limit, malformed, or incomplete request before any write, as
+an invalid request rather than a conflict. The browser mirrors that bound, so
+a batch it builds is always one the server can admit. Batch Rating is not part
+of this contract, and the route carries no source, Album, or position: the
+browser names the Photos it multi-selected.
 
-The browser moves loaded Photo facts and the source's decision counts only for
-`applied` outcomes. A Photo whose write was not confirmed is never presented
-as decided. A conflicted Photo keeps the fact the Grid already presents: the
-response reports no state for it, and the browser refreshes nothing on its
-behalf.
+The operation is one transaction with per-Photo outcomes, so one unsuccessful
+Photo never rolls back confirmed Photos. The response reports exactly one
+outcome per requested Photo:
+
+- `applied` with the Selection State the Photo held before the write;
+- `changedElsewhere` with the Photo's current Selection State when its current
+  value differs from `expectedCurrent`; and
+- `missing` when the current Library no longer holds the Photo.
+
+A `changedElsewhere` or `missing` Photo is not written. The browser moves
+loaded Photo facts and source decision counts only for `applied` outcomes. A
+Photo whose write was not confirmed is never presented as decided. The
+browser keeps unsuccessful Photos selected for review or retry and does not
+invent a fact for a missing Photo.
 
 Batch Undo reuses the single-Photo compare-and-set write: the browser sends
 one bounded write per confirmed Photo, each naming the prior value the server
@@ -357,8 +361,19 @@ compare-and-set surface for a workflow the existing route already expresses,
 and the per-Photo conflict truthfulness is identical either way.
 
 Batch **Add to Album** reuses the bounded Album membership route with the
-multi-selected identifiers; the server-side membership rules, the membership
-bound, and duplicate suppression are unchanged.
+multi-selected identifiers. The successful membership result identifies the
+newly added Photo IDs and the IDs that were already members. A separate
+bounded compensation operation removes only the newly added IDs; it is not
+global Selection State Undo and does not claim to restore historical Album
+positions. Existing membership rules, the membership bound, and duplicate
+suppression remain authoritative.
+
+The Grid selection tray is source-owned presentation. It shows `Visible
+results` for the currently filtered Browse Snapshot and `Source progress` for
+the complete source's Selection State counts. These labels must not reuse one
+number with two meanings. A batch operation does not write Album saved
+position; an Album result explicitly reports that the durable Photo View
+resume position is unchanged.
 
 ### Persistent Derivative Cache
 
