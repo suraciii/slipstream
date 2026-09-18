@@ -217,7 +217,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|Album compensation|batch compensation"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|Remove added Photos"
 bun run verify
 ```
 
