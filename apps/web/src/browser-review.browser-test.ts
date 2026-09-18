@@ -3810,6 +3810,459 @@ test("fit-mode Pointer Events show pending feedback, ignore below threshold, and
   );
 });
 
+test("touch Rating Wheel previews six values and commits once on release", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
+
+  const preview = page.locator("[data-preview]");
+  const wheel = page.locator("[data-rating-wheel]");
+  const options = page.locator("[data-rating-wheel-value]");
+  const writes: number[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    ) {
+      const body = request.postDataJSON() as { field?: string; value?: number };
+      if (body.field === "rating") writes.push(body.value!);
+    }
+  });
+
+  await expect(options).toHaveCount(6);
+  let pointerId = 10;
+  for (const value of [0, 1, 2, 3, 4, 5]) {
+    const center = await preview.evaluate((surface) => {
+      const box = surface.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    await preview.dispatchEvent("pointerdown", {
+      pointerId,
+      isPrimary: true,
+      clientX: center.x,
+      clientY: center.y,
+      pointerType: "touch",
+    });
+    await expect(wheel).toBeHidden();
+    await expect(wheel).toBeVisible({ timeout: 2_000 });
+    const wheelBox = await wheel.boundingBox();
+    const previewBox = await preview.boundingBox();
+    expect(wheelBox).not.toBeNull();
+    expect(previewBox).not.toBeNull();
+    expect(wheelBox!.x).toBeGreaterThanOrEqual(previewBox!.x - 1);
+    expect(wheelBox!.y).toBeGreaterThanOrEqual(previewBox!.y - 1);
+    expect(wheelBox!.x + wheelBox!.width).toBeLessThanOrEqual(
+      previewBox!.x + previewBox!.width + 1,
+    );
+    expect(wheelBox!.y + wheelBox!.height).toBeLessThanOrEqual(
+      previewBox!.y + previewBox!.height + 1,
+    );
+    await expect(wheel).toHaveAttribute("aria-label", "Rating Wheel");
+    await expect(wheel).toHaveAttribute("data-rating-wheel-candidate", "");
+
+    const option = page.locator(`[data-rating-wheel-value="${value}"]`);
+    const target = await option.boundingBox();
+    expect(target).not.toBeNull();
+    await preview.dispatchEvent("pointermove", {
+      pointerId,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+    await expect(option).toHaveAttribute("aria-pressed", "true");
+    await expect(wheel).toHaveAttribute(
+      "data-rating-wheel-candidate",
+      String(value),
+    );
+
+    const persisted = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.endsWith("/state") &&
+        response.status() === 200,
+    );
+    await preview.dispatchEvent("pointerup", {
+      pointerId,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+    await persisted;
+    await expect(wheel).toBeHidden();
+    await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+    await expect(page.getByText("1 / 2")).toBeVisible();
+    expect((await state(running.url, albumId)).members[0]!.rating).toBe(value);
+    pointerId += 1;
+  }
+  expect(writes).toEqual([0, 1, 2, 3, 4, 5]);
+  await expect(page.locator("[data-rating]")).toHaveText("5 stars");
+
+  // The same clamped presentation remains inside a short landscape Preview.
+  await page.setViewportSize({ width: 844, height: 390 });
+  await waitForLoadedReviewImage(page);
+  const landscapeCenter = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 80,
+    isPrimary: true,
+    clientX: landscapeCenter.x,
+    clientY: landscapeCenter.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeVisible({ timeout: 2_000 });
+  const landscapeWheel = await wheel.boundingBox();
+  const landscapePreview = await preview.boundingBox();
+  expect(landscapeWheel).not.toBeNull();
+  expect(landscapePreview).not.toBeNull();
+  expect(landscapeWheel!.x).toBeGreaterThanOrEqual(landscapePreview!.x - 1);
+  expect(landscapeWheel!.y).toBeGreaterThanOrEqual(landscapePreview!.y - 1);
+  expect(landscapeWheel!.x + landscapeWheel!.width).toBeLessThanOrEqual(
+    landscapePreview!.x + landscapePreview!.width + 1,
+  );
+  expect(landscapeWheel!.y + landscapeWheel!.height).toBeLessThanOrEqual(
+    landscapePreview!.y + landscapePreview!.height + 1,
+  );
+  await preview.dispatchEvent("pointercancel", {
+    pointerId: 80,
+    isPrimary: true,
+    clientX: landscapeCenter.x,
+    clientY: landscapeCenter.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden();
+
+  // Mouse input never arms or opens the touch-only accelerator.
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 90,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "mouse",
+  });
+  await expect(wheel).toBeHidden();
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 90,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "mouse",
+  });
+});
+
+test("Rating Wheel hands off before the hold and cancels on competing touch input", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 3);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
+
+  const preview = page.locator("[data-preview]");
+  const wheel = page.locator("[data-rating-wheel]");
+  let stateWrites = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname.endsWith("/state")
+    )
+      stateWrites += 1;
+  });
+  const center = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+
+  // Exactly 12 pixels remains inside the hold boundary; a larger horizontal
+  // movement hands the same pointer to the existing decision swipe.
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: center.x + 12,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeVisible({ timeout: 2_000 });
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden();
+  expect(stateWrites).toBe(0);
+
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 2,
+    isPrimary: true,
+    clientX: center.x,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 2,
+    isPrimary: true,
+    clientX: center.x + 20,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden();
+  const selected = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/state") &&
+      response.status() === 200,
+  );
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 2,
+    isPrimary: true,
+    clientX: center.x + 100,
+    clientY: center.y,
+    pointerType: "touch",
+  });
+  await selected;
+  await expect(page.getByText("2 / 3")).toBeVisible();
+  await waitForLoadedReviewImage(page);
+  expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
+    "selected",
+  );
+  expect(stateWrites).toBe(1);
+
+  // A vertical move yields to native Photo View scrolling and never writes.
+  const secondCenter = await preview.evaluate((surface) => {
+    const box = surface.getBoundingClientRect();
+    return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+  });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 3,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointermove", {
+    pointerId: 3,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y + 20,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden();
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 3,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y + 20,
+    pointerType: "touch",
+  });
+  expect(stateWrites).toBe(1);
+
+  // Manual zoom owns the same touch surface and never arms the Wheel.
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "manual");
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 6,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden({ timeout: 800 });
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 6,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await page.getByRole("button", { name: "Fit Window", exact: true }).click();
+  await expect(preview).toHaveAttribute("data-zoom-state", "fit");
+
+  // A second pointer cancels the pending Wheel and belongs to Pinch Zoom.
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 4,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeVisible({ timeout: 2_000 });
+  await preview.dispatchEvent("pointerdown", {
+    pointerId: 5,
+    isPrimary: false,
+    clientX: secondCenter.x + 40,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await expect(wheel).toBeHidden();
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 5,
+    isPrimary: false,
+    clientX: secondCenter.x + 40,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  await preview.dispatchEvent("pointerup", {
+    pointerId: 4,
+    isPrimary: true,
+    clientX: secondCenter.x,
+    clientY: secondCenter.y,
+    pointerType: "touch",
+  });
+  expect(stateWrites).toBe(1);
+});
+
+test("Rating Wheel failures keep the prior Rating and Photo position honest", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  await startReview(page, running.url, "Review", albumId);
+  await waitForLoadedReviewImage(page);
+
+  const preview = page.locator("[data-preview]");
+  const wheel = page.locator("[data-rating-wheel]");
+  const targetWheelValue = async (value: number, pointerId: number) => {
+    const center = await preview.evaluate((surface) => {
+      const box = surface.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    await preview.dispatchEvent("pointerdown", {
+      pointerId,
+      isPrimary: true,
+      clientX: center.x,
+      clientY: center.y,
+      pointerType: "touch",
+    });
+    await expect(wheel).toBeVisible({ timeout: 2_000 });
+    const option = page.locator(`[data-rating-wheel-value="${value}"]`);
+    const target = await option.boundingBox();
+    expect(target).not.toBeNull();
+    await preview.dispatchEvent("pointermove", {
+      pointerId,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+    await preview.dispatchEvent("pointerup", {
+      pointerId,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+  };
+
+  await page.route("**/api/photos/*/state", (route) => route.abort());
+  await targetWheelValue(4, 30);
+  await expect(wheel).toBeHidden();
+  await expect(page.locator("[data-status]")).toHaveText(
+    "Connection lost before the change was confirmed. Retry to refresh.",
+  );
+  await expect(page.locator("[data-rating]")).toHaveText("No rating");
+  await expect(page.getByText("1 / 1")).toBeVisible();
+  expect((await state(running.url, albumId)).members[0]!.rating).toBe(0);
+});
+
+test("Rating Wheel reuses answered and malformed mutation status", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 1);
+  const running = await server(base, root);
+  const { albumId } = await createAlbum(running.url);
+  const commitWithResponse = async (
+    response: (route: Route) => Promise<void>,
+    expectedStatus: string,
+  ) => {
+    await startReview(page, running.url, "Review", albumId);
+    await waitForLoadedReviewImage(page);
+    await page.route("**/api/photos/*/state", response);
+    const preview = page.locator("[data-preview]");
+    const wheel = page.locator("[data-rating-wheel]");
+    const center = await preview.evaluate((surface) => {
+      const box = surface.getBoundingClientRect();
+      return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+    });
+    await preview.dispatchEvent("pointerdown", {
+      pointerId: 40,
+      isPrimary: true,
+      clientX: center.x,
+      clientY: center.y,
+      pointerType: "touch",
+    });
+    await expect(wheel).toBeVisible({ timeout: 2_000 });
+    const option = page.locator('[data-rating-wheel-value="3"]');
+    const target = await option.boundingBox();
+    expect(target).not.toBeNull();
+    await preview.dispatchEvent("pointermove", {
+      pointerId: 40,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+    const persisted = page.waitForResponse(
+      (item) =>
+        item.request().method() === "POST" &&
+        new URL(item.url()).pathname.endsWith("/state"),
+    );
+    await preview.dispatchEvent("pointerup", {
+      pointerId: 40,
+      isPrimary: true,
+      clientX: target!.x + target!.width / 2,
+      clientY: target!.y + target!.height / 2,
+      pointerType: "touch",
+    });
+    await persisted;
+    await expect(wheel).toBeHidden();
+    await expect(page.locator("[data-status]")).toHaveText(expectedStatus);
+    await expect(page.locator("[data-rating]")).toHaveText("No rating");
+    await expect(page.getByText("1 / 1")).toBeVisible();
+    expect((await state(running.url, albumId)).members[0]!.rating).toBe(0);
+    await page.unroute("**/api/photos/*/state");
+  };
+
+  await commitWithResponse(
+    (route) => route.fulfill({ status: 409, body: "conflict" }),
+    "The Photo changed elsewhere. Retry to refresh its current state.",
+  );
+  await commitWithResponse(
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: '{"unexpected":true}',
+      }),
+    "Connection lost before the change was confirmed. Retry to refresh.",
+  );
+});
+
 test("swipe direction labels stay out of sight until a drag is pending on a hover-capable pointer", async ({
   page,
 }) => {
