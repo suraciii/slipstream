@@ -11569,10 +11569,11 @@ test("a source switch rebuilds the Grid range for the replacement source", async
   const running = await server(base, root);
   const windows = recordWindowRequests(page);
   await openGrid(page, running.url, "All Photos");
-  const previousImage = await page
-    .locator('[data-photo-index="0"] img')
-    .elementHandle();
-  expect(await previousImage!.getAttribute("src")).toMatch(/\/thumbnail\//);
+  const previousImage = page.locator('[data-photo-index="0"] img');
+  await expect(previousImage).toHaveAttribute("src", /\/thumbnail\//);
+  await previousImage.evaluate((image) => {
+    image.dataset.sourceSwitchBefore = "true";
+  });
   const sourceRequests = windows.requested.length;
 
   // The replacement source presents the same Photos, so it must rebuild the
@@ -11587,7 +11588,11 @@ test("a source switch rebuilds the Grid range for the replacement source", async
     "src",
     /\/thumbnail\//,
   );
-  expect(await previousImage!.evaluate((node) => node.isConnected)).toBe(false);
+  await expect(
+    page.locator(
+      '[data-photo-index="0"] img[data-source-switch-before="true"]',
+    ),
+  ).toHaveCount(0);
   await expectGridConverged(page, windows);
   const visible = await renderedGridSpan(page);
   expect(windows.requested.slice(sourceRequests)).toEqual(
@@ -11979,12 +11984,26 @@ const filmstripIndices = (page: Page) =>
 
 const waitForFilmstripImages = (page: Page) =>
   page.waitForFunction(() => {
-    const images = Array.from(
-      document.querySelectorAll<HTMLImageElement>("[data-filmstrip] img"),
+    const cells = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "[data-filmstrip] .filmstrip-cell",
+      ),
     );
     return (
-      images.length > 0 &&
-      images.every((image) => image.complete && image.naturalWidth > 0)
+      cells.length > 0 &&
+      cells.every((cell) => {
+        const image = cell.querySelector<HTMLImageElement>("img");
+        if (!image) return true;
+        const source = image.getAttribute("src");
+        // A cell without a source is an unavailable or not-yet-hydrated
+        // placeholder. A non-empty source is real work and must finish before
+        // the test continues.
+        return (
+          source === null ||
+          source === "" ||
+          (image.complete && image.naturalWidth > 0)
+        );
+      })
     );
   });
 
