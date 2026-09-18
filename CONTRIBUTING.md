@@ -50,16 +50,52 @@ On Debian/Ubuntu, install native dependencies with:
 sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev libvips-dev liblcms2-dev
 ```
 
-Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, then install dependencies from the lockfiles:
+Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, then prepare the checkout:
 
 ```sh
 rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
 rustc --version # 1.97.1
 curl -fsSL https://bun.com/install | bash -s "bun-v1.4.0"
 bun --version # 1.4.0
-bun install --frozen-lockfile
-cargo fetch --locked
+./scripts/prepare-worktree.sh
 ```
+
+## Worktree setup
+
+Create Issue worktrees from a fetched `origin/main` commit to avoid an outdated
+local branch. This does not change files in the original checkout:
+
+```sh
+repo=$(git rev-parse --show-toplevel)
+worktree="$repo/../slipstream-issue-XYZ"
+branch=feat/XYZ
+
+git -C "$repo" fetch --prune origin main
+base=$(git -C "$repo" rev-parse origin/main)
+git -C "$repo" worktree add "$worktree" -b "$branch" "$base"
+
+"$worktree/scripts/prepare-worktree.sh" "$worktree"
+```
+
+Run `scripts/prepare-worktree.sh [worktree-root]` from the target checkout's
+root, or supply its root path. The default is the current directory. Ordinary
+clones and linked worktrees use the same command.
+
+The script reads the expected versions from that checkout's `package.json` and
+`rust-toolchain.toml`, checks Bun, Rust, rustfmt, and Clippy, then runs
+`bun install --frozen-lockfile` followed by `cargo fetch --locked`. It checks
+that neither lockfile changed and runs `git diff --check`.
+
+Repeat the command when dependencies change. Existing edits need not be committed
+or stashed first; whitespace errors in those edits still fail `git diff --check`.
+On failure, fix the reported prerequisite and rerun. The script does not reset,
+clean, format, commit, install host packages or browsers, or run the full gate.
+It does not undo a failed install or discard edits. Run `bun run verify`
+separately before handoff.
+
+Run the focused preparation checks with `bun run test:worktree-preflight`.
+They use temporary Git repositories and stub tool commands, without downloading
+dependencies. They also run as part of `test:fast` and `verify`.
 
 Bun owns Web builds and browser-test tooling; the production server and Preview pipeline are Rust. The Rust Preview boundary uses owned C wrappers around LibRaw/libjpeg and libvips, with one process-global libvips lifecycle. Derivative processing is bounded to two concurrent jobs per cache directory, with 128 MiB input JPEG, 100 million decoded-pixel, 64 MiB output JPEG, and 256 MiB LibRaw native-memory limits.
 
