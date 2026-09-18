@@ -118,7 +118,10 @@ defined by Web Async Ownership:
   [Library Browsing and Selection](../docs/library-browsing-and-selection.md).
   It yields Fit-state vertical touch panning to native Photo View
   scrolling, retains Fit-state horizontal decision gestures, and takes full
-  Preview drag ownership whenever the zoom state is manual.
+  Preview drag ownership whenever the zoom state is manual. The page UI also
+  owns the transient mobile Quick Action Dock, Secondary Sheet, pending Rating
+  Wheel gesture, Wheel candidate, and disclosure focus. These
+  values are presentation state and do not become Photo owner state.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
   does not choose which operation supersedes another.
@@ -204,6 +207,39 @@ magnification between complete composition and honest pixel inspection
 without a second control model. The retired `Fill` cropping mode is not
 reintroduced: cropping hid composition rather than inspecting it. Explicit
 Select and Reject controls stay available in every zoom state.
+
+### Mobile Photo View interaction state
+
+The mobile Photo View adds a transient action hierarchy without adding a new
+frontend lifetime. The page UI owns the Quick Action Dock, the Secondary Sheet,
+and the Rating Wheel's pointer state. The Photo owner remains
+the sole owner of the current Photo, Rating and Selection State persistence,
+Undo, async authority, and settlement classification.
+
+The transient gesture state has three meaningful values:
+
+- no pending gesture;
+- a pending touch hold bound to one current Photo and its Preview surface; and
+- an open Wheel with one presentation-only Rating candidate.
+
+The pending hold uses the product contract's 12 CSS-pixel movement boundary and
+450-millisecond hold threshold. Before the threshold, the page UI hands the
+pointer to horizontal decision movement, native vertical scrolling, or Pinch
+Zoom when those gestures take ownership. After the threshold, the Wheel owns
+the pointer until release or cancellation. The state is invalidated when the
+Photo surface, current Photo, connection readiness, or UI generation changes.
+
+A Wheel release emits the same Rating intent as an explicit Rating control. It
+does not issue HTTP itself, retain a second Rating value, advance the Photo, or
+change Selection State. A late settlement is accepted only by the Photo owner
+and the current Photo presentation token, exactly like an explicit Rating
+mutation.
+
+The Quick Action Dock is a responsive presentation of existing intents. It
+must not become a second page controller or a second persistence admission. The
+Secondary Sheet presents existing Details, Album, Zoom, Clear, Undo, and
+navigation controls; each retains its existing owner, failure isolation, and
+focus restoration rules.
 
 ### Membership presentation state
 
@@ -302,6 +338,38 @@ Photo, File Location, or persistence ownership. It adds a second migration,
 new runtime concepts, and new failure modes without solving the current
 boundary problem.
 
+### Mobile Photo View interaction state options
+
+#### Selected: page-local transient interaction state
+
+Keep the Wheel, Dock, and disclosure state in the existing Library Browser page
+UI, and send only semantic Rating, Selection State, navigation, and Album
+intents to the page controller. This fits the current ownership model because
+only Photo View consumes the state, the state is invalidated by the current
+Photo surface, and no external consumer needs the interaction protocol.
+
+#### Rejected: move Wheel state into the Photo owner
+
+The Photo owner owns durable Photo mutations and async authority, not pointer
+geometry or responsive presentation. Moving a pending hold or candidate into it
+would make a transient gesture survive the wrong UI lifetime and would couple
+Photo persistence to DOM timing.
+
+#### Rejected: create a reusable gesture feature or mobile state store
+
+The Rating Wheel and Dock have one current consumer and depend on Preview zoom,
+Photo identity, focus, and existing page gestures. A new feature slice or
+frontend store would add an ownership boundary without an independent contract
+or second consumer. Reuse can be considered only when another current product
+surface has the same complete interaction semantics.
+
+#### Rejected: replace explicit Rating controls with the Wheel
+
+A Wheel is efficient for touch but is a poor keyboard and assistive-technology
+surface. Keeping explicit controls as the fallback preserves discoverability,
+programmatic state, and non-gesture operation while the Wheel remains an
+accelerator.
+
 ## Risks and Trade-offs
 
 - A page slice may remain large during migration. That is preferable to
@@ -374,6 +442,10 @@ Verification must prove:
 - existing browser scenarios continue to cover startup, File Locations, Grid,
   Photo Review, Album management, reconnect and race behavior, teardown, and a
   large Library;
+- mobile Photo View checks prove Quick Action Dock and Secondary Sheet focus,
+  safe-area, and ownership behavior, and Rating Wheel checks prove the
+  450-millisecond hold, 12 CSS-pixel handoff, release-only mutation, explicit
+  fallback, cancellation, and stale-settlement rules;
 - the complete repository verification gate passes with nonzero test discovery;
   and
 - an independent read-only review checks FSD placement, dependency direction,
