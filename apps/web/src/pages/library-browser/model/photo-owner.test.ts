@@ -839,6 +839,10 @@ describe("PhotoOwner", () => {
       "photo-0",
       "photo-2",
     ]);
+    expect(undone.kind === "settled" && undone.restoredValues).toEqual([
+      { photoId: "photo-0", value: "undecided" },
+      { photoId: "photo-2", value: "rejected" },
+    ]);
     expect(undone.kind === "settled" && undone.failed).toEqual([]);
     expect(undone.kind === "settled" && undone.conflicts).toEqual([]);
     expect(requests.slice(1)).toEqual([

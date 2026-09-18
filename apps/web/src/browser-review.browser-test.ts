@@ -2839,10 +2839,25 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   await expect(mode).toHaveAttribute("aria-pressed", "false");
   await expect(cell(0)).not.toHaveClass(/multi-selected/);
 
+  // Select mode exposes the bounded tray before the first Photo is marked.
+  await mode.click();
+  await expect(bar).toBeVisible();
+  await expect(count).toHaveText("0 / 100 Photos");
+  await expect(page.locator("[data-batch-source]")).toHaveText(
+    "Source: All Photos",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeHidden();
+  await expect(page.locator("[data-batch-actions]")).toBeHidden();
+  await mode.click();
+  await expect(bar).toBeHidden();
+
   // A Control-click toggles one Photo and becomes the range anchor.
   await cell(0).click({ modifiers: ["Control"] });
   await expect(bar).toBeVisible();
-  await expect(count).toHaveText("1 selected");
+  await expect(count).toHaveText("1 / 100 Photos");
+  await expect(page.locator("[data-batch-source]")).toHaveText(
+    "Source: All Photos",
+  );
   await expect(cell(0)).toHaveClass(/multi-selected/);
   await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("[data-review]")).toBeHidden();
@@ -2850,7 +2865,7 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   // A Shift-click extends the multi-selection over the loaded Photos between
   // the anchor and the clicked Photo.
   await cell(2).click({ modifiers: ["Shift"] });
-  await expect(count).toHaveText("3 selected");
+  await expect(count).toHaveText("3 / 100 Photos");
   for (const index of [0, 1, 2])
     await expect(cell(index)).toHaveClass(/multi-selected/);
   await expect(cell(3)).not.toHaveClass(/multi-selected/);
@@ -2858,10 +2873,10 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   // Another Control-click toggles one Photo out and moves the anchor, so the
   // next range extends from there.
   await cell(1).click({ modifiers: ["Control"] });
-  await expect(count).toHaveText("2 selected");
+  await expect(count).toHaveText("2 / 100 Photos");
   await expect(cell(1)).not.toHaveClass(/multi-selected/);
   await cell(3).click({ modifiers: ["Shift"] });
-  await expect(count).toHaveText("4 selected");
+  await expect(count).toHaveText("4 / 100 Photos");
   for (const index of [0, 1, 2, 3])
     await expect(cell(index)).toHaveClass(/multi-selected/);
 
@@ -2877,15 +2892,73 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   await expect(mode).toHaveAttribute("aria-pressed", "true");
   await cell(1).click();
   await expect(page.locator("[data-review]")).toBeHidden();
-  await expect(count).toHaveText("1 selected");
+  await expect(count).toHaveText("1 / 100 Photos");
   await expect(cell(1)).toHaveAttribute("aria-pressed", "true");
   await expect(cell(2)).toHaveAttribute("aria-pressed", "false");
   await cell(4).click();
-  await expect(count).toHaveText("2 selected");
+  await expect(count).toHaveText("2 / 100 Photos");
   await page.locator("[data-batch-clear]").click();
   await expect(bar).toBeHidden();
   await expect(mode).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator("[data-batch-retained]")).toBeHidden();
   await expect(cell(1)).not.toHaveAttribute("aria-pressed", "true");
+});
+
+test("Grid batch tray stays reachable at a 390px viewport", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const tray = page.locator("[data-grid-batch]");
+  const mode = page.locator("[data-grid-select-mode]");
+  await mode.click();
+  await expect(tray).toBeVisible();
+  await expect(page.locator("[data-batch-count]")).toHaveText("0 / 100 Photos");
+  await expect(page.locator("[data-batch-actions]")).toBeHidden();
+
+  await page.locator('[data-photo-index="0"]').click();
+  await expect(page.locator("[data-batch-retained]")).toBeHidden();
+  await expect(page.locator("[data-batch-actions]")).toBeVisible();
+  const geometry = await tray.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const controls = Array.from(
+      element.querySelectorAll<HTMLElement>(
+        "button:not([hidden]), select:not([hidden])",
+      ),
+    ).map((control) => {
+      const controlBox = control.getBoundingClientRect();
+      return {
+        right: controlBox.right,
+        bottom: controlBox.bottom,
+        viewportRight: window.innerWidth,
+        viewportBottom: window.innerHeight,
+      };
+    });
+    return {
+      right: box.right,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      controls,
+    };
+  });
+  expect(geometry.right).toBeLessThanOrEqual(390);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+  expect(
+    geometry.controls.every(
+      ({ right, bottom, viewportRight, viewportBottom }) =>
+        right <= viewportRight + 0.5 && bottom <= viewportBottom + 0.5,
+    ),
+  ).toBe(true);
+
+  await page.keyboard.press("Escape");
+  await expect(tray).toBeHidden();
+  await expect(mode).toHaveAttribute("aria-pressed", "false");
 });
 
 test("Grid batch Select decides every multi-selected Photo and Undo restores them as one unit", async ({
@@ -2902,7 +2975,8 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
 
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   const count = page.locator("[data-batch-count]");
-  const progress = page.locator("[data-grid-progress]");
+  const progress = page.locator("[data-grid-source-progress]");
+  const visibleResults = page.locator("[data-grid-visible-results]");
   const batchBodies: Array<Record<string, unknown>> = [];
   const undoWrites: string[] = [];
   page.on("request", (request) => {
@@ -2917,10 +2991,18 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   // them through one bounded request.
   await page.locator("[data-grid-select-mode]").click();
   for (const index of [0, 1, 2]) await cell(index).click();
-  await expect(count).toHaveText("3 selected");
+  await expect(count).toHaveText("3 / 100 Photos");
   await page.locator("[data-batch-select]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "3 Photos selected.",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "3 Photos selected.",
+  );
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "success",
   );
   expect(batchBodies).toEqual([
     { photoIds: [ids[0], ids[1], ids[2]], selectionState: "selected" },
@@ -2931,15 +3013,22 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
       selectionState: "selected",
     });
   }
-  await expect(progress).toContainText("3 selected");
+  await expect(visibleResults).toHaveText("Visible results: 4 of 4 Photos");
+  await expect(progress).toHaveText(
+    "Source progress: 3 selected · 0 rejected · 1 undecided",
+  );
   // The multi-selection stays, so the same Photos can join an Album next.
-  await expect(count).toHaveText("3 selected");
+  await expect(count).toHaveText("3 / 100 Photos");
 
   // One Undo restores every confirmed Photo as one unit and stays in the
   // Grid, exactly as a single Grid decision does.
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-grid-status]")).toHaveText(
+    "3 Photos restored.",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
     "3 Photos restored.",
   );
   expect(undoWrites).toEqual([
@@ -2953,7 +3042,9 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
       selectionState: "undecided",
     });
   }
-  await expect(progress).toContainText("0 selected");
+  await expect(progress).toHaveText(
+    "Source progress: 0 selected · 0 rejected · 4 undecided",
+  );
   await expect(page.locator("[data-review]")).toBeHidden();
 
   // The one-level description is consumed: nothing is left to undo.
@@ -2962,6 +3053,63 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
     "3 Photos restored.",
   );
   expect(undoWrites).toHaveLength(3);
+});
+
+test("Grid batch failure keeps the selection and exposes a retry result", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  let attempts = 0;
+  await page.route("**/api/photos/state", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "unavailable" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await cell(1).click();
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "The change could not be saved.",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "The batch could not be saved. Retry to refresh the selected Photos.",
+  );
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "failure",
+  );
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
+  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  await expect(cell(1).locator(".cell-state")).toHaveCount(0);
+
+  // The failed result is retryable without rebuilding the selection.
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos selected.",
+  );
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "success",
+  );
+  expect(attempts).toBe(2);
+  await page.unroute("**/api/photos/state");
 });
 
 test("Grid batch Undo restores the rest when one Photo changed elsewhere", async ({
@@ -3015,6 +3163,7 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await waitForGridFrame(page);
 
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const batchBodies: Array<Record<string, unknown>> = [];
   const undoWrites: string[] = [];
   page.on("request", (request) => {
     if (
@@ -3030,16 +3179,22 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await page.route("**/api/photos/state", async (route) => {
     const requested = (route.request().postDataJSON() as { photoIds: string[] })
       .photoIds;
+    batchBodies.push(route.request().postDataJSON() as Record<string, unknown>);
     await post(running.url, `/api/photos/${requested[0]}/state`, {
       field: "selectionState",
-      value: "selected",
+      value: requested.length === 2 ? "selected" : "rejected",
     });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        applied: [{ photoId: requested[0], priorValue: "undecided" }],
-        conflicts: [{ photoId: requested[1] }],
+        applied: [
+          {
+            photoId: requested[0],
+            priorValue: requested.length === 2 ? "undecided" : "selected",
+          },
+        ],
+        conflicts: requested.length === 2 ? [{ photoId: requested[1] }] : [],
       }),
     });
   });
@@ -3047,18 +3202,37 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await page.locator("[data-grid-select-mode]").click();
   await cell(0).click();
   await cell(1).click();
-  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
   await page.locator("[data-batch-select]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo selected. 1 Photo no longer in this Library.",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "warning",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
     "1 Photo selected. 1 Photo no longer in this Library.",
   );
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   // The Photo the Library no longer holds keeps the fact the Grid presents
   // and is never reported as decided.
   await expect(cell(1).locator(".cell-state")).toHaveCount(0);
-  await expect(page.locator("[data-grid-progress]")).toContainText(
-    "1 selected",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 1 selected · 0 rejected · 2 undecided",
   );
+
+  // The retained missing Photo stays visible but is excluded from the next
+  // batch request. The confirmed Photo can still take another decision.
+  await page.locator("[data-batch-reject]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo rejected.",
+  );
+  expect(batchBodies).toEqual([
+    { photoIds: [ids[0], ids[1]], selectionState: "selected" },
+    { photoIds: [ids[0]], selectionState: "rejected" },
+  ]);
 
   // Only the confirmed Photo is undoable: the conflict is not part of the
   // one-level description.
@@ -3068,7 +3242,7 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
     "1 Photo restored.",
   );
   expect(undoWrites).toEqual([`/api/photos/${ids[0]}/state`]);
-  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await page.unroute("**/api/photos/state");
 });
 
@@ -3102,10 +3276,18 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   // outside Undo, so the batch decision history is untouched.
   await cell(0).click({ modifiers: ["Control"] });
   await cell(3).click({ modifiers: ["Control"] });
-  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
   await page.locator("[data-batch-album-select]").selectOption(albumId);
   await page.locator("[data-batch-album-add]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos added to “Trip”.",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "success",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
     "2 Photos added to “Trip”.",
   );
   expect(bodies).toEqual([{ photoIds: [ids[0], ids[3]] }]);
@@ -3119,7 +3301,59 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   await expect(
     page.getByRole("button", { name: /^Trip 2 Photos$/ }),
   ).toBeVisible();
-  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
+});
+
+test("an Album batch result states that the resume point is unchanged", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Source" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const sourceId = created.albums.find((album) => album.name === "Source")!.id;
+  const targetCreated = (await (
+    await post(running.url, "/api/albums", { name: "Target" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const targetId = targetCreated.albums.find(
+    (album) => album.name === "Target",
+  )!.id;
+  await post(running.url, `/api/albums/${sourceId}/members`, {
+    photoIds: [ids[0]],
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await openSources(page);
+  await page.getByRole("button", { name: /^Source 1 Photo$/ }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Ready · 1 Photo",
+  );
+  await waitForGridFrame(page);
+
+  await page.locator("[data-grid-select-mode]").click();
+  await page.locator('[data-photo-index="0"]').click();
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo selected. Album resume point unchanged.",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "1 Photo selected. Album resume point unchanged.",
+  );
+  await page.locator("[data-batch-album-select]").selectOption(targetId);
+  await page.locator("[data-batch-album-add]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo added to “Target”. Album resume point unchanged.",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "1 Photo added to “Target”. Album resume point unchanged.",
+  );
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
 });
 
 test("Grid multi-selection stops at the batch bound and names it", async ({
@@ -3137,17 +3371,17 @@ test("Grid multi-selection stops at the batch bound and names it", async ({
   const status = page.locator("[data-grid-status]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   const refused =
-    "A batch holds up to 100 Photos. Clear this selection, or remove Photos from it, first.";
+    "Selection limit reached. Remove a Photo to extend the range.";
   await page.locator("[data-grid-select-mode]").click();
 
   // The first Photo anchors the range, and scrolling loads the windows the
   // range will need before it is attempted.
   await cell(0).click();
-  await expect(count).toHaveText("1 selected");
+  await expect(count).toHaveText("1 / 100 Photos");
   await scrollGrid(page, 16 * 178);
   await expect(cell(99)).toBeVisible();
   await cell(99).click({ modifiers: ["Shift"] });
-  await expect(count).toHaveText("100 of 100 selected");
+  await expect(count).toHaveText("100 / 100 Photos");
   await expect(cell(99)).toHaveClass(/multi-selected/);
 
   // A toggle that would pass the bound is refused whole: the notice names the
@@ -3156,21 +3390,21 @@ test("Grid multi-selection stops at the batch bound and names it", async ({
   await expect(cell(120)).toBeVisible();
   await cell(120).click({ modifiers: ["Control"] });
   await expect(status).toHaveText(refused);
-  await expect(count).toHaveText("100 of 100 selected");
+  await expect(count).toHaveText("100 / 100 Photos");
   await expect(cell(120)).not.toHaveClass(/multi-selected/);
 
   // A range that would pass the bound is refused the same way, so a batch the
   // server would reject can never be built.
   await cell(120).click({ modifiers: ["Shift"] });
   await expect(status).toHaveText(refused);
-  await expect(count).toHaveText("100 of 100 selected");
+  await expect(count).toHaveText("100 / 100 Photos");
   await expect(cell(120)).not.toHaveClass(/multi-selected/);
 
   // The selection is held by Photo identity, not by the loaded window: the
   // first Photo is still marked after the Grid scrolled away from it twice.
   await scrollGrid(page, 0);
   await expect(cell(0)).toHaveClass(/multi-selected/);
-  await expect(count).toHaveText("100 of 100 selected");
+  await expect(count).toHaveText("100 / 100 Photos");
 });
 
 test("Grid Select mode and the batch actions are reachable from the keyboard", async ({
@@ -3206,7 +3440,7 @@ test("Grid Select mode and the batch actions are reachable from the keyboard", a
   await page.keyboard.press("Enter");
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(bar).toBeVisible();
-  await expect(page.locator("[data-batch-count]")).toHaveText("1 selected");
+  await expect(page.locator("[data-batch-count]")).toHaveText("1 / 100 Photos");
   await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
 
   // Every batch action is in the Grid's keyboard order going backwards from
@@ -3266,7 +3500,7 @@ test("a focused batch control keeps a reachable focus while its batch settles", 
   await mode.click();
   for (const index of [0, 1])
     await page.locator(`[data-photo-index="${index}"]`).click();
-  await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
 
   // While the batch decision settles, its controls disable; a focused one
   // would drop keyboard focus to the body, so the bar parks it on the Select
@@ -3297,8 +3531,8 @@ test("a focused batch control keeps a reachable focus while its batch settles", 
   await expect(
     page.locator('[data-photo-index="0"] .cell-state.selected'),
   ).toHaveText("✓");
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "2 of 3 decided · 2 selected · 0 rejected · 1 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 2 selected · 0 rejected · 1 undecided",
   );
 });
 
@@ -11535,7 +11769,8 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   const viewport = page.locator("[data-grid-viewport]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   const filter = page.locator("[data-filter-select]");
-  const progress = page.locator("[data-grid-progress]");
+  const progress = page.locator("[data-grid-source-progress]");
+  const visibleResults = page.locator("[data-grid-visible-results]");
   const size = page.locator("[data-size-select]");
   const sort = page.locator("[data-sort-select]");
   const browseBodies = recordBrowseBodies(page);
@@ -11562,9 +11797,10 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await page.keyboard.press("Shift+Tab");
   await expect(filter).toBeFocused();
 
-  // The unfiltered Grid reports the source-wide decision progress.
+  // The unfiltered Grid reports visible results and source-wide decision progress separately.
+  await expect(visibleResults).toHaveText("Visible results: 5 of 5 Photos");
   await expect(progress).toHaveText(
-    "0 of 5 decided · 0 selected · 0 rejected · 5 undecided",
+    "Source progress: 0 selected · 0 rejected · 5 undecided",
   );
 
   // Decide three Photos from the Grid keyboard, then keep the focus on the
@@ -11580,8 +11816,9 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await page.keyboard.press("p");
   await expect(cell(2).locator(".cell-state.selected")).toHaveText("✓");
   await expect(progress).toHaveText(
-    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+    "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
+  await expect(visibleResults).toHaveText("Visible results: 5 of 5 Photos");
   const statePosts: string[] = [];
   page.on("request", (request) => {
     if (request.method() === "POST" && request.url().endsWith("/state"))
@@ -11602,7 +11839,7 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
     rating: 0,
   });
   await expect(progress).toHaveText(
-    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+    "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
 
   // One Selection State at a time: the filtered view holds only the matching
@@ -11614,8 +11851,9 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
     "Ready · 2 Photos",
   );
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await expect(visibleResults).toHaveText("Visible results: 2 of 5 Photos");
   await expect(progress).toHaveText(
-    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+    "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
   expect(browseBodies.at(-1)).toEqual({
     source: "library",
@@ -11638,8 +11876,9 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await expectGridOrder(page, [allIds[3]!, allIds[4]!]);
   await filter.selectOption("all");
   await expectGridOrder(page, allIds);
+  await expect(visibleResults).toHaveText("Visible results: 5 of 5 Photos");
   await expect(progress).toHaveText(
-    "3 of 5 decided · 2 selected · 1 rejected · 2 undecided",
+    "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
 
   // The filter belongs to the open view: a reload starts unfiltered.
@@ -11740,8 +11979,8 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 3 Photos",
   );
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "3 of 8 decided · 3 selected · 0 rejected · 5 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 3 selected · 0 rejected · 5 undecided",
   );
 
   // The refresh after the scan publishes the new Photo, keeps the filter,
@@ -11751,8 +11990,8 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 3 Photos",
   );
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "3 of 9 decided · 3 selected · 0 rejected · 6 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 3 selected · 0 rejected · 6 undecided",
   );
   await expect(filter).toHaveValue("selected");
 });
@@ -11778,13 +12017,13 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
 
   const filter = page.locator("[data-filter-select]");
   const status = page.locator("[data-grid-status]");
-  const progress = page.locator("[data-grid-progress]");
+  const progress = page.locator("[data-grid-source-progress]");
   const empty = page.locator("[data-grid-empty]");
   await filter.selectOption("selected");
   await expectGridOrder(page, [allIds[0]!]);
   await expect(status).toHaveText("Ready · 1 Photo");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 selected · 0 rejected · 3 undecided",
   );
 
   // The decision changes the filtered Photo in place: the open view keeps its
@@ -11798,7 +12037,7 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   await expect(cell.locator(".cell-state.rejected")).toHaveText("×");
   await expect(status).toHaveText("Ready · 1 Photo");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
   expect(await libraryPhoto(running.url, 0)).toMatchObject({
     id: allIds[0],
@@ -11822,7 +12061,7 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
   await expect(status).toHaveText("0 Photos");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
   await page.reload();
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
@@ -11861,13 +12100,13 @@ test("an Album source filters its members and keeps Album progress", async ({
 
   const filter = page.locator("[data-filter-select]");
   const status = page.locator("[data-grid-status]");
-  const progress = page.locator("[data-grid-progress]");
+  const progress = page.locator("[data-grid-source-progress]");
   const empty = page.locator("[data-grid-empty]");
   const browseBodies = recordBrowseBodies(page);
   // Album progress describes the Album's members, not the open view.
   await expect(status).toHaveText("Ready · 3 Photos");
   await expect(progress).toHaveText(
-    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+    "Source progress: 2 selected · 1 rejected · 0 undecided",
   );
 
   // The filter applies to the Album's members in membership position, and
@@ -11903,7 +12142,7 @@ test("an Album source filters its members and keeps Album progress", async ({
   await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
   await expect(status).toHaveText("0 Photos");
   await expect(progress).toHaveText(
-    "3 of 3 decided · 2 selected · 1 rejected · 0 undecided",
+    "Source progress: 2 selected · 1 rejected · 0 undecided",
   );
   await filter.selectOption("rejected");
   await expectGridOrder(page, [allIds[2]!]);
@@ -11925,10 +12164,10 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
   await waitForGridFrame(page);
 
-  const progress = page.locator("[data-grid-progress]");
+  const progress = page.locator("[data-grid-source-progress]");
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
   await expect(progress).toHaveText(
-    "0 of 4 decided · 0 selected · 0 rejected · 4 undecided",
+    "Source progress: 0 selected · 0 rejected · 4 undecided",
   );
 
   // A Grid decision advances the source-wide counts once, and a refused
@@ -11942,12 +12181,12 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("p");
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 selected · 0 rejected · 3 undecided",
   );
   await expect(cell(0)).toBeEnabled();
   await page.keyboard.press("p");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 selected · 0 rejected · 3 undecided",
   );
 
   // A decision change moves one Photo between the counts.
@@ -11955,7 +12194,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("x");
   await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+    "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
 
   // Undo returns that decision and the counts together: the Photo holds its
@@ -11967,7 +12206,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   );
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await expect(progress).toHaveText(
-    "1 of 4 decided · 1 selected · 0 rejected · 3 undecided",
+    "Source progress: 1 selected · 0 rejected · 3 undecided",
   );
 
   // Clearing a decision empties the counts for that Photo.
@@ -11975,7 +12214,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.keyboard.press("u");
   await expect(cell(0).locator(".cell-state")).toHaveCount(0);
   await expect(progress).toHaveText(
-    "0 of 4 decided · 0 selected · 0 rejected · 4 undecided",
+    "Source progress: 0 selected · 0 rejected · 4 undecided",
   );
 
   // Photo View decides with the same counts, and the values come from the
@@ -11986,13 +12225,13 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
   await page.reload();
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "1 of 4 decided · 0 selected · 1 rejected · 3 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
 });
 
@@ -12034,7 +12273,7 @@ test("a failed filter change keeps the requested view recoverable through Retry"
   ).toBeVisible();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(page.locator("[data-photo-index]")).toHaveCount(0);
-  await expect(page.locator("[data-grid-progress]")).toBeHidden();
+  await expect(page.locator("[data-grid-source-progress]")).toBeHidden();
 
   // Retry reopens the requested filtered view, not the previous one.
   const browseBodies = recordBrowseBodies(page);
@@ -12095,8 +12334,8 @@ test("a filtered view larger than one window pages through its own sequence", as
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 120 Photos",
   );
-  await expect(page.locator("[data-grid-progress]")).toHaveText(
-    "120 of 240 decided · 120 selected · 0 rejected · 120 undecided",
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 120 selected · 0 rejected · 120 undecided",
   );
 
   const viewport = page.locator("[data-grid-viewport]");
@@ -12695,7 +12934,9 @@ test("failed Browse recovery clears the expired token before Retry opens a fresh
     await page.locator("[data-grid-select-mode]").click();
     await cell(0).click();
     await cell(1).click();
-    await expect(page.locator("[data-batch-count]")).toHaveText("2 selected");
+    await expect(page.locator("[data-batch-count]")).toHaveText(
+      "2 / 100 Photos",
+    );
     await scrollBoundary();
     await expect.poll(() => reopenAttempts).toBe(1);
     await expect(page.locator("[data-status]")).toHaveText(
