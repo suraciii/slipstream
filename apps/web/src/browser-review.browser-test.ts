@@ -3962,6 +3962,77 @@ test("touch Rating Wheel previews six values and commits once on release", async
   });
 });
 
+test("mobile Photo View presents the Quick Action Dock and reachable secondary tools", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await waitForLoadedReviewImage(page);
+
+  const photoView = page.locator("[data-photo-view]");
+  const dock = page.locator("[data-quick-action-dock]");
+  await expect(dock).toBeVisible();
+  await expect(dock).toBeInViewport();
+  await expect(dock.locator("button")).toHaveText([
+    "Previous",
+    "Reject",
+    "Rating",
+    "Select",
+    "Next",
+  ]);
+  const dockGeometry = await dock.locator("button").evaluateAll((buttons) =>
+    buttons.map((button) => {
+      const box = button.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    }),
+  );
+  expect(
+    dockGeometry.every(({ width, height }) => width >= 44 && height >= 44),
+  ).toBe(true);
+  const layout = await photoView.evaluate((view) => {
+    const preview = view.querySelector<HTMLElement>("[data-preview]");
+    const actions = view.querySelector<HTMLElement>("[data-quick-action-dock]");
+    if (!preview || !actions)
+      throw new Error("Photo View action surfaces missing");
+    const previewBox = preview.getBoundingClientRect();
+    const actionBox = actions.getBoundingClientRect();
+    return {
+      clientWidth: view.clientWidth,
+      scrollWidth: view.scrollWidth,
+      previewBottom: previewBox.bottom,
+      actionTop: actionBox.top,
+    };
+  });
+  expect(layout.scrollWidth).toBe(layout.clientWidth);
+  expect(layout.previewBottom).toBeLessThanOrEqual(layout.actionTop + 1);
+
+  const more = page.getByRole("button", { name: "More Photo Tools" });
+  await expect(more).toBeVisible();
+  await expect(page.locator("[data-secondary-zoom-controls]")).toBeHidden();
+  await more.click();
+  await expect(page.locator("[data-secondary-zoom-controls]")).toBeVisible();
+  await expect(page.locator("[data-secondary-details]")).toBeVisible();
+  await expect(page.locator("[data-ratings] button")).toHaveCount(6);
+  await expect(page.locator("[data-ratings] button").first()).toBeVisible();
+  await expect(page.locator("[data-secondary-close]")).toBeFocused();
+  await page.locator("[data-secondary-close]").click();
+  await expect(more).toBeFocused();
+  await expect(page.locator("[data-secondary-zoom-controls]")).toBeHidden();
+
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(dock).toBeVisible();
+  await expect
+    .poll(() => photoView.evaluate((view) => view.scrollWidth))
+    .toBe(await photoView.evaluate((view) => view.clientWidth));
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(dock).toBeHidden();
+  await expect(page.locator("[data-secondary-toggle]")).toBeHidden();
+  await expect(page.locator(".photo-controls")).toBeVisible();
+});
+
 test("Rating Wheel hands off before the hold and cancels on competing touch input", async ({
   page,
 }) => {

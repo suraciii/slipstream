@@ -888,10 +888,15 @@
   justify-content: flex-end;
   gap: 0.2rem;
   max-width: calc(100% - 1.3rem);
+  pointer-events: none;
   padding: 0.2rem;
   border: 1px solid var(--border-strong);
   border-radius: 0.375rem;
   background: rgb(14 16 19 / 92%);
+}
+
+.zoom-controls > * {
+  pointer-events: auto;
 }
 
 .zoom-control {
@@ -1435,6 +1440,17 @@
   font-size: 0.72rem;
 }
 
+/* The mobile hierarchy is a presentation of the existing intents. Desktop
+   keeps the established Review Bar and Review Tools surfaces unchanged. */
+.quick-action-dock,
+.secondary-action-row,
+.secondary-sheet-header,
+.secondary-actions,
+.secondary-zoom-controls,
+.secondary-details {
+  display: none;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -1638,7 +1654,7 @@
   }
 
   .photo-view {
-    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto;
+    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto auto auto auto;
   }
 
   .photo-header {
@@ -1673,6 +1689,12 @@
     grid-template-columns: minmax(0, 1fr);
     gap: 0.35rem;
     padding: 0.4rem 0.5rem 0.5rem;
+  }
+
+  .review-state > .metadata,
+  .review-bar > .decision-controls,
+  .secondary-sheet .photo-controls {
+    display: none;
   }
 
   .facts {
@@ -1719,6 +1741,237 @@
     min-width: 0;
     padding-inline: 0.25rem;
     font-size: 0.72rem;
+  }
+}
+
+@media (max-width: 760px), (max-height: 480px) {
+  .photo-view {
+    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto auto auto auto;
+  }
+
+  .photo-view > .quick-action-dock {
+    order: 1;
+  }
+
+  .photo-view > .review-bar {
+    order: 2;
+  }
+
+  .photo-view > .secondary-action-row {
+    order: 3;
+  }
+
+  .photo-view > .secondary-sheet {
+    order: 4;
+  }
+
+  .review-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-state > .metadata,
+  .review-bar > .decision-controls {
+    display: none;
+  }
+
+  .secondary-sheet .photo-controls {
+    display: grid;
+  }
+
+  .secondary-sheet [data-secondary-undo] {
+    display: none;
+  }
+
+  .quick-action-dock {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.3rem;
+    min-width: 0;
+    padding: 0.4rem max(0.5rem, env(safe-area-inset-left)) 0.35rem
+      max(0.5rem, env(safe-area-inset-right));
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+
+  .quick-action-dock button {
+    min-width: 0;
+    min-height: 2.75rem;
+    padding-inline: 0.2rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.72rem;
+  }
+
+  .rating-dock-button {
+    border-color: var(--rating);
+    background: #3a301e;
+    color: var(--rating);
+  }
+
+  .secondary-action-row {
+    display: flex;
+    justify-content: flex-end;
+    min-width: 0;
+    padding: 0.25rem max(0.5rem, env(safe-area-inset-left))
+      max(0.25rem, env(safe-area-inset-bottom))
+      max(0.5rem, env(safe-area-inset-right));
+    border-top: 1px solid var(--border);
+    background: var(--canvas);
+  }
+
+  .secondary-toggle {
+    min-height: 2.75rem;
+    padding-inline: 0.7rem;
+  }
+
+  .secondary-sheet[data-secondary-open="false"],
+  .secondary-sheet[data-secondary-open="true"] {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.55rem;
+    min-width: 0;
+    padding: 0.55rem max(0.5rem, env(safe-area-inset-left))
+      max(0.65rem, env(safe-area-inset-bottom))
+      max(0.5rem, env(safe-area-inset-right));
+    border-top: 1px solid var(--border-strong);
+    background: var(--panel);
+  }
+
+  .secondary-sheet[data-secondary-open="false"] .secondary-sheet-header {
+    display: none;
+  }
+
+  .secondary-sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .secondary-sheet-header h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.8rem;
+  }
+
+  .secondary-sheet[data-secondary-open="false"] .secondary-sheet-header button {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .secondary-sheet-header button {
+    min-height: 2.75rem;
+  }
+
+  .secondary-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.3rem;
+  }
+
+  .secondary-actions button {
+    min-height: 2.75rem;
+  }
+
+  .rating-controls {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    column-gap: 0.45rem;
+  }
+
+  .rating-controls legend {
+    margin: 0;
+  }
+
+  .membership {
+    gap: 0.2rem;
+  }
+
+  .membership-facts {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .membership-heading {
+    display: none;
+  }
+
+  .membership-status {
+    grid-column: 1;
+  }
+
+  .membership-actions {
+    grid-column: 2;
+  }
+
+  .membership-list,
+  .membership-message {
+    grid-column: 1 / -1;
+  }
+
+  .secondary-sheet[data-secondary-open="false"] .secondary-zoom-controls,
+  .secondary-sheet[data-secondary-open="false"] .secondary-details {
+    display: none;
+  }
+
+  .secondary-zoom-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.2rem;
+    min-width: 0;
+    padding: 0.35rem;
+    border: 1px solid var(--border-strong);
+    border-radius: 0.375rem;
+    background: var(--canvas);
+  }
+
+  .secondary-zoom-controls .zoom-slider {
+    flex: 1 1 8rem;
+    min-width: 7rem;
+  }
+
+  .secondary-details {
+    display: block;
+    min-width: 0;
+    padding: 0.35rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    background: var(--canvas);
+    color: var(--muted);
+    font-size: 0.72rem;
+  }
+
+  .secondary-details summary {
+    min-height: 2.2rem;
+    padding: 0.45rem 0.2rem;
+    color: var(--text);
+    cursor: pointer;
+    font-weight: 650;
+  }
+
+  .secondary-details dl {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.8rem;
+    margin: 0.2rem 0 0;
+  }
+
+  .secondary-details dl div {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .secondary-details dt {
+    color: var(--muted);
+  }
+
+  .secondary-details dd {
+    margin: 0;
+    color: var(--text);
   }
 }
 
