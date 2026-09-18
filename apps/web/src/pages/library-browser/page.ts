@@ -2720,8 +2720,8 @@ export function mountLibraryBrowser(
             ? undefined
             : sourceGrid.photoAt(refreshedIndex);
         if (!photo) {
-          failed = true;
-          break;
+          becameMissing.add(photoId);
+          continue;
         }
         multiExpectedSelection.set(photoId, photo.selectionState);
         reviewed.add(photoId);
@@ -2744,8 +2744,11 @@ export function mountLibraryBrowser(
       (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
     );
     if (failed) {
-      const message =
-        "Some changed Photos could not be refreshed. Retry Review to continue.";
+      const missingMessage =
+        becameMissing.size > 0
+          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
+          : "";
+      const message = `Some changed Photos could not be refreshed.${missingMessage} Retry Review to continue.`;
       gridBatchResult = {
         tone: "warning",
         message,
@@ -2760,7 +2763,11 @@ export function mountLibraryBrowser(
       setDecisionStatus(message);
     } else {
       const reviewedCount = reviewed.size;
-      const message = `${photoCountText(reviewedCount)} reviewed. Retry the batch when ready.`;
+      const missingMessage =
+        becameMissing.size > 0
+          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
+          : "";
+      const message = `${photoCountText(reviewedCount)} reviewed.${missingMessage} Retry the batch when ready.`;
       gridBatchResult = {
         tone: becameMissing.size > 0 ? "warning" : "success",
         message,

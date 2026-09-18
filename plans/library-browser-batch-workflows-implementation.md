@@ -240,6 +240,7 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `apps/web/src/pages/library-browser/model/photo-owner.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
+- `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
 - `apps/web/src/browser-review.browser-test.ts`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
@@ -279,7 +280,7 @@ The transaction must compare each existing Photo's current state with its expect
 - Update expected state to the new value only for `applied` outcomes.
 - Keep changed and missing Photos in the multi-selection, but do not fabricate or move their facts. Missing Photos remain counted for presentation but are not retry candidates.
 - `Review N` focuses and refreshes the N changed bounded facts, then replaces their expected states before a retry.
-- A retry sends only the still-selected changed Photos whose expected state is known.
+- A retry sends every still-selected Photo whose expected state is known. Missing Photos stay excluded; already-applied Photos may be sent again as idempotent compare-and-set work so the retry covers the complete retained selection.
 - A malformed or incomplete response moves no local facts, progress counts, or Undo entries; the whole selection remains retryable.
 - Batch Undo continues to use the existing single-Photo compare-and-set route and remains independent of the new initial-write comparison.
 
@@ -297,7 +298,7 @@ The transaction must compare each existing Photo's current state with its expect
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch conflict|batch Undo"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo"
 bun run verify
 ```
 

@@ -2898,7 +2898,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LibraryRoot, identity::original_id};
+    use crate::{LibraryRoot, PhotoStateBatchItem, identity::original_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -4271,6 +4271,144 @@ mod tests {
                 Err(MutationError::Invalid)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn batch_photo_state_compares_each_photo_and_reports_a_complete_partition() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 1.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: ids[0].clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+
+        let result = persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: vec![
+                    PhotoStateBatchItem {
+                        photo_id: ids[0].clone(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                    PhotoStateBatchItem {
+                        photo_id: ids[1].clone(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                    PhotoStateBatchItem {
+                        photo_id: "missing-photo".to_owned(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                ],
+                value: SelectionState::Rejected,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.applied,
+            vec![PhotoStateBatchApplied {
+                photo_id: ids[1].clone(),
+                prior_value: SelectionState::Undecided,
+            }]
+        );
+        assert_eq!(
+            result.changed_elsewhere,
+            vec![PhotoStateBatchChangedElsewhere {
+                photo_id: ids[0].clone(),
+                current_value: SelectionState::Selected,
+            }]
+        );
+        assert_eq!(
+            result.missing,
+            vec![PhotoStateBatchMissing {
+                photo_id: "missing-photo".to_owned(),
+            }]
+        );
+        let after = persistence.snapshot().await.unwrap();
+        assert_eq!(
+            after
+                .photos
+                .iter()
+                .map(|photo| photo.selection_state)
+                .collect::<Vec<_>>(),
+            vec![SelectionState::Selected, SelectionState::Rejected]
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_photo_state_rolls_back_earlier_matches_when_a_later_write_fails() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 1.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let escaped_id = ids[1].replace('\'', "''");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_batch_second BEFORE UPDATE OF selection_state ON photos\n                 WHEN OLD.id = '{escaped_id}'\n                 BEGIN SELECT RAISE(ABORT, 'forced batch failure'); END;"
+            ))
+            .unwrap();
+
+        let result = persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: ids
+                    .iter()
+                    .map(|photo_id| PhotoStateBatchItem {
+                        photo_id: photo_id.clone(),
+                        expected_current: SelectionState::Undecided,
+                    })
+                    .collect(),
+                value: SelectionState::Selected,
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(result.is_err());
+        let after = persistence.snapshot().await.unwrap();
+        assert!(
+            after
+                .photos
+                .iter()
+                .all(|photo| photo.selection_state == SelectionState::Undecided)
+        );
+        persistence.shutdown().unwrap();
     }
 
     #[tokio::test]

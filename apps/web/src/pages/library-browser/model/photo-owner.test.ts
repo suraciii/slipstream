@@ -887,7 +887,7 @@ describe("PhotoOwner", () => {
     owner.dispose();
   });
 
-  test("presents per-Photo batch conflicts without moving their facts", async () => {
+  test("presents per-Photo changed and missing outcomes without moving facts", async () => {
     const source = new FakeSource();
     source.facts.set(0, fact("photo-0"));
     source.facts.set(1, fact("photo-1"));
@@ -922,8 +922,8 @@ describe("PhotoOwner", () => {
     expect(outcome.kind === "persisted" && outcome.missing).toEqual([
       { photoId: "photo-2" },
     ]);
-    // A conflict means the current Library no longer holds that Photo, so the
-    // batch writes no fact for it and the Grid keeps what it already shows.
+    // Changed-elsewhere and missing outcomes write no local fact, so the Grid
+    // keeps what it already shows for both Photos.
     expect(source.facts.get(1)?.selectionState).toBe("undecided");
     expect(source.facts.get(2)?.selectionState).toBe("undecided");
     // Only the confirmed Photo is part of the one-level Undo description.
@@ -1139,6 +1139,46 @@ describe("PhotoOwner", () => {
     expect(source.facts.get(0)?.selectionState).toBe("undecided");
     expect(owner.canUndo).toBe(false);
     owner.dispose();
+  });
+
+  test("rejects duplicated and invented batch outcomes as malformed", async () => {
+    const malformedResponses = [
+      {
+        applied: [
+          { photoId: "photo-0", priorValue: "undecided" },
+          { photoId: "photo-0", priorValue: "undecided" },
+        ],
+        changedElsewhere: [],
+        missing: [],
+      },
+      {
+        applied: [{ photoId: "photo-other", priorValue: "undecided" }],
+        changedElsewhere: [],
+        missing: [],
+      },
+    ];
+    for (const response of malformedResponses) {
+      const source = new FakeSource();
+      source.facts.set(0, fact("photo-0"));
+      const owner = createPhotoOwner(
+        () => Promise.resolve(Response.json(response)),
+        source,
+      );
+      owner.bindSource({
+        sourceAuthority: source.authority,
+        total: 1,
+        index: 0,
+      });
+      const outcome = await owner.mutateBatch(
+        batchPhotos(source, ["photo-0"]),
+        "selected",
+      )!.settlement;
+      expect(outcome.kind).toBe("failed");
+      expect(outcome.kind === "failed" && outcome.failure).toBe("malformed");
+      expect(source.facts.get(0)?.selectionState).toBe("undecided");
+      expect(owner.canUndo).toBe(false);
+      owner.dispose();
+    }
   });
 
   test("refuses an empty batch and detaches an admitted one on dispose", async () => {

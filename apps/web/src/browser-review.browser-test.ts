@@ -3396,6 +3396,80 @@ test("Grid batch Review refreshes changed Photos before a retry", async ({
   ]);
 });
 
+test("Grid batch Review retains a changed Photo when refresh shows it missing", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  const tailSource = (await (
+    await post(running.url, "/api/browse", { source: "library" })
+  ).json()) as { token: string };
+  const tail = await browseWindow(running.url, tailSource.token, 60);
+  await fetch(`${running.url}/api/browse/${tailSource.token}`, {
+    method: "DELETE",
+    headers: { Origin: running.url },
+  });
+  const replacementPhoto = tail.photos[0]!;
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  let removeChangedPhoto = false;
+  await page.route("**/api/browse/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      !removeChangedPhoto ||
+      request.method() !== "GET" ||
+      url.searchParams.get("start") !== "0"
+    ) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      start: number;
+      total: number;
+      photos: BrowsePhoto[];
+    };
+    const withoutChanged = body.photos.filter((photo) => photo.id !== ids[0]);
+    await route.fulfill({
+      response,
+      json: {
+        ...body,
+        photos: [...withoutChanged, replacementPhoto],
+      },
+    });
+  });
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await cell(1).click();
+  await post(running.url, `/api/photos/${ids[0]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-batch-select]").click();
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeVisible();
+  removeChangedPhoto = true;
+  await page.getByRole("button", { name: "Review 1 Photo" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "0 Photos reviewed. 1 Photo no longer in this Library. Retry the batch when ready.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeHidden();
+  await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await page.unroute("**/api/browse/**");
+});
+
 test("Grid batch Add to Album adds every multi-selected Photo through one bounded write", async ({
   page,
 }) => {
