@@ -631,12 +631,13 @@ multi-selection, so the same Photos can take another decision or join another
 Album; only the clear exit, `Escape`, and opening or reopening a source empty
 it. After a batch Selection State decision or batch Album addition settles in
 an Album, the Grid must report that the durable Photo View resume position is
-unchanged, for example `Album resume point unchanged: Photo 12.` The
+unchanged, for example `Album resume point unchanged.` The
 **Remove added Photos** compensation reports the ordinary Album removal result
 instead. If it removes the saved Photo, it reports the resulting saved
 position, or that no saved position remains. The batch actions must remain
-reachable from a keyboard, and the count and every batch outcome must be
-announced on the Grid's status surface.
+reachable from a keyboard. The batch result count and every batch outcome must
+be announced on the Grid's status surface; the tray's live selection count is
+a visual summary and is not a second announcement surface.
 
 ## Failure Behavior
 

@@ -177,6 +177,9 @@ export type PhotoBatchUndoOutcome =
   | Readonly<{
       kind: "settled";
       restored: ReadonlyArray<string>;
+      restoredValues: ReadonlyArray<
+        Readonly<{ photoId: string; value: SelectionState }>
+      >;
       conflicts: ReadonlyArray<string>;
       failed: ReadonlyArray<string>;
       connectivity: "unchanged" | "lost";
@@ -955,6 +958,9 @@ export function createPhotoOwner(
         return Object.freeze({ kind: "detached" });
       }
       const restored: string[] = [];
+      const restoredValues: Array<
+        Readonly<{ photoId: string; value: SelectionState }>
+      > = [];
       const conflicts: string[] = [];
       const failed: Array<
         Readonly<{ photoId: string; priorValue: SelectionState }>
@@ -985,6 +991,9 @@ export function createPhotoOwner(
         }
         if (result.kind === "persisted") {
           restored.push(entry.photoId);
+          restoredValues.push(
+            Object.freeze({ photoId: entry.photoId, value: entry.priorValue }),
+          );
           source.applyBatchSelection(
             record.sourceAuthority,
             entry.photoId,
@@ -1012,6 +1021,7 @@ export function createPhotoOwner(
       return Object.freeze({
         kind: "settled",
         restored: Object.freeze(restored),
+        restoredValues: Object.freeze(restoredValues),
         conflicts: Object.freeze(conflicts),
         failed: Object.freeze(failed.map((entry) => entry.photoId)),
         connectivity,

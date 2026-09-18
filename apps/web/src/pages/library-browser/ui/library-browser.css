@@ -376,6 +376,17 @@
   font-size: 0.72rem;
 }
 
+.grid-progress span {
+  display: block;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.grid-progress span + span {
+  margin-top: 0.15rem;
+}
+
 .grid-filter,
 .grid-size {
   flex: 0 0 auto;
@@ -514,8 +525,8 @@
   color: var(--text);
 }
 
-/* The batch bar takes its own header row while at least one Photo is
-   multi-selected, and stays out of the layout otherwise. */
+/* The batch tray takes its own header row while Select mode is active or a
+   Photo is multi-selected, and stays out of the layout otherwise. */
 .grid-batch {
   flex: 1 1 100%;
   min-width: 0;
@@ -525,6 +536,45 @@
   gap: 0.5rem;
   padding-top: 0.35rem;
   border-top: 1px solid var(--border);
+}
+
+.grid-batch-overview {
+  flex: 0 1 auto;
+  min-width: min(100%, 12rem);
+}
+
+.grid-batch-source,
+.grid-batch-retained {
+  margin-top: 0.15rem;
+  overflow: visible;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.grid-batch-result {
+  flex: 1 1 16rem;
+  min-width: min(100%, 12rem);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.grid-batch-result[data-tone="success"] {
+  color: var(--text);
+}
+
+.grid-batch-result[data-tone="warning"],
+.grid-batch-result[data-tone="failure"] {
+  color: var(--warning);
+}
+
+.grid-batch-result p {
+  margin: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .grid-batch-count {
@@ -1430,6 +1480,16 @@
     justify-content: space-between;
     gap: 0.5rem;
     white-space: normal;
+  }
+
+  .grid-batch-overview,
+  .grid-batch-result,
+  .grid-batch-actions {
+    flex-basis: 100%;
+  }
+
+  .grid-batch-actions {
+    align-items: stretch;
   }
 
   .grid-summary .summary-action {

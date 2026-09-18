@@ -316,9 +316,19 @@ export function mountLibraryBrowser(
   // to grow the selection past the bound the server enforces, so an invalid
   // batch can never be built.
   const MULTI_SELECTION_LIMIT = 100;
+  type GridBatchResult = Readonly<{
+    tone: "success" | "warning" | "failure";
+    message: string;
+  }>;
   let multiSelection = new Set<string>();
+  let multiExpectedSelection = new Map<string, SelectionState>();
+  // A settled batch can report that a retained Photo is no longer in the
+  // current Library. It stays visible in the tray, but must not be sent in a
+  // later batch request until the Photographer clears the selection.
+  let multiExcludedPhotoIds = new Set<string>();
   let multiAnchorId: string | undefined;
   let selectMode = false;
+  let gridBatchResult: GridBatchResult | undefined;
   // One batch Add to Album in flight. Membership stays outside the Undo
   // contract, so it never touches the pending Undo description.
   let batchAlbumPending = false;
@@ -575,11 +585,12 @@ export function mountLibraryBrowser(
     if (!applicationAlive) return;
     const counts = sourceGrid.selectionCounts;
     view.renderProgress({
-      // The counts belong to a source the Grid presents: an open Snapshot, or
-      // the same source's retained total across a reopen. A source
-      // replacement clears the reported total, so the line never presents
-      // another source's counts.
+      // The counts belong to the complete source, while `total` belongs to
+      // the currently open filtered Snapshot. A source replacement clears the
+      // token, so the line never presents another source's counts.
       visible: sourceGrid.token !== "" || sourceGrid.total > 0,
+      visibleTotal: sourceGrid.total,
+      sourceTotal: counts.selected + counts.rejected + counts.undecided,
       selected: counts.selected,
       rejected: counts.rejected,
       undecided: counts.undecided,
@@ -1769,10 +1780,12 @@ export function mountLibraryBrowser(
           mode: selectMode,
           count: multiSelection.size,
           limit: MULTI_SELECTION_LIMIT,
+          sourceName: sourceGrid.name,
           // A batch action is presented only while it would be admitted: the
           // same source readiness, connection, and idle owner a Grid decision
           // needs, so an activation is never refused silently.
           enabled: connected && canOpenGridPhoto(),
+          result: gridBatchResult,
           selected: (index) => {
             const photo = sourceGrid.photoAt(index);
             return photo !== undefined && multiSelection.has(photo.id);
@@ -1806,8 +1819,11 @@ export function mountLibraryBrowser(
   /// or a marker for Photos that open no longer presents.
   const clearMultiSelection = () => {
     multiSelection = new Set();
+    multiExpectedSelection = new Map();
+    multiExcludedPhotoIds = new Set();
     multiAnchorId = undefined;
     selectMode = false;
+    gridBatchResult = undefined;
     view.resetGridMultiSelection();
   };
 
@@ -1815,20 +1831,30 @@ export function mountLibraryBrowser(
   /// bound: the bound is named, and the selection is left exactly as it was.
   const refuseBeyondBatchBound = () => {
     setDecisionStatus(
-      `A batch holds up to ${MULTI_SELECTION_LIMIT} Photos. Clear this selection, or remove Photos from it, first.`,
+      "Selection limit reached. Remove a Photo to extend the range.",
     );
   };
 
   /// Toggles one Photo's membership of the multi-selection and moves the
   /// anchor there, so a following shift-click extends from the last mark.
   const toggleMultiSelection = (photoId: string) => {
-    if (!multiSelection.delete(photoId)) {
+    if (multiSelection.delete(photoId)) {
+      multiExpectedSelection.delete(photoId);
+      multiExcludedPhotoIds.delete(photoId);
+    } else {
       if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
         refuseBeyondBatchBound();
         return;
       }
+      const photoIndex = sourceGrid.findPhotoIndex(photoId);
+      const photo =
+        photoIndex === undefined ? undefined : sourceGrid.photoAt(photoIndex);
+      if (!photo) return;
       multiSelection.add(photoId);
+      multiExcludedPhotoIds.delete(photoId);
+      multiExpectedSelection.set(photoId, photo.selectionState);
     }
+    gridBatchResult = undefined;
     multiAnchorId = photoId;
     renderGrid();
   };
@@ -1848,7 +1874,12 @@ export function mountLibraryBrowser(
         refuseBeyondBatchBound();
         return;
       }
+      const photo = sourceGrid.photoAt(index);
+      if (!photo) return;
       multiSelection.add(photoId);
+      multiExcludedPhotoIds.delete(photoId);
+      multiExpectedSelection.set(photoId, photo.selectionState);
+      gridBatchResult = undefined;
       multiAnchorId = photoId;
       renderGrid();
       return;
@@ -1866,7 +1897,16 @@ export function mountLibraryBrowser(
       refuseBeyondBatchBound();
       return;
     }
-    for (const photoIdToAdd of joined) multiSelection.add(photoIdToAdd);
+    for (const photoIdToAdd of joined) {
+      const indexToAdd = sourceGrid.findPhotoIndex(photoIdToAdd);
+      const photo =
+        indexToAdd === undefined ? undefined : sourceGrid.photoAt(indexToAdd);
+      if (!photo) continue;
+      multiSelection.add(photoIdToAdd);
+      multiExcludedPhotoIds.delete(photoIdToAdd);
+      multiExpectedSelection.set(photoIdToAdd, photo.selectionState);
+    }
+    gridBatchResult = undefined;
     multiAnchorId = photoId;
     renderGrid();
   };
@@ -2392,6 +2432,12 @@ export function mountLibraryBrowser(
       return;
     }
     if (!outcome.applied) return;
+    if (
+      field === "selectionState" &&
+      outcome.photoId &&
+      multiSelection.has(outcome.photoId)
+    )
+      multiExpectedSelection.set(outcome.photoId, value as SelectionState);
     view.setPhotoStatus(
       `${field === "rating" ? "Rating" : "Selection"} saved.`,
     );
@@ -2419,6 +2465,11 @@ export function mountLibraryBrowser(
     // cell in place, and returns focus to it. A detached write stays silent.
     renderGrid();
     if (outcome.kind === "detached") return;
+    if (outcome.kind === "persisted" && field === "selectionState") {
+      const photoId = sourceGrid.photoAt(index)?.id;
+      if (photoId && multiSelection.has(photoId))
+        multiExpectedSelection.set(photoId, value as SelectionState);
+    }
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
         setDecisionStatus(
@@ -2441,10 +2492,20 @@ export function mountLibraryBrowser(
   const mutateGridBatch = async (value: SelectionState) => {
     if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
       return;
-    const photoIds = [...multiSelection];
-    if (photoIds.length === 0) return;
+    const photoIds = [...multiSelection].filter(
+      (photoId) => !multiExcludedPhotoIds.has(photoId),
+    );
+    if (photoIds.length === 0) {
+      const message =
+        "No selected Photos remain in this Library. Clear the selection to continue.";
+      gridBatchResult = { tone: "warning", message };
+      setDecisionStatus(message);
+      renderGrid();
+      return;
+    }
     const admission = photoOwner.mutateBatch(photoIds, value);
     if (!admission) return;
+    gridBatchResult = undefined;
     renderGrid();
     setDecisionStatus(`Saving ${photoCountText(photoIds.length)}…`);
     const outcome = await admission.settlement;
@@ -2472,20 +2533,41 @@ export function mountLibraryBrowser(
       }
       if (outcome.connectivity === "lost")
         failPhotoRecovery(photoOwner.authority, "photo-write");
+      gridBatchResult = {
+        tone: "failure",
+        message:
+          outcome.failure === "transport"
+            ? "Connection lost before the batch was confirmed. Retry to refresh."
+            : "The batch could not be saved. Retry to refresh the selected Photos.",
+      };
+      renderGrid();
       updateControls();
       return;
     }
     const applied = outcome.applied.length;
     const conflicts = outcome.conflicts.length;
+    for (const conflict of outcome.conflicts) {
+      multiExcludedPhotoIds.add(conflict.photoId);
+      multiExpectedSelection.delete(conflict.photoId);
+    }
     const decision = value === "selected" ? "selected" : "rejected";
+    const resumeMessage =
+      sourceGrid.kind === "album" ? " Album resume point unchanged." : "";
+    for (const entry of outcome.applied)
+      multiExpectedSelection.set(entry.photoId, value);
     // A conflict is a Photo the current Library no longer holds: the batch
     // wrote no fact for it, so the Grid reports exactly that and claims no
     // knowledge of any state it never refreshed.
-    setDecisionStatus(
+    const message =
       conflicts === 0
-        ? `${photoCountText(applied)} ${decision}.`
-        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} no longer in this Library.`,
-    );
+        ? `${photoCountText(applied)} ${decision}.${resumeMessage}`
+        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} no longer in this Library.${resumeMessage}`;
+    gridBatchResult = {
+      tone: conflicts === 0 ? "success" : "warning",
+      message,
+    };
+    setDecisionStatus(message);
+    renderGrid();
     updateControls();
   };
   /// Adds every multi-selected Photo to one Album through the bounded
@@ -2495,9 +2577,21 @@ export function mountLibraryBrowser(
     if (!applicationAlive || batchAlbumPending || !albumId) return;
     if (multiSelection.size === 0) return;
     if (!application.albums.some((album) => album.id === albumId)) return;
-    const photoIds = [...multiSelection];
+    const photoIds = [...multiSelection].filter(
+      (photoId) => !multiExcludedPhotoIds.has(photoId),
+    );
+    if (photoIds.length === 0) {
+      const message =
+        "No selected Photos remain in this Library. Clear the selection to continue.";
+      gridBatchResult = { tone: "warning", message };
+      setDecisionStatus(message);
+      renderGrid();
+      return;
+    }
     const name = membershipAlbumName(albumId);
     batchAlbumPending = true;
+    gridBatchResult = undefined;
+    renderGrid();
     renderBatchAlbums();
     setDecisionStatus(
       `Adding ${photoCountText(photoIds.length)} to “${name}”…`,
@@ -2512,11 +2606,17 @@ export function mountLibraryBrowser(
     // A superseded or already admitted batch reports nothing: the action that
     // owns the settlement presents its own outcome.
     if (!result.admitted) return;
-    setDecisionStatus(
-      result.ok
-        ? `${photoCountText(photoIds.length)} added to “${name}”.`
-        : `Could not add the selected Photos to “${name}”.`,
-    );
+    const message = result.ok
+      ? `${photoCountText(photoIds.length)} added to “${name}”.${
+          sourceGrid.kind === "album" ? " Album resume point unchanged." : ""
+        }`
+      : `Could not add the selected Photos to “${name}”.`;
+    gridBatchResult = {
+      tone: result.ok ? "success" : "failure",
+      message,
+    };
+    setDecisionStatus(message);
+    renderGrid();
   };
   /// Restores every Photo one batch Selection State change confirmed. The
   /// writes are the same compare-and-set writes a single Undo sends, one
@@ -2536,13 +2636,22 @@ export function mountLibraryBrowser(
     const restored = outcome.restored.length;
     const conflicts = outcome.conflicts.length;
     const failed = outcome.failed.length;
-    setDecisionStatus(
+    for (const entry of outcome.restoredValues) {
+      if (multiSelection.has(entry.photoId))
+        multiExpectedSelection.set(entry.photoId, entry.value);
+    }
+    const message =
       failed > 0
         ? `${photoCountText(restored)} restored. ${photoCountText(failed)} not restored; Undo again to retry.`
         : conflicts > 0
           ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} could not be restored because ${conflicts === 1 ? "it changed" : "they changed"} elsewhere.`
-          : `${photoCountText(restored)} restored.`,
-    );
+          : `${photoCountText(restored)} restored.`;
+    gridBatchResult = {
+      tone: failed > 0 || conflicts > 0 ? "warning" : "success",
+      message,
+    };
+    setDecisionStatus(message);
+    renderGrid();
   };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
@@ -2630,6 +2739,11 @@ export function mountLibraryBrowser(
     }
     const outcome = await photoOwner.performUndo(preparation);
     if (outcome.kind === "detached") return;
+    if (outcome.kind === "persisted" && outcome.photoId) {
+      const restored = sourceGrid.photoAt(outcome.index);
+      if (restored && multiSelection.has(outcome.photoId))
+        multiExpectedSelection.set(outcome.photoId, restored.selectionState);
+    }
     if (outcome.kind === "failed") {
       if (outcome.failure === "transport") {
         setDecisionStatus("Connection lost before Undo was confirmed.");
