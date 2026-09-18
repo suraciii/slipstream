@@ -997,7 +997,6 @@ async fn response_goldens_match_real_serialized_routes() {
     .await;
     assert_golden(&goldens, 8, &batch, &captures);
 
-    std::thread::sleep(Duration::from_millis(10));
     jpeg_fixture(&root.join("later.JPG"), 140, 70, [32, 192, 64]);
     assert_eq!(
         send(
@@ -1047,7 +1046,6 @@ async fn response_goldens_match_real_serialized_routes() {
         StatusCode::OK
     );
 
-    std::thread::sleep(Duration::from_millis(10));
     fs::write(root.join("later.JPG"), b"malformed replacement").unwrap();
     assert_eq!(
         send(
