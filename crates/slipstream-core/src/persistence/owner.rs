@@ -4482,30 +4482,43 @@ mod tests {
         let removed = persistence
             .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
                 album_id: album_id.clone(),
-                photo_ids: vec![ids[2].clone()],
+                photo_ids: vec![ids[1].clone()],
             })
             .await
             .unwrap();
-        assert_eq!(removed.removed_photo_ids, vec![ids[2].clone()]);
+        assert_eq!(removed.removed_photo_ids, vec![ids[1].clone()]);
         assert!(removed.already_absent_photo_ids.is_empty());
-        let repeated = persistence
-            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
-                album_id: album_id.clone(),
-                photo_ids: vec![ids[2].clone()],
-            })
-            .await
-            .unwrap();
-        assert!(repeated.removed_photo_ids.is_empty());
-        assert_eq!(repeated.already_absent_photo_ids, vec![ids[2].clone()]);
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(
+            album
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            vec![ids[0].clone(), ids[2].clone()]
+        );
+        assert_eq!(album.members[0].position, 0);
+        assert_eq!(album.members[1].position, 1);
+        assert_eq!(album.last_reviewed_photo_id, None);
 
-        let saved_removed = persistence
+        let repeated = persistence
             .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
                 album_id: album_id.clone(),
                 photo_ids: vec![ids[1].clone()],
             })
             .await
             .unwrap();
-        assert_eq!(saved_removed.removed_photo_ids, vec![ids[1].clone()]);
+        assert!(repeated.removed_photo_ids.is_empty());
+        assert_eq!(repeated.already_absent_photo_ids, vec![ids[1].clone()]);
+        let removed_tail = persistence
+            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[2].clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed_tail.removed_photo_ids, vec![ids[2].clone()]);
+        assert!(removed_tail.already_absent_photo_ids.is_empty());
         let album = &persistence.list_albums().await.unwrap()[0];
         assert_eq!(album.members.len(), 1);
         assert_eq!(album.last_reviewed_photo_id, None);

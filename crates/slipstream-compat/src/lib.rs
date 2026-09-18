@@ -805,14 +805,14 @@ mod tests {
             assert!(example["name"].is_string());
             let route = example["route"].as_str().expect("invalid request route");
             assert!(example["body"].is_object());
-            assert_eq!(
-                example["error"],
-                if route.starts_with("/api/albums/") {
-                    "Invalid membership batch"
-                } else {
-                    "Invalid Photo state batch"
-                }
-            );
+            let expected_error = if route.ends_with("/members/batch-remove") {
+                "Invalid membership compensation"
+            } else if route.starts_with("/api/albums/") {
+                "Invalid membership batch"
+            } else {
+                "Invalid Photo state batch"
+            };
+            assert_eq!(example["error"], expected_error);
         }
         let over_limit = invalid
             .iter()

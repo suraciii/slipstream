@@ -135,9 +135,9 @@ removes the listed members that are still present, and reports
 
 It is idempotent for retries, never removes an ID that was reported as already
 a member, and is not part of global Selection State Undo. The browser expires
-the record on source change, a new membership operation, or application
-teardown. Removing the saved Photo updates the Album's saved position through
-the existing removal-compaction rule.
+the record on source change, a new membership operation, target Album deletion,
+or application teardown. Removing the saved Photo updates the Album's saved
+position through the existing removal-compaction rule.
 
 The browser may update presentation after confirmation. It must not abort an
 admitted Album or Photo-state persistence operation solely because the current

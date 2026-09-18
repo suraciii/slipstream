@@ -3317,6 +3317,9 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   await post(running.url, `/api/albums/${albumId}/members`, {
     photoIds: [ids[3]],
   });
+  await post(running.url, `/api/albums/${albumId}/progress`, {
+    photoId: ids[3],
+  });
   await page.setViewportSize({ width: 1000, height: 700 });
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
@@ -3376,9 +3379,15 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
     page.getByRole("button", { name: "Remove added Photos" }),
   ).toBeVisible();
   await page.unroute(`**/api/albums/${albumId}/members/batch-remove`);
+  // Another membership action removes the newly added Photo before the
+  // compensation arrives. The bounded result reports it as already absent,
+  // while the pre-existing saved position remains intact.
+  await post(running.url, `/api/albums/${albumId}/members/remove`, {
+    photoId: ids[0],
+  });
   await page.getByRole("button", { name: "Remove added Photos" }).click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
-    "1 Photo removed from “Trip”.",
+    "0 Photos removed from “Trip”. 1 Photo already absent from “Trip”. Album resume point remains.",
   );
   await expect(
     page.getByRole("button", { name: "Remove added Photos" }),

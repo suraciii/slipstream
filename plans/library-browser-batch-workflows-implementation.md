@@ -166,7 +166,8 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 - `apps/web/src/pages/library-browser/model/album-action-owner.ts`
 - `apps/web/src/pages/library-browser/model/album-action-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
-- `apps/web/src/browser-review.browser-test.ts`
+- `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
+- `apps/web/src/browser-review.browser-test.ts
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
 
@@ -192,7 +193,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 
 - Avoid changing the general `AlbumMutationResult` shape for create, rename, delete, and reorder. Add a dedicated membership batch result or a dedicated application method so unrelated Album routes do not gain meaningless fields.
 - Keep the existing single-member route for Photo View membership toggles. Add the dedicated bounded `POST /api/albums/{albumId}/members/batch-remove` route rather than issuing up to 100 independent requests.
-- The client compensation record belongs to the page-level batch workflow and expires on source change, a new membership action, or application teardown.
+- The client compensation record belongs to the page-level batch workflow and expires on source change, a new membership action, target Album deletion, or application teardown.
 - A compensation settlement must not replace a newer Album action's status.
 
 ### Tests
@@ -201,7 +202,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 - Core and HTTP tests cover bounded removal, missing members, duplicate IDs, unknown Photos, and saved-position invalidation.
 - API validation rejects malformed or incomplete result shapes.
 - Album action owner tests cover admission, supersession, transport failure, and compensation settlement.
-- Browser test adds Photos to an Album, removes only newly added Photos, verifies existing members remain, and verifies selection and global decision Undo are unaffected.
+- Browser test adds Photos to an Album, covers an already-absent newly added Photo and saved-position messaging, removes only newly added Photos, verifies existing members remain, and verifies selection and global decision Undo are unaffected.
 
 ### Verification
 

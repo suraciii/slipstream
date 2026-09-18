@@ -4868,6 +4868,42 @@ async fn album_and_state_protocol_persists_across_reopen() {
         post_json(
             &router,
             &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": [&ids[0], &ids[0]]}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": []}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let over_limit = (0..=100)
+        .map(|index| format!("photo-{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": over_limit}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": ["00000000-0000-4000-8000-00000000dead"]}),
             Some("http://camera.local"),
         )

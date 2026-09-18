@@ -241,6 +241,32 @@ describe("AlbumActionOwner", () => {
     owner.dispose();
   });
 
+  test("rejects malformed identity-bearing compensation results", async () => {
+    const owner = createAlbumActionOwner(() =>
+      Promise.resolve(
+        jsonResponse({
+          albumId: "album-1",
+          removedPhotoIds: ["photo-1"],
+          alreadyAbsentPhotoIds: [],
+          albums: [],
+        }),
+      ),
+    );
+    const action = owner.removeAddedMemberships(
+      "album-1",
+      ["photo-1", "photo-2"],
+      context(),
+    );
+    if (!action) throw new Error("expected compensation admission");
+    const outcome = await action.settlement;
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind !== "failed")
+      throw new Error("expected malformed failure");
+    expect(outcome.settlement).toEqual({ kind: "malformed" });
+    owner.finish(action.mutation);
+    owner.dispose();
+  });
+
   test("owns one bounded Folder-to-Album action and preserves its counts", async () => {
     const requests: Array<Readonly<{ path: string; init?: RequestInit }>> = [];
     const fetcher: AlbumActionFetch = (path, init) => {

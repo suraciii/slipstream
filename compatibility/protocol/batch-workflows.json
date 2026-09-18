@@ -164,7 +164,7 @@
       "body": {
         "photoIds": ["$photoId", "$photoId"]
       },
-      "error": "Invalid membership batch"
+      "error": "Invalid membership compensation"
     },
     {
       "name": "photo-state-batch-empty",

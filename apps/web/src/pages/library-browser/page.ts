@@ -1156,6 +1156,7 @@ export function mountLibraryBrowser(
       );
       if (albumActions.isFormCurrent(record.authority))
         dismissAlbumForm(record);
+      if (deleted) expireBatchAlbumCompensation();
       renderSources();
       if (
         deleted &&
