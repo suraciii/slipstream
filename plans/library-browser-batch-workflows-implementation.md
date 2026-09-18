@@ -236,6 +236,8 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `crates/slipstream-server/src/app.rs`
 - `crates/slipstream-server/src/http.rs`
 - `crates/slipstream-server/src/tests.rs`
+- `crates/slipstream-compat/src/lib.rs`
+- `compatibility/protocol/batch-workflows.json`
 - `apps/web/src/pages/library-browser/api/photo.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.test.ts`
@@ -302,7 +304,7 @@ The transaction must compare each existing Photo's current state with its expect
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo|batch Review"
 bun run verify
 ```
 

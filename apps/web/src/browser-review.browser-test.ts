@@ -3479,6 +3479,54 @@ test("Grid batch Review retains a changed Photo when refresh shows it missing", 
   await page.unroute("**/api/browse/**");
 });
 
+test("Grid batch Review keeps existing Photos under retention pressure", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 400);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 400 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await scrollGrid(page, "end");
+  await expect(cell(398)).toBeVisible();
+  await cell(398).click();
+  await scrollGrid(page, 0);
+  await expect(cell(0)).toBeVisible();
+  await cell(0).click();
+  await scrollGrid(page, "end");
+  await expect(cell(399)).toBeVisible();
+  await cell(399).click();
+
+  // Fill the bounded retained-fact set and leave the tail as the current
+  // viewport. Review then visits tail, head, and tail again in one run.
+  await evictFirstPhotoFact(page);
+  for (const id of [ids[398]!, ids[0]!, ids[399]!])
+    await post(running.url, `/api/photos/${id}/state`, {
+      field: "selectionState",
+      value: "rejected",
+    });
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "0 Photos selected. 3 Photos changed elsewhere. Review them before retrying.",
+  );
+  await page.getByRole("button", { name: "Review 3 Photos" }).click();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "3 Photos reviewed. Retry the batch when ready.",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).not.toContainText(
+    "no longer in this Library",
+  );
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 3 rejected · 397 undecided",
+  );
+});
+
 test("Grid batch Add to Album adds every multi-selected Photo through one bounded write", async ({
   page,
 }) => {

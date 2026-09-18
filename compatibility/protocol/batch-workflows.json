@@ -195,107 +195,410 @@
       "body": {
         "selectionState": "selected",
         "photos": [
-          { "photoId": "p001", "expectedCurrent": "undecided" },
-          { "photoId": "p002", "expectedCurrent": "undecided" },
-          { "photoId": "p003", "expectedCurrent": "undecided" },
-          { "photoId": "p004", "expectedCurrent": "undecided" },
-          { "photoId": "p005", "expectedCurrent": "undecided" },
-          { "photoId": "p006", "expectedCurrent": "undecided" },
-          { "photoId": "p007", "expectedCurrent": "undecided" },
-          { "photoId": "p008", "expectedCurrent": "undecided" },
-          { "photoId": "p009", "expectedCurrent": "undecided" },
-          { "photoId": "p010", "expectedCurrent": "undecided" },
-          { "photoId": "p011", "expectedCurrent": "undecided" },
-          { "photoId": "p012", "expectedCurrent": "undecided" },
-          { "photoId": "p013", "expectedCurrent": "undecided" },
-          { "photoId": "p014", "expectedCurrent": "undecided" },
-          { "photoId": "p015", "expectedCurrent": "undecided" },
-          { "photoId": "p016", "expectedCurrent": "undecided" },
-          { "photoId": "p017", "expectedCurrent": "undecided" },
-          { "photoId": "p018", "expectedCurrent": "undecided" },
-          { "photoId": "p019", "expectedCurrent": "undecided" },
-          { "photoId": "p020", "expectedCurrent": "undecided" },
-          { "photoId": "p021", "expectedCurrent": "undecided" },
-          { "photoId": "p022", "expectedCurrent": "undecided" },
-          { "photoId": "p023", "expectedCurrent": "undecided" },
-          { "photoId": "p024", "expectedCurrent": "undecided" },
-          { "photoId": "p025", "expectedCurrent": "undecided" },
-          { "photoId": "p026", "expectedCurrent": "undecided" },
-          { "photoId": "p027", "expectedCurrent": "undecided" },
-          { "photoId": "p028", "expectedCurrent": "undecided" },
-          { "photoId": "p029", "expectedCurrent": "undecided" },
-          { "photoId": "p030", "expectedCurrent": "undecided" },
-          { "photoId": "p031", "expectedCurrent": "undecided" },
-          { "photoId": "p032", "expectedCurrent": "undecided" },
-          { "photoId": "p033", "expectedCurrent": "undecided" },
-          { "photoId": "p034", "expectedCurrent": "undecided" },
-          { "photoId": "p035", "expectedCurrent": "undecided" },
-          { "photoId": "p036", "expectedCurrent": "undecided" },
-          { "photoId": "p037", "expectedCurrent": "undecided" },
-          { "photoId": "p038", "expectedCurrent": "undecided" },
-          { "photoId": "p039", "expectedCurrent": "undecided" },
-          { "photoId": "p040", "expectedCurrent": "undecided" },
-          { "photoId": "p041", "expectedCurrent": "undecided" },
-          { "photoId": "p042", "expectedCurrent": "undecided" },
-          { "photoId": "p043", "expectedCurrent": "undecided" },
-          { "photoId": "p044", "expectedCurrent": "undecided" },
-          { "photoId": "p045", "expectedCurrent": "undecided" },
-          { "photoId": "p046", "expectedCurrent": "undecided" },
-          { "photoId": "p047", "expectedCurrent": "undecided" },
-          { "photoId": "p048", "expectedCurrent": "undecided" },
-          { "photoId": "p049", "expectedCurrent": "undecided" },
-          { "photoId": "p050", "expectedCurrent": "undecided" },
-          { "photoId": "p051", "expectedCurrent": "undecided" },
-          { "photoId": "p052", "expectedCurrent": "undecided" },
-          { "photoId": "p053", "expectedCurrent": "undecided" },
-          { "photoId": "p054", "expectedCurrent": "undecided" },
-          { "photoId": "p055", "expectedCurrent": "undecided" },
-          { "photoId": "p056", "expectedCurrent": "undecided" },
-          { "photoId": "p057", "expectedCurrent": "undecided" },
-          { "photoId": "p058", "expectedCurrent": "undecided" },
-          { "photoId": "p059", "expectedCurrent": "undecided" },
-          { "photoId": "p060", "expectedCurrent": "undecided" },
-          { "photoId": "p061", "expectedCurrent": "undecided" },
-          { "photoId": "p062", "expectedCurrent": "undecided" },
-          { "photoId": "p063", "expectedCurrent": "undecided" },
-          { "photoId": "p064", "expectedCurrent": "undecided" },
-          { "photoId": "p065", "expectedCurrent": "undecided" },
-          { "photoId": "p066", "expectedCurrent": "undecided" },
-          { "photoId": "p067", "expectedCurrent": "undecided" },
-          { "photoId": "p068", "expectedCurrent": "undecided" },
-          { "photoId": "p069", "expectedCurrent": "undecided" },
-          { "photoId": "p070", "expectedCurrent": "undecided" },
-          { "photoId": "p071", "expectedCurrent": "undecided" },
-          { "photoId": "p072", "expectedCurrent": "undecided" },
-          { "photoId": "p073", "expectedCurrent": "undecided" },
-          { "photoId": "p074", "expectedCurrent": "undecided" },
-          { "photoId": "p075", "expectedCurrent": "undecided" },
-          { "photoId": "p076", "expectedCurrent": "undecided" },
-          { "photoId": "p077", "expectedCurrent": "undecided" },
-          { "photoId": "p078", "expectedCurrent": "undecided" },
-          { "photoId": "p079", "expectedCurrent": "undecided" },
-          { "photoId": "p080", "expectedCurrent": "undecided" },
-          { "photoId": "p081", "expectedCurrent": "undecided" },
-          { "photoId": "p082", "expectedCurrent": "undecided" },
-          { "photoId": "p083", "expectedCurrent": "undecided" },
-          { "photoId": "p084", "expectedCurrent": "undecided" },
-          { "photoId": "p085", "expectedCurrent": "undecided" },
-          { "photoId": "p086", "expectedCurrent": "undecided" },
-          { "photoId": "p087", "expectedCurrent": "undecided" },
-          { "photoId": "p088", "expectedCurrent": "undecided" },
-          { "photoId": "p089", "expectedCurrent": "undecided" },
-          { "photoId": "p090", "expectedCurrent": "undecided" },
-          { "photoId": "p091", "expectedCurrent": "undecided" },
-          { "photoId": "p092", "expectedCurrent": "undecided" },
-          { "photoId": "p093", "expectedCurrent": "undecided" },
-          { "photoId": "p094", "expectedCurrent": "undecided" },
-          { "photoId": "p095", "expectedCurrent": "undecided" },
-          { "photoId": "p096", "expectedCurrent": "undecided" },
-          { "photoId": "p097", "expectedCurrent": "undecided" },
-          { "photoId": "p098", "expectedCurrent": "undecided" },
-          { "photoId": "p099", "expectedCurrent": "undecided" },
-          { "photoId": "p100", "expectedCurrent": "undecided" },
-          { "photoId": "p101", "expectedCurrent": "undecided" }
+          {
+            "photoId": "00000000-0000-4000-8000-000000000001",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000002",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000003",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000004",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000005",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000006",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000007",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000008",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000009",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000010",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000011",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000012",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000013",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000014",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000015",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000016",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000017",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000018",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000019",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000020",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000021",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000022",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000023",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000024",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000025",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000026",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000027",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000028",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000029",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000030",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000031",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000032",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000033",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000034",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000035",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000036",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000037",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000038",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000039",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000040",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000041",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000042",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000043",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000044",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000045",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000046",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000047",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000048",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000049",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000050",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000051",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000052",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000053",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000054",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000055",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000056",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000057",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000058",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000059",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000060",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000061",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000062",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000063",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000064",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000065",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000066",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000067",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000068",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000069",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000070",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000071",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000072",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000073",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000074",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000075",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000076",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000077",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000078",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000079",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000080",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000081",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000082",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000083",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000084",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000085",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000086",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000087",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000088",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000089",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000090",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000091",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000092",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000093",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000094",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000095",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000096",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000097",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000098",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000099",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000100",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000101",
+            "expectedCurrent": "undecided"
+          }
         ]
       },
       "error": "Invalid Photo state batch"

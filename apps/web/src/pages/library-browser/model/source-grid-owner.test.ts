@@ -1516,6 +1516,31 @@ describe("SourceGridOwner", () => {
     owner.dispose();
   });
 
+  test("keeps every fact in a clamped tail window after trim", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 400));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 400));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    owner.ensureRange(0, 400, { kind: "grid", authority });
+    await flushTasks();
+    owner.ensureRange(0, 60, { kind: "grid", authority });
+    owner.ensureRange(340, 400, { kind: "grid", authority });
+    await flushTasks();
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(240);
+    expect(owner.photoAt(340)?.id).toBe("photo-340");
+    expect(owner.photoAt(399)?.id).toBe("photo-399");
+    owner.dispose();
+  });
+
   test("clamps pathological range reports and keeps the fixed floor", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

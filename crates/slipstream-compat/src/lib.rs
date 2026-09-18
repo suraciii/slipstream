@@ -820,14 +820,16 @@ mod tests {
             .expect("over-limit invalid request example");
         let over_limit_photos = over_limit["body"]["photos"].as_array().unwrap();
         assert_eq!(over_limit_photos.len(), 101);
-        assert_eq!(
-            over_limit_photos
-                .iter()
-                .filter_map(|photo| photo["photoId"].as_str())
-                .collect::<BTreeSet<_>>()
-                .len(),
-            101
-        );
+        let over_limit_ids = over_limit_photos
+            .iter()
+            .filter_map(|photo| photo["photoId"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(over_limit_ids.len(), 101);
+        assert!(over_limit_ids.iter().all(|id| {
+            id.len() == 36
+                && id.starts_with("00000000-0000-4000-8000-")
+                && id[24..].chars().all(|character| character.is_ascii_digit())
+        }));
 
         let malformed = contract["malformedResponses"]
             .as_array()

@@ -2699,7 +2699,7 @@ export function mountLibraryBrowser(
         }
         const believedState = multiExpectedSelection.get(photoId);
         const { start } = sourceGrid.describeWindow(index);
-        if (!loadedWindows.has(start)) {
+        const refreshWindow = async () => {
           sourceGrid.invalidateWindow(index);
           const loaded = await loadWindow(
             index,
@@ -2707,20 +2707,30 @@ export function mountLibraryBrowser(
             true,
             "high",
           );
-          if (!loaded || !sourceGrid.isCurrent(sourceAuthority)) {
-            failed = true;
-            break;
-          }
+          if (!loaded || !sourceGrid.isCurrent(sourceAuthority)) return false;
           loadedWindows.add(start);
+          return true;
+        };
+        if (!loadedWindows.has(start) && !(await refreshWindow())) {
+          failed = true;
+          break;
         }
-        const refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+        let refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+        if (refreshedIndex === undefined && !(await refreshWindow())) {
+          failed = true;
+          break;
+        }
+        refreshedIndex = sourceGrid.findPhotoIndex(photoId);
         const photo =
           refreshedIndex === undefined
             ? undefined
             : sourceGrid.photoAt(refreshedIndex);
+        // Only the position lookup above can prove that a Photo disappeared.
+        // A missing retained fact is cache pressure, not a Library deletion;
+        // keep the Photo retryable if a second refresh still cannot retain it.
         if (!photo) {
-          becameMissing.add(photoId);
-          continue;
+          failed = true;
+          break;
         }
         if (
           believedState !== undefined &&

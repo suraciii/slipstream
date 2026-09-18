@@ -514,8 +514,15 @@ export function createSourceGridOwner(
         total,
         visibleRange.start + span + WINDOW_SIZE,
       );
+      // Keep the clamped tail aligned to its actual final window. For every
+      // other anchor, retain the ordinary aligned window used by Photo-owned
+      // trimming.
       const anchorStart =
-        anchor === undefined ? undefined : alignedStart(anchor);
+        anchor === undefined
+          ? undefined
+          : anchor + WINDOW_SIZE >= total
+            ? Math.max(0, total - WINDOW_SIZE)
+            : alignedStart(anchor);
       const anchorEnd =
         anchorStart === undefined
           ? undefined
