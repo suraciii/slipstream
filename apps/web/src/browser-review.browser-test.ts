@@ -9821,6 +9821,58 @@ test("Photo View shows a bounded filmstrip of neighbors and navigates through it
   );
 });
 
+test("a Photo View navigation binds again the strip thumbnails it detached mid-transfer", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 8);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+
+  // Hold the first round of thumbnail bytes: the transfers are in flight when
+  // the navigation detaches them, which is exactly the state a visit loses.
+  let releaseImages!: () => void;
+  const imagesReleased = new Promise<void>((resolve) => {
+    releaseImages = resolve;
+  });
+  let holdImages = true;
+  await page.route("**/api/derivatives/*/thumbnail/*", async (route) => {
+    if (holdImages) await imagesReleased;
+    await route.continue();
+  });
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="0"]').click();
+  await waitForLoadedReviewImage(page);
+  const strip = page.locator("[data-filmstrip]");
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(3);
+
+  // One navigation keeps the strip's retained entries while handing their
+  // in-flight transfers back to the owner.
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator("[data-position]")).toHaveText("2 / 8");
+  await waitForLoadedReviewImage(page);
+  expect(await filmstripIndices(page)).toEqual([0, 1, 2, 3]);
+
+  holdImages = false;
+  releaseImages();
+
+  // Every entry — retained or newly built — must present its own Photo's
+  // image instead of staying blank for the rest of the visit.
+  await waitForFilmstripImages(page);
+  await expect(strip.locator(".filmstrip-cell img")).toHaveCount(4);
+  const sources = await strip
+    .locator(".filmstrip-cell img")
+    .evaluateAll((images) =>
+      images.map((image) => image.getAttribute("src") ?? ""),
+    );
+  expect(sources).toHaveLength(4);
+  sources.forEach((source, index) => {
+    expect(source).toContain(`/api/derivatives/${ids[index]}/thumbnail/`);
+  });
+});
+
 test("the filmstrip marks the current Photo and keeps its decisions truthful", async ({
   page,
 }) => {

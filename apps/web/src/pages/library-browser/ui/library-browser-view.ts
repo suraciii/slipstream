@@ -1791,6 +1791,19 @@ export function createLibraryBrowserView(
       if (!rendered) {
         rendered = buildFilmstripCell(cell, model.total);
         renderedFilmstripCells.set(cell.index, rendered);
+      } else if (
+        rendered.thumbnail &&
+        !rendered.deliveryFailed &&
+        !rendered.button.querySelector("img")?.getAttribute("src")
+      ) {
+        // A navigation hands the entry's in-flight thumbnail transfer back to
+        // the owner and drops its source, while the retained entry keeps its
+        // signature so the build path never runs again for it. Bind the
+        // thumbnail it still holds again instead of leaving the entry blank
+        // for the rest of the visit. A binding whose delivery already failed
+        // is left alone, so a failure cannot become a request on every
+        // render.
+        bindThumbnail(rendered.thumbnail);
       }
       // Appending an entry the strip already holds keeps its image element,
       // so a moved entry never restarts its thumbnail transfer.
