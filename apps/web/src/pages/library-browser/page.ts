@@ -114,6 +114,13 @@ export function mountLibraryBrowser(
         sourceGrid.setPhotoPreview(authority, index, photoId, preview),
       patchSelection: (authority, index, photoId, selectionState) =>
         sourceGrid.setPhotoSelection(authority, index, photoId, selectionState),
+      applyBatchSelection: (authority, photoId, priorValue, selectionState) =>
+        sourceGrid.applyBatchSelection(
+          authority,
+          photoId,
+          priorValue,
+          selectionState,
+        ),
       patchRating: (authority, index, photoId, rating) =>
         sourceGrid.setPhotoRating(authority, index, photoId, rating),
       trimFacts: (authority, anchor) => {
@@ -301,6 +308,20 @@ export function mountLibraryBrowser(
   let connectionEstablished = false;
   let pageBusy = false;
   let photoRetryPending = false;
+  // The Grid's multi-selection is session state of the open source: the
+  // stable Photo identities the Photographer marked, the anchor a range
+  // extends from, and whether Select mode makes every cell activation toggle
+  // its Photo instead of opening it. Opening or reopening a source clears it.
+  // One batch addresses at most MULTI_SELECTION_LIMIT Photos: the Grid refuses
+  // to grow the selection past the bound the server enforces, so an invalid
+  // batch can never be built.
+  const MULTI_SELECTION_LIMIT = 100;
+  let multiSelection = new Set<string>();
+  let multiAnchorId: string | undefined;
+  let selectMode = false;
+  // One batch Add to Album in flight. Membership stays outside the Undo
+  // contract, so it never touches the pending Undo description.
+  let batchAlbumPending = false;
   const canOpenGridPhoto = () =>
     sourceGrid.isReady(sourceGrid.authority) &&
     !pageBusy &&
@@ -1047,6 +1068,7 @@ export function mountLibraryBrowser(
         ...(operation?.status ? { status: operation.status } : {}),
       });
     }
+    renderBatchAlbums();
   };
 
   const openAlbumForm = (form: AlbumFormReference): void => {
@@ -1271,6 +1293,10 @@ export function mountLibraryBrowser(
     recoveryGate.succeedTransition(photoTransition);
     syncConnection();
     view.prepareSourceOpen(sourceGrid.name);
+    // The multi-selection names Photos of the source that was open: a new
+    // source starts empty, and its bar presents nothing until the
+    // Photographer marks Photos again.
+    clearMultiSelection();
     renderSortControl();
     try {
       const opened = await pendingOpen;
@@ -1413,6 +1439,10 @@ export function mountLibraryBrowser(
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
     pageBusy = true;
+    // A reopen builds a new Snapshot of the same source, so the
+    // multi-selection starts empty here too; the render after the reopen
+    // clears the markers on the retained cells.
+    clearMultiSelection();
     updateControls();
     const resumePhoto = photoOwner.active;
     const resumeIndex = photoOwner.currentIndex;
@@ -1735,11 +1765,110 @@ export function mountLibraryBrowser(
     view.renderGrid(
       {
         total: sourceGrid.total,
+        multi: {
+          mode: selectMode,
+          count: multiSelection.size,
+          limit: MULTI_SELECTION_LIMIT,
+          // A batch action is presented only while it would be admitted: the
+          // same source readiness, connection, and idle owner a Grid decision
+          // needs, so an activation is never refused silently.
+          enabled: connected && canOpenGridPhoto(),
+          selected: (index) => {
+            const photo = sourceGrid.photoAt(index);
+            return photo !== undefined && multiSelection.has(photo.id);
+          },
+        },
         photoAt: (index) => sourceGrid.photoAt(index),
       },
       position,
     );
     updateControls();
+  };
+
+  /// Presents the batch bar's Album choices from the bounded Album summary.
+  const renderBatchAlbums = () => {
+    if (!applicationAlive) return;
+    view.renderBatchAlbums({
+      albums: application.albums.map(({ id, name }) => ({ id, name })),
+      pending: batchAlbumPending,
+    });
+  };
+
+  /// One Photo count with its noun, so every batch message reads correctly
+  /// for a single Photo and for many.
+  const photoCountText = (count: number): string =>
+    `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
+
+  /// Empties the Grid's multi-selection and leaves Select mode. The caller
+  /// owns the render, so a source open that clears it presents the cleared
+  /// Grid in its own render; the view is told here as well, because an open
+  /// that fails leaves the Grid its retained cells and must never keep a bar
+  /// or a marker for Photos that open no longer presents.
+  const clearMultiSelection = () => {
+    multiSelection = new Set();
+    multiAnchorId = undefined;
+    selectMode = false;
+    view.resetGridMultiSelection();
+  };
+
+  /// The shared refusal for a multi-selection that would pass the batch
+  /// bound: the bound is named, and the selection is left exactly as it was.
+  const refuseBeyondBatchBound = () => {
+    setDecisionStatus(
+      `A batch holds up to ${MULTI_SELECTION_LIMIT} Photos. Clear this selection, or remove Photos from it, first.`,
+    );
+  };
+
+  /// Toggles one Photo's membership of the multi-selection and moves the
+  /// anchor there, so a following shift-click extends from the last mark.
+  const toggleMultiSelection = (photoId: string) => {
+    if (!multiSelection.delete(photoId)) {
+      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
+        refuseBeyondBatchBound();
+        return;
+      }
+      multiSelection.add(photoId);
+    }
+    multiAnchorId = photoId;
+    renderGrid();
+  };
+
+  /// Extends the multi-selection over the loaded Photos between the anchor and
+  /// the clicked Photo. A position the Grid has not loaded cannot join, and an
+  /// anchor the Grid no longer holds makes the clicked Photo the new anchor.
+  /// An extension that would pass the batch bound is refused whole, so the
+  /// Grid never presents a selection its own batch would be refused for.
+  const extendMultiSelection = (index: number, photoId: string) => {
+    const anchorIndex =
+      multiAnchorId === undefined
+        ? undefined
+        : sourceGrid.findPhotoIndex(multiAnchorId);
+    if (anchorIndex === undefined) {
+      if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
+        refuseBeyondBatchBound();
+        return;
+      }
+      multiSelection.add(photoId);
+      multiAnchorId = photoId;
+      renderGrid();
+      return;
+    }
+    const joined: string[] = [];
+    for (
+      let position = Math.min(anchorIndex, index);
+      position <= Math.max(anchorIndex, index);
+      position += 1
+    ) {
+      const photo = sourceGrid.photoAt(position);
+      if (photo && !multiSelection.has(photo.id)) joined.push(photo.id);
+    }
+    if (multiSelection.size + joined.length > MULTI_SELECTION_LIMIT) {
+      refuseBeyondBatchBound();
+      return;
+    }
+    for (const photoIdToAdd of joined) multiSelection.add(photoIdToAdd);
+    multiAnchorId = photoId;
+    renderGrid();
   };
 
   const openPhoto = async (index: number) => {
@@ -2305,8 +2434,124 @@ export function mountLibraryBrowser(
       updateControls();
     }
   };
+  /// Applies one Selection State to every multi-selected Photo as one bounded
+  /// change. The write shares the Photo View and Grid admission, the
+  /// one-level Undo, and every failure rule; the multi-selection stays, so the
+  /// Photographer can decide again or add the same Photos to an Album.
+  const mutateGridBatch = async (value: SelectionState) => {
+    if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
+      return;
+    const photoIds = [...multiSelection];
+    if (photoIds.length === 0) return;
+    const admission = photoOwner.mutateBatch(photoIds, value);
+    if (!admission) return;
+    renderGrid();
+    setDecisionStatus(`Saving ${photoCountText(photoIds.length)}…`);
+    const outcome = await admission.settlement;
+    // The write settled, so the Grid is interactive again whatever the
+    // outcome; the merged render re-enables the bar and rebuilds the decided
+    // cells in place. A detached write stays silent.
+    renderGrid();
+    if (outcome.kind === "detached") return;
+    if (outcome.kind === "failed") {
+      if (outcome.failure === "answered") {
+        setDecisionStatus(
+          outcome.status === 409
+            ? "Those Photos changed elsewhere. Retry to confirm their current state."
+            : // Only an over-limit batch answers 400; the client caps the
+              // selection, so the bound clause stays off every other answered
+              // failure it cannot have caused.
+              outcome.status === 400
+              ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
+              : "The change could not be saved.",
+        );
+      } else {
+        setDecisionStatus(
+          "Connection lost before the change was confirmed. Retry to refresh.",
+        );
+      }
+      if (outcome.connectivity === "lost")
+        failPhotoRecovery(photoOwner.authority, "photo-write");
+      updateControls();
+      return;
+    }
+    const applied = outcome.applied.length;
+    const conflicts = outcome.conflicts.length;
+    const decision = value === "selected" ? "selected" : "rejected";
+    // A conflict is a Photo the current Library no longer holds: the batch
+    // wrote no fact for it, so the Grid reports exactly that and claims no
+    // knowledge of any state it never refreshed.
+    setDecisionStatus(
+      conflicts === 0
+        ? `${photoCountText(applied)} ${decision}.`
+        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} no longer in this Library.`,
+    );
+    updateControls();
+  };
+  /// Adds every multi-selected Photo to one Album through the bounded
+  /// membership route. Membership stays outside the Undo contract, and the
+  /// multi-selection stays so the same Photos can join another Album.
+  const batchAddToAlbum = async (albumId: string) => {
+    if (!applicationAlive || batchAlbumPending || !albumId) return;
+    if (multiSelection.size === 0) return;
+    if (!application.albums.some((album) => album.id === albumId)) return;
+    const photoIds = [...multiSelection];
+    const name = membershipAlbumName(albumId);
+    batchAlbumPending = true;
+    renderBatchAlbums();
+    setDecisionStatus(
+      `Adding ${photoCountText(photoIds.length)} to “${name}”…`,
+    );
+    const result = await mutateAlbum(
+      (context) => albumActions.addMemberships(albumId, photoIds, context),
+      "summary",
+    );
+    batchAlbumPending = false;
+    if (!applicationAlive) return;
+    renderBatchAlbums();
+    // A superseded or already admitted batch reports nothing: the action that
+    // owns the settlement presents its own outcome.
+    if (!result.admitted) return;
+    setDecisionStatus(
+      result.ok
+        ? `${photoCountText(photoIds.length)} added to “${name}”.`
+        : `Could not add the selected Photos to “${name}”.`,
+    );
+  };
+  /// Restores every Photo one batch Selection State change confirmed. The
+  /// writes are the same compare-and-set writes a single Undo sends, one
+  /// Photo at a time, and the Grid stays where it is: a batch never opened a
+  /// Photo, so nothing navigates.
+  const performBatchUndo = async () => {
+    const preparation = photoOwner.prepareBatchUndo();
+    if (!preparation) return;
+    updateControls();
+    setDecisionStatus(`Restoring ${photoCountText(preparation.count)}…`);
+    const outcome = await photoOwner.performBatchUndo(preparation);
+    renderGrid();
+    updateControls();
+    if (outcome.kind === "detached") return;
+    if (outcome.connectivity === "lost")
+      failPhotoRecovery(photoOwner.authority, "undo");
+    const restored = outcome.restored.length;
+    const conflicts = outcome.conflicts.length;
+    const failed = outcome.failed.length;
+    setDecisionStatus(
+      failed > 0
+        ? `${photoCountText(restored)} restored. ${photoCountText(failed)} not restored; Undo again to retry.`
+        : conflicts > 0
+          ? `${photoCountText(restored)} restored. ${photoCountText(conflicts)} could not be restored because ${conflicts === 1 ? "it changed" : "they changed"} elsewhere.`
+          : `${photoCountText(restored)} restored.`,
+    );
+  };
   const performUndo = async () => {
     if (!connected || pageBusy) return;
+    // One Undo control covers the one-level change: a pending batch restores
+    // in place, and a pending single decision keeps its own path.
+    if (photoOwner.undoBatch) {
+      await performBatchUndo();
+      return;
+    }
     const targetPhotoId = photoOwner.undoPhotoId;
     if (!targetPhotoId) return;
     const sourceAuthority = sourceGrid.authority;
@@ -2750,8 +2995,37 @@ export function mountLibraryBrowser(
         if (sourceGrid.isCurrent(authority)) renderGrid(position);
         return;
       }
-      case "open-photo":
+      case "open-photo": {
+        const photo = sourceGrid.photoAt(intent.index);
+        if (!photo) return;
+        // A modifier always wins: a shift-click extends a range even in
+        // Select mode, where a plain activation toggles its Photo.
+        if (intent.range) {
+          extendMultiSelection(intent.index, photo.id);
+          return;
+        }
+        if (selectMode || intent.toggle) {
+          toggleMultiSelection(photo.id);
+          return;
+        }
         void openPhoto(intent.index);
+        return;
+      }
+      case "grid-select-mode":
+        if (selectMode === intent.mode) return;
+        selectMode = intent.mode;
+        renderGrid();
+        return;
+      case "grid-multi-clear":
+        if (multiSelection.size === 0 && !selectMode) return;
+        clearMultiSelection();
+        renderGrid();
+        return;
+      case "grid-batch-mutation":
+        void mutateGridBatch(intent.value);
+        return;
+      case "grid-batch-album-add":
+        void batchAddToAlbum(intent.albumId);
         return;
       case "show-grid":
         showGrid();

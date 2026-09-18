@@ -358,6 +358,82 @@ describe("SourceGridOwner", () => {
     });
   });
 
+  test("moves the counts for one confirmed batch outcome by Photo identity", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+        );
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(windowResponse(0, 10, 10));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner, "browse-1");
+    const authority = owner.authority;
+    const loaded = await owner.loadWindow(0, { kind: "source", authority });
+    expect(loaded.kind).toBe("loaded");
+    const first = owner.photoAt(0)!;
+    const second = owner.photoAt(1)!;
+
+    // A loaded Photo is patched and moves the counts by the state the Grid
+    // believed, whatever prior the server reported for it.
+    expect(
+      owner.applyBatchSelection(authority, first.id, "rejected", "selected"),
+    ).toBe(true);
+    expect(owner.photoAt(0)?.selectionState).toBe("selected");
+    expect(owner.selectionCounts).toEqual({
+      selected: 4,
+      rejected: 1,
+      undecided: 5,
+    });
+    // A Photo the Grid no longer holds still moves the counts once, by the
+    // server's own prior value.
+    expect(
+      owner.applyBatchSelection(
+        authority,
+        "evicted-photo",
+        "undecided",
+        "selected",
+      ),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 5,
+      rejected: 1,
+      undecided: 4,
+    });
+    // A confirmed outcome moves a loaded fact and its counts once; applying
+    // the same outcome again changes nothing.
+    expect(
+      owner.applyBatchSelection(authority, second.id, "undecided", "selected"),
+    ).toBe(true);
+    expect(owner.photoAt(1)?.selectionState).toBe("selected");
+    expect(owner.selectionCounts).toEqual({
+      selected: 6,
+      rejected: 1,
+      undecided: 3,
+    });
+    expect(
+      owner.applyBatchSelection(authority, second.id, "undecided", "selected"),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 6,
+      rejected: 1,
+      undecided: 3,
+    });
+    // A batch outcome outside the open source authority is refused.
+    const stale = owner.authority;
+    await owner.open({ kind: "library" });
+    expect(
+      owner.applyBatchSelection(stale, first.id, "undecided", "selected"),
+    ).toBe(false);
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 1,
+      undecided: 6,
+    });
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

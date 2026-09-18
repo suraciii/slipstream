@@ -1,5 +1,6 @@
 import {
   addAlbumMember,
+  addAlbumMembers,
   addFolderToAlbum,
   createAlbum,
   deleteAlbum,
@@ -103,6 +104,12 @@ export interface AlbumActionOwner {
   addMembership(
     albumId: string,
     photoId: string,
+    context: AlbumActionContext,
+  ): AlbumActionAdmission | undefined;
+  /// Adds every named Photo as one bounded membership batch.
+  addMemberships(
+    albumId: string,
+    photoIds: ReadonlyArray<string>,
     context: AlbumActionContext,
   ): AlbumActionAdmission | undefined;
   addFolderMembers(
@@ -313,6 +320,16 @@ export function createAlbumActionOwner(
         () => "The Photo could not be added to the Album.",
         { admissionKey: membershipKey("add", albumId, photoId) },
       ),
+    addMemberships: (albumId, photoIds, context) => {
+      const admissionKey = `add-many:${albumId}:${[...photoIds].sort().join(",")}`;
+      return start(
+        admissionKey,
+        context,
+        () => addAlbumMembers(fetcher, albumId, photoIds),
+        () => "The Photos could not be added to the Album.",
+        { admissionKey },
+      );
+    },
     addFolderMembers: (albumId, folderPath, publication, context) =>
       start(
         folderMembershipKey(albumId, folderPath, publication),
