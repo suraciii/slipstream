@@ -62,6 +62,74 @@ When a short viewport cannot show a usable Preview and every control at once, Ph
 
 Clear must be unavailable while the current Photo is already `undecided`. Undo must be unavailable until the current source has an undoable Selection State or Rating change.
 
+## Mobile Photo View Quick Actions
+
+Photographers often cull on a phone with one hand. A mobile Photo View must
+therefore keep the frequent actions near the Preview while leaving metadata,
+Album management, and detailed inspection reachable without competing for the
+same primary space.
+
+At supported narrow or short-landscape touch viewports, Photo View must provide
+one safe-area-aware **Quick Action Dock**. The Dock must present these
+high-frequency culling actions in this order:
+
+1. **Reject**;
+2. the current **Rating**; and
+3. **Select**.
+
+The Dock must remain available while Photo View scrolls through secondary
+content, must not cover the Preview or clip a control, and must give every
+visible action at least a 44 by 44 CSS-pixel target including the device
+safe-area inset. Select and Reject follow the Selection State rules and
+persistence ordering defined below.
+
+The Dock must also provide a visible **More** affordance that opens the mobile
+**Secondary Sheet**. The Sheet is the lower-frequency and supporting action
+surface. It must provide, without changing their existing semantics:
+
+- **Previous** and **Next** navigation;
+- **Clear** and **Undo**;
+- Capture Details;
+- Album membership and membership management; and
+- the complete Preview Zoom controls, including Fit, zoom out, the slider,
+  zoom in, and 100%.
+
+Previous and Next are navigation only. They must not imply a Selection State
+change. They remain separate controls in the Secondary Sheet rather than being
+combined with Select or Reject.
+
+The Secondary Sheet must be an accessible bottom surface with a programmatic
+name, a close action, and a bounded focus scope while it is open. Opening it
+must move focus to its first available control. Closing it by its close action,
+Escape, the platform back action, or its scrim must return focus to More when
+More remains available. While open, the underlying Photo View must not receive
+focus or pointer actions. Opening the Sheet cancels a pending or open Rating
+Wheel without a mutation. A failure loading Details or Album membership must
+remain isolated from Preview, Rating, Selection State, and navigation
+readiness.
+
+The action hierarchy is:
+
+```text diagram
+Photo View
+├── Preview
+├── Quick Action Dock: Reject · Rating · Select · More
+└── Secondary Sheet: Previous · Next · Clear · Undo · Details · Albums · Zoom
+```
+
+The Rating entry must communicate the current Rating and must provide a direct
+activation path to explicit controls for `0` through `5`. Selecting a value from
+that path uses the same Rating persistence and Undo rules as every other Rating
+control. At any moment, only one explicit Rating control group is active: the
+Dock entry or the path it opens. The touch-only Rating Wheel is an accelerator
+and must not replace either explicit path.
+
+The mobile action hierarchy must not create a new source, Photo, Album, Review
+Session, global frontend store, Rating store, or Undo model, and must not add an
+HTTP endpoint. The Wheel must reuse the existing Photo owner Rating mutation
+through the existing `/state` path. Wide desktop layouts may keep their
+existing grouping when the same controls and semantics remain available.
+
 ## Source Order
 
 Each source owns one order:
@@ -434,7 +502,113 @@ can hover must not show them outside an in-progress decision drag.
 
 A committed swipe advances to the next Photo after the decision is accepted.
 
-Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses explicit controls. Slipstream must provide visible controls equivalent to swipe actions.
+Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses the explicit controls required below and may use the touch-only Rating Wheel defined in Mobile Photo View Quick Actions. Slipstream must provide visible controls equivalent to swipe actions.
+
+### Rating Wheel
+
+The Rating Wheel is an optional touch accelerator for the current Photo. It is
+available only while the Preview is in Fit, the current Photo is connected and
+ready for decisions, and no other Photo mutation is settling. A mouse pointer
+must not open it. Grid View must not acquire a Rating Wheel or any other
+long-press action as part of this contract.
+
+The touch ownership states are:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> PendingPress: touch pointerdown on Fit Preview
+  PendingPress --> Swipe: horizontal movement first
+  PendingPress --> Scroll: vertical movement first
+  PendingPress --> Pinch: second pointer first
+  PendingPress --> WheelOpen: 450 ms hold
+  WheelOpen --> WheelOpen: move across rating sector
+  WheelOpen --> Idle: cancel, Photo change, disconnect, pointercancel
+  WheelOpen --> Saving: release with candidate
+  Saving --> Idle: accepted
+  Saving --> RetryableFailure: answered error, conflict, malformed response, or transport loss
+  RetryableFailure --> Saving: retry current Rating
+  Swipe --> Idle
+  Scroll --> Idle
+  Pinch --> Idle
+```
+
+A touch pointer that begins on the Preview enters a pending long-press
+candidate. The candidate uses these initial product thresholds:
+
+- the pointer must remain within 12 CSS pixels of its starting point; and
+- it must remain stable for 450 milliseconds.
+
+The thresholds are interaction behavior, not a user setting. A later device
+qualification may propose new thresholds only through a Product Spec change.
+
+A pointer release before 450 milliseconds cancels the candidate without a
+mutation. It leaves the existing double-tap detail-zoom behavior unchanged.
+Before the 450-millisecond threshold, once movement exceeds 12 CSS pixels, the
+larger absolute axis delta owns the gesture:
+
+- a horizontal-dominant movement cancels the candidate and gives the gesture
+  to the existing Select / Reject swipe;
+- a vertical-dominant movement cancels the candidate and gives the gesture to
+  natural Photo View scrolling;
+- an equal-axis movement cancels the candidate and gives the gesture to
+  natural scrolling;
+- a second pointer cancels the candidate and gives the gesture to Pinch Zoom;
+- pointer cancellation, Photo change, source change, disconnect, or a
+  superseding UI generation cancels the candidate without a mutation.
+
+When the threshold is reached, Slipstream opens a transient Rating Wheel near
+the starting point. The Wheel must adapt inward when the starting point is
+near an edge or safe-area inset. It must expose exactly six candidates: `0`,
+`1`, `2`, `3`, `4`, and `5`; `0` means Clear Rating. The current Rating must
+be highlighted, and the candidate under the pointer must be communicated with
+its numeric and star meaning. A candidate highlight is presentation only; it
+must not persist while the pointer remains down.
+
+Moving between candidates may change the highlighted candidate any number of
+times, but it must never start a save. Releasing on one candidate must emit
+exactly one Rating value for that gesture and enter Saving once; duplicate
+pointer-up or late events must not create another Rating mutation.
+
+The Photographer selects a candidate by moving across the Wheel and commits it
+by releasing the pointer on a candidate. A release without a candidate, a
+pointer cancellation, a second pointer, a Photo change, or a disconnect closes
+the Wheel without changing Rating. A committed Rating must:
+
+- persist through the existing Photo Rating mutation;
+- leave Selection State, Album membership, Photo position, and saved Album
+  position unchanged; and
+- keep the current Photo open without automatically advancing to the next
+  Photo.
+
+While the Wheel is pending or open, the Preview must suppress the browser's
+context menu for that gesture. It must not suppress the browser context menu
+for an unrelated mouse interaction. The Wheel must provide a programmatic
+name, current candidate, and instruction that the Photographer must release
+to save. Existing visible Rating controls and keyboard shortcuts remain the
+accessible and non-gesture fallback.
+
+On a persistence failure or uncertain transport result, Slipstream must close
+the Wheel, keep the previous Rating visible, identify that the change was not
+confirmed, and expose the existing retry and connection-recovery path. The
+outcome rules are:
+
+- an accepted response may update the current Rating only with the server's
+  confirmed value;
+- an answered error or conflict keeps the previous Rating, identifies that the
+  Photo changed elsewhere or the action was rejected, and offers retry;
+- a malformed, incomplete, or otherwise untrusted response moves no Rating,
+  Selection State, Photo position, or Undo entry and offers retry; and
+- transport loss leaves the admitted change retryable without claiming whether
+  the server applied it, until the existing recovery path confirms the current
+  Photo state.
+
+If a newer Rating intent, Photo change, source change, disconnect, or teardown
+supersedes a save, the Photo owner must cancel or fence the older request. A
+late result for an obsolete Photo or obsolete intent must not repaint the
+current Photo's Rating or status and must not create a second Undo entry.
+Reduced-motion users must not need animation or haptic feedback to understand
+or complete the action.
 
 ## Preview Zoom and Fit
 
@@ -487,7 +661,7 @@ Changing Rating must not change Selection State. Selecting or rejecting a Photo 
 
 The Photographer must be able to set Rating through visible controls. Keyboard shortcuts `0` through `5` may provide the same behavior on devices with keyboards.
 
-Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. Zero must remain an explicit current value when the Photo has no Rating.
+Exactly one visible Rating control from zero through five must communicate the current Rating visually and programmatically. The mobile Rating entry and the explicit Rating path opened from it count as the same Rating control for this rule; the touch-only Rating Wheel is an accelerator and does not replace them. Zero must remain an explicit current value when the Photo has no Rating.
 
 Photo View must present a Photo with no Rating as `No rating` in its Rating
 fact. A rated Photo must present `<N> star` for one and `<N> stars`
@@ -695,6 +869,18 @@ A rescan discovers 100 new Photos while the Photographer is viewing the Library.
 The Photographer opens Photo 100. Slipstream prepares its review Preview first, then prepares Photos 101 and 99 with lower priority. Moving to Photo 101 normally reuses the completed cache entry.
 
 The Photographer drags a Photo to the right. A selected indicator grows with the drag. The Photographer releases after the commit threshold. Slipstream records `selected` and advances to the next Photo.
+
+On a Fit Preview, the Photographer holds a touch pointer still for 450
+milliseconds, slides to `4`, and releases. Slipstream saves exactly Rating `4`,
+leaves Selection State and Photo position unchanged, and keeps the Photo open.
+Holding while moving vertically first scrolls Photo View; moving horizontally
+first starts the existing Select / Reject swipe; adding a second pointer starts
+Pinch Zoom. None of those handoffs changes Rating.
+
+The Photographer releases the Wheel outside all six candidates. The Wheel
+closes without saving. If the save returns a conflict or malformed response,
+the prior Rating remains visible with retry; if the Photo changes before a late
+response arrives, that response is ignored.
 
 A Library contains `shoot/A.JPG` captured at `2026:01:01 10:00:00` and `shoot/Z.JPG` captured at `2026:01:01 09:00:00`. Grid and Photo navigation show `Z`, then `A`, even though the filenames sort in the opposite order.
 
