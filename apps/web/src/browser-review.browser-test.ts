@@ -3045,7 +3045,14 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
     "success",
   );
   expect(batchBodies).toEqual([
-    { photoIds: [ids[0], ids[1], ids[2]], selectionState: "selected" },
+    {
+      photos: [
+        { photoId: ids[0], expectedCurrent: "undecided" },
+        { photoId: ids[1], expectedCurrent: "undecided" },
+        { photoId: ids[2], expectedCurrent: "undecided" },
+      ],
+      selectionState: "selected",
+    },
   ]);
   for (const index of [0, 1, 2]) {
     await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
@@ -3205,7 +3212,10 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await waitForGridFrame(page);
 
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
-  const batchBodies: Array<{ photoIds: string[]; selectionState: string }> = [];
+  const batchBodies: Array<{
+    photos: Array<{ photoId: string; expectedCurrent: string }>;
+    selectionState: string;
+  }> = [];
   const undoWrites: string[] = [];
   page.on("request", (request) => {
     if (
@@ -3220,11 +3230,11 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   // current Library no longer holds while the fixture still does.
   await page.route("**/api/photos/state", async (route) => {
     const body = route.request().postDataJSON() as {
-      photoIds: string[];
+      photos: Array<{ photoId: string; expectedCurrent: string }>;
       selectionState: string;
     };
     batchBodies.push(body);
-    const requested = body.photoIds;
+    const requested = body.photos.map((photo) => photo.photoId);
     await post(running.url, `/api/photos/${requested[0]}/state`, {
       field: "selectionState",
       value: body.selectionState,
@@ -3241,11 +3251,13 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
                   priorValue: "selected",
                 },
               ],
-              conflicts: [],
+              changedElsewhere: [],
+              missing: [],
             }
           : {
               applied: [{ photoId: requested[0], priorValue: "undecided" }],
-              conflicts: [{ photoId: requested[1] }],
+              changedElsewhere: [],
+              missing: [{ photoId: requested[1] }],
             },
       ),
     });
@@ -3281,17 +3293,26 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
     "1 Photo rejected.",
   );
   expect(
-    batchBodies.map(({ photoIds, selectionState }) => ({
-      photoIds,
+    batchBodies.map(({ photos, selectionState }) => ({
+      photos,
       selectionState,
     })),
   ).toEqual([
-    { photoIds: [ids[0], ids[1]], selectionState: "selected" },
-    { photoIds: [ids[0]], selectionState: "rejected" },
+    {
+      photos: [
+        { photoId: ids[0], expectedCurrent: "undecided" },
+        { photoId: ids[1], expectedCurrent: "undecided" },
+      ],
+      selectionState: "selected",
+    },
+    {
+      photos: [{ photoId: ids[0], expectedCurrent: "selected" }],
+      selectionState: "rejected",
+    },
   ]);
 
-  // Only the confirmed Photo is undoable: the conflict is not part of the
-  // one-level description.
+  // Only the confirmed Photo is undoable: the missing Photo is not part of
+  // the one-level description.
   undoWrites.length = 0;
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Control+z");
@@ -3301,6 +3322,78 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   expect(undoWrites).toEqual([`/api/photos/${ids[0]}/state`]);
   await expect(cell(0).locator(".cell-state.selected")).toHaveText("✓");
   await page.unroute("**/api/photos/state");
+});
+
+test("Grid batch Review refreshes changed Photos before a retry", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  const bodies: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/photos/state"
+    )
+      bodies.push(request.postDataJSON() as Record<string, unknown>);
+  });
+
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await cell(1).click();
+  // Change one Photo after the browser captured its expected state. The real
+  // batch route must report it, not overwrite it.
+  await post(running.url, `/api/photos/${ids[0]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo selected. 1 Photo changed elsewhere. Review them before retrying.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeVisible();
+  await expect(cell(0).locator(".cell-state")).toHaveCount(0);
+  await expect(cell(1).locator(".cell-state.selected")).toHaveText("✓");
+
+  await page.getByRole("button", { name: "Review 1 Photo" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo reviewed. Retry the batch when ready.",
+  );
+  await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeHidden();
+
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos selected.",
+  );
+  expect(bodies).toEqual([
+    {
+      photos: [
+        { photoId: ids[0], expectedCurrent: "undecided" },
+        { photoId: ids[1], expectedCurrent: "undecided" },
+      ],
+      selectionState: "selected",
+    },
+    {
+      photos: [
+        { photoId: ids[0], expectedCurrent: "rejected" },
+        { photoId: ids[1], expectedCurrent: "selected" },
+      ],
+      selectionState: "selected",
+    },
+  ]);
 });
 
 test("Grid batch Add to Album adds every multi-selected Photo through one bounded write", async ({

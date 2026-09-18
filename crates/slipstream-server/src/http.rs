@@ -764,8 +764,9 @@ pub(crate) async fn mutate_photo_state(
 const ALBUM_PHOTO_IDS_MAX: usize = 100;
 
 /// One bounded batch Selection State write from the Grid's multi-selection.
-/// The request names the Photos; the response reports one outcome per Photo so
-/// the browser moves only confirmed facts and counts.
+/// Each item carries the Selection State the browser last confirmed for that
+/// Photo. The response reports one outcome per item so the browser moves only
+/// confirmed facts and counts.
 pub(crate) async fn mutate_photo_state_batch(
     State(state): State<HttpState>,
     request: Request<Body>,
@@ -774,17 +775,56 @@ pub(crate) async fn mutate_photo_state_batch(
         Ok(body) => body,
         Err(response) => return response,
     };
-    let photo_ids = match valid_ids(body.get("photoIds"), slipstream_core::PHOTO_STATE_BATCH_MAX) {
-        Some(photo_ids) if !photo_ids.is_empty() => photo_ids,
-        _ => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch"),
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
     };
-    let value = match body.get("selectionState").and_then(valid_selection) {
-        Some(value) => value,
-        None => return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch"),
+    if !has_exact_keys(body, &["selectionState", "photos"]) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+    }
+    let Some(value) = body.get("selectionState").and_then(valid_selection) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
     };
+    let Some(items) = body.get("photos").and_then(Value::as_array) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+    };
+    if items.is_empty() || items.len() > slipstream_core::PHOTO_STATE_BATCH_MAX {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+    }
+    let mut photos = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+        };
+        if !has_exact_keys(item, &["photoId", "expectedCurrent"]) {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+        }
+        let Some(photo_id) = item
+            .get("photoId")
+            .and_then(Value::as_str)
+            .filter(|photo_id| valid_id(photo_id))
+        else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+        };
+        let Some(expected_current) = item.get("expectedCurrent").and_then(valid_selection) else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+        };
+        photos.push(slipstream_core::PhotoStateBatchItem {
+            photo_id: photo_id.to_owned(),
+            expected_current,
+        });
+    }
+    if photos
+        .iter()
+        .map(|photo| &photo.photo_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != photos.len()
+    {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid Photo state batch");
+    }
     let result = state
         .application
-        .mutate_photo_state_batch(slipstream_core::PhotoStateBatchMutation { photo_ids, value })
+        .mutate_photo_state_batch(slipstream_core::PhotoStateBatchMutation { photos, value })
         .await;
     match result {
         Ok(result) => json_response(StatusCode::OK, &photo_state_batch_wire(&result)),
@@ -802,8 +842,16 @@ pub(crate) fn photo_state_batch_wire(result: &slipstream_core::PhotoStateBatchRe
                 "priorValue": selection_state(entry.prior_value),
             }))
             .collect::<Vec<_>>(),
-        "conflicts": result
-            .conflicts
+        "changedElsewhere": result
+            .changed_elsewhere
+            .iter()
+            .map(|entry| serde_json::json!({
+                "photoId": entry.photo_id,
+                "currentValue": selection_state(entry.current_value),
+            }))
+            .collect::<Vec<_>>(),
+        "missing": result
+            .missing
             .iter()
             .map(|entry| serde_json::json!({ "photoId": entry.photo_id }))
             .collect::<Vec<_>>(),
@@ -1041,6 +1089,10 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         .header(header::CONTENT_LENGTH, body.len())
         .body(Body::from(body))
         .expect("valid JSON response")
+}
+
+fn has_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {

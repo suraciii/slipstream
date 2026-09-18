@@ -327,7 +327,7 @@
       "classification": "malformed"
     },
     {
-      "name": "photo-state-batch-uses-obsolete-conflicts",
+      "name": "photo-state-batch-rejects-obsolete-conflicts-field",
       "kind": "photoStateBatch",
       "response": {
         "applied": [],

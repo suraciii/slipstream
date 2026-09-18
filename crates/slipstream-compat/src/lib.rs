@@ -754,7 +754,7 @@ mod tests {
                 assert_eq!(keys(item), BTreeSet::from(["photoId".to_owned()]));
                 assert!(outcome_ids.insert(item["photoId"].as_str().unwrap()));
             }
-            assert_eq!(outcome_ids.len(), requested_ids.len());
+            assert_eq!(outcome_ids, requested_ids);
         }
 
         let album_cases = contract["albumMembership"]

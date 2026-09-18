@@ -161,6 +161,14 @@ class FakeSource implements PhotoSourcePort {
   }
 }
 
+const batchPhotos = (source: FakeSource, ids: ReadonlyArray<string>) =>
+  ids.map((photoId) => ({
+    photoId,
+    expectedCurrent:
+      [...source.facts.values()].find((photo) => photo.id === photoId)
+        ?.selectionState ?? "undecided",
+  }));
+
 const bind = (source: FakeSource, fetcher: PhotoFetch) => {
   const owner = createPhotoOwner(fetcher, source);
   owner.bindSource({
@@ -794,7 +802,8 @@ describe("PhotoOwner", () => {
               { photoId: "photo-0", priorValue: "undecided" },
               { photoId: "photo-2", priorValue: "rejected" },
             ],
-            conflicts: [],
+            changedElsewhere: [],
+            missing: [],
           }),
         );
       return Promise.resolve(new Response(null, { status: 200 }));
@@ -806,16 +815,24 @@ describe("PhotoOwner", () => {
       albumId: "album-1",
     });
 
-    const admission = owner.mutateBatch(["photo-0", "photo-2"], "selected")!;
+    const admission = owner.mutateBatch(
+      batchPhotos(source, ["photo-0", "photo-2"]),
+      "selected",
+    )!;
     expect(owner.busy).toBe(true);
     // One write at a time still serializes a batch with every other write.
-    expect(owner.mutateBatch(["photo-1"], "selected")).toBeUndefined();
+    expect(
+      owner.mutateBatch(batchPhotos(source, ["photo-1"]), "selected"),
+    ).toBeUndefined();
     const outcome = await admission.settlement;
     expect(outcome.kind).toBe("persisted");
     expect(requests[0]).toEqual({
       path: "/api/photos/state",
       body: JSON.stringify({
-        photoIds: ["photo-0", "photo-2"],
+        photos: [
+          { photoId: "photo-0", expectedCurrent: "undecided" },
+          { photoId: "photo-2", expectedCurrent: "undecided" },
+        ],
         selectionState: "selected",
       }),
     });
@@ -880,7 +897,10 @@ describe("PhotoOwner", () => {
         Promise.resolve(
           Response.json({
             applied: [{ photoId: "photo-0", priorValue: "undecided" }],
-            conflicts: [{ photoId: "photo-1" }, { photoId: "photo-2" }],
+            changedElsewhere: [
+              { photoId: "photo-1", currentValue: "rejected" },
+            ],
+            missing: [{ photoId: "photo-2" }],
           }),
         ),
       source,
@@ -888,7 +908,7 @@ describe("PhotoOwner", () => {
     owner.bindSource({ sourceAuthority: source.authority, total: 3, index: 0 });
 
     const admission = owner.mutateBatch(
-      ["photo-0", "photo-1", "photo-2"],
+      batchPhotos(source, ["photo-0", "photo-1", "photo-2"]),
       "selected",
     )!;
     const outcome = await admission.settlement;
@@ -896,8 +916,10 @@ describe("PhotoOwner", () => {
     expect(outcome.kind === "persisted" && outcome.applied).toEqual([
       { photoId: "photo-0", priorValue: "undecided" },
     ]);
-    expect(outcome.kind === "persisted" && outcome.conflicts).toEqual([
-      { photoId: "photo-1" },
+    expect(outcome.kind === "persisted" && outcome.changedElsewhere).toEqual([
+      { photoId: "photo-1", currentValue: "rejected" },
+    ]);
+    expect(outcome.kind === "persisted" && outcome.missing).toEqual([
       { photoId: "photo-2" },
     ]);
     // A conflict means the current Library no longer holds that Photo, so the
@@ -935,7 +957,10 @@ describe("PhotoOwner", () => {
 
     // The batch clears it at admission, and a transport failure cannot prove
     // the batch did not commit, so the description stays consumed.
-    const batch = await owner.mutateBatch(["photo-1"], "rejected")!.settlement;
+    const batch = await owner.mutateBatch(
+      batchPhotos(source, ["photo-1"]),
+      "rejected",
+    )!.settlement;
     expect(batch.kind).toBe("failed");
     if (batch.kind === "failed") expect(batch.connectivity).toBe("lost");
     expect(owner.canUndo).toBe(false);
@@ -956,7 +981,8 @@ describe("PhotoOwner", () => {
               { photoId: "photo-0", priorValue: "undecided" },
               { photoId: "photo-1", priorValue: "undecided" },
             ],
-            conflicts: [],
+            changedElsewhere: [],
+            missing: [],
           }),
         );
       const status = statuses.shift() ?? 200;
@@ -968,7 +994,10 @@ describe("PhotoOwner", () => {
     }, source);
     owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
 
-    await owner.mutateBatch(["photo-0", "photo-1"], "selected")!.settlement;
+    await owner.mutateBatch(
+      batchPhotos(source, ["photo-0", "photo-1"]),
+      "selected",
+    )!.settlement;
     // The first Photo changed elsewhere, so its restore retires; the second
     // answered a service failure, so it stays part of the description.
     statuses = [409, 503];
@@ -1002,7 +1031,8 @@ describe("PhotoOwner", () => {
               { photoId: "photo-0", priorValue: "undecided" },
               { photoId: "photo-1", priorValue: "undecided" },
             ],
-            conflicts: [],
+            changedElsewhere: [],
+            missing: [],
           }),
         );
       }
@@ -1012,7 +1042,10 @@ describe("PhotoOwner", () => {
     }, source);
     owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
 
-    await owner.mutateBatch(["photo-0", "photo-1"], "selected")!.settlement;
+    await owner.mutateBatch(
+      batchPhotos(source, ["photo-0", "photo-1"]),
+      "selected",
+    )!.settlement;
     const outcome = await owner.performBatchUndo(owner.prepareBatchUndo()!);
     expect(outcome.kind).toBe("settled");
     expect(outcome.kind === "settled" && outcome.connectivity).toBe("lost");
@@ -1037,7 +1070,8 @@ describe("PhotoOwner", () => {
         return Promise.resolve(
           Response.json({
             applied: [{ photoId: "photo-1", priorValue: "undecided" }],
-            conflicts: [],
+            changedElsewhere: [],
+            missing: [],
           }),
         );
       return Promise.resolve(
@@ -1060,7 +1094,8 @@ describe("PhotoOwner", () => {
     expect(owner.undoBatch).toBe(false);
     expect(owner.undoPhotoId).toBe("photo-0");
     // A batch replaces the single description.
-    await owner.mutateBatch(["photo-1"], "selected")!.settlement;
+    await owner.mutateBatch(batchPhotos(source, ["photo-1"]), "selected")!
+      .settlement;
     expect(owner.undoBatch).toBe(true);
     expect(owner.undoPhotoId).toBeUndefined();
     // A same-source Snapshot replacement keeps the stable-identity batch.
@@ -1085,15 +1120,18 @@ describe("PhotoOwner", () => {
         Promise.resolve(
           Response.json({
             applied: [{ photoId: "photo-0", priorValue: "undecided" }],
-            conflicts: [],
+            changedElsewhere: [],
+            missing: [],
           }),
         ),
       source,
     );
     owner.bindSource({ sourceAuthority: source.authority, total: 2, index: 0 });
 
-    const outcome = await owner.mutateBatch(["photo-0", "photo-1"], "selected")!
-      .settlement;
+    const outcome = await owner.mutateBatch(
+      batchPhotos(source, ["photo-0", "photo-1"]),
+      "selected",
+    )!.settlement;
     expect(outcome.kind).toBe("failed");
     expect(outcome.kind === "failed" && outcome.failure).toBe("malformed");
     // An unreadable answer may still have committed, so the facts are not
@@ -1111,12 +1149,16 @@ describe("PhotoOwner", () => {
     owner.bindSource({ sourceAuthority: source.authority, total: 1, index: 0 });
 
     expect(owner.mutateBatch([], "selected")).toBeUndefined();
-    const admission = owner.mutateBatch(["photo-0"], "selected")!;
+    const admission = owner.mutateBatch(
+      batchPhotos(source, ["photo-0"]),
+      "selected",
+    )!;
     owner.dispose();
     held.resolve(
       Response.json({
         applied: [{ photoId: "photo-0", priorValue: "undecided" }],
-        conflicts: [],
+        changedElsewhere: [],
+        missing: [],
       }),
     );
     expect((await admission.settlement).kind).toBe("detached");

@@ -146,6 +146,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "grid-batch-mutation"; value: ViewSelectionState }>
   | Readonly<{ kind: "grid-batch-album-add"; albumId: string }>
   | Readonly<{ kind: "grid-batch-album-remove" }>
+  | Readonly<{ kind: "grid-batch-review" }>
   | Readonly<{
       kind:
         | "show-grid"
@@ -265,6 +266,7 @@ type GridPhotoViewModel = Readonly<{
 type GridBatchResultViewModel = Readonly<{
   tone: "success" | "warning" | "failure";
   message: string;
+  review?: Readonly<{ label: string }>;
   compensation?: Readonly<{ label: string }>;
 }>;
 
@@ -2201,7 +2203,9 @@ export function createLibraryBrowserView(
     const resultHidden = gridMultiResult === undefined;
     const resultText = gridMultiResult?.message ?? "";
     const compensation = gridMultiResult?.compensation;
-    const compensationHidden = resultHidden || compensation === undefined;
+    const review = gridMultiResult?.review;
+    const resultAction = compensation ?? review;
+    const compensationHidden = resultHidden || resultAction === undefined;
     if (batchCount.textContent !== countText)
       batchCount.textContent = countText;
     if (batchSource.textContent !== sourceText)
@@ -2214,8 +2218,9 @@ export function createLibraryBrowserView(
     if (batchResultText.textContent !== resultText)
       batchResultText.textContent = resultText;
     batchCompensate.hidden = compensationHidden;
-    if (compensation && batchCompensate.textContent !== compensation.label)
-      batchCompensate.textContent = compensation.label;
+    if (resultAction && batchCompensate.textContent !== resultAction.label)
+      batchCompensate.textContent = resultAction.label;
+    batchCompensate.dataset.action = compensation ? "compensate" : "review";
     if (gridMultiResult) batchResult.dataset.tone = gridMultiResult.tone;
     else batchResult.removeAttribute("data-tone");
 
@@ -2267,7 +2272,7 @@ export function createLibraryBrowserView(
     const albums = batchAlbumSelect.options.length > 0;
     batchAlbumSelect.disabled = !enabled || !albums;
     batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
-    batchCompensate.disabled = !enabled || compensation === undefined;
+    batchCompensate.disabled = !enabled || resultAction === undefined;
     if (enabled && heldBatchControl) {
       const control = heldBatchControl;
       heldBatchControl = null;
@@ -3410,7 +3415,11 @@ export function createLibraryBrowserView(
   });
   batchCompensate.addEventListener("click", () => {
     if (!alive || batchCompensate.disabled) return;
-    send({ kind: "grid-batch-album-remove" });
+    send(
+      batchCompensate.dataset.action === "review"
+        ? { kind: "grid-batch-review" }
+        : { kind: "grid-batch-album-remove" },
+    );
   });
   sortSelect.addEventListener("change", () => {
     if (!alive || sortSelect.disabled) return;

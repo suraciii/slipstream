@@ -32,7 +32,7 @@ These decisions are the implementation contract for this plan:
 6. Progress labels distinguish the active filtered sequence from counts over the complete source.
 7. No new global history abstraction, modal conflict workflow, or batch Undo endpoint is added.
 
-The current repository implements the older batch contract: existing Photos are last-writer-wins, missing Photos are the only batch conflicts, and Album membership writes return counts through the general Album summary response. Those contracts must change only in the slices below. The old executable route fixtures remain a transitional baseline during the contract PR because the route implementation changes in Slices 2 and 3; Slice 3 must retire the old `photoIds`/`conflicts` vectors and replace the old response golden before this Epic can be complete.
+The target contract uses optimistic expected Selection State comparison and identity-bearing Album membership results. The implementation slices below replace the former last-writer-wins and aggregate-only routes in dependency order. The executable compatibility vectors now use the target request and response shapes; the only retained `conflicts` example is a negative response-validation case that proves the obsolete field is rejected.
 
 ## Ownership and Delivery Rules
 
@@ -244,7 +244,7 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
 
-Slice 3 must retire or replace the executed Photo State `photoIds`/`conflicts` browse vectors and response golden when the optimistic request and response become live.
+Slice 3 replaces every executed Photo State batch request and response example with the optimistic `photos` items and `applied`/`changedElsewhere`/`missing` partition. No positive `photoIds`/`conflicts` batch contract remains.
 
 ### Request model
 

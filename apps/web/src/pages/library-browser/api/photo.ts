@@ -30,17 +30,23 @@ export type PhotoStateResult =
   | Readonly<{ kind: "malformed" }>;
 
 /// One bounded batch Selection State write. The server reports exactly one
-/// outcome per requested Photo: an applied entry carries the state the Photo
-/// held before the write, and a conflict means the current Library no longer
-/// holds that Photo. A Photo whose state changed elsewhere still takes the
-/// write, so a conflict never reports another Photo's state.
+/// non-overlapping outcome per requested Photo. A changed or missing Photo is
+/// not written and carries no fabricated local fact.
+export type PhotoStateBatchPhoto = Readonly<{
+  photoId: string;
+  expectedCurrent: SelectionState;
+}>;
+
 export type PhotoStateBatchResult =
   | Readonly<{
       kind: "persisted";
       applied: ReadonlyArray<
         Readonly<{ photoId: string; priorValue: SelectionState }>
       >;
-      conflicts: ReadonlyArray<Readonly<{ photoId: string }>>;
+      changedElsewhere: ReadonlyArray<
+        Readonly<{ photoId: string; currentValue: SelectionState }>
+      >;
+      missing: ReadonlyArray<Readonly<{ photoId: string }>>;
     }>
   | Readonly<{ kind: "rejected"; status: number }>
   | Readonly<{ kind: "malformed" }>;
@@ -55,6 +61,13 @@ export type PhotoAlbumsResult =
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
+
+const hasExactKeys = (
+  value: Record<string, unknown>,
+  keys: ReadonlyArray<string>,
+): boolean =>
+  Object.keys(value).length === keys.length &&
+  keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
 
 const optional = (
   value: unknown,
@@ -105,16 +118,41 @@ const validBatchApplied = (
   value: unknown,
 ): value is Readonly<{ photoId: string; priorValue: SelectionState }> =>
   isRecord(value) &&
+  hasExactKeys(value, ["photoId", "priorValue"]) &&
   typeof value.photoId === "string" &&
   value.photoId.length > 0 &&
   validStateValue("selectionState", value.priorValue);
 
-const validBatchConflict = (
+const validBatchChangedElsewhere = (
+  value: unknown,
+): value is Readonly<{ photoId: string; currentValue: SelectionState }> =>
+  isRecord(value) &&
+  hasExactKeys(value, ["photoId", "currentValue"]) &&
+  typeof value.photoId === "string" &&
+  value.photoId.length > 0 &&
+  validStateValue("selectionState", value.currentValue);
+
+const validBatchMissing = (
   value: unknown,
 ): value is Readonly<{ photoId: string }> =>
   isRecord(value) &&
+  hasExactKeys(value, ["photoId"]) &&
   typeof value.photoId === "string" &&
   value.photoId.length > 0;
+
+const validBatchPartition = (
+  requested: ReadonlyArray<string>,
+  groups: ReadonlyArray<ReadonlyArray<string>>,
+): boolean => {
+  const outcomes = groups.flat();
+  const reported = new Set(outcomes);
+  if (
+    reported.size !== requested.length ||
+    outcomes.length !== requested.length
+  )
+    return false;
+  return requested.every((photoId) => reported.has(photoId));
+};
 
 const validPhotoAlbums = (value: unknown): value is PhotoAlbumsResponse =>
   isRecord(value) &&
@@ -231,13 +269,16 @@ export async function fetchPreview(
 
 export async function persistPhotoStateBatch(
   fetcher: PhotoFetch,
-  input: Readonly<{ photoIds: ReadonlyArray<string>; value: SelectionState }>,
+  input: Readonly<{
+    photos: ReadonlyArray<PhotoStateBatchPhoto>;
+    value: SelectionState;
+  }>,
 ): Promise<PhotoStateBatchResult> {
   const response = await fetcher("/api/photos/state", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      photoIds: input.photoIds,
+      photos: input.photos,
       selectionState: input.value,
     }),
   });
@@ -251,22 +292,25 @@ export async function persistPhotoStateBatch(
   }
   if (
     !isRecord(value) ||
+    !hasExactKeys(value, ["applied", "changedElsewhere", "missing"]) ||
     !Array.isArray(value.applied) ||
     !value.applied.every(validBatchApplied) ||
-    !Array.isArray(value.conflicts) ||
-    !value.conflicts.every(validBatchConflict)
+    !Array.isArray(value.changedElsewhere) ||
+    !value.changedElsewhere.every(validBatchChangedElsewhere) ||
+    !Array.isArray(value.missing) ||
+    !value.missing.every(validBatchMissing)
   )
     return Object.freeze({ kind: "malformed" });
   // The batch contract answers exactly one outcome per requested Photo. A
-  // response that omits or invents an identifier cannot be trusted to move
-  // facts or counts, so it is malformed rather than partially applied.
-  const reported = new Set<string>([
-    ...value.applied.map((entry) => entry.photoId),
-    ...value.conflicts.map((entry) => entry.photoId),
-  ]);
+  // response that omits, duplicates, invents, or gives a null/extra field for
+  // an identifier cannot be trusted to move facts or counts.
+  const requested = input.photos.map((photo) => photo.photoId);
   if (
-    reported.size !== input.photoIds.length ||
-    !input.photoIds.every((photoId) => reported.has(photoId))
+    !validBatchPartition(requested, [
+      value.applied.map((entry) => entry.photoId),
+      value.changedElsewhere.map((entry) => entry.photoId),
+      value.missing.map((entry) => entry.photoId),
+    ])
   )
     return Object.freeze({ kind: "malformed" });
   return Object.freeze({
@@ -279,8 +323,16 @@ export async function persistPhotoStateBatch(
         }),
       ),
     ),
-    conflicts: Object.freeze(
-      value.conflicts.map((entry) =>
+    changedElsewhere: Object.freeze(
+      value.changedElsewhere.map((entry) =>
+        Object.freeze({
+          photoId: entry.photoId,
+          currentValue: entry.currentValue,
+        }),
+      ),
+    ),
+    missing: Object.freeze(
+      value.missing.map((entry) =>
         Object.freeze({
           photoId: entry.photoId,
         }),
