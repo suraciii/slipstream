@@ -2721,16 +2721,43 @@ export function mountLibraryBrowser(
           break;
         }
         refreshedIndex = sourceGrid.findPhotoIndex(photoId);
-        const photo =
+        let photo =
           refreshedIndex === undefined
             ? undefined
             : sourceGrid.photoAt(refreshedIndex);
-        // Only the position lookup above can prove that a Photo disappeared.
-        // A missing retained fact is cache pressure, not a Library deletion;
-        // keep the Photo retryable if a second refresh still cannot retain it.
         if (!photo) {
-          failed = true;
-          break;
+          // A refreshed window can lose a retained fact to bounded-cache
+          // pressure. Ask the position authority before deciding that the
+          // Photo left the Library; only its `missing` answer is definitive.
+          const currentPosition = await sourceGrid.resolvePhotoPosition(
+            sourceAuthority,
+            photoId,
+          );
+          if (!sourceGrid.isCurrent(sourceAuthority)) return;
+          if (currentPosition.kind === "missing") {
+            becameMissing.add(photoId);
+            continue;
+          }
+          if (currentPosition.kind !== "resolved") {
+            failed = true;
+            break;
+          }
+          if (!(await refreshWindow())) {
+            failed = true;
+            break;
+          }
+          refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+          photo =
+            refreshedIndex === undefined
+              ? undefined
+              : sourceGrid.photoAt(refreshedIndex);
+          // The position route proved that the Photo still exists. If the
+          // second refresh cannot retain it, keep it retryable rather than
+          // presenting a false deletion.
+          if (!photo) {
+            failed = true;
+            break;
+          }
         }
         if (
           believedState !== undefined &&

@@ -3431,6 +3431,19 @@ test("Grid batch Review retains a changed Photo when refresh shows it missing", 
     const request = route.request();
     const url = new URL(request.url());
     if (
+      removeChangedPhoto &&
+      request.method() === "GET" &&
+      url.pathname.endsWith("/position") &&
+      url.searchParams.get("photoId") === ids[0]
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ position: null }),
+      });
+      return;
+    }
+    if (
       !removeChangedPhoto ||
       request.method() !== "GET" ||
       url.searchParams.get("start") !== "0"
