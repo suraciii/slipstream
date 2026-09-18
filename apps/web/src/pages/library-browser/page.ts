@@ -2783,13 +2783,6 @@ export function mountLibraryBrowser(
       gridBatchResult = {
         tone: becameMissing.size > 0 ? "warning" : "success",
         message,
-        ...(remaining.length > 0
-          ? {
-              review: {
-                label: `Review ${photoCountText(remaining.length)}`,
-              },
-            }
-          : {}),
       };
       setDecisionStatus(message);
     }

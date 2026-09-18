@@ -349,10 +349,13 @@ outcome per requested Photo:
   value differs from `expectedCurrent`; and
 - `missing` when the current Library no longer holds the Photo.
 
-A `changedElsewhere` or `missing` Photo is not written. The browser moves
-loaded Photo facts and source decision counts only for `applied` outcomes. A
-Photo whose write was not confirmed is never presented as decided. The
-browser keeps unsuccessful Photos selected for review or retry. A missing
+A `changedElsewhere` or `missing` Photo is not written. On the batch
+settlement, the browser moves loaded Photo facts and source decision counts
+only for `applied` outcomes. During `Review N`, it reconciles each refreshed
+Photo's contribution from the belief already held by the source counts to the
+observed fact, so a retry cannot move a count twice. A Photo whose write was
+not confirmed is never presented as decided. The browser keeps unsuccessful
+Photos selected for review or retry. A missing
 Photo remains a selected, non-retryable result until clear or source change;
 its ID is excluded from later requests. The browser does not invent a fact for
 a missing Photo. `Review N` refreshes the current facts for N changed Photos

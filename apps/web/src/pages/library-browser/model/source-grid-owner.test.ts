@@ -491,6 +491,45 @@ describe("SourceGridOwner", () => {
     ).toBe(false);
   });
 
+  test("keeps reconciled progress counts non-negative after an external write", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 1, 0, { selected: 0, rejected: 1, undecided: 0 }),
+        );
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              start: 0,
+              total: 1,
+              photos: [{ ...photo("photo-0"), selectionState: "rejected" }],
+            }),
+            { status: 200 },
+          ),
+        );
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner, "browse-1");
+    await owner.loadWindow(0, { kind: "source", authority });
+    expect(
+      owner.reconcilePhotoSelection(
+        authority,
+        0,
+        "photo-0",
+        "selected",
+        "rejected",
+      ),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 0,
+      rejected: 2,
+      undecided: 0,
+    });
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

@@ -761,8 +761,11 @@ operation. Each selected Photo carries the last Selection State the browser
 confirmed for it. A Photo whose current Selection State differs from that
 expected value is reported as changed elsewhere and is not overwritten. A
 Photo the current Library no longer holds is reported as missing and does not
-block the other Photos. A confirmed Photo moves the decision progress once. A
-batch carries no Album position write even in an open Album: it moves no
+block the other Photos. A confirmed Photo moves the decision progress once.
+`Review N` also reconciles each refreshed Photo from the state contribution the
+source counts already held to the observed state, so a retry does not move its
+progress twice. A batch carries no Album position write even in an open Album:
+it moves no
 browsing position. A failed or partial operation must leave every affected
 Photo recoverable and must not present the batch as complete.
 

@@ -285,7 +285,11 @@ const adjustedSelectionCounts = (
 ): SelectionCounts => {
   if (prior === next) return counts;
   const adjusted = { ...counts };
-  adjusted[prior] -= 1;
+  // A loaded Photo can be newer than the source-wide counts after an
+  // external write. Never expose a negative progress bucket while moving the
+  // browser's belief to the observed fact; the next source refresh restores
+  // the server's complete counts.
+  adjusted[prior] = Math.max(0, adjusted[prior] - 1);
   adjusted[next] += 1;
   return Object.freeze(adjusted);
 };
@@ -510,11 +514,33 @@ export function createSourceGridOwner(
         total,
         visibleRange.start + span + WINDOW_SIZE,
       );
+      const anchorStart =
+        anchor === undefined ? undefined : alignedStart(anchor);
+      const anchorEnd =
+        anchorStart === undefined
+          ? undefined
+          : Math.min(total, anchorStart + WINDOW_SIZE);
+      const isAnchorFact = (index: number) =>
+        anchorStart !== undefined &&
+        anchorEnd !== undefined &&
+        index >= anchorStart &&
+        index < anchorEnd;
       for (const index of [...facts.keys()]) {
         if (facts.size <= bound) break;
-        if (index < protectedStart || index >= protectedEnd)
+        if (
+          (index < protectedStart || index >= protectedEnd) &&
+          !isAnchorFact(index)
+        )
           facts.delete(index);
       }
+      // The caller's settled window is protected for identity checks, but the
+      // retention bound remains hard. If the visible span and that window are
+      // both larger than the bound, evict visible facts before the anchor.
+      if (anchorStart !== undefined)
+        for (const index of [...facts.keys()]) {
+          if (facts.size <= bound) break;
+          if (!isAnchorFact(index)) facts.delete(index);
+        }
       return;
     }
     const fallback = anchor ?? latestSettledWindowStart;
@@ -761,7 +787,9 @@ export function createSourceGridOwner(
           latestSettledWindowStart === undefined
             ? start
             : Math.max(latestSettledWindowStart, start);
-        trimFacts();
+        // Keep the window this caller just settled available for the caller's
+        // identity check, even when the visible Grid range is elsewhere.
+        trimFacts(start);
         if (operation.kind === "source") sourceReady = true;
         return {
           kind: "loaded",

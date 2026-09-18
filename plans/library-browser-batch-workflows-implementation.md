@@ -244,10 +244,12 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `apps/web/src/pages/library-browser/page.ts`
 - `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
 - `apps/web/src/browser-review.browser-test.ts`
+- `design/library-browsing.md`
+- `docs/library-browsing-and-selection.md`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
 
-Slice 3 replaces every executed Photo State batch request and response example with the optimistic `photos` items and `applied`/`changedElsewhere`/`missing` partition. No positive `photoIds`/`conflicts` batch contract remains.
+Slice 3 replaces every executed Photo State batch request and response example with the optimistic `photos` items and `applied`/`changedElsewhere`/`missing` partition. It also records the Review-time count reconciliation in the authoritative product and design specs because that rule belongs to the optimistic settlement boundary. No positive `photoIds`/`conflicts` batch contract remains.
 
 ### Request model
 
