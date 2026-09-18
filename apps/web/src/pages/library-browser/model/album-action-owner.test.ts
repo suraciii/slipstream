@@ -39,6 +39,44 @@ const albumResponse = (
   }>,
 ): Response => jsonResponse({ albums });
 
+const membershipAddResponse = (
+  albumId: string,
+  addedPhotoIds: ReadonlyArray<string>,
+  alreadyMemberPhotoIds: ReadonlyArray<string>,
+): Response =>
+  jsonResponse({
+    albumId,
+    addedPhotoIds,
+    alreadyMemberPhotoIds,
+    albums: [
+      {
+        id: albumId,
+        name: "Picks",
+        photoCount: addedPhotoIds.length + alreadyMemberPhotoIds.length,
+        hasSavedPosition: false,
+      },
+    ],
+  });
+
+const membershipRemoveResponse = (
+  albumId: string,
+  removedPhotoIds: ReadonlyArray<string>,
+  alreadyAbsentPhotoIds: ReadonlyArray<string>,
+): Response =>
+  jsonResponse({
+    albumId,
+    removedPhotoIds,
+    alreadyAbsentPhotoIds,
+    albums: [
+      {
+        id: albumId,
+        name: "Picks",
+        photoCount: alreadyAbsentPhotoIds.length,
+        hasSavedPosition: false,
+      },
+    ],
+  });
+
 const defaultSourceAuthority = Object.freeze({}) as SourceAuthority;
 
 const context = (
@@ -120,6 +158,86 @@ describe("AlbumActionOwner", () => {
       outcomes.every((outcome) => outcome.settlement.kind === "persisted"),
     ).toBe(true);
     for (const outcome of outcomes) owner.finish(outcome.mutation);
+    owner.dispose();
+  });
+
+  test("returns identity-bearing batch Add and compensation results", async () => {
+    const requests: Array<Readonly<{ path: string; init?: RequestInit }>> = [];
+    const fetcher: AlbumActionFetch = (path, init) => {
+      requests.push({ path, ...(init ? { init } : {}) });
+      return Promise.resolve(
+        path.endsWith("batch-remove")
+          ? membershipRemoveResponse("album-1", ["photo-1"], ["photo-2"])
+          : membershipAddResponse("album-1", ["photo-1"], ["photo-2"]),
+      );
+    };
+    const owner = createAlbumActionOwner(fetcher);
+    const add = owner.addMemberships(
+      "album-1",
+      ["photo-1", "photo-2"],
+      context(),
+    );
+    if (!add) throw new Error("expected batch Add admission");
+    const addOutcome = await add.settlement;
+    expect(addOutcome.kind).toBe("persisted");
+    if (addOutcome.kind !== "persisted") throw new Error("expected Add result");
+    expect(addOutcome.membershipAdd?.addedPhotoIds).toEqual(["photo-1"]);
+    expect(addOutcome.membershipAdd?.alreadyMemberPhotoIds).toEqual([
+      "photo-2",
+    ]);
+    owner.finish(add.mutation);
+
+    const remove = owner.removeAddedMemberships(
+      "album-1",
+      ["photo-1", "photo-2"],
+      context(),
+    );
+    if (!remove) throw new Error("expected compensation admission");
+    const removeOutcome = await remove.settlement;
+    expect(removeOutcome.kind).toBe("persisted");
+    if (removeOutcome.kind !== "persisted")
+      throw new Error("expected compensation result");
+    expect(removeOutcome.membershipRemove?.removedPhotoIds).toEqual([
+      "photo-1",
+    ]);
+    expect(removeOutcome.membershipRemove?.alreadyAbsentPhotoIds).toEqual([
+      "photo-2",
+    ]);
+    expect(requests.map((request) => request.path)).toEqual([
+      "/api/albums/album-1/members",
+      "/api/albums/album-1/members/batch-remove",
+    ]);
+    expect(requests.map((request) => request.init?.body)).toEqual([
+      JSON.stringify({ photoIds: ["photo-1", "photo-2"] }),
+      JSON.stringify({ photoIds: ["photo-1", "photo-2"] }),
+    ]);
+    owner.finish(remove.mutation);
+    owner.dispose();
+  });
+
+  test("rejects incomplete identity-bearing membership results", async () => {
+    const owner = createAlbumActionOwner(() =>
+      Promise.resolve(
+        jsonResponse({
+          albumId: "album-1",
+          addedPhotoIds: ["photo-1"],
+          alreadyMemberPhotoIds: [],
+          albums: [],
+        }),
+      ),
+    );
+    const action = owner.addMemberships(
+      "album-1",
+      ["photo-1", "photo-2"],
+      context(),
+    );
+    if (!action) throw new Error("expected batch Add admission");
+    const outcome = await action.settlement;
+    expect(outcome.kind).toBe("failed");
+    if (outcome.kind !== "failed")
+      throw new Error("expected malformed failure");
+    expect(outcome.settlement).toEqual({ kind: "malformed" });
+    owner.finish(action.mutation);
     owner.dispose();
   });
 

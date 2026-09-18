@@ -809,9 +809,9 @@ unchanged, for example `Album resume point unchanged.` The
 **Remove added Photos** compensation reports the ordinary Album removal result
 instead. If it removes the saved Photo, it reports the resulting saved
 position, or that no saved position remains. The batch actions must remain
-reachable from a keyboard. The batch result count and every batch outcome must
-be announced on the Grid's status surface; the tray's live selection count is
-a visual summary and is not a second announcement surface.
+reachable from a keyboard. Every batch result count and outcome must be
+announced on the Grid's status surface; the tray count is a visual summary and
+is not a second live-region announcement.
 
 ## Failure Behavior
 

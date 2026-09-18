@@ -162,6 +162,10 @@ pub(crate) fn create_router_with_web_root(
             get(method_not_allowed).post(add_album_members),
         )
         .route(
+            "/api/albums/{id}/members/batch-remove",
+            get(method_not_allowed).post(remove_added_album_members),
+        )
+        .route(
             "/api/albums/{id}/folder-members",
             get(method_not_allowed).post(add_folder_members),
         )
@@ -547,18 +551,51 @@ pub(crate) async fn add_album_members(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
-    mutate_album_route(&state, request, move |body| {
-        if !valid_id(&id) {
-            return Err("Invalid membership batch");
-        }
-        valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX)
-            .map(|photo_ids| slipstream_core::AlbumMutation::AddMembers {
-                album_id: id.clone(),
-                photo_ids,
-            })
-            .ok_or("Invalid membership batch")
-    })
-    .await
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
+    };
+    if !valid_id(&id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
+    }
+    let Some(photo_ids) = valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership batch");
+    };
+    match state.application.add_album_members(&id, photo_ids).await {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+pub(crate) async fn remove_added_album_members(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
+    };
+    if !valid_id(&id) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
+    }
+    let Some(photo_ids) = valid_ids(body.get("photoIds"), ALBUM_PHOTO_IDS_MAX) else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid membership compensation");
+    };
+    match state
+        .application
+        .remove_added_album_members(&id, photo_ids)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &result),
+        Err(error) => ApiError::from(error).into_response(),
+    }
 }
 
 pub(crate) async fn add_folder_members(

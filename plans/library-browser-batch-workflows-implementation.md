@@ -89,7 +89,7 @@ The repository has one authoritative definition for the new behavior before impl
 - Define the difference between `Visible results` and `Source progress`.
 - Define the response shape for Album membership additions so the browser knows which requested Photos were newly added and which were already members.
 - Add examples that cover a full success, a partial result, a changed-elsewhere result, a missing Photo, and a scoped Album compensation.
-- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; every executed browse vector or response golden that pins a superseded batch shape must be replaced by the slice that changes that route. The old Photo State route fixtures are explicitly transitional and Slice 3 owns their replacement; the old Album membership vector and golden are transitional until Slice 2 replaces the Add Members response. Every vector must have an executing consumer.
+- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; every executed browse vector or response golden that pins a superseded batch shape must be replaced by the slice that changes that route. The old Photo State route fixtures are explicitly transitional and Slice 3 owns their replacement. Slice 2 replaces the executed Album membership vector and response golden when the Add Members response gains identity fields. Every vector must have an executing consumer.
 
 ### Exit criteria
 

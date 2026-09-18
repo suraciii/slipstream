@@ -3095,7 +3095,7 @@ test("Grid batch Select decides every multi-selected Photo and Undo restores the
   expect(undoWrites).toHaveLength(3);
 });
 
-test("Grid batch failure keeps the selection and exposes a retry result", async ({
+test("Grid batch failure retains the selection and offers retry", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -3140,6 +3140,8 @@ test("Grid batch failure keeps the selection and exposes a retry result", async 
   await expect(cell(1).locator(".cell-state")).toHaveCount(0);
 
   // The failed result is retryable without rebuilding the selection.
+  await expect(cell(0)).toHaveAttribute("data-multi-selected", "true");
+  await expect(cell(1)).toHaveAttribute("data-multi-selected", "true");
   await page.locator("[data-batch-select]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "2 Photos selected.",
@@ -3203,7 +3205,7 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await waitForGridFrame(page);
 
   const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
-  const batchBodies: Array<Record<string, unknown>> = [];
+  const batchBodies: Array<{ photoIds: string[]; selectionState: string }> = [];
   const undoWrites: string[] = [];
   page.on("request", (request) => {
     if (
@@ -3217,25 +3219,35 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   // for real, and the simulated response reports the second as one the
   // current Library no longer holds while the fixture still does.
   await page.route("**/api/photos/state", async (route) => {
-    const requested = (route.request().postDataJSON() as { photoIds: string[] })
-      .photoIds;
-    batchBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    const body = route.request().postDataJSON() as {
+      photoIds: string[];
+      selectionState: string;
+    };
+    batchBodies.push(body);
+    const requested = body.photoIds;
     await post(running.url, `/api/photos/${requested[0]}/state`, {
       field: "selectionState",
-      value: requested.length === 2 ? "selected" : "rejected",
+      value: body.selectionState,
     });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        applied: [
-          {
-            photoId: requested[0],
-            priorValue: requested.length === 2 ? "undecided" : "selected",
-          },
-        ],
-        conflicts: requested.length === 2 ? [{ photoId: requested[1] }] : [],
-      }),
+      body: JSON.stringify(
+        requested.length === 1
+          ? {
+              applied: [
+                {
+                  photoId: requested[0],
+                  priorValue: "selected",
+                },
+              ],
+              conflicts: [],
+            }
+          : {
+              applied: [{ photoId: requested[0], priorValue: "undecided" }],
+              conflicts: [{ photoId: requested[1] }],
+            },
+      ),
     });
   });
 
@@ -3262,20 +3274,25 @@ test("Grid batch reports a Photo the current Library no longer holds and decides
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 1 selected · 0 rejected · 2 undecided",
   );
-
   // The retained missing Photo stays visible but is excluded from the next
   // batch request. The confirmed Photo can still take another decision.
   await page.locator("[data-batch-reject]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "1 Photo rejected.",
   );
-  expect(batchBodies).toEqual([
+  expect(
+    batchBodies.map(({ photoIds, selectionState }) => ({
+      photoIds,
+      selectionState,
+    })),
+  ).toEqual([
     { photoIds: [ids[0], ids[1]], selectionState: "selected" },
     { photoIds: [ids[0]], selectionState: "rejected" },
   ]);
 
   // Only the confirmed Photo is undoable: the conflict is not part of the
   // one-level description.
+  undoWrites.length = 0;
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-grid-status]")).toHaveText(
@@ -3297,6 +3314,9 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   ).json()) as { albums: Array<{ id: string; name: string }> };
   const albumId = created.albums.find((album) => album.name === "Trip")!.id;
   const ids = await browseIds(running.url);
+  await post(running.url, `/api/albums/${albumId}/members`, {
+    photoIds: [ids[3]],
+  });
   await page.setViewportSize({ width: 1000, height: 700 });
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
@@ -3317,10 +3337,14 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   await cell(0).click({ modifiers: ["Control"] });
   await cell(3).click({ modifiers: ["Control"] });
   await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos selected.",
+  );
   await page.locator("[data-batch-album-select]").selectOption(albumId);
   await page.locator("[data-batch-album-add]").click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
-    "2 Photos added to “Trip”.",
+    "1 Photo added to “Trip”. 1 Photo already in “Trip”.",
   );
   await expect(page.locator("[data-batch-retained]")).toBeVisible();
   await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
@@ -3328,19 +3352,48 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
     "success",
   );
   await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
-    "2 Photos added to “Trip”.",
+    "1 Photo added to “Trip”. 1 Photo already in “Trip”.",
   );
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeVisible();
   expect(bodies).toEqual([{ photoIds: [ids[0], ids[3]] }]);
-  const members = (await state(running.url, albumId)).members.map(
+  let members = (await state(running.url, albumId)).members.map(
     (member) => member.photoId,
   );
-  expect(members).toEqual([ids[0], ids[3]]);
-  // The Album's own count follows, and the multi-selection stays for the next
-  // batch action.
-  await openSources(page);
+  expect(members).toEqual([ids[3], ids[0]]);
+  await page.route(`**/api/albums/${albumId}/members/batch-remove`, (route) =>
+    route.fulfill({
+      status: 400,
+      body: JSON.stringify({ error: "invalid" }),
+    }),
+  );
+  await page.getByRole("button", { name: "Remove added Photos" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "Could not remove the added Photos from “Trip”. Retry to continue.",
+  );
   await expect(
-    page.getByRole("button", { name: /^Trip 2 Photos$/ }),
+    page.getByRole("button", { name: "Remove added Photos" }),
   ).toBeVisible();
+  await page.unroute(`**/api/albums/${albumId}/members/batch-remove`);
+  await page.getByRole("button", { name: "Remove added Photos" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo removed from “Trip”.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeHidden();
+  members = (await state(running.url, albumId)).members.map(
+    (member) => member.photoId,
+  );
+  expect(members).toEqual([ids[3]]);
+  // Compensation stays outside global Selection State Undo: the earlier
+  // decision remains available and restores both selected Photos.
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("Control+z");
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "2 Photos restored.",
+  );
   await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
 });
 

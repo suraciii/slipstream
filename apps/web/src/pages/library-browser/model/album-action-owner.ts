@@ -5,10 +5,13 @@ import {
   createAlbum,
   deleteAlbum,
   removeAlbumMember,
+  removeAddedAlbumMembers,
   renameAlbum,
   type AlbumActionFetch,
   type AlbumCreateResult,
   type AlbumFolderAddResult,
+  type AlbumMembershipAddResult,
+  type AlbumMembershipRemoveResult,
   type AlbumWriteResult,
 } from "../api/album-actions.js";
 import type { AlbumSummary } from "../api/contracts.js";
@@ -65,6 +68,8 @@ export type AlbumActionOutcome = AlbumOutcomeOwner &
           sourceAuthority: SourceAuthority;
         }>;
         folderAdd?: AlbumFolderAddResult;
+        membershipAdd?: AlbumMembershipAddResult;
+        membershipRemove?: AlbumMembershipRemoveResult;
       }>
     | Readonly<{
         kind: "failed";
@@ -108,6 +113,11 @@ export interface AlbumActionOwner {
   ): AlbumActionAdmission | undefined;
   /// Adds every named Photo as one bounded membership batch.
   addMemberships(
+    albumId: string,
+    photoIds: ReadonlyArray<string>,
+    context: AlbumActionContext,
+  ): AlbumActionAdmission | undefined;
+  removeAddedMemberships(
     albumId: string,
     photoIds: ReadonlyArray<string>,
     context: AlbumActionContext,
@@ -234,6 +244,14 @@ export function createAlbumActionOwner(
         result.kind === "persisted" && "folderPath" in result
           ? result
           : undefined;
+      const membershipAdd =
+        result.kind === "persisted" && "addedPhotoIds" in result
+          ? result
+          : undefined;
+      const membershipRemove =
+        result.kind === "persisted" && "removedPhotoIds" in result
+          ? result
+          : undefined;
       const owner = {
         mutation,
         surface,
@@ -249,6 +267,8 @@ export function createAlbumActionOwner(
             ...(createdAlbum ? { createdAlbum } : {}),
             ...(removed ? { removedFromCurrentAlbum: removed } : {}),
             ...(folderAdd ? { folderAdd } : {}),
+            ...(membershipAdd ? { membershipAdd } : {}),
+            ...(membershipRemove ? { membershipRemove } : {}),
           })
         : Object.freeze({
             ...owner,
@@ -328,6 +348,19 @@ export function createAlbumActionOwner(
         () => addAlbumMembers(fetcher, albumId, photoIds),
         () => "The Photos could not be added to the Album.",
         { admissionKey },
+      );
+    },
+    removeAddedMemberships: (albumId, photoIds, context) => {
+      const admissionKey = `remove-added:${albumId}:${[...photoIds].sort().join(",")}`;
+      return start(
+        admissionKey,
+        context,
+        () => removeAddedAlbumMembers(fetcher, albumId, photoIds),
+        () => "The added Photos could not be removed from the Album.",
+        {
+          admissionKey,
+          invalidatesSavedPositionFor: albumId,
+        },
       );
     },
     addFolderMembers: (albumId, folderPath, publication, context) =>

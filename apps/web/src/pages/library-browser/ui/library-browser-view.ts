@@ -145,6 +145,7 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "grid-multi-clear" }>
   | Readonly<{ kind: "grid-batch-mutation"; value: ViewSelectionState }>
   | Readonly<{ kind: "grid-batch-album-add"; albumId: string }>
+  | Readonly<{ kind: "grid-batch-album-remove" }>
   | Readonly<{
       kind:
         | "show-grid"
@@ -264,6 +265,7 @@ type GridPhotoViewModel = Readonly<{
 type GridBatchResultViewModel = Readonly<{
   tone: "success" | "warning" | "failure";
   message: string;
+  compensation?: Readonly<{ label: string }>;
 }>;
 
 type GridViewModel = Readonly<{
@@ -510,7 +512,7 @@ export function createLibraryBrowserView(
         </nav>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden><span data-grid-visible-results></span><span data-grid-source-progress></span></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-size" data-grid-size><label for="grid-size-select">Size</label><select id="grid-size-select" data-size-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="grid-select-mode"><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p><div class="grid-batch" data-grid-batch hidden><div class="grid-batch-overview"><p class="grid-batch-count" data-batch-count></p><p class="grid-batch-source" data-batch-source></p><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p></div><div class="grid-batch-result" data-grid-batch-result hidden><p data-grid-batch-result-text></p></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button><button type="button" class="quiet" data-batch-clear>Clear</button></div></div></header>
+          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden><span data-grid-visible-results></span><span data-grid-source-progress></span></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-size" data-grid-size><label for="grid-size-select">Size</label><select id="grid-size-select" data-size-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="grid-select-mode"><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p><div class="grid-batch" data-grid-batch hidden><div class="grid-batch-overview"><p class="grid-batch-count" data-batch-count></p><p class="grid-batch-source" data-batch-source></p><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p></div><div class="grid-batch-result" data-grid-batch-result hidden><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button><button type="button" class="quiet" data-batch-clear>Clear</button></div></div></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
@@ -601,6 +603,10 @@ export function createLibraryBrowserView(
   const batchResultText = required<HTMLElement>(
     root,
     "[data-grid-batch-result-text]",
+  );
+  const batchCompensate = required<HTMLButtonElement>(
+    root,
+    "[data-grid-batch-compensate]",
   );
   const batchActions = required<HTMLElement>(root, "[data-batch-actions]");
   const batchSelect = required<HTMLButtonElement>(root, "[data-batch-select]");
@@ -2174,6 +2180,8 @@ export function createLibraryBrowserView(
       batchRetained.hidden = true;
       batchResult.hidden = true;
       batchResultText.textContent = "";
+      batchCompensate.hidden = true;
+      batchCompensate.disabled = true;
       batchActions.hidden = true;
       batchAlbumSelect.replaceChildren();
       renderedBatchAlbumSignature = "";
@@ -2192,6 +2200,8 @@ export function createLibraryBrowserView(
     const actionsHidden = count === 0;
     const resultHidden = gridMultiResult === undefined;
     const resultText = gridMultiResult?.message ?? "";
+    const compensation = gridMultiResult?.compensation;
+    const compensationHidden = resultHidden || compensation === undefined;
     if (batchCount.textContent !== countText)
       batchCount.textContent = countText;
     if (batchSource.textContent !== sourceText)
@@ -2203,6 +2213,9 @@ export function createLibraryBrowserView(
     if (batchResult.hidden !== resultHidden) batchResult.hidden = resultHidden;
     if (batchResultText.textContent !== resultText)
       batchResultText.textContent = resultText;
+    batchCompensate.hidden = compensationHidden;
+    if (compensation && batchCompensate.textContent !== compensation.label)
+      batchCompensate.textContent = compensation.label;
     if (gridMultiResult) batchResult.dataset.tone = gridMultiResult.tone;
     else batchResult.removeAttribute("data-tone");
 
@@ -2210,6 +2223,8 @@ export function createLibraryBrowserView(
       batchAlbumSelect.replaceChildren();
       renderedBatchAlbumSignature = "";
       batchAlbumSelection = "";
+      batchCompensate.hidden = true;
+      batchCompensate.disabled = true;
       applyGridMultiSelection();
       return;
     }
@@ -2239,7 +2254,8 @@ export function createLibraryBrowserView(
         active === batchSelect ||
         active === batchReject ||
         active === batchAlbumSelect ||
-        active === batchAlbumAdd
+        active === batchAlbumAdd ||
+        active === batchCompensate
       ) {
         heldBatchControl = active as HTMLButtonElement | HTMLSelectElement;
         gridSelectMode.focus();
@@ -2251,6 +2267,7 @@ export function createLibraryBrowserView(
     const albums = batchAlbumSelect.options.length > 0;
     batchAlbumSelect.disabled = !enabled || !albums;
     batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
+    batchCompensate.disabled = !enabled || compensation === undefined;
     if (enabled && heldBatchControl) {
       const control = heldBatchControl;
       heldBatchControl = null;
@@ -3390,6 +3407,10 @@ export function createLibraryBrowserView(
   batchAlbumAdd.addEventListener("click", () => {
     if (!alive || batchAlbumAdd.disabled || !batchAlbumSelection) return;
     send({ kind: "grid-batch-album-add", albumId: batchAlbumSelection });
+  });
+  batchCompensate.addEventListener("click", () => {
+    if (!alive || batchCompensate.disabled) return;
+    send({ kind: "grid-batch-album-remove" });
   });
   sortSelect.addEventListener("change", () => {
     if (!alive || sortSelect.disabled) return;

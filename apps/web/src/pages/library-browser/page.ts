@@ -319,16 +319,25 @@ export function mountLibraryBrowser(
   type GridBatchResult = Readonly<{
     tone: "success" | "warning" | "failure";
     message: string;
+    compensation?: Readonly<{ label: string }>;
+  }>;
+  type BatchAlbumCompensation = Readonly<{
+    albumId: string;
+    albumName: string;
+    photoIds: ReadonlyArray<string>;
+    sourceAuthority: SourceAuthority;
+    hadSavedPosition: boolean;
   }>;
   let multiSelection = new Set<string>();
-  let multiExpectedSelection = new Map<string, SelectionState>();
   // A settled batch can report that a retained Photo is no longer in the
   // current Library. It stays visible in the tray, but must not be sent in a
   // later batch request until the Photographer clears the selection.
-  let multiExcludedPhotoIds = new Set<string>();
+  let multiMissingIds = new Set<string>();
+  let multiExpectedSelection = new Map<string, SelectionState>();
   let multiAnchorId: string | undefined;
   let selectMode = false;
   let gridBatchResult: GridBatchResult | undefined;
+  let batchAlbumCompensation: BatchAlbumCompensation | undefined;
   // One batch Add to Album in flight. Membership stays outside the Undo
   // contract, so it never touches the pending Undo description.
   let batchAlbumPending = false;
@@ -650,6 +659,7 @@ export function mountLibraryBrowser(
   ): Promise<{
     admitted: boolean;
     ok: boolean;
+    latest: boolean;
     announce: (text: string) => void;
     removedFromCurrentAlbum?: Readonly<{
       albumId: string;
@@ -661,6 +671,18 @@ export function mountLibraryBrowser(
       matchedCount: number;
       addedCount: number;
       alreadyMemberCount: number;
+    }>;
+    membershipAdd?: Readonly<{
+      albumId: string;
+      addedPhotoIds: ReadonlyArray<string>;
+      alreadyMemberPhotoIds: ReadonlyArray<string>;
+      albums: ReadonlyArray<AlbumSummary>;
+    }>;
+    membershipRemove?: Readonly<{
+      albumId: string;
+      removedPhotoIds: ReadonlyArray<string>;
+      alreadyAbsentPhotoIds: ReadonlyArray<string>;
+      albums: ReadonlyArray<AlbumSummary>;
     }>;
   }> => {
     const capturedPhotoStatus = view.photoStatusSurface;
@@ -682,6 +704,7 @@ export function mountLibraryBrowser(
       return Promise.resolve({
         admitted: false,
         ok: false,
+        latest: false,
         announce: () => {},
       });
     const summaryPresentation = application.claimAlbumSummary(action.noticeKey);
@@ -720,6 +743,7 @@ export function mountLibraryBrowser(
           return {
             admitted: true,
             ok: outcome.kind === "persisted",
+            latest: albumActions.isLatest(outcome.mutation),
             announce: () => {},
           };
 
@@ -747,7 +771,12 @@ export function mountLibraryBrowser(
               disconnect(outcome.sourceAuthority);
             }
           }
-          return { admitted: true, ok: false, announce: () => {} };
+          return {
+            admitted: true,
+            ok: false,
+            latest: albumActions.isLatest(outcome.mutation),
+            announce: () => {},
+          };
         }
 
         let disconnectAfterRefresh = false;
@@ -782,6 +811,7 @@ export function mountLibraryBrowser(
         return {
           admitted: true,
           ok: true,
+          latest: albumActions.isLatest(outcome.mutation),
           announce: (text: string) => {
             if (presentOnSurface && ownsPhotoSurface())
               view.setPhotoStatus(text);
@@ -800,6 +830,12 @@ export function mountLibraryBrowser(
                   alreadyMemberCount: outcome.folderAdd.alreadyMemberCount,
                 },
               }
+            : {}),
+          ...(outcome.membershipAdd
+            ? { membershipAdd: outcome.membershipAdd }
+            : {}),
+          ...(outcome.membershipRemove
+            ? { membershipRemove: outcome.membershipRemove }
             : {}),
         };
       } finally {
@@ -1173,6 +1209,7 @@ export function mountLibraryBrowser(
   };
 
   const addFolderToAlbum = (albumId: string): void => {
+    expireBatchAlbumCompensation();
     const folder = sourceGrid.kind === "folder" ? sourceGrid.folder : undefined;
     const publication =
       sourceGrid.kind === "folder" ? fileLocations.publication : undefined;
@@ -1812,6 +1849,15 @@ export function mountLibraryBrowser(
   const photoCountText = (count: number): string =>
     `${count.toLocaleString()} ${count === 1 ? "Photo" : "Photos"}`;
 
+  const expireBatchAlbumCompensation = () => {
+    batchAlbumCompensation = undefined;
+    if (!gridBatchResult?.compensation) return;
+    gridBatchResult = {
+      tone: gridBatchResult.tone,
+      message: gridBatchResult.message,
+    };
+  };
+
   /// Empties the Grid's multi-selection and leaves Select mode. The caller
   /// owns the render, so a source open that clears it presents the cleared
   /// Grid in its own render; the view is told here as well, because an open
@@ -1819,11 +1865,12 @@ export function mountLibraryBrowser(
   /// or a marker for Photos that open no longer presents.
   const clearMultiSelection = () => {
     multiSelection = new Set();
+    multiMissingIds = new Set();
     multiExpectedSelection = new Map();
-    multiExcludedPhotoIds = new Set();
     multiAnchorId = undefined;
     selectMode = false;
     gridBatchResult = undefined;
+    batchAlbumCompensation = undefined;
     view.resetGridMultiSelection();
   };
 
@@ -1840,7 +1887,7 @@ export function mountLibraryBrowser(
   const toggleMultiSelection = (photoId: string) => {
     if (multiSelection.delete(photoId)) {
       multiExpectedSelection.delete(photoId);
-      multiExcludedPhotoIds.delete(photoId);
+      multiMissingIds.delete(photoId);
     } else {
       if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
         refuseBeyondBatchBound();
@@ -1851,7 +1898,7 @@ export function mountLibraryBrowser(
         photoIndex === undefined ? undefined : sourceGrid.photoAt(photoIndex);
       if (!photo) return;
       multiSelection.add(photoId);
-      multiExcludedPhotoIds.delete(photoId);
+      multiMissingIds.delete(photoId);
       multiExpectedSelection.set(photoId, photo.selectionState);
     }
     gridBatchResult = undefined;
@@ -1877,7 +1924,7 @@ export function mountLibraryBrowser(
       const photo = sourceGrid.photoAt(index);
       if (!photo) return;
       multiSelection.add(photoId);
-      multiExcludedPhotoIds.delete(photoId);
+      multiMissingIds.delete(photoId);
       multiExpectedSelection.set(photoId, photo.selectionState);
       gridBatchResult = undefined;
       multiAnchorId = photoId;
@@ -1903,7 +1950,7 @@ export function mountLibraryBrowser(
         indexToAdd === undefined ? undefined : sourceGrid.photoAt(indexToAdd);
       if (!photo) continue;
       multiSelection.add(photoIdToAdd);
-      multiExcludedPhotoIds.delete(photoIdToAdd);
+      multiMissingIds.delete(photoIdToAdd);
       multiExpectedSelection.set(photoIdToAdd, photo.selectionState);
     }
     gridBatchResult = undefined;
@@ -2140,6 +2187,7 @@ export function mountLibraryBrowser(
   /// checkbox shows the intended state while the mutation is in flight, and
   /// a failed mutation keeps the panel truthful and names the action.
   const toggleMembership = (albumId: string, member: boolean): void => {
+    expireBatchAlbumCompensation();
     const photo = currentPhoto();
     if (!photo || !albumId) return;
     const photoId = photo.id;
@@ -2493,7 +2541,7 @@ export function mountLibraryBrowser(
     if (!connected || pageBusy || !view.gridVisible() || !canOpenGridPhoto())
       return;
     const photoIds = [...multiSelection].filter(
-      (photoId) => !multiExcludedPhotoIds.has(photoId),
+      (photoId) => !multiMissingIds.has(photoId),
     );
     if (photoIds.length === 0) {
       const message =
@@ -2546,9 +2594,9 @@ export function mountLibraryBrowser(
     }
     const applied = outcome.applied.length;
     const conflicts = outcome.conflicts.length;
-    for (const conflict of outcome.conflicts) {
-      multiExcludedPhotoIds.add(conflict.photoId);
-      multiExpectedSelection.delete(conflict.photoId);
+    for (const entry of outcome.conflicts) {
+      multiMissingIds.add(entry.photoId);
+      multiExpectedSelection.delete(entry.photoId);
     }
     const decision = value === "selected" ? "selected" : "rejected";
     const resumeMessage =
@@ -2574,11 +2622,12 @@ export function mountLibraryBrowser(
   /// membership route. Membership stays outside the Undo contract, and the
   /// multi-selection stays so the same Photos can join another Album.
   const batchAddToAlbum = async (albumId: string) => {
+    expireBatchAlbumCompensation();
     if (!applicationAlive || batchAlbumPending || !albumId) return;
     if (multiSelection.size === 0) return;
     if (!application.albums.some((album) => album.id === albumId)) return;
     const photoIds = [...multiSelection].filter(
-      (photoId) => !multiExcludedPhotoIds.has(photoId),
+      (photoId) => !multiMissingIds.has(photoId),
     );
     if (photoIds.length === 0) {
       const message =
@@ -2588,6 +2637,10 @@ export function mountLibraryBrowser(
       renderGrid();
       return;
     }
+    const sourceAuthority = sourceGrid.authority;
+    const albumBefore = application.albums.find(
+      (album) => album.id === albumId,
+    );
     const name = membershipAlbumName(albumId);
     batchAlbumPending = true;
     gridBatchResult = undefined;
@@ -2605,19 +2658,136 @@ export function mountLibraryBrowser(
     renderBatchAlbums();
     // A superseded or already admitted batch reports nothing: the action that
     // owns the settlement presents its own outcome.
-    if (!result.admitted) return;
-    const message = result.ok
-      ? `${photoCountText(photoIds.length)} added to “${name}”.${
-          sourceGrid.kind === "album" ? " Album resume point unchanged." : ""
-        }`
-      : `Could not add the selected Photos to “${name}”.`;
+    if (
+      !result.admitted ||
+      !result.latest ||
+      !sourceGrid.isCurrent(sourceAuthority)
+    )
+      return;
+    let message: string;
+    let compensation: GridBatchResult["compensation"];
+    if (result.ok && result.membershipAdd) {
+      const added = result.membershipAdd.addedPhotoIds.length;
+      const alreadyMember = result.membershipAdd.alreadyMemberPhotoIds.length;
+      const parts = [
+        ...(added > 0 ? [`${photoCountText(added)} added to “${name}”.`] : []),
+        ...(alreadyMember > 0
+          ? [`${photoCountText(alreadyMember)} already in “${name}”.`]
+          : []),
+      ];
+      if (sourceGrid.kind === "album")
+        parts.push("Album resume point unchanged.");
+      message = parts.join(" ");
+      if (added > 0) {
+        batchAlbumCompensation = Object.freeze({
+          albumId,
+          albumName: name,
+          photoIds: Object.freeze([...result.membershipAdd.addedPhotoIds]),
+          sourceAuthority,
+          hadSavedPosition: albumBefore?.hasSavedPosition ?? false,
+        });
+        compensation = { label: "Remove added Photos" };
+      } else batchAlbumCompensation = undefined;
+    } else {
+      batchAlbumCompensation = undefined;
+      message = result.ok
+        ? `${photoCountText(photoIds.length)} added to “${name}”.${
+            sourceGrid.kind === "album" ? " Album resume point unchanged." : ""
+          }`
+        : `Could not add the selected Photos to “${name}”.`;
+    }
     gridBatchResult = {
       tone: result.ok ? "success" : "failure",
+      message,
+      ...(compensation ? { compensation } : {}),
+    };
+    setDecisionStatus(message);
+    renderGrid();
+  };
+  /// Removes only the identities returned as newly added by the current batch
+  /// Album operation. This is a scoped compensation, not the global decision
+  /// Undo, and a failed settlement keeps the exact bounded record retryable.
+  const removeAddedPhotosFromAlbum = async () => {
+    const compensation = batchAlbumCompensation;
+    if (
+      !compensation ||
+      batchAlbumPending ||
+      !applicationAlive ||
+      !sourceGrid.isCurrent(compensation.sourceAuthority)
+    )
+      return;
+    const savedPositionBefore =
+      application.albums.find((album) => album.id === compensation.albumId)
+        ?.hasSavedPosition ?? compensation.hadSavedPosition;
+    batchAlbumPending = true;
+    renderGrid();
+    renderBatchAlbums();
+    setDecisionStatus(
+      `Removing ${photoCountText(compensation.photoIds.length)} added Photos from “${compensation.albumName}”…`,
+    );
+    const result = await mutateAlbum(
+      (context) =>
+        albumActions.removeAddedMemberships(
+          compensation.albumId,
+          compensation.photoIds,
+          context,
+        ),
+      "summary",
+    );
+    batchAlbumPending = false;
+    if (!applicationAlive) return;
+    renderBatchAlbums();
+    if (
+      !result.admitted ||
+      !result.latest ||
+      batchAlbumCompensation !== compensation ||
+      !sourceGrid.isCurrent(compensation.sourceAuthority)
+    ) {
+      renderGrid();
+      return;
+    }
+    if (!result.ok || !result.membershipRemove) {
+      const message = `Could not remove the added Photos from “${compensation.albumName}”. Retry to continue.`;
+      gridBatchResult = {
+        tone: "failure",
+        message,
+        compensation: { label: "Remove added Photos" },
+      };
+      setDecisionStatus(message);
+      renderGrid();
+      return;
+    }
+    const removed = result.membershipRemove.removedPhotoIds.length;
+    const absent = result.membershipRemove.alreadyAbsentPhotoIds.length;
+    const currentAlbum = application.albums.find(
+      (album) => album.id === compensation.albumId,
+    );
+    const savedPositionMessage =
+      savedPositionBefore && !currentAlbum?.hasSavedPosition
+        ? " Album resume point cleared."
+        : savedPositionBefore && currentAlbum?.hasSavedPosition
+          ? " Album resume point remains."
+          : "";
+    const message = [
+      `${photoCountText(removed)} removed from “${compensation.albumName}”.`,
+      ...(absent > 0
+        ? [
+            `${photoCountText(absent)} already absent from “${compensation.albumName}”.`,
+          ]
+        : []),
+      savedPositionMessage.trim(),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    batchAlbumCompensation = undefined;
+    gridBatchResult = {
+      tone: absent > 0 ? "warning" : "success",
       message,
     };
     setDecisionStatus(message);
     renderGrid();
   };
+
   /// Restores every Photo one batch Selection State change confirmed. The
   /// writes are the same compare-and-set writes a single Undo sends, one
   /// Photo at a time, and the Grid stays where it is: a batch never opened a
@@ -3141,6 +3311,9 @@ export function mountLibraryBrowser(
       case "grid-batch-album-add":
         void batchAddToAlbum(intent.albumId);
         return;
+      case "grid-batch-album-remove":
+        void removeAddedPhotosFromAlbum();
+        return;
       case "show-grid":
         showGrid();
         return;
@@ -3189,6 +3362,7 @@ export function mountLibraryBrowser(
     cancelScheduledGridRender();
     unsubscribeWindowSettled();
     albumRecovery = undefined;
+    batchAlbumCompensation = undefined;
     albumActions.dispose();
     savedPositions.dispose();
     application.dispose();

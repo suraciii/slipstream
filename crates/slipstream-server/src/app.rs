@@ -1182,6 +1182,46 @@ impl Application {
         self.albums().await
     }
 
+    pub async fn add_album_members(
+        &self,
+        album_id: &str,
+        photo_ids: Vec<String>,
+    ) -> Result<AlbumMembershipAddResponse, ServerError> {
+        let result = self
+            .library
+            .mutate_album_membership(slipstream_core::AlbumMembershipMutation::Add {
+                album_id: album_id.to_owned(),
+                photo_ids,
+            })
+            .await?;
+        Ok(AlbumMembershipAddResponse {
+            album_id: result.album_id,
+            added_photo_ids: result.added_photo_ids,
+            already_member_photo_ids: result.already_member_photo_ids,
+            albums: self.albums().await?.albums,
+        })
+    }
+
+    pub async fn remove_added_album_members(
+        &self,
+        album_id: &str,
+        photo_ids: Vec<String>,
+    ) -> Result<AlbumMembershipRemoveResponse, ServerError> {
+        let result = self
+            .library
+            .mutate_album_membership(slipstream_core::AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.to_owned(),
+                photo_ids,
+            })
+            .await?;
+        Ok(AlbumMembershipRemoveResponse {
+            album_id: result.album_id,
+            removed_photo_ids: result.removed_photo_ids,
+            already_absent_photo_ids: result.already_absent_photo_ids,
+            albums: self.albums().await?.albums,
+        })
+    }
+
     /// Adds all Photos projected into one Folder from the exact Published
     /// Library generation supplied by the browser. The Folder index is
     /// already ordered like the corresponding recursive Folder source, so the

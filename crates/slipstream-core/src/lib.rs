@@ -37,7 +37,8 @@ pub use derivative::{
     Derivative, DerivativeError, DerivativeProfile, DerivativeTarget, process_jpeg,
 };
 pub use domain::{
-    AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
+    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
+    AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
     AlbumRecord, AlbumSummary, DiscoveredOriginal, MAXIMUM_FOLDER_ALBUM_PHOTOS,
     OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
     PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoRecord, PhotoStateBatchApplied,
