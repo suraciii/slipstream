@@ -359,7 +359,10 @@ Photos selected for review or retry. A missing
 Photo remains a selected, non-retryable result until clear or source change;
 its ID is excluded from later requests. The browser does not invent a fact for
 a missing Photo. `Review N` refreshes the current facts for N changed Photos
-and replaces their expected states before a retry.
+and replaces their expected states before a retry. Before treating a refreshed
+Photo as missing, the browser resolves its identity against the current Browse
+Snapshot position; bounded local fact eviction is retryable cache pressure, not
+proof that the Photo left the Library.
 
 The response is valid only when its three arrays contain exactly one
 non-overlapping outcome for every requested Photo and each outcome has the

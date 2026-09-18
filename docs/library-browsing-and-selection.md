@@ -775,7 +775,9 @@ identify missing Photos as `no longer in this Library`, identify concurrent
 state differences as `changed elsewhere`, and offer a `Review N` action for the
 latter, where `N` is the number of affected Photos. `Review N` focuses the
 affected cells and opens no modal. Review must refresh each affected Photo's
-current facts before another decision can be confirmed.
+current facts before another decision can be confirmed. Review verifies the
+Photo's position in the current Browse Snapshot before it reports the Photo as
+missing; local fact eviction stays retryable and is not proof of deletion.
 
 A missing Photo remains visible in the selection result and the tray count
 until the Photographer clears it or opens another source, but it is marked

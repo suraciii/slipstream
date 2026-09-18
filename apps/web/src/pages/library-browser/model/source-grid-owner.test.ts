@@ -1517,12 +1517,14 @@ describe("SourceGridOwner", () => {
   });
 
   test("keeps every fact in a clamped tail window after trim", async () => {
+    const requested: number[] = [];
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);
       if (url.pathname === "/api/browse" && init?.method === "POST")
         return Promise.resolve(opened("browse-1", 400));
       if (url.pathname === "/api/browse/browse-1") {
         const start = Number(url.searchParams.get("start"));
+        requested.push(start);
         return Promise.resolve(windowResponse(start, 400));
       }
       if (init?.method === "DELETE")
@@ -1533,8 +1535,11 @@ describe("SourceGridOwner", () => {
     owner.ensureRange(0, 400, { kind: "grid", authority });
     await flushTasks();
     owner.ensureRange(0, 60, { kind: "grid", authority });
+    // The prior trim evicted the tail. This re-admits the clamped [340,400)
+    // window, so the anchor branch must protect its actual 340 start.
     owner.ensureRange(340, 400, { kind: "grid", authority });
     await flushTasks();
+    expect(requested).toContain(340);
     expect(owner.retainedFactCount).toBeLessThanOrEqual(240);
     expect(owner.photoAt(340)?.id).toBe("photo-340");
     expect(owner.photoAt(399)?.id).toBe("photo-399");

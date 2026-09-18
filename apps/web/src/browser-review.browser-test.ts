@@ -3516,8 +3516,8 @@ test("Grid batch Review keeps existing Photos under retention pressure", async (
   await expect(cell(399)).toBeVisible();
   await cell(399).click();
 
-  // Fill the bounded retained-fact set and leave the tail as the current
-  // viewport. Review then visits tail, head, and tail again in one run.
+  // Fill the bounded retained-fact set. Review then visits tail, head, and
+  // tail again in one run, so the first tail window can be evicted in between.
   await evictFirstPhotoFact(page);
   for (const id of [ids[398]!, ids[0]!, ids[399]!])
     await post(running.url, `/api/photos/${id}/state`, {

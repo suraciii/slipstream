@@ -2691,6 +2691,13 @@ export function mountLibraryBrowser(
             becameMissing.add(photoId);
             continue;
           }
+          if (position.kind === "expired") {
+            await reopenExpired(
+              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
+              sourceGrid.generation,
+            );
+            return;
+          }
           if (position.kind !== "resolved") {
             failed = true;
             break;
@@ -2737,6 +2744,13 @@ export function mountLibraryBrowser(
           if (currentPosition.kind === "missing") {
             becameMissing.add(photoId);
             continue;
+          }
+          if (currentPosition.kind === "expired") {
+            await reopenExpired(
+              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
+              sourceGrid.generation,
+            );
+            return;
           }
           if (currentPosition.kind !== "resolved") {
             failed = true;
