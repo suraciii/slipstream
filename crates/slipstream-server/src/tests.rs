@@ -128,6 +128,31 @@ fn prepare_fixture() -> (PathBuf, Config) {
     (base.clone(), test_config(&base, web_root, 3000))
 }
 
+/// The protocol success fixtures contain one RAW/JPEG pair and one JPEG-only
+/// Photo. Their capture times make the descending view visibly reorder the
+/// same two identities, while the pair proves RAW filename and Original
+/// hydration at the HTTP boundary.
+fn prepare_populated_fixture() -> (PathBuf, Config) {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::write(root.join("pair.ARW"), b"compatibility raw fixture").unwrap();
+    jpeg_fixture_with_capture_time(
+        &root.join("pair.JPG"),
+        90,
+        45,
+        [192, 64, 32],
+        "2026:01:01 09:00:00",
+    );
+    jpeg_fixture_with_capture_time(
+        &root.join("later.JPG"),
+        120,
+        60,
+        [32, 192, 64],
+        "2026:01:01 10:00:00",
+    );
+    (base, config)
+}
+
 fn environment(values: &[(&str, &str)]) -> HashMap<String, String> {
     values
         .iter()
@@ -527,9 +552,71 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
 
 #[tokio::test]
 async fn browse_protocol_fixtures_execute_with_captured_token() {
-    let (base, config) = prepare_fixture();
+    let vectors: Vec<serde_json::Value> = serde_json::from_slice(
+        &fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compatibility/protocol/browse-vectors.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(vectors.len(), 53);
+    fn substitute(
+        value: &serde_json::Value,
+        captures: &HashMap<String, String>,
+    ) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                let mut result = text.clone();
+                for (placeholder, replacement) in captures {
+                    result = result.replace(&format!("${placeholder}"), replacement);
+                }
+                serde_json::Value::String(result)
+            }
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|item| substitute(item, captures))
+                    .collect(),
+            ),
+            serde_json::Value::Object(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(name, item)| (name.clone(), substitute(item, captures)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    let (base, config) = prepare_populated_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
+    let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(
+        photo_ids.len(),
+        2,
+        "populated protocol fixture must have two Photos"
+    );
+    let album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Compat Album".to_owned(),
+        })
+        .await
+        .unwrap();
+    let album_id = album.albums[0].id.clone();
+    application
+        .mutate_album(slipstream_core::AlbumMutation::AddMembers {
+            album_id: album_id.clone(),
+            photo_ids: vec![photo_ids[1].clone(), photo_ids[0].clone()],
+        })
+        .await
+        .unwrap();
+    for photo_id in &photo_ids {
+        let preview = application.preview(photo_id).await.unwrap();
+        assert_eq!(preview.state, "ready", "fixture Preview must be ready");
+        let thumbnail = application.thumbnail(photo_id).await.unwrap();
+        assert_eq!(thumbnail.state, "ready", "fixture Thumbnail must be ready");
+    }
     let router = create_router(Arc::clone(&application), config.web_root());
     let vectors: Vec<serde_json::Value> = serde_json::from_slice(
         &fs::read(
@@ -539,54 +626,25 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         .unwrap(),
     )
     .unwrap();
-    assert!(vectors.len() >= 12);
-    fn replace_placeholder(
-        value: &serde_json::Value,
-        placeholder: &str,
-        replacement: &str,
-    ) -> serde_json::Value {
-        match value {
-            serde_json::Value::String(text) => {
-                serde_json::Value::String(text.replace(placeholder, replacement))
-            }
-            serde_json::Value::Array(values) => serde_json::Value::Array(
-                values
-                    .iter()
-                    .map(|item| replace_placeholder(item, placeholder, replacement))
-                    .collect(),
-            ),
-            serde_json::Value::Object(entries) => serde_json::Value::Object(
-                entries
-                    .iter()
-                    .map(|(name, item)| {
-                        (
-                            name.clone(),
-                            replace_placeholder(item, placeholder, replacement),
-                        )
-                    })
-                    .collect(),
-            ),
-            other => other.clone(),
-        }
-    }
-    fn substitute(value: &serde_json::Value, token: &str, publication: &str) -> serde_json::Value {
-        replace_placeholder(
-            &replace_placeholder(value, "$publication", publication),
-            "$token",
-            token,
-        )
-    }
+    assert_eq!(vectors.len(), 53);
+    let mut captures = HashMap::from([
+        ("albumId".to_owned(), album_id),
+        ("photoId".to_owned(), photo_ids[0].clone()),
+        ("secondPhotoId".to_owned(), photo_ids[1].clone()),
+    ]);
     let mut token = String::new();
     let mut publication = String::new();
     for vector in vectors {
         let name = vector["name"].as_str().unwrap().to_owned();
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
-        let path = request_definition["path"]
-            .as_str()
-            .unwrap()
-            .replace("$token", &token)
-            .replace("$publication", &publication);
+        let path = substitute(
+            &serde_json::Value::String(request_definition["path"].as_str().unwrap().to_owned()),
+            &captures,
+        )
+        .as_str()
+        .unwrap()
+        .to_owned();
         let mut builder = Request::builder()
             .method(method)
             .uri(format!("http://camera.local{path}"));
@@ -597,10 +655,7 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         }
         let body = request_definition
             .get("body")
-            .map(|body| {
-                let substituted = substitute(body, &token, &publication);
-                Body::from(serde_json::to_vec(&substituted).unwrap())
-            })
+            .map(|body| Body::from(serde_json::to_vec(&substitute(body, &captures)).unwrap()))
             .unwrap_or_else(Body::empty);
         let request = builder.body(body).unwrap();
         let response = tower::ServiceExt::oneshot(router.clone(), request)
@@ -611,7 +666,7 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
             vector["expected"]["status"].as_u64().unwrap() as u16,
             "{name}"
         );
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        let body = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
             .await
             .unwrap();
         let actual: Option<serde_json::Value> = if vector["expected"]["body"].is_object() {
@@ -619,55 +674,451 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         } else {
             None
         };
-        if publication.is_empty()
-            && let Some(captured) = actual
-                .as_ref()
-                .and_then(|value| {
-                    value
-                        .get("publication")
-                        .or_else(|| value.get("scan")?.get("publication"))
-                })
-                .and_then(|value| value.as_str())
-        {
-            publication = captured.to_owned();
-        }
-        if let Some(actual_value) = &actual
-            && method == "POST"
-            && path == "/api/browse"
-            && let Some(new_token) = actual_value.get("token").and_then(|value| value.as_str())
-        {
-            token = new_token.to_owned();
-            assert!(token.len() >= 36, "{name} token is not opaque");
-        }
-        if vector["capture"].as_str() == Some("publication")
-            && let Some(captured) = actual
-                .as_ref()
-                .and_then(|value| value.get("publication"))
-                .and_then(|value| value.as_str())
-        {
-            publication = captured.to_owned();
+        if let Some(actual_value) = actual.as_ref() {
+            if publication.is_empty()
+                && let Some(captured) = actual_value
+                    .get("publication")
+                    .or_else(|| {
+                        actual_value
+                            .get("scan")
+                            .and_then(|scan| scan.get("publication"))
+                    })
+                    .and_then(|value| value.as_str())
+            {
+                publication = captured.to_owned();
+                captures.insert("publication".to_owned(), publication.clone());
+            }
+            if method == "POST"
+                && path == "/api/browse"
+                && let Some(new_token) = actual_value.get("token").and_then(|value| value.as_str())
+            {
+                token = new_token.to_owned();
+                captures.insert("token".to_owned(), token.clone());
+                assert!(token.len() >= 36, "{name} token is not opaque");
+            }
+            if let Some(photos) = actual_value
+                .get("photos")
+                .and_then(|value| value.as_array())
+            {
+                for (index, photo) in photos.iter().take(2).enumerate() {
+                    let fields = if index == 0 {
+                        [
+                            ("photoId", "id"),
+                            ("reviewUrl", "preview.url"),
+                            ("thumbnailUrl", "preview.thumbnailUrl"),
+                        ]
+                    } else {
+                        [
+                            ("secondPhotoId", "id"),
+                            ("secondReviewUrl", "preview.url"),
+                            ("secondThumbnailUrl", "preview.thumbnailUrl"),
+                        ]
+                    };
+                    for (placeholder, field) in fields {
+                        let value = field
+                            .split('.')
+                            .try_fold(photo, |value, key| value.get(key))
+                            .and_then(|value| value.as_str());
+                        if let Some(value) = value {
+                            captures
+                                .entry(placeholder.to_owned())
+                                .or_insert_with(|| value.to_owned());
+                        }
+                    }
+                }
+            }
+            if let Some(url) = actual_value.get("url").and_then(|value| value.as_str()) {
+                let placeholder = if url.contains("/thumbnail/") {
+                    "thumbnailUrl"
+                } else if url.contains("/review/") {
+                    "reviewUrl"
+                } else {
+                    ""
+                };
+                if !placeholder.is_empty() {
+                    captures
+                        .entry(placeholder.to_owned())
+                        .or_insert_with(|| url.to_owned());
+                }
+            }
         }
         if let (Some(actual_value), Some(expected)) =
             (actual.as_ref(), vector["expected"]["body"].as_object())
         {
+            let expected = substitute(&serde_json::Value::Object(expected.clone()), &captures);
             assert_eq!(
                 actual_value.as_object().unwrap(),
-                substitute(
-                    &serde_json::Value::Object(expected.clone()),
-                    &token,
-                    &publication
-                )
-                .as_object()
-                .unwrap(),
+                expected.as_object().unwrap(),
                 "{name}"
             );
         }
     }
     assert!(!token.is_empty(), "fixtures must exercise a captured token");
+    assert!(captures.contains_key("albumId"));
+    assert!(captures.contains_key("photoId"));
+    assert!(captures.contains_key("reviewUrl"));
+    assert!(captures.contains_key("thumbnailUrl"));
     assert!(
         !publication.is_empty(),
         "fixtures must exercise a captured publication"
     );
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn response_goldens_match_real_serialized_routes() {
+    let goldens: Vec<serde_json::Value> = serde_json::from_slice(
+        &fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compatibility/protocol/responses.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(goldens.len(), 9);
+
+    fn substitute(
+        value: &serde_json::Value,
+        captures: &HashMap<String, String>,
+    ) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                let mut result = text.clone();
+                for (placeholder, replacement) in captures {
+                    result = result.replace(&format!("${placeholder}"), replacement);
+                }
+                serde_json::Value::String(result)
+            }
+            serde_json::Value::Array(values) => serde_json::Value::Array(
+                values
+                    .iter()
+                    .map(|item| substitute(item, captures))
+                    .collect(),
+            ),
+            serde_json::Value::Object(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(name, item)| (name.clone(), substitute(item, captures)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    fn assert_golden(
+        goldens: &[serde_json::Value],
+        index: usize,
+        actual: &serde_json::Value,
+        captures: &HashMap<String, String>,
+    ) {
+        assert_eq!(
+            actual,
+            &substitute(&goldens[index], captures),
+            "response golden {index}"
+        );
+    }
+
+    let (base, config) = prepare_populated_fixture();
+    let root = &config.library_root;
+    oversized_jpeg_fixture(&root.join("failed.JPG"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let summaries = browse_summaries(&application, BrowseSourceRequest::Library).await;
+    let photo_id_for = |filename: &str| {
+        summaries
+            .iter()
+            .find(|photo| photo.original_filename.as_deref() == Some(filename))
+            .unwrap_or_else(|| panic!("fixture is missing {filename}"))
+            .id
+            .clone()
+    };
+    let photo_id = photo_id_for("pair.ARW");
+    let later_id = photo_id_for("later.JPG");
+    let failed_id = photo_id_for("failed.JPG");
+
+    let created = response_json(
+        post_json(
+            &router,
+            "/api/albums",
+            serde_json::json!({"name":"Review"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let album_id = created["albums"][0]["id"].as_str().unwrap().to_owned();
+    let added = response_json(
+        post_json(
+            &router,
+            &format!("/api/albums/{album_id}/members"),
+            serde_json::json!({"photoIds":[photo_id.clone()]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let mut captures = HashMap::from([
+        ("albumId".to_owned(), album_id),
+        ("photoId".to_owned(), photo_id.clone()),
+    ]);
+    assert_golden(&goldens, 2, &added, &captures);
+
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source":"album","albumId":captures["albumId"]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let token = opened["token"].as_str().unwrap().to_owned();
+    let pending = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=1"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 0, &pending, &captures);
+
+    let pair_current = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(pair_current["state"], "ready");
+    captures.insert(
+        "reviewUrl".to_owned(),
+        pair_current["url"].as_str().unwrap().to_owned(),
+    );
+
+    let current = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(current["state"], "ready");
+    assert_eq!(current["width"], 120);
+    assert_eq!(current["height"], 60);
+    captures.insert("secondPhotoId".to_owned(), later_id.clone());
+    captures.insert(
+        "secondReviewUrl".to_owned(),
+        current["url"].as_str().unwrap().to_owned(),
+    );
+    let thumbnail = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/thumbnail"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(thumbnail["state"], "ready");
+    captures.insert(
+        "thumbnailUrl".to_owned(),
+        thumbnail["url"].as_str().unwrap().to_owned(),
+    );
+    let ready = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=1"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 1, &ready, &captures);
+    assert_golden(&goldens, 3, &current, &captures);
+
+    let set_two = response_json(
+        post_json(
+            &router,
+            &format!("/api/photos/{photo_id}/state"),
+            serde_json::json!({"field":"rating","value":2}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(set_two["kind"], "applied");
+    let set_four = response_json(
+        post_json(
+            &router,
+            &format!("/api/photos/{photo_id}/state"),
+            serde_json::json!({"field":"rating","value":4}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 7, &set_four, &captures);
+    let batch = response_json(
+        post_json(
+            &router,
+            "/api/photos/state",
+            serde_json::json!({
+                "photoIds":[photo_id.clone(),"00000000-0000-4000-8000-000000000000"],
+                "selectionState":"selected"
+            }),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 8, &batch, &captures);
+
+    std::thread::sleep(Duration::from_millis(10));
+    jpeg_fixture(&root.join("later.JPG"), 140, 70, [32, 192, 64]);
+    assert_eq!(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/scan")
+                .header(header::ORIGIN, "http://camera.local")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let changed = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(changed["state"], "ready");
+    assert_eq!(changed["width"], 140);
+    assert_eq!(changed["height"], 70);
+    captures.insert(
+        "secondReviewUrl".to_owned(),
+        changed["url"].as_str().unwrap().to_owned(),
+    );
+    assert_eq!(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local{}",
+                    changed["url"].as_str().unwrap()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    std::thread::sleep(Duration::from_millis(10));
+    fs::write(root.join("later.JPG"), b"malformed replacement").unwrap();
+    assert_eq!(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/scan")
+                .header(header::ORIGIN, "http://camera.local")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let stale = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 4, &stale, &captures);
+
+    let failed = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photos/{failed_id}/preview"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 5, &failed, &captures);
+
+    fs::remove_file(root.join("later.JPG")).unwrap();
+    assert_eq!(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/scan")
+                .header(header::ORIGIN, "http://camera.local")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_golden(&goldens, 6, &unavailable, &captures);
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -731,6 +1182,17 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
             other => panic!("unknown cache fixture setup {other}"),
         };
         let expected = &vector["expected"];
+        let declared_headers = expected["headers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            declared_headers,
+            BTreeSet::from(["cache-control", "content-type", "x-content-type-options"]),
+            "{name} must declare the complete cache header contract"
+        );
         let response = send(
             &router,
             Request::builder()
@@ -757,6 +1219,18 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
                 pattern,
                 response.headers()[header::ETAG].to_str().unwrap(),
                 name,
+            );
+        }
+        if vector["setup"] == "matching-jpeg" {
+            let cache_key = preview_url
+                .rsplit('/')
+                .next()
+                .and_then(|filename| filename.strip_suffix(".jpg"))
+                .unwrap();
+            assert_eq!(
+                response.headers()[header::ETAG],
+                format!("\"{cache_key}\""),
+                "{name} ETag must identify the requested derivative cache key"
             );
         }
         let etag = response
@@ -4146,6 +4620,45 @@ fn jpeg_fixture(path: &Path, width: u32, height: u32, color: [u8; 3]) {
     image::RgbImage::from_pixel(width, height, image::Rgb(color))
         .save_with_format(path, image::ImageFormat::Jpeg)
         .unwrap();
+}
+
+fn jpeg_fixture_with_capture_time(
+    path: &Path,
+    width: u32,
+    height: u32,
+    color: [u8; 3],
+    capture_time: &str,
+) {
+    jpeg_fixture(path, width, height, color);
+    let jpeg = fs::read(path).unwrap();
+    let mut value = capture_time.as_bytes().to_vec();
+    value.push(0);
+    let data_offset = 8 + 2 + 12 + 4;
+    let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+    tiff.extend_from_slice(&1_u16.to_le_bytes());
+    tiff.extend_from_slice(&0x9003_u16.to_le_bytes());
+    tiff.extend_from_slice(&2_u16.to_le_bytes());
+    tiff.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    tiff.extend_from_slice(&(data_offset as u32).to_le_bytes());
+    tiff.extend_from_slice(&0_u32.to_le_bytes());
+    tiff.extend_from_slice(&value);
+    let mut payload = b"Exif\0\0".to_vec();
+    payload.extend_from_slice(&tiff);
+    let length = u16::try_from(payload.len() + 2).unwrap();
+    let mut bytes = jpeg[..2].to_vec();
+    bytes.extend_from_slice(b"\xff\xe1");
+    bytes.extend_from_slice(&length.to_be_bytes());
+    bytes.extend_from_slice(&payload);
+    bytes.extend_from_slice(&jpeg[2..]);
+    fs::write(path, bytes).unwrap();
+}
+
+/// A sparse JPEG-suffixed file beyond the preview input budget. The scanner
+/// can retain its identity, while preview inspection returns the real request
+/// failure state without allocating 128 MiB of fixture data.
+fn oversized_jpeg_fixture(path: &Path) {
+    let file = fs::File::create(path).unwrap();
+    file.set_len(128 * 1024 * 1024 + 1).unwrap();
 }
 
 fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {

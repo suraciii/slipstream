@@ -61,6 +61,8 @@ pub fn source_revision(path: &str, size: u64, mtime_ms: f64) -> String {
 #[cfg(test)]
 #[derive(Deserialize)]
 struct IdentityContract {
+    #[serde(rename = "algorithmVersion")]
+    algorithm_version: String,
     vectors: Vec<IdentityVector>,
     paired: PairedVector,
 }
@@ -69,15 +71,22 @@ struct IdentityContract {
 #[derive(Deserialize)]
 struct IdentityVector {
     path: String,
+    source: String,
     size: u64,
     #[serde(rename = "mtimeMs")]
     mtime_ms: f64,
+    candidate: Option<String>,
+    edge: u32,
     #[serde(rename = "originalId")]
     original_id: String,
     #[serde(rename = "photoId")]
     photo_id: String,
     #[serde(rename = "sourceRevision")]
     source_revision: String,
+    #[serde(rename = "historicalCacheKey")]
+    historical_cache_key: String,
+    #[serde(rename = "historicalManifestIdentity")]
+    historical_manifest_identity: String,
 }
 
 #[cfg(test)]
@@ -106,8 +115,10 @@ mod tests {
     use serde_json::Value;
     use slipstream_core::{DerivativeProfile, DerivativeTarget, process_jpeg};
     use std::{
+        collections::BTreeSet,
         fs,
         io::Cursor,
+        path::Path,
         sync::{Mutex, OnceLock},
     };
     static VIPS_TEST_LEASE: OnceLock<Mutex<()>> = OnceLock::new();
@@ -404,6 +415,141 @@ mod tests {
     }
 
     #[test]
+    fn every_compatibility_file_has_an_executing_consumer() {
+        let root = Path::new(CONTRACT_ROOT);
+        fn files_under(root: &Path, path: &Path, files: &mut BTreeSet<String>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    files_under(root, &path, files);
+                } else if path.is_file() {
+                    files.insert(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut actual = BTreeSet::new();
+        files_under(root, root, &mut actual);
+        let consumed = BTreeSet::from([
+            "identity/vectors.json",
+            "metadata/capture-order.json",
+            "metadata/capture-time.json",
+            "preview/fixtures.json",
+            "protocol/browse-vectors.json",
+            "protocol/cache-vectors.json",
+            "protocol/capture-order-omission.json",
+            "protocol/responses.json",
+            "protocol/vectors.json",
+            "sqlite/malformed-v2.sql",
+            "sqlite/rejections.json",
+            "sqlite/schema-v1.json",
+            "sqlite/schema-v1.sql",
+            "sqlite/schema-v2.json",
+            "sqlite/schema-v2.sql",
+            "sqlite/schema-v3.json",
+            "sqlite/schema-v3.sql",
+            "sqlite/schema-v4.json",
+            "sqlite/schema-v4.sql",
+            "sqlite/schema-v5.json",
+            "sqlite/schema-v5.sql",
+            "sqlite/v0.sql",
+            "sqlite/v1.sql",
+            "startup/vectors.json",
+        ])
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            actual, consumed,
+            "each compatibility file must be added to an executing consumer and this inventory"
+        );
+        let repository = root.parent().unwrap();
+        for (file, source) in [
+            (
+                "identity/vectors.json",
+                "crates/slipstream-core/src/identity.rs",
+            ),
+            (
+                "metadata/capture-time.json",
+                "crates/slipstream-core/src/capture.rs",
+            ),
+            (
+                "metadata/capture-order.json",
+                "crates/slipstream-core/src/capture.rs",
+            ),
+            (
+                "protocol/browse-vectors.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "protocol/cache-vectors.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "protocol/capture-order-omission.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "protocol/responses.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "protocol/vectors.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "startup/vectors.json",
+                "crates/slipstream-server/src/tests.rs",
+            ),
+            (
+                "sqlite/malformed-v2.sql",
+                "crates/slipstream-core/src/persistence/owner.rs",
+            ),
+            (
+                "sqlite/rejections.json",
+                "crates/slipstream-core/src/persistence/owner.rs",
+            ),
+            (
+                "sqlite/v0.sql",
+                "crates/slipstream-core/src/persistence/owner.rs",
+            ),
+            (
+                "sqlite/v1.sql",
+                "crates/slipstream-core/src/persistence/owner.rs",
+            ),
+        ] {
+            assert!(
+                fs::read_to_string(repository.join(source))
+                    .unwrap()
+                    .contains(file),
+                "{file} lost its executing consumer {source}"
+            );
+        }
+        for version in 1..=5 {
+            let schema = fs::read_to_string(
+                repository.join("crates/slipstream-core/src/persistence/schema.rs"),
+            )
+            .unwrap();
+            for extension in ["sql", "json"] {
+                let file = format!("sqlite/schema-v{version}.{extension}");
+                assert!(schema.contains(&file), "{file} lost its schema consumer");
+            }
+        }
+        let preview =
+            fs::read_to_string(repository.join("crates/slipstream-compat/src/lib.rs")).unwrap();
+        assert!(
+            preview.contains("fn preview_fixture_matrix_runs_rust_derivative_for_every_recipe")
+        );
+        assert!(preview.contains("contract_path(\"preview/fixtures.json\")"));
+    }
+
+    #[test]
     fn shared_protocol_goldens_preserve_absence_instead_of_null() {
         let mut vectors: Vec<Value> =
             serde_json::from_slice(&fs::read(contract_path("protocol/vectors.json")).unwrap())
@@ -456,7 +602,7 @@ mod tests {
             values.iter().any(|v| {
                 v["photos"][0]["preview"]["url"]
                     .as_str()
-                    .is_some_and(|url| url.starts_with("/api/derivatives/"))
+                    .is_some_and(|url| url == "$reviewUrl" || is_review_derivative_url(url))
             }),
             "browse photo summaries document the hydrated current preview URL"
         );
@@ -465,7 +611,8 @@ mod tests {
                 v["photos"][0]["preview"]["thumbnailUrl"]
                     .as_str()
                     .is_some_and(|url| {
-                        url.starts_with("/api/derivatives/") && url.contains("/thumbnail/")
+                        url == "$thumbnailUrl"
+                            || (url.starts_with("/api/derivatives/") && url.contains("/thumbnail/"))
                     })
             }),
             "browse photo summaries document the hydrated current thumbnail URL"
@@ -496,7 +643,7 @@ mod tests {
                 .as_str()
                 .expect("top-level ready Preview response has a URL");
             assert!(
-                is_review_derivative_url(url),
+                url == "$secondReviewUrl" || is_review_derivative_url(url),
                 "top-level ready Preview response uses the target-qualified review URL"
             );
             let retired_url = url.replacen("/review/", "/", 1);
@@ -602,7 +749,19 @@ mod tests {
         let contract: IdentityContract =
             serde_json::from_slice(&fs::read(contract_path("identity/vectors.json")).unwrap())
                 .unwrap();
+        assert_eq!(contract.algorithm_version, "sharp-v2");
         for vector in contract.vectors {
+            assert!(matches!(
+                vector.source.as_str(),
+                "matching-jpeg" | "embedded-raw-jpeg"
+            ));
+            assert!(matches!(vector.edge, 512 | 2560));
+            if let Some(candidate) = vector.candidate {
+                assert!(!candidate.is_empty());
+                assert!(candidate.parse::<u32>().is_ok());
+            }
+            assert!(is_valid_cache_key(&vector.historical_cache_key));
+            assert!(is_valid_cache_key(&vector.historical_manifest_identity));
             assert_eq!(original_id(&vector.path), vector.original_id);
             assert_eq!(photo_id(&vector.original_id), vector.photo_id);
             assert_eq!(

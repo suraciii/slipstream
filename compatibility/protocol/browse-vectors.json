@@ -1,6 +1,6 @@
 [
   {
-    "name": "overview-empty-library",
+    "name": "overview-populated-library",
     "request": {
       "method": "GET",
       "path": "/api/overview"
@@ -10,14 +10,21 @@
       "body": {
         "published": true,
         "publication": "$publication",
-        "photoCount": 0,
+        "photoCount": 2,
         "scan": {
           "state": "idle",
           "publication": "$publication",
-          "completed": 0,
-          "total": 0
+          "completed": 2,
+          "total": 2
         },
-        "albums": []
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Compat Album",
+            "photoCount": 2,
+            "hasSavedPosition": false
+          }
+        ]
       }
     }
   },
@@ -38,27 +45,93 @@
       "status": 200,
       "body": {
         "token": "$token",
-        "total": 0,
+        "total": 2,
         "position": 0,
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
       }
     }
   },
   {
-    "name": "browse-window-empty",
+    "name": "browse-window-library-populated",
     "request": {
       "method": "GET",
-      "path": "/api/browse/$token?start=0&limit=1"
+      "path": "/api/browse/$token?start=0&limit=60"
     },
     "expected": {
       "status": 200,
       "body": {
         "start": 0,
-        "total": 0,
+        "total": 2,
+        "photos": [
+          {
+            "id": "$photoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "pair.ARW",
+            "originals": [
+              {
+                "kind": "raw",
+                "available": true
+              },
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 90,
+              "height": 45,
+              "limitedDetail": true,
+              "url": "$reviewUrl",
+              "thumbnailUrl": "$thumbnailUrl"
+            }
+          },
+          {
+            "id": "$secondPhotoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "later.JPG",
+            "originals": [
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 120,
+              "height": 60,
+              "limitedDetail": true,
+              "url": "$secondReviewUrl",
+              "thumbnailUrl": "$secondThumbnailUrl"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "browse-window-empty-after-library",
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token?start=2&limit=1"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "start": 2,
+        "total": 2,
         "photos": []
       }
     }
@@ -253,12 +326,12 @@
       "status": 200,
       "body": {
         "token": "$token",
-        "total": 0,
+        "total": 2,
         "position": 0,
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
       }
     }
@@ -371,12 +444,12 @@
       "status": 200,
       "body": {
         "token": "$token",
-        "total": 0,
+        "total": 2,
         "position": 0,
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
       }
     }
@@ -464,13 +537,79 @@
       "status": 200,
       "body": {
         "token": "$token",
-        "total": 0,
+        "total": 2,
         "position": 0,
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
+      }
+    }
+  },
+  {
+    "name": "browse-window-library-capture-time-desc",
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token?start=0&limit=60"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "start": 0,
+        "total": 2,
+        "photos": [
+          {
+            "id": "$secondPhotoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "later.JPG",
+            "originals": [
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 120,
+              "height": 60,
+              "limitedDetail": true,
+              "url": "$secondReviewUrl",
+              "thumbnailUrl": "$secondThumbnailUrl"
+            }
+          },
+          {
+            "id": "$photoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "pair.ARW",
+            "originals": [
+              {
+                "kind": "raw",
+                "available": true
+              },
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 90,
+              "height": 45,
+              "limitedDetail": true,
+              "url": "$reviewUrl",
+              "thumbnailUrl": "$thumbnailUrl"
+            }
+          }
+        ]
       }
     }
   },
@@ -562,7 +701,7 @@
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
       }
     }
@@ -585,12 +724,12 @@
       "status": 200,
       "body": {
         "token": "$token",
-        "total": 0,
+        "total": 2,
         "position": 0,
         "selectionCounts": {
           "selected": 0,
           "rejected": 0,
-          "undecided": 0
+          "undecided": 2
         }
       }
     }
@@ -695,6 +834,379 @@
       "status": 400,
       "body": {
         "error": "Invalid Photo state batch"
+      }
+    }
+  },
+  {
+    "name": "browse-open-library-capture-time-asc",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "library",
+        "order": "capture-time-asc"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 2,
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 2
+        }
+      }
+    }
+  },
+  {
+    "name": "status-published-library",
+    "request": {
+      "method": "GET",
+      "path": "/api/status"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "state": "idle",
+        "publication": "$publication",
+        "completed": 2,
+        "total": 2
+      }
+    }
+  },
+  {
+    "name": "browse-open-album-default-order",
+    "request": {
+      "method": "POST",
+      "path": "/api/browse",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "source": "album",
+        "albumId": "$albumId"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "token": "$token",
+        "total": 2,
+        "position": 0,
+        "selectionCounts": {
+          "selected": 0,
+          "rejected": 0,
+          "undecided": 2
+        }
+      }
+    }
+  },
+  {
+    "name": "browse-window-album-order",
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token?start=0&limit=60"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "start": 0,
+        "total": 2,
+        "photos": [
+          {
+            "id": "$secondPhotoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "later.JPG",
+            "originals": [
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 120,
+              "height": 60,
+              "limitedDetail": true,
+              "url": "$secondReviewUrl",
+              "thumbnailUrl": "$secondThumbnailUrl"
+            }
+          },
+          {
+            "id": "$photoId",
+            "available": true,
+            "ambiguous": false,
+            "originalFilename": "pair.ARW",
+            "originals": [
+              {
+                "kind": "raw",
+                "available": true
+              },
+              {
+                "kind": "jpeg",
+                "available": true
+              }
+            ],
+            "selectionState": "undecided",
+            "rating": 0,
+            "preview": {
+              "state": "ready",
+              "source": "matching-jpeg",
+              "width": 90,
+              "height": 45,
+              "limitedDetail": true,
+              "url": "$reviewUrl",
+              "thumbnailUrl": "$thumbnailUrl"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "browse-position-pair-in-album",
+    "request": {
+      "method": "GET",
+      "path": "/api/browse/$token/position?photoId=$photoId"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "position": 1
+      }
+    }
+  },
+  {
+    "name": "photo-albums-success",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/$photoId/albums"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Compat Album"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "photo-preview-success",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/$photoId/preview"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "state": "ready",
+        "source": "matching-jpeg",
+        "stale": false,
+        "width": 90,
+        "height": 45,
+        "limitedDetail": true,
+        "url": "$reviewUrl"
+      }
+    }
+  },
+  {
+    "name": "photo-thumbnail-success",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/$photoId/thumbnail"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "state": "ready",
+        "source": "matching-jpeg",
+        "stale": false,
+        "width": 90,
+        "height": 45,
+        "limitedDetail": true,
+        "url": "$thumbnailUrl"
+      }
+    }
+  },
+  {
+    "name": "photo-metadata-success",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/$photoId/metadata"
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "captureTime": "2026-01-01T09:00:00.000000000"
+      }
+    }
+  },
+  {
+    "name": "album-rename",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/rename",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "name": "Renamed Compat Album"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2,
+            "hasSavedPosition": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "album-add-existing-member",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/members",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoIds": ["$photoId"]
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2,
+            "hasSavedPosition": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "album-reorder",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/order",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoIds": ["$photoId", "$secondPhotoId"]
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2,
+            "hasSavedPosition": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "album-set-progress",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/progress",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoId": "$photoId"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2,
+            "hasSavedPosition": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "album-remove-member",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/members/remove",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {
+        "photoId": "$secondPhotoId"
+      }
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 1,
+            "hasSavedPosition": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "album-delete",
+    "request": {
+      "method": "POST",
+      "path": "/api/albums/$albumId/delete",
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "body": {}
+    },
+    "expected": {
+      "status": 200,
+      "body": {
+        "albums": []
       }
     }
   }
