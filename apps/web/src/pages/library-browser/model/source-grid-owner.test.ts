@@ -1516,7 +1516,7 @@ describe("SourceGridOwner", () => {
     owner.dispose();
   });
 
-  test("keeps every fact in a clamped tail window after trim", async () => {
+  test("protects the actual clamped tail anchor under retention pressure", async () => {
     const requested: number[] = [];
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);
@@ -1532,16 +1532,33 @@ describe("SourceGridOwner", () => {
       throw new Error(`unexpected request ${url.pathname}`);
     });
     const authority = await openLibrary(owner);
-    owner.ensureRange(0, 400, { kind: "grid", authority });
+    const grid = { kind: "grid" as const, authority };
+
+    // Keep the visible range at the head while seeding enough older windows to
+    // make the Photo-owned tail load trim under pressure.
+    owner.ensureRange(0, 1, grid);
     await flushTasks();
-    owner.ensureRange(0, 60, { kind: "grid", authority });
-    // The prior trim evicted the tail. This re-admits the clamped [340,400)
-    // window, so the anchor branch must protect its actual 340 start.
-    owner.ensureRange(340, 400, { kind: "grid", authority });
-    await flushTasks();
+    for (const start of [60, 120, 180])
+      expect(
+        await owner.loadWindow(start, { kind: "source", authority }),
+      ).toMatchObject({
+        kind: "loaded",
+      });
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(181);
+
+    const photoAuthority = owner.renewPhotoWindow();
+    expect(
+      await owner.loadWindow(399, {
+        kind: "photo",
+        authority: photoAuthority,
+      }),
+    ).toMatchObject({ kind: "loaded" });
     expect(requested).toContain(340);
-    expect(owner.retainedFactCount).toBeLessThanOrEqual(240);
+    expect(owner.retainedFactCount).toBeLessThanOrEqual(181);
+    // With the old aligned anchor, the trim protected [300,360) and evicted
+    // the final 40 Photos. The committed clamped [340,400) window is whole.
     expect(owner.photoAt(340)?.id).toBe("photo-340");
+    expect(owner.photoAt(360)?.id).toBe("photo-360");
     expect(owner.photoAt(399)?.id).toBe("photo-399");
     owner.dispose();
   });

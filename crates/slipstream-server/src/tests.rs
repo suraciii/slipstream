@@ -3461,6 +3461,18 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
         serde_json::json!({"photos": valid_items(), "selectionState": "maybe"}),
         serde_json::json!({"photos": valid_items(), "rating": 3}),
         serde_json::json!({
+            "photos": [{"photoId": ids[0]}],
+            "selectionState": "selected"
+        }),
+        serde_json::json!({
+            "photos": [{
+                "photoId": ids[0],
+                "expectedCurrent": "undecided",
+                "unexpected": true
+            }],
+            "selectionState": "selected"
+        }),
+        serde_json::json!({
             "photos": [{"photoId": "NOT-A-PHOTO-ID", "expectedCurrent": "undecided"}],
             "selectionState": "selected"
         }),

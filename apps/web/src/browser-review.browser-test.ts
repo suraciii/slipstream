@@ -3492,6 +3492,88 @@ test("Grid batch Review retains a changed Photo when refresh shows it missing", 
   await page.unroute("**/api/browse/**");
 });
 
+test("Grid batch Review retries after a refresh loses a retained Photo fact", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  let reviewActive = false;
+  let refreshAttempts = 0;
+  let positionRequests = 0;
+  await page.route("**/api/browse/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (!reviewActive || request.method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    if (url.pathname.endsWith("/position")) {
+      if (url.searchParams.get("photoId") === ids[0]) positionRequests += 1;
+      await route.continue();
+      return;
+    }
+    if (url.searchParams.get("start") !== "0") {
+      await route.continue();
+      return;
+    }
+    refreshAttempts += 1;
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      start: number;
+      total: number;
+      photos: BrowsePhoto[];
+    };
+    if (refreshAttempts > 2) {
+      await route.fulfill({ response });
+      return;
+    }
+    const replacement = body.photos.find((photo) => photo.id !== ids[0]);
+    if (!replacement)
+      throw new Error("refresh window has no replacement Photo");
+    await route.fulfill({
+      response,
+      json: {
+        ...body,
+        photos: body.photos.map((photo) =>
+          photo.id === ids[0] ? replacement : photo,
+        ),
+      },
+    });
+  });
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await post(running.url, `/api/photos/${ids[0]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-batch-select]").click();
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeVisible();
+
+  reviewActive = true;
+  await page.getByRole("button", { name: "Review 1 Photo" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo reviewed. Retry the batch when ready.",
+  );
+  await expect(page.locator("[data-grid-batch-result-text]")).not.toContainText(
+    "no longer in this Library",
+  );
+  expect(refreshAttempts).toBeGreaterThanOrEqual(3);
+  expect(positionRequests).toBeGreaterThanOrEqual(1);
+  await expect(cell(0).locator(".cell-state.rejected")).toHaveText("×");
+  await page.unroute("**/api/browse/**");
+});
+
 test("Grid batch Review keeps existing Photos under retention pressure", async ({
   page,
 }) => {

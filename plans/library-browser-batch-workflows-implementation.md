@@ -177,6 +177,7 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 - `design/photo-organization.md`
 - `design/web-async-ownership.md`
 - `docs/library-browsing-and-selection.md`
+- `plans/library-browser-batch-workflows-implementation.md`
 
 ### Contract
 
@@ -250,6 +251,7 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `docs/library-browsing-and-selection.md`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
+- `plans/library-browser-batch-workflows-implementation.md`
 
 Slice 3 replaces every executed Photo State batch request and response example with the optimistic `photos` items and `applied`/`changedElsewhere`/`missing` partition. It also records the Review-time count reconciliation in the authoritative product and design specs because that rule belongs to the optimistic settlement boundary. No positive `photoIds`/`conflicts` batch contract remains.
 
@@ -304,7 +306,7 @@ The transaction must compare each existing Photo's current state with its expect
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo|batch Review"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo|batch Review|no longer holds"
 bun run verify
 ```
 
