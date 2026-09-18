@@ -89,7 +89,7 @@ The repository has one authoritative definition for the new behavior before impl
 - Define the difference between `Visible results` and `Source progress`.
 - Define the response shape for Album membership additions so the browser knows which requested Photos were newly added and which were already members.
 - Add examples that cover a full success, a partial result, a changed-elsewhere result, a missing Photo, and a scoped Album compensation.
-- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; every executed browse vector or response golden that pins a superseded batch shape must be replaced by the slice that changes that route. The old Photo State route fixtures are explicitly transitional and Slice 3 owns their replacement; the old Album membership vector and golden are transitional until Slice 2 replaces the Add Members response. Every vector must have an executing consumer.
+- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; every executed browse vector or response golden that pins a superseded batch shape must be replaced by the slice that changes that route. The old Photo State route fixtures are explicitly transitional and Slice 3 owns their replacement. Slice 2 replaces the executed Album membership vector and response golden when the Add Members response gains identity fields. Every vector must have an executing consumer.
 
 ### Exit criteria
 
@@ -155,20 +155,28 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 ### Files allowed
 
 - `crates/slipstream-core/src/domain.rs`
+- `crates/slipstream-core/src/lib.rs`
 - `crates/slipstream-core/src/library.rs`
 - `crates/slipstream-core/src/persistence/owner.rs`
 - `crates/slipstream-core/src/persistence/mod.rs`
 - `crates/slipstream-server/src/app.rs`
 - `crates/slipstream-server/src/http.rs`
+- `crates/slipstream-server/src/lib.rs`
 - `crates/slipstream-server/src/wire.rs`
 - `crates/slipstream-server/src/tests.rs`
+- `crates/slipstream-compat/src/lib.rs`
 - `apps/web/src/pages/library-browser/api/album-actions.ts`
 - `apps/web/src/pages/library-browser/model/album-action-owner.ts`
 - `apps/web/src/pages/library-browser/model/album-action-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
+- `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
 - `apps/web/src/browser-review.browser-test.ts`
+- `compatibility/protocol/batch-workflows.json`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
+- `design/photo-organization.md`
+- `design/web-async-ownership.md`
+- `docs/library-browsing-and-selection.md`
 
 ### Contract
 
@@ -192,7 +200,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 
 - Avoid changing the general `AlbumMutationResult` shape for create, rename, delete, and reorder. Add a dedicated membership batch result or a dedicated application method so unrelated Album routes do not gain meaningless fields.
 - Keep the existing single-member route for Photo View membership toggles. Add the dedicated bounded `POST /api/albums/{albumId}/members/batch-remove` route rather than issuing up to 100 independent requests.
-- The client compensation record belongs to the page-level batch workflow and expires on source change, a new membership action, or application teardown.
+- The client compensation record belongs to the page-level batch workflow and expires on source change, a new membership action, target Album deletion, or application teardown.
 - A compensation settlement must not replace a newer Album action's status.
 
 ### Tests
@@ -201,7 +209,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 - Core and HTTP tests cover bounded removal, missing members, duplicate IDs, unknown Photos, and saved-position invalidation.
 - API validation rejects malformed or incomplete result shapes.
 - Album action owner tests cover admission, supersession, transport failure, and compensation settlement.
-- Browser test adds Photos to an Album, removes only newly added Photos, verifies existing members remain, and verifies selection and global decision Undo are unaffected.
+- Browser test adds Photos to an Album, covers an already-absent newly added Photo and saved-position messaging, removes only newly added Photos, verifies existing members remain, and verifies selection and global decision Undo are unaffected.
 
 ### Verification
 
@@ -209,7 +217,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|Album compensation"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|Remove added Photos"
 bun run verify
 ```
 

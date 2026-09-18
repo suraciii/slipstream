@@ -795,9 +795,9 @@ The result must offer a scoped **Remove added Photos** action for Photos newly
 added by that operation. It must not remove Photos that were already members,
 and it must not be called **Undo** because removing and re-adding a member may
 change its Album position. The action remains available while its result is
-visible and may expire on source change, a new membership operation, or page
-reload. Membership changes stay outside the global Selection State Undo
-contract.
+visible and may expire on source change, a new membership operation, target
+Album deletion, page teardown, or page reload. Membership changes stay outside
+the global Selection State Undo contract.
 
 Opening or reopening a source clears the multi-selection; scrolling and Grid
 renders must not. A batch decision or one batch Album addition keeps the
@@ -809,9 +809,9 @@ unchanged, for example `Album resume point unchanged.` The
 **Remove added Photos** compensation reports the ordinary Album removal result
 instead. If it removes the saved Photo, it reports the resulting saved
 position, or that no saved position remains. The batch actions must remain
-reachable from a keyboard. The batch result count and every batch outcome must
-be announced on the Grid's status surface; the tray's live selection count is
-a visual summary and is not a second announcement surface.
+reachable from a keyboard. Every batch result count and outcome must be
+announced on the Grid's status surface; the tray count is a visual summary and
+is not a second live-region announcement.
 
 ## Failure Behavior
 

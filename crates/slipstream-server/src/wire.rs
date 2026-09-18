@@ -170,6 +170,26 @@ pub struct AlbumSummaryListResponse {
     pub albums: Vec<AlbumSummaryWire>,
 }
 
+/// Identity-bearing result for one bounded Grid Add to Album operation.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumMembershipAddResponse {
+    pub album_id: String,
+    pub added_photo_ids: Vec<String>,
+    pub already_member_photo_ids: Vec<String>,
+    pub albums: Vec<AlbumSummaryWire>,
+}
+
+/// Identity-bearing result for one bounded Add-to-Album compensation.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumMembershipRemoveResponse {
+    pub album_id: String,
+    pub removed_photo_ids: Vec<String>,
+    pub already_absent_photo_ids: Vec<String>,
+    pub albums: Vec<AlbumSummaryWire>,
+}
+
 /// Result of adding every Photo projected into one Original Folder to an
 /// Album. The Photo IDs stay server-side; the response only reports bounded
 /// operation facts and refreshed Album summaries.

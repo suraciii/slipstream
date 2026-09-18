@@ -1100,6 +1100,9 @@
     "expected": {
       "status": 200,
       "body": {
+        "albumId": "$albumId",
+        "addedPhotoIds": [],
+        "alreadyMemberPhotoIds": ["$photoId"],
         "albums": [
           {
             "id": "$albumId",

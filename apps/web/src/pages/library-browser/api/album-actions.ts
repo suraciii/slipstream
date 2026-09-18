@@ -7,8 +7,27 @@ export type AlbumActionFetch = (
 
 export type AlbumWriteResult =
   | Readonly<{ kind: "persisted" }>
+  | AlbumMembershipAddResult
+  | AlbumMembershipRemoveResult
   | AlbumFolderAddResult
-  | Readonly<{ kind: "rejected"; status: number }>;
+  | Readonly<{ kind: "rejected"; status: number }>
+  | Readonly<{ kind: "malformed" }>;
+
+export type AlbumMembershipAddResult = Readonly<{
+  kind: "persisted";
+  albumId: string;
+  addedPhotoIds: ReadonlyArray<string>;
+  alreadyMemberPhotoIds: ReadonlyArray<string>;
+  albums: ReadonlyArray<AlbumSummary>;
+}>;
+
+export type AlbumMembershipRemoveResult = Readonly<{
+  kind: "persisted";
+  albumId: string;
+  removedPhotoIds: ReadonlyArray<string>;
+  alreadyAbsentPhotoIds: ReadonlyArray<string>;
+  albums: ReadonlyArray<AlbumSummary>;
+}>;
 
 export type AlbumFolderAddResult = Readonly<{
   kind: "persisted";
@@ -54,6 +73,38 @@ const validAlbumSummaries = (
   );
 };
 
+const validPhotoIds = (value: unknown): value is ReadonlyArray<string> =>
+  Array.isArray(value) &&
+  value.every((photoId) => typeof photoId === "string" && photoId.length > 0) &&
+  new Set(value).size === value.length;
+
+const isRequestOrder = (
+  requested: ReadonlyArray<string>,
+  values: ReadonlyArray<string>,
+): boolean => {
+  const expected = new Map(requested.map((photoId, index) => [photoId, index]));
+  let prior = -1;
+  for (const photoId of values) {
+    const index = expected.get(photoId);
+    if (index === undefined || index <= prior) return false;
+    prior = index;
+  }
+  return true;
+};
+
+const isPartition = (
+  requested: ReadonlyArray<string>,
+  first: ReadonlyArray<string>,
+  second: ReadonlyArray<string>,
+): boolean =>
+  first.length + second.length === requested.length &&
+  new Set([...first, ...second]).size === requested.length &&
+  requested.every(
+    (photoId) => first.includes(photoId) !== second.includes(photoId),
+  ) &&
+  isRequestOrder(requested, first) &&
+  isRequestOrder(requested, second);
+
 const requestAlbumAction = (
   fetcher: AlbumActionFetch,
   path: string,
@@ -75,6 +126,72 @@ async function postAlbumAction(
     ? Object.freeze({ kind: "persisted" })
     : Object.freeze({ kind: "rejected", status: response.status });
 }
+
+const parseMembershipAddResult = async (
+  response: Response,
+  albumId: string,
+  requested: ReadonlyArray<string>,
+): Promise<AlbumWriteResult> => {
+  if (!response.ok)
+    return Object.freeze({ kind: "rejected", status: response.status });
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return Object.freeze({ kind: "malformed" });
+  }
+  if (
+    !isRecord(body) ||
+    body.albumId !== albumId ||
+    !validPhotoIds(body.addedPhotoIds) ||
+    !validPhotoIds(body.alreadyMemberPhotoIds) ||
+    !isPartition(requested, body.addedPhotoIds, body.alreadyMemberPhotoIds) ||
+    !validAlbumSummaries(body.albums)
+  )
+    return Object.freeze({ kind: "malformed" });
+  return Object.freeze({
+    kind: "persisted",
+    albumId,
+    addedPhotoIds: Object.freeze([...body.addedPhotoIds]),
+    alreadyMemberPhotoIds: Object.freeze([...body.alreadyMemberPhotoIds]),
+    albums: Object.freeze(
+      body.albums.map((album) => Object.freeze({ ...album })),
+    ),
+  });
+};
+
+const parseMembershipRemoveResult = async (
+  response: Response,
+  albumId: string,
+  requested: ReadonlyArray<string>,
+): Promise<AlbumWriteResult> => {
+  if (!response.ok)
+    return Object.freeze({ kind: "rejected", status: response.status });
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return Object.freeze({ kind: "malformed" });
+  }
+  if (
+    !isRecord(body) ||
+    body.albumId !== albumId ||
+    !validPhotoIds(body.removedPhotoIds) ||
+    !validPhotoIds(body.alreadyAbsentPhotoIds) ||
+    !isPartition(requested, body.removedPhotoIds, body.alreadyAbsentPhotoIds) ||
+    !validAlbumSummaries(body.albums)
+  )
+    return Object.freeze({ kind: "malformed" });
+  return Object.freeze({
+    kind: "persisted",
+    albumId,
+    removedPhotoIds: Object.freeze([...body.removedPhotoIds]),
+    alreadyAbsentPhotoIds: Object.freeze([...body.alreadyAbsentPhotoIds]),
+    albums: Object.freeze(
+      body.albums.map((album) => Object.freeze({ ...album })),
+    ),
+  });
+};
 
 export const createAlbum = async (
   fetcher: AlbumActionFetch,
@@ -133,17 +250,39 @@ export const addAlbumMember = (
   fetcher: AlbumActionFetch,
   albumId: string,
   photoId: string,
-): Promise<AlbumWriteResult> => addAlbumMembers(fetcher, albumId, [photoId]);
+): Promise<AlbumWriteResult> =>
+  postAlbumAction(fetcher, `/api/albums/${albumId}/members`, {
+    photoIds: [photoId],
+  });
 
 /// Adds every named Photo to one Album through the bounded membership route.
 /// A Photo that already belongs is skipped without changing its membership
 /// position, exactly as a single addition is.
-export const addAlbumMembers = (
+export const addAlbumMembers = async (
   fetcher: AlbumActionFetch,
   albumId: string,
   photoIds: ReadonlyArray<string>,
-): Promise<AlbumWriteResult> =>
-  postAlbumAction(fetcher, `/api/albums/${albumId}/members`, { photoIds });
+): Promise<AlbumWriteResult> => {
+  const response = await requestAlbumAction(
+    fetcher,
+    `/api/albums/${albumId}/members`,
+    { photoIds },
+  );
+  return parseMembershipAddResult(response, albumId, photoIds);
+};
+
+export const removeAddedAlbumMembers = async (
+  fetcher: AlbumActionFetch,
+  albumId: string,
+  photoIds: ReadonlyArray<string>,
+): Promise<AlbumWriteResult> => {
+  const response = await requestAlbumAction(
+    fetcher,
+    `/api/albums/${albumId}/members/batch-remove`,
+    { photoIds },
+  );
+  return parseMembershipRemoveResult(response, albumId, photoIds);
+};
 
 export const addFolderToAlbum = async (
   fetcher: AlbumActionFetch,

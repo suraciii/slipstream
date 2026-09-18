@@ -3,7 +3,8 @@ use super::{
     admission::StateDatabaseLock, validate_canonical_schema,
 };
 use crate::{
-    AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMutation, AlbumMutationResult,
+    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
+    AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
     AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
     DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
     OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
@@ -187,6 +188,44 @@ fn normalize_album_mutation(mutation: AlbumMutation) -> Result<AlbumMutation, Mu
     }
 }
 
+fn normalize_album_membership_mutation(
+    mutation: AlbumMembershipMutation,
+) -> Result<AlbumMembershipMutation, MutationError> {
+    let (album_id, photo_ids, kind) = match mutation {
+        AlbumMembershipMutation::Add {
+            album_id,
+            photo_ids,
+        } => (album_id, photo_ids, 0_u8),
+        AlbumMembershipMutation::RemoveAdded {
+            album_id,
+            photo_ids,
+        } => (album_id, photo_ids, 1_u8),
+    };
+    if album_id.trim().is_empty()
+        || photo_ids.is_empty()
+        || photo_ids.len() > ALBUM_MEMBERSHIP_BATCH_MAX
+        || photo_ids.iter().any(|photo_id| photo_id.trim().is_empty())
+        || photo_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != photo_ids.len()
+    {
+        return Err(MutationError::Invalid);
+    }
+    Ok(if kind == 0 {
+        AlbumMembershipMutation::Add {
+            album_id,
+            photo_ids,
+        }
+    } else {
+        AlbumMembershipMutation::RemoveAdded {
+            album_id,
+            photo_ids,
+        }
+    })
+}
+
 fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), MutationError> {
     if mutation.expected_current.is_some_and(|expected| {
         std::mem::discriminant(&expected) != std::mem::discriminant(&mutation.value)
@@ -245,6 +284,10 @@ enum Command {
     MutateAlbum(
         AlbumMutation,
         oneshot::Sender<Result<AlbumMutationResult, MutationError>>,
+    ),
+    MutateAlbumMembership(
+        AlbumMembershipMutation,
+        oneshot::Sender<Result<AlbumMembershipResult, MutationError>>,
     ),
     MutatePhotoState(
         PhotoStateMutation,
@@ -540,6 +583,26 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub async fn mutate_album_membership(
+        &self,
+        mutation: AlbumMembershipMutation,
+    ) -> Result<AlbumMembershipResult, MutationError> {
+        let receive = self.mutate_album_membership_receiver(mutation)?;
+        receive.await.unwrap_or(Err(MutationError::Persistence))
+    }
+
+    pub(crate) fn mutate_album_membership_receiver(
+        &self,
+        mutation: AlbumMembershipMutation,
+    ) -> Result<oneshot::Receiver<Result<AlbumMembershipResult, MutationError>>, MutationError>
+    {
+        let mutation = normalize_album_membership_mutation(mutation)?;
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::MutateAlbumMembership(mutation, send))
+            .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
     pub async fn mutate_photo_state(
         &self,
         mutation: PhotoStateMutation,
@@ -694,6 +757,11 @@ fn owner_main(
             }
             Command::MutateAlbum(mutation, reply) => {
                 let result = mutate_album(&state, &database_name, &mut connection, mutation);
+                let _ = reply.send(result);
+            }
+            Command::MutateAlbumMembership(mutation, reply) => {
+                let result =
+                    mutate_album_membership(&state, &database_name, &mut connection, mutation);
                 let _ = reply.send(result);
             }
             Command::MutatePhotoState(mutation, reply) => {
@@ -2511,6 +2579,129 @@ fn mutate_album(
     })
 }
 
+/// Applies one bounded identity-bearing membership operation. The add result
+/// distinguishes newly inserted IDs from existing members; the compensation
+/// result distinguishes removed IDs from members already absent. Both result
+/// lists preserve request order so the browser can retain an exact, bounded
+/// record without reconstructing membership from aggregate counts.
+fn mutate_album_membership(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: AlbumMembershipMutation,
+) -> Result<AlbumMembershipResult, MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let (album_id, photo_ids) = match &mutation {
+            AlbumMembershipMutation::Add {
+                album_id,
+                photo_ids,
+            }
+            | AlbumMembershipMutation::RemoveAdded {
+                album_id,
+                photo_ids,
+            } => (album_id, photo_ids),
+        };
+        require_album(transaction, album_id)?;
+        // Resolve every identity before the first membership write. An
+        // unknown Photo is a malformed compensation record, not an implicit
+        // already-absent result, and therefore cannot produce a partial batch.
+        for photo_id in photo_ids {
+            transaction
+                .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
+                .optional()
+                .map_err(mutation_error_from_sqlite)?
+                .ok_or(MutationError::NotFound)?;
+        }
+
+        match mutation {
+            AlbumMembershipMutation::Add {
+                album_id,
+                photo_ids,
+            } => {
+                let mut position: i64 = transaction
+                    .query_row(
+                        "SELECT COALESCE(MAX(position)+1,0) FROM album_members WHERE album_id=?",
+                        [&album_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(mutation_error_from_sqlite)?;
+                let mut added_photo_ids = Vec::new();
+                let mut already_member_photo_ids = Vec::new();
+                for photo_id in photo_ids {
+                    let already_member = transaction
+                        .query_row(
+                            "SELECT 1 FROM album_members WHERE album_id=? AND photo_id=?",
+                            params![album_id, photo_id],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .map_err(mutation_error_from_sqlite)?;
+                    if already_member.is_some() {
+                        already_member_photo_ids.push(photo_id);
+                        continue;
+                    }
+                    transaction
+                        .execute(
+                            "INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)",
+                            params![album_id, photo_id, position],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                    position = position.checked_add(1).ok_or(MutationError::Conflict)?;
+                    added_photo_ids.push(photo_id);
+                }
+                Ok(AlbumMembershipResult {
+                    album_id,
+                    added_photo_ids,
+                    already_member_photo_ids,
+                    removed_photo_ids: Vec::new(),
+                    already_absent_photo_ids: Vec::new(),
+                })
+            }
+            AlbumMembershipMutation::RemoveAdded {
+                album_id,
+                photo_ids,
+            } => {
+                let mut removed_photo_ids = Vec::new();
+                let mut already_absent_photo_ids = Vec::new();
+                for photo_id in photo_ids {
+                    let position = transaction
+                        .query_row(
+                            "SELECT position FROM album_members WHERE album_id=? AND photo_id=?",
+                            params![album_id, photo_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(mutation_error_from_sqlite)?;
+                    let Some(position) = position else {
+                        already_absent_photo_ids.push(photo_id);
+                        continue;
+                    };
+                    transaction
+                        .execute(
+                            "DELETE FROM album_members WHERE album_id=? AND photo_id=?",
+                            params![album_id, photo_id],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                    transaction
+                        .execute(
+                            "UPDATE album_members SET position=position-1 WHERE album_id=? AND position>?",
+                            params![album_id, position],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                    removed_photo_ids.push(photo_id);
+                }
+                Ok(AlbumMembershipResult {
+                    album_id,
+                    added_photo_ids: Vec::new(),
+                    already_member_photo_ids: Vec::new(),
+                    removed_photo_ids,
+                    already_absent_photo_ids,
+                })
+            }
+        }
+    })
+}
+
 fn state_value(
     selection: &str,
     rating: i64,
@@ -4216,6 +4407,140 @@ mod tests {
         assert_eq!(album.members.len(), 3);
         assert_eq!(album.members[2].photo_id, photo_three);
         assert_eq!(album.members[2].position, 2);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn membership_batch_reports_identities_and_compensates_idempotently() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                    discovered("three.JPG", OriginalKind::Jpeg, 3, 3.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Compensation".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[0].clone(), ids[1].clone()],
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: ids[1].clone(),
+            })
+            .await
+            .unwrap();
+
+        let add = persistence
+            .mutate_album_membership(AlbumMembershipMutation::Add {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[1].clone(), ids[2].clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(add.added_photo_ids, vec![ids[2].clone()]);
+        assert_eq!(add.already_member_photo_ids, vec![ids[1].clone()]);
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(
+            album
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            vec![ids[0].clone(), ids[1].clone(), ids[2].clone()]
+        );
+        assert_eq!(album.members[0].position, 0);
+        assert_eq!(album.members[1].position, 1);
+        assert_eq!(album.members[2].position, 2);
+        assert_eq!(
+            album.last_reviewed_photo_id.as_deref(),
+            Some(ids[1].as_str())
+        );
+
+        let removed = persistence
+            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[1].clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed.removed_photo_ids, vec![ids[1].clone()]);
+        assert!(removed.already_absent_photo_ids.is_empty());
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(
+            album
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            vec![ids[0].clone(), ids[2].clone()]
+        );
+        assert_eq!(album.members[0].position, 0);
+        assert_eq!(album.members[1].position, 1);
+        assert_eq!(album.last_reviewed_photo_id, None);
+
+        let repeated = persistence
+            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[1].clone()],
+            })
+            .await
+            .unwrap();
+        assert!(repeated.removed_photo_ids.is_empty());
+        assert_eq!(repeated.already_absent_photo_ids, vec![ids[1].clone()]);
+        let removed_tail = persistence
+            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[2].clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed_tail.removed_photo_ids, vec![ids[2].clone()]);
+        assert!(removed_tail.already_absent_photo_ids.is_empty());
+        let album = &persistence.list_albums().await.unwrap()[0];
+        assert_eq!(album.members.len(), 1);
+        assert_eq!(album.last_reviewed_photo_id, None);
+        assert_eq!(
+            persistence
+                .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                    album_id: album_id.clone(),
+                    photo_ids: vec!["00000000-0000-4000-8000-00000000dead".to_owned()],
+                })
+                .await,
+            Err(MutationError::NotFound)
+        );
+        assert_eq!(persistence.list_albums().await.unwrap()[0].members.len(), 1);
+        assert_eq!(
+            persistence
+                .mutate_album_membership(AlbumMembershipMutation::Add {
+                    album_id,
+                    photo_ids: vec![ids[0].clone(), ids[0].clone()],
+                })
+                .await,
+            Err(MutationError::Invalid)
+        );
         persistence.shutdown().unwrap();
     }
 

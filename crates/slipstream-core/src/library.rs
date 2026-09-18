@@ -1,8 +1,9 @@
 use crate::{
-    AlbumBrowseTarget, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact,
-    LibraryRoot, NativeWorkBudget, OriginalCapability, PhotoAlbumMembership,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
-    PreviewSeed, PreviewSeedResult, ScanLimits, ScanResult, ScanSnapshot,
+    AlbumBrowseTarget, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
+    AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact, LibraryRoot, NativeWorkBudget,
+    OriginalCapability, PhotoAlbumMembership, PhotoStateBatchMutation, PhotoStateBatchResult,
+    PhotoStateMutation, PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits,
+    ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
@@ -435,6 +436,21 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.mutate_album_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    pub async fn mutate_album_membership(
+        &self,
+        mutation: AlbumMembershipMutation,
+    ) -> Result<AlbumMembershipResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.mutate_album_membership_receiver(mutation)
         }
         .map_err(LibraryError::from)?;
         receive

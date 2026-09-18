@@ -60,6 +60,9 @@
     ]
   },
   {
+    "albumId": "$albumId",
+    "addedPhotoIds": ["$photoId"],
+    "alreadyMemberPhotoIds": [],
     "albums": [
       {
         "id": "$albumId",

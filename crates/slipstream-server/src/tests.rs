@@ -4777,16 +4777,139 @@ async fn album_and_state_protocol_persists_across_reopen() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(
+    let first_b_add = response_json(
         post_json(
             &router,
             &format!("http://camera.local/api/albums/{album_b}/members"),
             serde_json::json!({"photoIds": [&ids[0]]}),
             Some("http://camera.local"),
         )
+        .await,
+    )
+    .await;
+    assert_eq!(first_b_add["albumId"], album_b);
+    assert_eq!(first_b_add["addedPhotoIds"], serde_json::json!([ids[0]]));
+    assert_eq!(first_b_add["alreadyMemberPhotoIds"], serde_json::json!([]));
+
+    let mixed_b_add = response_json(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members"),
+            serde_json::json!({"photoIds": [&ids[0], &ids[1]]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(mixed_b_add["addedPhotoIds"], serde_json::json!([ids[1]]));
+    assert_eq!(
+        mixed_b_add["alreadyMemberPhotoIds"],
+        serde_json::json!([ids[0]])
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/progress"),
+            serde_json::json!({"photoId": ids[1]}),
+            Some("http://camera.local"),
+        )
         .await
         .status(),
         StatusCode::OK
+    );
+    let removed_b = response_json(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": [ids[1]]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed_b["removedPhotoIds"], serde_json::json!([ids[1]]));
+    assert_eq!(removed_b["alreadyAbsentPhotoIds"], serde_json::json!([]));
+    assert_eq!(
+        removed_b["albums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|album| album["id"] == album_b)
+            .unwrap()["hasSavedPosition"],
+        false
+    );
+    let repeated_removed_b = response_json(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": [ids[1]]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(repeated_removed_b["removedPhotoIds"], serde_json::json!([]));
+    assert_eq!(
+        repeated_removed_b["alreadyAbsentPhotoIds"],
+        serde_json::json!([ids[1]])
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members"),
+            serde_json::json!({"photoIds": [&ids[2], &ids[2]]}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": [&ids[0], &ids[0]]}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": []}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let over_limit = (0..=100)
+        .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": over_limit}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post_json(
+            &router,
+            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            serde_json::json!({"photoIds": ["00000000-0000-4000-8000-00000000dead"]}),
+            Some("http://camera.local"),
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
     );
 
     let selected = response_json(
@@ -4812,8 +4935,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
         .status(),
         StatusCode::OK
     );
-    // Membership order is observable only through a fresh Album
-    // Browse Snapshot; the mutation responses stay summary-only.
+    // Membership order is observable only through a fresh Album Browse
+    // Snapshot; the bounded membership response carries identities, not
+    // member lists.
     let ordered = browse_photo_ids(&application, BrowseSourceRequest::Album(album_a.clone())).await;
     assert_eq!(
         ordered,

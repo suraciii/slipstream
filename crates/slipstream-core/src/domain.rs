@@ -242,6 +242,35 @@ pub struct AlbumMutationResult {
     pub already_member_count: usize,
 }
 
+/// The largest number of Photo identities admitted by one ordinary Album
+/// membership batch. The browser uses the same bound for its compensation
+/// record, so a retry cannot grow into an unbounded SQLite transaction.
+pub const ALBUM_MEMBERSHIP_BATCH_MAX: usize = 100;
+
+/// A bounded, identity-bearing Album membership operation. The add and
+/// compensation remove paths are separate from the generic Album mutation
+/// result because the browser must know exactly which Photos it may remove.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AlbumMembershipMutation {
+    Add {
+        album_id: String,
+        photo_ids: Vec<String>,
+    },
+    RemoveAdded {
+        album_id: String,
+        photo_ids: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlbumMembershipResult {
+    pub album_id: String,
+    pub added_photo_ids: Vec<String>,
+    pub already_member_photo_ids: Vec<String>,
+    pub removed_photo_ids: Vec<String>,
+    pub already_absent_photo_ids: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhotoStateField {
     SelectionState,
