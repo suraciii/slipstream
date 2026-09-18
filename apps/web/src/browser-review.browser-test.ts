@@ -3574,6 +3574,84 @@ test("Grid batch Review retries after a refresh loses a retained Photo fact", as
   await page.unroute("**/api/browse/**");
 });
 
+test("Grid batch Review keeps a refresh failure retryable", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 120);
+  const running = await server(base, root);
+  const ids = await browseIds(running.url);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  let reviewActive = false;
+  let allowRefresh = false;
+  let refreshAttempts = 0;
+  await page.route("**/api/browse/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (
+      !reviewActive ||
+      request.method() !== "GET" ||
+      url.pathname.endsWith("/position") ||
+      url.searchParams.get("start") !== "0"
+    ) {
+      await route.continue();
+      return;
+    }
+    refreshAttempts += 1;
+    if (!allowRefresh) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "temporarily unavailable" }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  const cell = (index: number) => page.locator(`[data-photo-index="${index}"]`);
+  await page.locator("[data-grid-select-mode]").click();
+  await cell(0).click();
+  await post(running.url, `/api/photos/${ids[0]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-batch-select]").click();
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeVisible();
+
+  reviewActive = true;
+  await page.getByRole("button", { name: "Review 1 Photo" }).click();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "Some changed Photos could not be refreshed. Retry Review to continue.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeVisible();
+  await expect(page.locator("[data-batch-count]")).toHaveText("1 / 100 Photos");
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 0 rejected · 120 undecided",
+  );
+
+  allowRefresh = true;
+  await page.getByRole("button", { name: "Retry connection" }).click();
+  await expect(
+    page.getByRole("button", { name: "Review 1 Photo" }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Review 1 Photo" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo reviewed. Retry the batch when ready.",
+  );
+  expect(refreshAttempts).toBeGreaterThanOrEqual(2);
+  await page.unroute("**/api/browse/**");
+});
+
 test("Grid batch Review keeps existing Photos under retention pressure", async ({
   page,
 }) => {
@@ -3598,8 +3676,8 @@ test("Grid batch Review keeps existing Photos under retention pressure", async (
   await expect(cell(399)).toBeVisible();
   await cell(399).click();
 
-  // Fill the bounded retained-fact set. Review then visits tail, head, and
-  // tail again in one run, so the first tail window can be evicted in between.
+  // Scroll through several mid-source ranges to exercise bounded retention.
+  // Review then visits tail, head, and tail again in one run.
   await evictFirstPhotoFact(page);
   for (const id of [ids[398]!, ids[0]!, ids[399]!])
     await post(running.url, `/api/photos/${id}/state`, {

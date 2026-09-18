@@ -1534,17 +1534,17 @@ describe("SourceGridOwner", () => {
     const authority = await openLibrary(owner);
     const grid = { kind: "grid" as const, authority };
 
-    // Keep the visible range at the head while seeding enough older windows to
-    // make the Photo-owned tail load trim under pressure.
-    owner.ensureRange(0, 1, grid);
+    // Protect an earlier visible span, then fill the map to the bound with a
+    // window that the old aligned tail anchor would protect.
+    owner.ensureRange(60, 120, grid);
     await flushTasks();
-    for (const start of [60, 120, 180])
+    for (const start of [0, 120, 300])
       expect(
         await owner.loadWindow(start, { kind: "source", authority }),
       ).toMatchObject({
         kind: "loaded",
       });
-    expect(owner.retainedFactCount).toBeLessThanOrEqual(181);
+    expect(owner.retainedFactCount).toBe(240);
 
     const photoAuthority = owner.renewPhotoWindow();
     expect(
@@ -1554,9 +1554,9 @@ describe("SourceGridOwner", () => {
       }),
     ).toMatchObject({ kind: "loaded" });
     expect(requested).toContain(340);
-    expect(owner.retainedFactCount).toBeLessThanOrEqual(181);
-    // With the old aligned anchor, the trim protected [300,360) and evicted
-    // the final 40 Photos. The committed clamped [340,400) window is whole.
+    expect(owner.retainedFactCount).toBe(240);
+    // The old aligned anchor protected [300,360) and evicted 360–399. The
+    // committed clamped [340,400) window must survive as one whole window.
     expect(owner.photoAt(340)?.id).toBe("photo-340");
     expect(owner.photoAt(360)?.id).toBe("photo-360");
     expect(owner.photoAt(399)?.id).toBe("photo-399");
