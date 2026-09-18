@@ -3406,6 +3406,108 @@ test("Grid batch Add to Album adds every multi-selected Photo through one bounde
   await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
 });
 
+test("deleting the target Album expires its batch compensation action", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Target" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const targetId = created.albums.find((album) => album.name === "Target")!.id;
+  let compensationRequests = 0;
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname ===
+        `/api/albums/${targetId}/members/batch-remove`
+    )
+      compensationRequests += 1;
+  });
+
+  await page.locator('[data-photo-index="0"]').click({
+    modifiers: ["Control"],
+  });
+  await page.locator("[data-batch-album-select]").selectOption(targetId);
+  await page.locator("[data-batch-album-add]").click();
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeVisible();
+
+  await openSources(page);
+  await page.getByRole("button", { name: "Delete Target" }).click();
+  await expect(
+    page.getByText("Photos and Original Files remain unchanged."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Delete Album" }).click();
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeHidden();
+  expect(compensationRequests).toBe(0);
+});
+
+test("Album compensation reports when it clears a saved position", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  const created = (await (
+    await post(running.url, "/api/albums", { name: "Target" })
+  ).json()) as { albums: Array<{ id: string; name: string }> };
+  const targetId = created.albums.find((album) => album.name === "Target")!.id;
+
+  // The production route normally reports this from the Album's saved
+  // member. The overview seam makes that prior state explicit so this test
+  // can exercise the compensation branch that clears it.
+  let savedBefore = true;
+  await page.route("**/api/overview", async (route) => {
+    const response = await route.fetch();
+    const body = (await response.json()) as {
+      albums: Array<Record<string, unknown>>;
+    };
+    await route.fulfill({
+      response,
+      json: {
+        ...body,
+        albums: body.albums.map((album) =>
+          album.id === targetId
+            ? { ...album, hasSavedPosition: savedBefore }
+            : album,
+        ),
+      },
+    });
+  });
+
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+  await page.locator('[data-photo-index="0"]').click({
+    modifiers: ["Control"],
+  });
+  await page.locator("[data-batch-album-select]").selectOption(targetId);
+  await page.locator("[data-batch-album-add]").click();
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeVisible();
+  savedBefore = false;
+  await page.getByRole("button", { name: "Remove added Photos" }).click();
+  await expect(page.locator("[data-grid-status]")).toHaveText(
+    "1 Photo removed from “Target”. Album resume point cleared.",
+  );
+  await expect(
+    page.getByRole("button", { name: "Remove added Photos" }),
+  ).toBeHidden();
+  expect((await state(running.url, targetId)).members).toEqual([]);
+  await page.unroute("**/api/overview");
+});
+
 test("an Album batch result states that the resume point is unchanged", async ({
   page,
 }) => {

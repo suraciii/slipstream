@@ -795,9 +795,9 @@ The result must offer a scoped **Remove added Photos** action for Photos newly
 added by that operation. It must not remove Photos that were already members,
 and it must not be called **Undo** because removing and re-adding a member may
 change its Album position. The action remains available while its result is
-visible and may expire on source change, a new membership operation, or page
-reload. Membership changes stay outside the global Selection State Undo
-contract.
+visible and may expire on source change, a new membership operation, target
+Album deletion, page teardown, or page reload. Membership changes stay outside
+the global Selection State Undo contract.
 
 Opening or reopening a source clears the multi-selection; scrolling and Grid
 renders must not. A batch decision or one batch Album addition keeps the

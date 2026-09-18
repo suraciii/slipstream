@@ -288,7 +288,7 @@ Album notices and connectivity presentation regardless of which Album it
 targets. A batch Add to Album stores its returned `addedPhotoIds` in a
 page-level compensation record. The record is owned by the source generation
 and Album operation that created it; a new membership operation, source
-change, or application teardown expires it. A compensation request may
+change, target Album deletion, or application teardown expires it. A compensation request may
 settle, but its local result can write only while that record and Album remain
 current.
 

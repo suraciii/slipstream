@@ -4887,7 +4887,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
         StatusCode::BAD_REQUEST
     );
     let over_limit = (0..=100)
-        .map(|index| format!("photo-{index}"))
+        .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
         .collect::<Vec<_>>();
     assert_eq!(
         post_json(

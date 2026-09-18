@@ -155,21 +155,28 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 ### Files allowed
 
 - `crates/slipstream-core/src/domain.rs`
+- `crates/slipstream-core/src/lib.rs`
 - `crates/slipstream-core/src/library.rs`
 - `crates/slipstream-core/src/persistence/owner.rs`
 - `crates/slipstream-core/src/persistence/mod.rs`
 - `crates/slipstream-server/src/app.rs`
 - `crates/slipstream-server/src/http.rs`
+- `crates/slipstream-server/src/lib.rs`
 - `crates/slipstream-server/src/wire.rs`
 - `crates/slipstream-server/src/tests.rs`
+- `crates/slipstream-compat/src/lib.rs`
 - `apps/web/src/pages/library-browser/api/album-actions.ts`
 - `apps/web/src/pages/library-browser/model/album-action-owner.ts`
 - `apps/web/src/pages/library-browser/model/album-action-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
 - `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
-- `apps/web/src/browser-review.browser-test.ts
+- `apps/web/src/browser-review.browser-test.ts`
+- `compatibility/protocol/batch-workflows.json`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
+- `design/photo-organization.md`
+- `design/web-async-ownership.md`
+- `docs/library-browsing-and-selection.md`
 
 ### Contract
 
