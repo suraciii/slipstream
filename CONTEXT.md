@@ -34,6 +34,28 @@ _Avoid_: Rebase, relink, root migration
 A Photographer-defined, explicitly ordered virtual group of Photos. One Photo may belong to multiple Albums. Album membership does not change an Original File or Original Location.
 _Avoid_: Photo Set, Collection, Favorites
 
+## Metadata
+
+**XMP Sidecar**:
+A Photographer-owned external XMP file associated with a Photo and stored separately from its Original Files. It carries supported metadata for exchange with other photo applications and does not define Photo identity or modify an Original File.
+_Avoid_: sidecar when the kind is unclear, XMP Original, XMP Photo
+
+**Sidecar Association**:
+The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Locations. An unambiguous RAW/JPEG pair shares one association; the sidecar does not create a Photo or change its Original identity.
+_Avoid_: sidecar identity, filename identity
+
+**Sidecar Metadata**:
+The supported Photo metadata carried by an XMP Sidecar. In the current product boundary, Rating may have a Sidecar Metadata representation; Selection State, Album membership, and Photo identity do not.
+_Avoid_: all metadata, EXIF state
+
+**Metadata Synchronization**:
+Reconciliation between a Photo's supported facts in Slipstream and its Sidecar Metadata through explicit read or save actions.
+_Avoid_: automatic import, automatic merge
+
+**Metadata Conflict**:
+A condition in which Slipstream and external software have changed the same Sidecar Metadata independently. Both values remain available until the Photographer chooses which value to keep.
+_Avoid_: sync error, overwrite conflict
+
 ## Browsing and Selection
 
 **Library Browser**:
@@ -46,10 +68,10 @@ The progressively loaded thumbnail view of the current `All Photos`, Original Fo
 The focused view of one Photo with Preview, zoom, navigation, Selection State, Rating, and Album membership controls.
 
 **Selection State**:
-The keep decision for a Photo: `undecided`, `selected`, or `rejected`.
+The keep decision for a Photo: `undecided`, `selected`, or `rejected`. Selection State is independent of Rating and is not inferred from Sidecar Metadata in the current product boundary.
 
 **Rating**:
-An optional zero-to-five-star assessment. Rating is separate from Selection State.
+An optional zero-to-five-star assessment owned by a Photo. Rating is separate from Selection State and may have a Sidecar Metadata representation.
 
 ## Preview
 
