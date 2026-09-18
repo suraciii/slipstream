@@ -800,26 +800,39 @@ mod tests {
         let invalid = contract["invalidRequests"]
             .as_array()
             .expect("invalid request examples");
-        assert_eq!(invalid.len(), 6);
+        assert_eq!(invalid.len(), 7);
         for example in invalid {
             assert!(example["name"].is_string());
-            assert!(example["route"].is_string());
+            let route = example["route"].as_str().expect("invalid request route");
             assert!(example["body"].is_object());
-            assert!(example["error"].is_string());
+            assert_eq!(
+                example["error"],
+                if route.starts_with("/api/albums/") {
+                    "Invalid membership batch"
+                } else {
+                    "Invalid Photo state batch"
+                }
+            );
         }
+        let over_limit = invalid
+            .iter()
+            .find(|example| example["name"] == "photo-state-batch-over-limit")
+            .expect("over-limit invalid request example");
+        let over_limit_photos = over_limit["body"]["photos"].as_array().unwrap();
+        assert_eq!(over_limit_photos.len(), 101);
         assert_eq!(
-            invalid[0]["error"], "Invalid Photo state batch",
-            "photo-state invalid examples use the photo-state error"
+            over_limit_photos
+                .iter()
+                .filter_map(|photo| photo["photoId"].as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            101
         );
-        assert_eq!(invalid[1]["error"], "Invalid Photo state batch");
-        assert_eq!(invalid[3]["error"], "Invalid Photo state batch");
-        assert_eq!(invalid[4]["error"], "Invalid Photo state batch");
-        assert_eq!(invalid[5]["error"], "Invalid Photo state batch");
 
         let malformed = contract["malformedResponses"]
             .as_array()
             .expect("malformed response examples");
-        assert_eq!(malformed.len(), 5);
+        assert_eq!(malformed.len(), 7);
         for example in malformed {
             assert!(example["name"].is_string());
             assert!(matches!(
@@ -842,6 +855,15 @@ mod tests {
         assert_eq!(
             malformed[4]["response"]["applied"][0]["photoId"],
             "$unrequestedPhotoId"
+        );
+        assert!(
+            malformed[5]["response"]["applied"][0]
+                .get("unexpected")
+                .is_some()
+        );
+        assert_eq!(
+            malformed[6]["response"]["applied"][0]["photoId"],
+            malformed[6]["response"]["missing"][0]["photoId"]
         );
     }
 

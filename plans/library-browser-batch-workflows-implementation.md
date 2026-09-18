@@ -74,7 +74,7 @@ The repository has one authoritative definition for the new behavior before impl
 - `docs/library-browsing-and-selection.md`
 - `design/library-browsing.md`
 - `design/photo-organization.md`
-- `design/web-async-ownership.md` only if the scoped Album compensation settlement needs a durable ownership rule
+- `design/web-async-ownership.md` only if the scoped Album compensation or Grid batch Selection State settlement needs a durable ownership rule
 - `compatibility/protocol/batch-workflows.json`
 - `crates/slipstream-compat/src/lib.rs`
 - `compatibility/protocol/browse-vectors.json`
@@ -89,7 +89,7 @@ The repository has one authoritative definition for the new behavior before impl
 - Define the difference between `Visible results` and `Source progress`.
 - Define the response shape for Album membership additions so the browser knows which requested Photos were newly added and which were already members.
 - Add examples that cover a full success, a partial result, a changed-elsewhere result, a missing Photo, and a scoped Album compensation.
-- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; the old route fixtures are explicitly transitional and Slice 3 owns their replacement in the executable browse vectors and response goldens. Every vector must have an executing consumer.
+- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; every executed browse vector or response golden that pins a superseded batch shape must be replaced by the slice that changes that route. The old Photo State route fixtures are explicitly transitional and Slice 3 owns their replacement; the old Album membership vector and golden are transitional until Slice 2 replaces the Add Members response. Every vector must have an executing consumer.
 
 ### Exit criteria
 
@@ -172,7 +172,7 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 
 ### Contract
 
-Keep the existing Add Members route and its 100-Photo bound. Its successful response must identify:
+Keep the existing Add Members route and its 100-Photo bound. Slice 2 must retire or replace the executed `album-add-existing-member` browse vector and its matching response golden when the response gains identity fields. Its successful response must identify:
 
 - `addedPhotoIds`: requested Photos newly inserted into the Album;
 - `alreadyMemberPhotoIds`: requested Photos skipped because membership already existed;
@@ -235,6 +235,8 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `apps/web/src/browser-review.browser-test.ts`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
+
+Slice 3 must retire or replace the executed Photo State `photoIds`/`conflicts` browse vectors and response golden when the optimistic request and response become live.
 
 ### Request model
 

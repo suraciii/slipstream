@@ -176,6 +176,117 @@
       "error": "Invalid Photo state batch"
     },
     {
+      "name": "photo-state-batch-over-limit",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "selected",
+        "photos": [
+          { "photoId": "p001", "expectedCurrent": "undecided" },
+          { "photoId": "p002", "expectedCurrent": "undecided" },
+          { "photoId": "p003", "expectedCurrent": "undecided" },
+          { "photoId": "p004", "expectedCurrent": "undecided" },
+          { "photoId": "p005", "expectedCurrent": "undecided" },
+          { "photoId": "p006", "expectedCurrent": "undecided" },
+          { "photoId": "p007", "expectedCurrent": "undecided" },
+          { "photoId": "p008", "expectedCurrent": "undecided" },
+          { "photoId": "p009", "expectedCurrent": "undecided" },
+          { "photoId": "p010", "expectedCurrent": "undecided" },
+          { "photoId": "p011", "expectedCurrent": "undecided" },
+          { "photoId": "p012", "expectedCurrent": "undecided" },
+          { "photoId": "p013", "expectedCurrent": "undecided" },
+          { "photoId": "p014", "expectedCurrent": "undecided" },
+          { "photoId": "p015", "expectedCurrent": "undecided" },
+          { "photoId": "p016", "expectedCurrent": "undecided" },
+          { "photoId": "p017", "expectedCurrent": "undecided" },
+          { "photoId": "p018", "expectedCurrent": "undecided" },
+          { "photoId": "p019", "expectedCurrent": "undecided" },
+          { "photoId": "p020", "expectedCurrent": "undecided" },
+          { "photoId": "p021", "expectedCurrent": "undecided" },
+          { "photoId": "p022", "expectedCurrent": "undecided" },
+          { "photoId": "p023", "expectedCurrent": "undecided" },
+          { "photoId": "p024", "expectedCurrent": "undecided" },
+          { "photoId": "p025", "expectedCurrent": "undecided" },
+          { "photoId": "p026", "expectedCurrent": "undecided" },
+          { "photoId": "p027", "expectedCurrent": "undecided" },
+          { "photoId": "p028", "expectedCurrent": "undecided" },
+          { "photoId": "p029", "expectedCurrent": "undecided" },
+          { "photoId": "p030", "expectedCurrent": "undecided" },
+          { "photoId": "p031", "expectedCurrent": "undecided" },
+          { "photoId": "p032", "expectedCurrent": "undecided" },
+          { "photoId": "p033", "expectedCurrent": "undecided" },
+          { "photoId": "p034", "expectedCurrent": "undecided" },
+          { "photoId": "p035", "expectedCurrent": "undecided" },
+          { "photoId": "p036", "expectedCurrent": "undecided" },
+          { "photoId": "p037", "expectedCurrent": "undecided" },
+          { "photoId": "p038", "expectedCurrent": "undecided" },
+          { "photoId": "p039", "expectedCurrent": "undecided" },
+          { "photoId": "p040", "expectedCurrent": "undecided" },
+          { "photoId": "p041", "expectedCurrent": "undecided" },
+          { "photoId": "p042", "expectedCurrent": "undecided" },
+          { "photoId": "p043", "expectedCurrent": "undecided" },
+          { "photoId": "p044", "expectedCurrent": "undecided" },
+          { "photoId": "p045", "expectedCurrent": "undecided" },
+          { "photoId": "p046", "expectedCurrent": "undecided" },
+          { "photoId": "p047", "expectedCurrent": "undecided" },
+          { "photoId": "p048", "expectedCurrent": "undecided" },
+          { "photoId": "p049", "expectedCurrent": "undecided" },
+          { "photoId": "p050", "expectedCurrent": "undecided" },
+          { "photoId": "p051", "expectedCurrent": "undecided" },
+          { "photoId": "p052", "expectedCurrent": "undecided" },
+          { "photoId": "p053", "expectedCurrent": "undecided" },
+          { "photoId": "p054", "expectedCurrent": "undecided" },
+          { "photoId": "p055", "expectedCurrent": "undecided" },
+          { "photoId": "p056", "expectedCurrent": "undecided" },
+          { "photoId": "p057", "expectedCurrent": "undecided" },
+          { "photoId": "p058", "expectedCurrent": "undecided" },
+          { "photoId": "p059", "expectedCurrent": "undecided" },
+          { "photoId": "p060", "expectedCurrent": "undecided" },
+          { "photoId": "p061", "expectedCurrent": "undecided" },
+          { "photoId": "p062", "expectedCurrent": "undecided" },
+          { "photoId": "p063", "expectedCurrent": "undecided" },
+          { "photoId": "p064", "expectedCurrent": "undecided" },
+          { "photoId": "p065", "expectedCurrent": "undecided" },
+          { "photoId": "p066", "expectedCurrent": "undecided" },
+          { "photoId": "p067", "expectedCurrent": "undecided" },
+          { "photoId": "p068", "expectedCurrent": "undecided" },
+          { "photoId": "p069", "expectedCurrent": "undecided" },
+          { "photoId": "p070", "expectedCurrent": "undecided" },
+          { "photoId": "p071", "expectedCurrent": "undecided" },
+          { "photoId": "p072", "expectedCurrent": "undecided" },
+          { "photoId": "p073", "expectedCurrent": "undecided" },
+          { "photoId": "p074", "expectedCurrent": "undecided" },
+          { "photoId": "p075", "expectedCurrent": "undecided" },
+          { "photoId": "p076", "expectedCurrent": "undecided" },
+          { "photoId": "p077", "expectedCurrent": "undecided" },
+          { "photoId": "p078", "expectedCurrent": "undecided" },
+          { "photoId": "p079", "expectedCurrent": "undecided" },
+          { "photoId": "p080", "expectedCurrent": "undecided" },
+          { "photoId": "p081", "expectedCurrent": "undecided" },
+          { "photoId": "p082", "expectedCurrent": "undecided" },
+          { "photoId": "p083", "expectedCurrent": "undecided" },
+          { "photoId": "p084", "expectedCurrent": "undecided" },
+          { "photoId": "p085", "expectedCurrent": "undecided" },
+          { "photoId": "p086", "expectedCurrent": "undecided" },
+          { "photoId": "p087", "expectedCurrent": "undecided" },
+          { "photoId": "p088", "expectedCurrent": "undecided" },
+          { "photoId": "p089", "expectedCurrent": "undecided" },
+          { "photoId": "p090", "expectedCurrent": "undecided" },
+          { "photoId": "p091", "expectedCurrent": "undecided" },
+          { "photoId": "p092", "expectedCurrent": "undecided" },
+          { "photoId": "p093", "expectedCurrent": "undecided" },
+          { "photoId": "p094", "expectedCurrent": "undecided" },
+          { "photoId": "p095", "expectedCurrent": "undecided" },
+          { "photoId": "p096", "expectedCurrent": "undecided" },
+          { "photoId": "p097", "expectedCurrent": "undecided" },
+          { "photoId": "p098", "expectedCurrent": "undecided" },
+          { "photoId": "p099", "expectedCurrent": "undecided" },
+          { "photoId": "p100", "expectedCurrent": "undecided" },
+          { "photoId": "p101", "expectedCurrent": "undecided" }
+        ]
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
       "name": "photo-state-batch-invalid-state",
       "route": "/api/photos/state",
       "body": {
@@ -268,6 +379,41 @@
         ],
         "changedElsewhere": [],
         "missing": []
+      },
+      "classification": "malformed"
+    },
+    {
+      "name": "photo-state-batch-outcome-has-extra-field",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided",
+            "unexpected": true
+          }
+        ],
+        "changedElsewhere": [],
+        "missing": []
+      },
+      "classification": "malformed"
+    },
+    {
+      "name": "photo-state-batch-overlapping-outcomes",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided"
+          }
+        ],
+        "changedElsewhere": [],
+        "missing": [
+          {
+            "photoId": "$photoId"
+          }
+        ]
       },
       "classification": "malformed"
     }
