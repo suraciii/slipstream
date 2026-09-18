@@ -31,6 +31,10 @@ const LIMITED_PREVIEW_DETAIL = "Limited by camera Preview resolution";
 const SWIPE_PENDING_PIXELS = 24;
 const SWIPE_COMMIT_PIXELS = 72;
 const SWIPE_COMMIT_VELOCITY = 0.5;
+const RATING_WHEEL_HOLD_MS = 450;
+const RATING_WHEEL_MOVE_PIXELS = 12;
+const RATING_WHEEL_RADIUS = 78;
+const RATING_WHEEL_OPTION_COUNT = 6;
 
 type SourceReference =
   | Readonly<{ kind: "library" }>
@@ -523,6 +527,11 @@ export function createLibraryBrowserView(
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
+            <div class="rating-wheel" data-rating-wheel hidden role="dialog" aria-label="Rating Wheel" aria-describedby="rating-wheel-instructions">
+              <p class="rating-wheel-instructions" id="rating-wheel-instructions" data-rating-wheel-instructions>Move across a Rating and release to save.</p>
+              <p class="rating-wheel-status" data-rating-wheel-status role="status" aria-live="polite"></p>
+              <div class="rating-wheel-options" data-rating-wheel-options role="group" aria-label="Rating choices"></div>
+            </div>
           </section>
           <div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div>
           <section class="review-bar" aria-label="Photo review">
@@ -635,6 +644,19 @@ export function createLibraryBrowserView(
   const position = required<HTMLElement>(root, "[data-position]");
   const stage = required<HTMLElement>(root, "[data-stage]");
   const preview = required<HTMLElement>(root, "[data-preview]");
+  const ratingWheel = required<HTMLElement>(root, "[data-rating-wheel]");
+  const ratingWheelInstructions = required<HTMLElement>(
+    root,
+    "[data-rating-wheel-instructions]",
+  );
+  const ratingWheelStatus = required<HTMLElement>(
+    root,
+    "[data-rating-wheel-status]",
+  );
+  const ratingWheelOptions = required<HTMLElement>(
+    root,
+    "[data-rating-wheel-options]",
+  );
   const zoomControls = required<HTMLElement>(root, "[data-zoom-controls]");
   const zoomFit = required<HTMLButtonElement>(root, "[data-zoom-fit]");
   const zoomOut = required<HTMLButtonElement>(root, "[data-zoom-out]");
@@ -719,6 +741,25 @@ export function createLibraryBrowserView(
     button.setAttribute("aria-pressed", String(value === 0));
     button.textContent = value === 0 ? "0" : `${value}★`;
     ratings.append(button);
+
+    const wheelButton = document.createElement("button");
+    wheelButton.type = "button";
+    wheelButton.className = "rating-wheel-option";
+    wheelButton.dataset.ratingWheelValue = String(value);
+    wheelButton.style.setProperty(
+      "--wheel-angle",
+      `${value * (360 / RATING_WHEEL_OPTION_COUNT)}deg`,
+    );
+    wheelButton.tabIndex = -1;
+    wheelButton.setAttribute(
+      "aria-label",
+      value === 0
+        ? "Clear Rating, 0 stars"
+        : `${value} ${value === 1 ? "star" : "stars"}`,
+    );
+    wheelButton.setAttribute("aria-pressed", "false");
+    wheelButton.textContent = value === 0 ? "0" : `${value}★`;
+    ratingWheelOptions.append(wheelButton);
   }
 
   let photoStatusSurface: object = {};
@@ -817,6 +858,12 @@ export function createLibraryBrowserView(
   let renderedProgressText = "";
   let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
+  let currentRating = 0;
+  let ratingWheelHoldTimer: number | undefined;
+  let ratingWheelOpen = false;
+  let ratingWheelCandidate: number | undefined;
+  let ratingWheelCenter: Readonly<{ x: number; y: number }> | undefined;
+  let ratingWheelRadius = RATING_WHEEL_RADIUS;
   let pointer:
     | {
         id: number;
@@ -826,6 +873,8 @@ export function createLibraryBrowserView(
         lastY: number;
         startedAt: number;
         vertical: boolean;
+        ratingPending: boolean;
+        ratingWheel: boolean;
         // The zoom mode the gesture started in; it owns the drag until
         // release even if Fit returns mid-gesture.
         pan: boolean;
@@ -947,7 +996,110 @@ export function createLibraryBrowserView(
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
 
+  const ratingLabel = (value: number) =>
+    value === 0 ? "Clear Rating" : `${value} ${value === 1 ? "star" : "stars"}`;
+  const syncRatingWheelOptions = () => {
+    for (const button of Array.from(
+      ratingWheelOptions.querySelectorAll<HTMLButtonElement>(
+        "[data-rating-wheel-value]",
+      ),
+    )) {
+      const value = Number(button.dataset.ratingWheelValue);
+      button.dataset.current = String(value === currentRating);
+      button.setAttribute(
+        "aria-current",
+        value === currentRating ? "true" : "false",
+      );
+      button.setAttribute(
+        "aria-pressed",
+        String(value === ratingWheelCandidate),
+      );
+    }
+  };
+  const setRatingWheelCandidate = (value: number | undefined) => {
+    ratingWheelCandidate = value;
+    if (value === undefined) {
+      ratingWheelStatus.textContent = `Current Rating: ${ratingLabel(currentRating)}. Move across a Rating and release to save.`;
+      ratingWheel.dataset.ratingWheelCandidate = "";
+    } else {
+      ratingWheelStatus.textContent = `${ratingLabel(value)}. Release to save.`;
+      ratingWheel.dataset.ratingWheelCandidate = String(value);
+    }
+    syncRatingWheelOptions();
+  };
+  const closeRatingWheel = () => {
+    ratingWheelOpen = false;
+    ratingWheelCandidate = undefined;
+    ratingWheelCenter = undefined;
+    ratingWheel.hidden = true;
+    delete ratingWheel.dataset.ratingWheelCandidate;
+    preview.classList.remove("rating-wheel-open");
+    preview.style.removeProperty("touch-action");
+    ratingWheelStatus.textContent = "";
+    syncRatingWheelOptions();
+  };
+  const openRatingWheel = (clientX: number, clientY: number) => {
+    const bounds = preview.getBoundingClientRect();
+    const radius = Math.max(
+      46,
+      Math.min(
+        RATING_WHEEL_RADIUS,
+        (bounds.width - 96) / 2,
+        (bounds.height - 96) / 2,
+      ),
+    );
+    const extent = radius + 28;
+    const centerX = clamp(
+      clientX - bounds.left,
+      Math.min(extent, bounds.width / 2),
+      Math.max(bounds.width / 2, bounds.width - extent),
+    );
+    const centerY = clamp(
+      clientY - bounds.top,
+      Math.min(extent, bounds.height / 2),
+      Math.max(bounds.height / 2, bounds.height - extent),
+    );
+    ratingWheelRadius = radius;
+    ratingWheelCenter = { x: centerX, y: centerY };
+    ratingWheel.style.left = `${centerX}px`;
+    ratingWheel.style.top = `${centerY}px`;
+    ratingWheel.style.setProperty("--rating-wheel-radius", `${radius}px`);
+    ratingWheelOpen = true;
+    ratingWheel.hidden = false;
+    ratingWheelInstructions.textContent =
+      "Rating Wheel open. Move across a Rating and release to save.";
+    preview.classList.add("rating-wheel-open");
+    preview.style.touchAction = "none";
+    setRatingWheelCandidate(undefined);
+  };
+  const updateRatingWheel = (clientX: number, clientY: number) => {
+    if (!ratingWheelOpen || !ratingWheelCenter) return;
+    const dx =
+      clientX - (preview.getBoundingClientRect().left + ratingWheelCenter.x);
+    const dy =
+      clientY - (preview.getBoundingClientRect().top + ratingWheelCenter.y);
+    const distance = Math.hypot(dx, dy);
+    const outer = ratingWheelRadius + 56;
+    if (distance < 30 || distance > outer) {
+      setRatingWheelCandidate(undefined);
+      return;
+    }
+    const degrees = (Math.atan2(dy, dx) * (180 / Math.PI) + 90 + 360) % 360;
+    const value =
+      Math.floor(
+        (degrees + 180 / RATING_WHEEL_OPTION_COUNT) /
+          (360 / RATING_WHEEL_OPTION_COUNT),
+      ) % RATING_WHEEL_OPTION_COUNT;
+    setRatingWheelCandidate(value);
+  };
+  const cancelRatingHold = () => {
+    if (ratingWheelHoldTimer !== undefined) {
+      window.clearTimeout(ratingWheelHoldTimer);
+      ratingWheelHoldTimer = undefined;
+    }
+  };
   const clearPointer = () => {
+    cancelRatingHold();
     const id = pointer?.id;
     pointer = undefined;
     if (id !== undefined && preview.hasPointerCapture(id))
@@ -957,6 +1109,8 @@ export function createLibraryBrowserView(
     rejectFeedback.classList.remove("pending");
   };
   const resetGestures = () => {
+    cancelRatingHold();
+    closeRatingWheel();
     for (const id of Array.from(activePointers.keys()))
       if (preview.hasPointerCapture(id)) preview.releasePointerCapture(id);
     activePointers.clear();
@@ -1119,8 +1273,13 @@ export function createLibraryBrowserView(
       offsetX: midpoint.x - (center.x + panX),
       offsetY: midpoint.y - (center.y + panY),
     };
-    for (const id of Array.from(activePointers.keys()))
-      preview.setPointerCapture(id);
+    for (const id of Array.from(activePointers.keys())) {
+      try {
+        preview.setPointerCapture(id);
+      } catch {
+        // Synthetic PointerEvents have no native active pointer to capture.
+      }
+    }
     preview.style.touchAction = "none";
   };
   const updatePinch = () => {
@@ -1157,6 +1316,9 @@ export function createLibraryBrowserView(
       ? zoomPercent
       : Math.max(MIN_ZOOM_PERCENT, currentPercent());
     zoomAt(base * factor, { x: event.clientX, y: event.clientY });
+  };
+  const onPreviewContextMenu = (event: MouseEvent) => {
+    if (pointer?.ratingPending || ratingWheelOpen) event.preventDefault();
   };
 
   const createSourceButton = (
@@ -2308,8 +2470,10 @@ export function createLibraryBrowserView(
     currentSelection = model.selectionState ?? "undecided";
     selection.textContent = selectionLabel(currentSelection);
     const value = model.rating ?? 0;
+    currentRating = value;
     rating.textContent =
       value === 0 ? "No rating" : `${value} ${value === 1 ? "star" : "stars"}`;
+    syncRatingWheelOptions();
     for (const button of Array.from(
       ratings.querySelectorAll<HTMLButtonElement>("[data-rating-value]"),
     ))
@@ -2392,6 +2556,7 @@ export function createLibraryBrowserView(
 
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
+    resetGestures();
     photoTitle.textContent = model.sourceName;
     currentPhotoId = model.photoId;
     photoSurface = {};
@@ -2429,6 +2594,8 @@ export function createLibraryBrowserView(
     });
     if (activePointers.size === 2) {
       event.preventDefault();
+      cancelRatingHold();
+      closeRatingWheel();
       beginPinch();
       return;
     }
@@ -2436,6 +2603,11 @@ export function createLibraryBrowserView(
     // Fit owns decision swipes; a manual zoom owns bounded panning. Neither
     // state ever records a decision from a drag.
     if (!zoomManual && !decisionInteractionEnabled) return;
+    const ratingPending =
+      event.pointerType === "touch" &&
+      !zoomManual &&
+      measurableImage() &&
+      decisionInteractionEnabled;
     pointer = {
       id: event.pointerId,
       startX: event.clientX,
@@ -2444,11 +2616,47 @@ export function createLibraryBrowserView(
       lastY: event.clientY,
       startedAt: event.timeStamp,
       vertical: false,
+      ratingPending,
+      ratingWheel: false,
       pan: zoomManual,
       surface: photoSurface,
       photoId: currentPhotoId,
     };
-    preview.setPointerCapture(event.pointerId);
+    try {
+      preview.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic PointerEvents used by browser qualification have no native
+      // active pointer to capture; the gesture state still remains testable.
+    }
+    if (ratingPending) {
+      const id = event.pointerId;
+      const surface = photoSurface;
+      const photoId = currentPhotoId;
+      ratingWheelHoldTimer = window.setTimeout(() => {
+        ratingWheelHoldTimer = undefined;
+        const active = pointer;
+        if (
+          !active ||
+          active.id !== id ||
+          !active.ratingPending ||
+          active.surface !== surface ||
+          active.photoId !== photoId ||
+          active.vertical ||
+          active.pan ||
+          zoomManual ||
+          !decisionInteractionEnabled ||
+          !currentPhotoId
+        )
+          return;
+        active.ratingPending = false;
+        active.ratingWheel = true;
+        stage.style.transform = "";
+        selectFeedback.classList.remove("pending");
+        rejectFeedback.classList.remove("pending");
+        openRatingWheel(active.lastX, active.lastY);
+        updateRatingWheel(active.lastX, active.lastY);
+      }, RATING_WHEEL_HOLD_MS);
+    }
   };
   const pointerMove = (event: PointerEvent) => {
     if (!alive) return;
@@ -2468,14 +2676,28 @@ export function createLibraryBrowserView(
     const stepY = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
     pointer.lastY = event.clientY;
+    if (pointer.ratingWheel) {
+      updateRatingWheel(event.clientX, event.clientY);
+      return;
+    }
     if (pointer.pan || zoomManual) {
       panX = clamp(panX + stepX, -panLimitX(), panLimitX());
       panY = clamp(panY + stepY, -panLimitY(), panLimitY());
       applyZoom();
       return;
     }
-    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12)
+    if (
+      pointer.ratingPending &&
+      Math.hypot(dx, dy) > RATING_WHEEL_MOVE_PIXELS
+    ) {
+      pointer.ratingPending = false;
+      cancelRatingHold();
+      // The dominant axis owns the gesture. Equal movement yields to native
+      // vertical scrolling instead of guessing a decision direction.
+      if (Math.abs(dy) >= Math.abs(dx)) pointer.vertical = true;
+    } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 12) {
       pointer.vertical = true;
+    }
     if (pointer.vertical) return;
     stage.style.transform = `translateX(${clamp(dx, -140, 140)}px)`;
     selectFeedback.classList.toggle("pending", dx > SWIPE_PENDING_PIXELS);
@@ -2494,7 +2716,28 @@ export function createLibraryBrowserView(
     }
     if (!pointer || pointer.id !== event.pointerId) return;
     const active = pointer;
+    const wheelCandidate = active.ratingWheel
+      ? ratingWheelCandidate
+      : undefined;
+    if (active.ratingWheel) closeRatingWheel();
     clearPointer();
+    if (active.ratingWheel) {
+      if (
+        cancelled ||
+        wheelCandidate === undefined ||
+        !decisionInteractionEnabled ||
+        active.surface !== photoSurface ||
+        active.photoId !== currentPhotoId
+      )
+        return;
+      send({
+        kind: "photo-mutation",
+        field: "rating",
+        value: wheelCandidate,
+        advance: false,
+      });
+      return;
+    }
     if (
       active.pan ||
       zoomManual ||
@@ -2825,6 +3068,7 @@ export function createLibraryBrowserView(
     applyManualZoom(Number(zoomSlider.value)),
   );
   preview.addEventListener("wheel", wheelZoom, { passive: false });
+  preview.addEventListener("contextmenu", onPreviewContextMenu);
   zoomControls.addEventListener("pointerdown", (event) =>
     event.stopPropagation(),
   );
@@ -3080,6 +3324,11 @@ export function createLibraryBrowserView(
       if (heldCell && !gridInteractionEnabled) gridViewport.focus();
       else if (becameInteractive) restoreGridKeyboardFocus();
       decisionInteractionEnabled = model.decisionEnabled;
+      if (
+        !model.decisionEnabled &&
+        (ratingWheelOpen || pointer?.ratingPending || pointer?.ratingWheel)
+      )
+        resetGestures();
       for (const button of [
         select,
         reject,
@@ -3115,6 +3364,7 @@ export function createLibraryBrowserView(
       if (!alive) return;
       const returnFocus = browser.classList.contains("sources-open");
       cancelGridRender();
+      resetGestures();
       stage.replaceChildren();
       resetZoomForImage();
       gridView.hidden = false;
@@ -3159,6 +3409,7 @@ export function createLibraryBrowserView(
     },
     showGrid(index) {
       if (!alive) return;
+      resetGestures();
       resetZoomForImage();
       photoView.hidden = true;
       gridView.hidden = false;
@@ -3177,6 +3428,7 @@ export function createLibraryBrowserView(
     },
     enterPhoto() {
       if (!alive) return;
+      resetGestures();
       gridView.hidden = true;
       photoView.hidden = false;
       photoView.scrollTop = 0;
@@ -3236,6 +3488,7 @@ export function createLibraryBrowserView(
       stageObserver.disconnect();
       clearFilmstripCells();
       preview.removeEventListener("wheel", wheelZoom);
+      preview.removeEventListener("contextmenu", onPreviewContextMenu);
       cancelGridRender();
       compactSources.removeEventListener("change", onSourceViewportChange);
       shortViewport.removeEventListener("change", onShortViewportChange);
