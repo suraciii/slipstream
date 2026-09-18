@@ -434,6 +434,102 @@ describe("SourceGridOwner", () => {
     });
   });
 
+  test("reconciles a refreshed Photo fact against the source counts", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 10, 0, { selected: 3, rejected: 1, undecided: 6 }),
+        );
+      if (url.pathname === "/api/browse/browse-1") {
+        const photos = Array.from({ length: 10 }, (_, index) =>
+          index === 0
+            ? { ...photo("photo-0"), selectionState: "rejected" as const }
+            : photo(`photo-${index}`),
+        );
+        return Promise.resolve(
+          new Response(JSON.stringify({ start: 0, total: 10, photos }), {
+            status: 200,
+          }),
+        );
+      }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    await openLibrary(owner, "browse-1");
+    const authority = owner.authority;
+    expect(
+      (await owner.loadWindow(0, { kind: "source", authority })).kind,
+    ).toBe("loaded");
+    const first = owner.photoAt(0)!;
+    expect(first.selectionState).toBe("rejected");
+    // The open counts still contain the browser's prior undecided belief. A
+    // Review refresh reconciles that one contribution to the observed fact.
+    expect(
+      owner.reconcilePhotoSelection(
+        authority,
+        0,
+        first.id,
+        "undecided",
+        "rejected",
+      ),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 3,
+      rejected: 2,
+      undecided: 5,
+    });
+    const stale = owner.authority;
+    await owner.open({ kind: "library" });
+    expect(
+      owner.reconcilePhotoSelection(
+        stale,
+        0,
+        first.id,
+        "undecided",
+        "rejected",
+      ),
+    ).toBe(false);
+  });
+
+  test("keeps reconciled progress counts non-negative after an external write", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 1, 0, { selected: 0, rejected: 1, undecided: 0 }),
+        );
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              start: 0,
+              total: 1,
+              photos: [{ ...photo("photo-0"), selectionState: "rejected" }],
+            }),
+            { status: 200 },
+          ),
+        );
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner, "browse-1");
+    await owner.loadWindow(0, { kind: "source", authority });
+    expect(
+      owner.reconcilePhotoSelection(
+        authority,
+        0,
+        "photo-0",
+        "selected",
+        "rejected",
+      ),
+    ).toBe(true);
+    expect(owner.selectionCounts).toEqual({
+      selected: 0,
+      rejected: 2,
+      undecided: 0,
+    });
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);
@@ -1417,6 +1513,53 @@ describe("SourceGridOwner", () => {
     expect(outcome).toMatchObject({ kind: "loaded", changed: true });
     expect(owner.photoAt(180)?.id).toBe("photo-180");
     expect(owner.retainedFactCount).toBeLessThanOrEqual(196);
+    owner.dispose();
+  });
+
+  test("protects the actual clamped tail anchor under retention pressure", async () => {
+    const requested: number[] = [];
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 400));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        requested.push(start);
+        return Promise.resolve(windowResponse(start, 400));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner);
+    const grid = { kind: "grid" as const, authority };
+
+    // Protect an earlier visible span, then fill the map to the bound with a
+    // window that the old aligned tail anchor would protect.
+    owner.ensureRange(60, 120, grid);
+    await flushTasks();
+    for (const start of [0, 120, 300])
+      expect(
+        await owner.loadWindow(start, { kind: "source", authority }),
+      ).toMatchObject({
+        kind: "loaded",
+      });
+    expect(owner.retainedFactCount).toBe(240);
+
+    const photoAuthority = owner.renewPhotoWindow();
+    expect(
+      await owner.loadWindow(399, {
+        kind: "photo",
+        authority: photoAuthority,
+      }),
+    ).toMatchObject({ kind: "loaded" });
+    expect(requested).toContain(340);
+    expect(owner.retainedFactCount).toBe(240);
+    // The old aligned anchor protected [300,360) and evicted 360–399. The
+    // committed clamped [340,400) window must survive as one whole window.
+    expect(owner.photoAt(340)?.id).toBe("photo-340");
+    expect(owner.photoAt(360)?.id).toBe("photo-360");
+    expect(owner.photoAt(399)?.id).toBe("photo-399");
     owner.dispose();
   });
 

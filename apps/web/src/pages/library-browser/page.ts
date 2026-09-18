@@ -319,6 +319,7 @@ export function mountLibraryBrowser(
   type GridBatchResult = Readonly<{
     tone: "success" | "warning" | "failure";
     message: string;
+    review?: Readonly<{ label: string }>;
     compensation?: Readonly<{ label: string }>;
   }>;
   type BatchAlbumCompensation = Readonly<{
@@ -333,6 +334,7 @@ export function mountLibraryBrowser(
   // current Library. It stays visible in the tray, but must not be sent in a
   // later batch request until the Photographer clears the selection.
   let multiMissingIds = new Set<string>();
+  let multiChangedIds = new Set<string>();
   let multiExpectedSelection = new Map<string, SelectionState>();
   let multiAnchorId: string | undefined;
   let selectMode = false;
@@ -1859,6 +1861,7 @@ export function mountLibraryBrowser(
     gridBatchResult = {
       tone: gridBatchResult.tone,
       message: gridBatchResult.message,
+      ...(gridBatchResult.review ? { review: gridBatchResult.review } : {}),
     };
   };
 
@@ -1870,6 +1873,7 @@ export function mountLibraryBrowser(
   const clearMultiSelection = () => {
     multiSelection = new Set();
     multiMissingIds = new Set();
+    multiChangedIds = new Set();
     multiExpectedSelection = new Map();
     multiAnchorId = undefined;
     selectMode = false;
@@ -1892,6 +1896,7 @@ export function mountLibraryBrowser(
     if (multiSelection.delete(photoId)) {
       multiExpectedSelection.delete(photoId);
       multiMissingIds.delete(photoId);
+      multiChangedIds.delete(photoId);
     } else {
       if (multiSelection.size >= MULTI_SELECTION_LIMIT) {
         refuseBeyondBatchBound();
@@ -1929,6 +1934,7 @@ export function mountLibraryBrowser(
       if (!photo) return;
       multiSelection.add(photoId);
       multiMissingIds.delete(photoId);
+      multiChangedIds.delete(photoId);
       multiExpectedSelection.set(photoId, photo.selectionState);
       gridBatchResult = undefined;
       multiAnchorId = photoId;
@@ -1955,6 +1961,7 @@ export function mountLibraryBrowser(
       if (!photo) continue;
       multiSelection.add(photoIdToAdd);
       multiMissingIds.delete(photoIdToAdd);
+      multiChangedIds.delete(photoIdToAdd);
       multiExpectedSelection.set(photoIdToAdd, photo.selectionState);
     }
     gridBatchResult = undefined;
@@ -2555,7 +2562,21 @@ export function mountLibraryBrowser(
       renderGrid();
       return;
     }
-    const admission = photoOwner.mutateBatch(photoIds, value);
+    const photos = photoIds.flatMap((photoId) => {
+      const expectedCurrent = multiExpectedSelection.get(photoId);
+      return expectedCurrent === undefined
+        ? []
+        : [{ photoId, expectedCurrent }];
+    });
+    if (photos.length !== photoIds.length) {
+      const message =
+        "The selected Photos need a refresh before this batch can be retried.";
+      gridBatchResult = { tone: "failure", message };
+      setDecisionStatus(message);
+      renderGrid();
+      return;
+    }
+    const admission = photoOwner.mutateBatch(photos, value);
     if (!admission) return;
     gridBatchResult = undefined;
     renderGrid();
@@ -2569,14 +2590,12 @@ export function mountLibraryBrowser(
     if (outcome.kind === "failed") {
       if (outcome.failure === "answered") {
         setDecisionStatus(
-          outcome.status === 409
-            ? "Those Photos changed elsewhere. Retry to confirm their current state."
-            : // Only an over-limit batch answers 400; the client caps the
-              // selection, so the bound clause stays off every other answered
-              // failure it cannot have caused.
-              outcome.status === 400
-              ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
-              : "The change could not be saved.",
+          // Only an over-limit batch answers 400; the client caps the
+          // selection, so the bound clause stays off every other answered
+          // failure it cannot have caused.
+          outcome.status === 400
+            ? `The change could not be saved. A batch holds up to ${MULTI_SELECTION_LIMIT} Photos.`
+            : "The change could not be saved.",
         );
       } else {
         setDecisionStatus(
@@ -2597,8 +2616,12 @@ export function mountLibraryBrowser(
       return;
     }
     const applied = outcome.applied.length;
-    const conflicts = outcome.conflicts.length;
-    for (const entry of outcome.conflicts) {
+    const changed = outcome.changedElsewhere.length;
+    const missing = outcome.missing.length;
+    multiChangedIds = new Set(
+      outcome.changedElsewhere.map((entry) => entry.photoId),
+    );
+    for (const entry of outcome.missing) {
       multiMissingIds.add(entry.photoId);
       multiExpectedSelection.delete(entry.photoId);
     }
@@ -2607,21 +2630,219 @@ export function mountLibraryBrowser(
       sourceGrid.kind === "album" ? " Album resume point unchanged." : "";
     for (const entry of outcome.applied)
       multiExpectedSelection.set(entry.photoId, value);
-    // A conflict is a Photo the current Library no longer holds: the batch
-    // wrote no fact for it, so the Grid reports exactly that and claims no
-    // knowledge of any state it never refreshed.
-    const message =
-      conflicts === 0
-        ? `${photoCountText(applied)} ${decision}.${resumeMessage}`
-        : `${photoCountText(applied)} ${decision}. ${photoCountText(conflicts)} no longer in this Library.${resumeMessage}`;
+    const parts = [`${photoCountText(applied)} ${decision}.`];
+    if (changed > 0)
+      parts.push(
+        `${photoCountText(changed)} changed elsewhere. Review them before retrying.`,
+      );
+    if (missing > 0)
+      parts.push(`${photoCountText(missing)} no longer in this Library.`);
+    const message = `${parts.join(" ")}${resumeMessage}`;
     gridBatchResult = {
-      tone: conflicts === 0 ? "success" : "warning",
+      tone: changed > 0 || missing > 0 ? "warning" : "success",
       message,
+      ...(changed > 0
+        ? { review: { label: `Review ${photoCountText(changed)}` } }
+        : {}),
     };
     setDecisionStatus(message);
     renderGrid();
     updateControls();
   };
+  /// Refreshes the bounded facts for Photos that the server reported as
+  /// changed elsewhere. The open Browse Snapshot and the page-owned selection
+  /// stay in place; only the windows containing the reviewed identities are
+  /// reloaded. Missing identities become non-retryable retained selections.
+  const reviewChangedPhotos = async () => {
+    if (
+      !applicationAlive ||
+      !connected ||
+      pageBusy ||
+      !view.gridVisible() ||
+      multiChangedIds.size === 0
+    )
+      return;
+    const reviewIds = [...multiChangedIds].filter(
+      (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
+    );
+    if (reviewIds.length === 0) return;
+    const sourceAuthority = sourceGrid.authority;
+    const loadedWindows = new Set<number>();
+    const reviewed = new Set<string>();
+    const becameMissing = new Set<string>();
+    let firstReviewedIndex: number | undefined;
+    let failed = false;
+    pageBusy = true;
+    renderGrid();
+    setDecisionStatus(
+      `Reviewing ${photoCountText(reviewIds.length)} changed elsewhere…`,
+    );
+    try {
+      for (const photoId of reviewIds) {
+        if (!sourceGrid.isCurrent(sourceAuthority)) return;
+        let index = sourceGrid.findPhotoIndex(photoId);
+        if (index === undefined) {
+          const position = await sourceGrid.resolvePhotoPosition(
+            sourceAuthority,
+            photoId,
+          );
+          if (!sourceGrid.isCurrent(sourceAuthority)) return;
+          if (position.kind === "missing") {
+            becameMissing.add(photoId);
+            continue;
+          }
+          if (position.kind === "expired") {
+            await reopenExpired(
+              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
+              sourceGrid.generation,
+            );
+            return;
+          }
+          if (position.kind !== "resolved") {
+            failed = true;
+            break;
+          }
+          index = position.position;
+        }
+        const believedState = multiExpectedSelection.get(photoId);
+        const { start } = sourceGrid.describeWindow(index);
+        const refreshWindow = async () => {
+          sourceGrid.invalidateWindow(index);
+          const loaded = await loadWindow(
+            index,
+            { kind: "grid", authority: sourceAuthority },
+            true,
+            "high",
+          );
+          if (!loaded || !sourceGrid.isCurrent(sourceAuthority)) return false;
+          loadedWindows.add(start);
+          return true;
+        };
+        if (!loadedWindows.has(start) && !(await refreshWindow())) {
+          failed = true;
+          break;
+        }
+        let refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+        if (refreshedIndex === undefined && !(await refreshWindow())) {
+          failed = true;
+          break;
+        }
+        refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+        let photo =
+          refreshedIndex === undefined
+            ? undefined
+            : sourceGrid.photoAt(refreshedIndex);
+        if (!photo) {
+          // A refreshed window can lose a retained fact to bounded-cache
+          // pressure. Ask the position authority before deciding that the
+          // Photo left the Library; only its `missing` answer is definitive.
+          const currentPosition = await sourceGrid.resolvePhotoPosition(
+            sourceAuthority,
+            photoId,
+          );
+          if (!sourceGrid.isCurrent(sourceAuthority)) return;
+          if (currentPosition.kind === "missing") {
+            becameMissing.add(photoId);
+            continue;
+          }
+          if (currentPosition.kind === "expired") {
+            await reopenExpired(
+              sourceGrid.readGridPosition(sourceAuthority) ?? 0,
+              sourceGrid.generation,
+            );
+            return;
+          }
+          if (currentPosition.kind !== "resolved") {
+            failed = true;
+            break;
+          }
+          if (!(await refreshWindow())) {
+            failed = true;
+            break;
+          }
+          refreshedIndex = sourceGrid.findPhotoIndex(photoId);
+          photo =
+            refreshedIndex === undefined
+              ? undefined
+              : sourceGrid.photoAt(refreshedIndex);
+          // The position route proved that the Photo still exists. If the
+          // second refresh cannot retain it, keep it retryable rather than
+          // presenting a false deletion.
+          if (!photo) {
+            failed = true;
+            break;
+          }
+        }
+        if (
+          believedState !== undefined &&
+          !sourceGrid.reconcilePhotoSelection(
+            sourceAuthority,
+            refreshedIndex!,
+            photoId,
+            believedState,
+            photo.selectionState,
+          )
+        ) {
+          failed = true;
+          break;
+        }
+        multiExpectedSelection.set(photoId, photo.selectionState);
+        reviewed.add(photoId);
+        firstReviewedIndex ??= refreshedIndex;
+      }
+    } finally {
+      if (sourceGrid.isCurrent(sourceAuthority)) {
+        pageBusy = false;
+        updateControls();
+      }
+    }
+    if (!applicationAlive || !sourceGrid.isCurrent(sourceAuthority)) return;
+    for (const photoId of becameMissing) {
+      multiMissingIds.add(photoId);
+      multiExpectedSelection.delete(photoId);
+      multiChangedIds.delete(photoId);
+    }
+    for (const photoId of reviewed) multiChangedIds.delete(photoId);
+    const remaining = [...multiChangedIds].filter(
+      (photoId) => multiSelection.has(photoId) && !multiMissingIds.has(photoId),
+    );
+    if (failed) {
+      const missingMessage =
+        becameMissing.size > 0
+          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
+          : "";
+      const message = `Some changed Photos could not be refreshed.${missingMessage} Retry Review to continue.`;
+      gridBatchResult = {
+        tone: "warning",
+        message,
+        ...(remaining.length > 0
+          ? {
+              review: {
+                label: `Review ${photoCountText(remaining.length)}`,
+              },
+            }
+          : {}),
+      };
+      setDecisionStatus(message);
+    } else {
+      const reviewedCount = reviewed.size;
+      const missingMessage =
+        becameMissing.size > 0
+          ? ` ${photoCountText(becameMissing.size)} no longer in this Library.`
+          : "";
+      const message = `${photoCountText(reviewedCount)} reviewed.${missingMessage} Retry the batch when ready.`;
+      gridBatchResult = {
+        tone: becameMissing.size > 0 ? "warning" : "success",
+        message,
+      };
+      setDecisionStatus(message);
+    }
+    renderGrid(firstReviewedIndex);
+    if (firstReviewedIndex !== undefined)
+      view.focusGridIndex(firstReviewedIndex);
+    updateControls();
+  };
+
   /// Adds every multi-selected Photo to one Album through the bounded
   /// membership route. Membership stays outside the Undo contract, and the
   /// multi-selection stays so the same Photos can join another Album.
@@ -3317,6 +3538,9 @@ export function mountLibraryBrowser(
         return;
       case "grid-batch-album-remove":
         void removeAddedPhotosFromAlbum();
+        return;
+      case "grid-batch-review":
+        void reviewChangedPhotos();
         return;
       case "show-grid":
         showGrid();

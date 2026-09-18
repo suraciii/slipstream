@@ -312,8 +312,14 @@ pub struct PhotoStateMutationResult {
 pub const PHOTO_STATE_BATCH_MAX: usize = 100;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchItem {
+    pub photo_id: String,
+    pub expected_current: SelectionState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoStateBatchMutation {
-    pub photo_ids: Vec<String>,
+    pub photos: Vec<PhotoStateBatchItem>,
     pub value: SelectionState,
 }
 
@@ -325,18 +331,25 @@ pub struct PhotoStateBatchApplied {
     pub prior_value: SelectionState,
 }
 
-/// One requested Photo that could not take the batch write because the
-/// current Library no longer holds it. A Photo the Library still holds always
-/// takes the write, so a state that changed elsewhere is not a conflict.
+/// One requested Photo whose current Selection State did not match the
+/// browser's expected value. The Photo is not written.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PhotoStateBatchConflict {
+pub struct PhotoStateBatchChangedElsewhere {
+    pub photo_id: String,
+    pub current_value: SelectionState,
+}
+
+/// One requested Photo that the current Library no longer holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoStateBatchMissing {
     pub photo_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoStateBatchResult {
     pub applied: Vec<PhotoStateBatchApplied>,
-    pub conflicts: Vec<PhotoStateBatchConflict>,
+    pub changed_elsewhere: Vec<PhotoStateBatchChangedElsewhere>,
+    pub missing: Vec<PhotoStateBatchMissing>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

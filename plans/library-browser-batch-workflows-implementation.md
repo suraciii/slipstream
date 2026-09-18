@@ -32,7 +32,7 @@ These decisions are the implementation contract for this plan:
 6. Progress labels distinguish the active filtered sequence from counts over the complete source.
 7. No new global history abstraction, modal conflict workflow, or batch Undo endpoint is added.
 
-The current repository implements the older batch contract: existing Photos are last-writer-wins, missing Photos are the only batch conflicts, and Album membership writes return counts through the general Album summary response. Those contracts must change only in the slices below. The old executable route fixtures remain a transitional baseline during the contract PR because the route implementation changes in Slices 2 and 3; Slice 3 must retire the old `photoIds`/`conflicts` vectors and replace the old response golden before this Epic can be complete.
+The target contract uses optimistic expected Selection State comparison and identity-bearing Album membership results. The implementation slices below replace the former last-writer-wins and aggregate-only routes in dependency order. The executable compatibility vectors now use the target request and response shapes; the only retained `conflicts` example is a negative response-validation case that proves the obsolete field is rejected.
 
 ## Ownership and Delivery Rules
 
@@ -177,6 +177,7 @@ A successful batch Album addition identifies the newly added Photo IDs and offer
 - `design/photo-organization.md`
 - `design/web-async-ownership.md`
 - `docs/library-browsing-and-selection.md`
+- `plans/library-browser-batch-workflows-implementation.md`
 
 ### Contract
 
@@ -217,7 +218,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|Remove added Photos"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "batch Add to Album|compensation"
 bun run verify
 ```
 
@@ -236,15 +237,23 @@ A batch does not silently overwrite a Selection State changed after the browser 
 - `crates/slipstream-server/src/app.rs`
 - `crates/slipstream-server/src/http.rs`
 - `crates/slipstream-server/src/tests.rs`
+- `crates/slipstream-compat/src/lib.rs`
+- `compatibility/protocol/batch-workflows.json`
 - `apps/web/src/pages/library-browser/api/photo.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.ts`
 - `apps/web/src/pages/library-browser/model/photo-owner.test.ts`
+- `apps/web/src/pages/library-browser/model/source-grid-owner.ts`
+- `apps/web/src/pages/library-browser/model/source-grid-owner.test.ts`
 - `apps/web/src/pages/library-browser/page.ts`
+- `apps/web/src/pages/library-browser/ui/library-browser-view.ts`
 - `apps/web/src/browser-review.browser-test.ts`
+- `design/library-browsing.md`
+- `docs/library-browsing-and-selection.md`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
+- `plans/library-browser-batch-workflows-implementation.md`
 
-Slice 3 must retire or replace the executed Photo State `photoIds`/`conflicts` browse vectors and response golden when the optimistic request and response become live.
+Slice 3 replaces every executed Photo State batch request and response example with the optimistic `photos` items and `applied`/`changedElsewhere`/`missing` partition. It also records the Review-time count reconciliation in the authoritative product and design specs because that rule belongs to the optimistic settlement boundary. No positive `photoIds`/`conflicts` batch contract remains.
 
 ### Request model
 
@@ -279,7 +288,7 @@ The transaction must compare each existing Photo's current state with its expect
 - Update expected state to the new value only for `applied` outcomes.
 - Keep changed and missing Photos in the multi-selection, but do not fabricate or move their facts. Missing Photos remain counted for presentation but are not retry candidates.
 - `Review N` focuses and refreshes the N changed bounded facts, then replaces their expected states before a retry.
-- A retry sends only the still-selected changed Photos whose expected state is known.
+- A retry sends every still-selected Photo whose expected state is known. Missing Photos stay excluded; already-applied Photos may be sent again as idempotent compare-and-set work so the retry covers the complete retained selection.
 - A malformed or incomplete response moves no local facts, progress counts, or Undo entries; the whole selection remains retryable.
 - Batch Undo continues to use the existing single-Photo compare-and-set route and remains independent of the new initial-write comparison.
 
@@ -297,7 +306,7 @@ The transaction must compare each existing Photo's current state with its expect
 bun run test:rust
 bun run --cwd apps/web test:unit
 bun run lint && bun run typecheck
-bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch conflict|batch Undo"
+bun x playwright test apps/web/src/browser-review.browser-test.ts -g "changed elsewhere|batch Undo|batch Review|no longer holds"
 bun run verify
 ```
 

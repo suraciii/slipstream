@@ -782,7 +782,7 @@
     }
   },
   {
-    "name": "photo-state-batch-reports-absent-photos-as-conflicts",
+    "name": "photo-state-batch-reports-changed-and-missing-photos",
     "request": {
       "method": "POST",
       "path": "/api/photos/state",
@@ -791,9 +791,15 @@
         "origin": "http://camera.local"
       },
       "body": {
-        "photoIds": [
-          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
-          "00000000-0000-4000-8000-000000000000"
+        "photos": [
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "selected"
+          },
+          {
+            "photoId": "00000000-0000-4000-8000-000000000000",
+            "expectedCurrent": "undecided"
+          }
         ],
         "selectionState": "selected"
       }
@@ -802,10 +808,13 @@
       "status": 200,
       "body": {
         "applied": [],
-        "conflicts": [
+        "changedElsewhere": [
           {
-            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
-          },
+            "photoId": "$photoId",
+            "currentValue": "undecided"
+          }
+        ],
+        "missing": [
           {
             "photoId": "00000000-0000-4000-8000-000000000000"
           }
@@ -823,9 +832,15 @@
         "origin": "http://camera.local"
       },
       "body": {
-        "photoIds": [
-          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
-          "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
+        "photos": [
+          {
+            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
+            "expectedCurrent": "undecided"
+          },
+          {
+            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
+            "expectedCurrent": "undecided"
+          }
         ],
         "selectionState": "selected"
       }

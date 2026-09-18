@@ -9,6 +9,7 @@ import {
   persistPhotoState,
   persistPhotoStateBatch,
   type PhotoFetch,
+  type PhotoStateBatchPhoto,
 } from "../api/photo.js";
 import { TaskScope } from "./async-ownership.js";
 import type {
@@ -150,7 +151,10 @@ export type PhotoBatchOutcome =
       applied: ReadonlyArray<
         Readonly<{ photoId: string; priorValue: SelectionState }>
       >;
-      conflicts: ReadonlyArray<Readonly<{ photoId: string }>>;
+      changedElsewhere: ReadonlyArray<
+        Readonly<{ photoId: string; currentValue: SelectionState }>
+      >;
+      missing: ReadonlyArray<Readonly<{ photoId: string }>>;
     }>
   | Readonly<{
       kind: "failed";
@@ -256,7 +260,7 @@ export interface PhotoOwner {
   /// Whether the pending Undo action is one batch Selection State change.
   readonly undoBatch: boolean;
   mutateBatch(
-    photoIds: ReadonlyArray<string>,
+    photos: ReadonlyArray<PhotoStateBatchPhoto>,
     value: SelectionState,
   ): PhotoBatchAdmission | undefined;
   prepareBatchUndo(): PhotoBatchUndoPreparation | undefined;
@@ -547,7 +551,7 @@ export function createPhotoOwner(
   /// keeps its identity while the source generation remains current.
   const admitBatchWrite = (
     record: Lifetime,
-    photoIds: ReadonlyArray<string>,
+    photos: ReadonlyArray<PhotoStateBatchPhoto>,
     value: SelectionState,
   ): PhotoBatchAdmission => {
     const priorUndo = undo;
@@ -558,7 +562,7 @@ export function createPhotoOwner(
     const settlement = (async (): Promise<PhotoBatchOutcome> => {
       let result;
       try {
-        result = await persistPhotoStateBatch(fetcher, { photoIds, value });
+        result = await persistPhotoStateBatch(fetcher, { photos, value });
       } catch {
         // A transport failure cannot prove the batch did not commit, so the
         // prior Undo description is consumed exactly as a single write's is.
@@ -582,8 +586,8 @@ export function createPhotoOwner(
             entry.priorValue,
             value,
           );
-        // A conflicted Photo is one the current Library no longer holds, so
-        // the batch writes no fact for it and the Grid reports it as it is.
+        // Changed and missing Photos are not written, so the owner moves no
+        // local fact for either outcome. Only applied Photos can enter Undo.
         const entries = result.applied.filter(
           (entry) => entry.priorValue !== value,
         );
@@ -596,7 +600,8 @@ export function createPhotoOwner(
           kind: "persisted",
           value,
           applied: result.applied,
-          conflicts: result.conflicts,
+          changedElsewhere: result.changedElsewhere,
+          missing: result.missing,
         });
       }
       // The route rejects before any write, so a rejected batch never
@@ -916,11 +921,11 @@ export function createPhotoOwner(
     get undoAdvanced() {
       return undo?.advanced ?? false;
     },
-    mutateBatch: (photoIds, value) => {
+    mutateBatch: (photos, value) => {
       const record = lifetime;
-      if (!record || closed || owner.busy || photoIds.length === 0)
+      if (!record || closed || owner.busy || photos.length === 0)
         return undefined;
-      return admitBatchWrite(record, [...photoIds], value);
+      return admitBatchWrite(record, [...photos], value);
     },
     prepareBatchUndo: () => {
       const record = lifetime;

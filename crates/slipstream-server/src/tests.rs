@@ -987,7 +987,10 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             "/api/photos/state",
             serde_json::json!({
-                "photoIds":[photo_id.clone(),"00000000-0000-4000-8000-000000000000"],
+                "photos":[
+                    {"photoId":photo_id.clone(),"expectedCurrent":"undecided"},
+                    {"photoId":"00000000-0000-4000-8000-000000000000","expectedCurrent":"undecided"}
+                ],
                 "selectionState":"selected"
             }),
             Some("http://camera.local"),
@@ -3209,13 +3212,20 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
         post_json(
             &router,
             "/api/photos/state",
-            serde_json::json!({"photoIds": ids, "selectionState": "rejected"}),
+            serde_json::json!({
+                "photos": ids
+                    .iter()
+                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}))
+                    .collect::<Vec<_>>(),
+                "selectionState": "rejected"
+            }),
             Some("http://camera.local"),
         )
         .await,
     )
     .await;
-    assert_eq!(applied["conflicts"].as_array().unwrap().len(), 0);
+    assert_eq!(applied["changedElsewhere"].as_array().unwrap().len(), 0);
+    assert_eq!(applied["missing"].as_array().unwrap().len(), 0);
     let entries = applied["applied"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     for (entry, id) in entries.iter().zip(&ids) {
@@ -3245,13 +3255,79 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             .all(|photo| photo["selectionState"] == "rejected")
     );
 
-    // Repeating the same batch is idempotent: every Photo reports the state it
-    // already holds as its prior value, and the counts do not move twice.
+    // A later writer changes one Photo after the browser's confirmed state.
+    // The next batch reports that identity and leaves its newer value intact.
+    let external = response_json(
+        post_json(
+            &router,
+            &format!("/api/photos/{}/state", ids[0]),
+            serde_json::json!({
+                "field": "selectionState",
+                "value": "selected",
+                "expectedCurrent": "rejected"
+            }),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(external["kind"], "applied");
+    let changed = response_json(
+        post_json(
+            &router,
+            "/api/photos/state",
+            serde_json::json!({
+                "photos": ids
+                    .iter()
+                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "rejected"}))
+                    .collect::<Vec<_>>(),
+                "selectionState": "selected"
+            }),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        changed["changedElsewhere"],
+        serde_json::json!([{"photoId": ids[0], "currentValue": "selected"}])
+    );
+    assert_eq!(changed["applied"].as_array().unwrap().len(), 2);
+    assert!(changed["missing"].as_array().unwrap().is_empty());
+    let changed_window = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=10"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        changed_window["photos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|photo| photo["selectionState"] == "selected")
+    );
+
+    // Repeating the now-confirmed state is idempotent: every Photo reports the
+    // state it already holds as its prior value.
     let repeated = response_json(
         post_json(
             &router,
             "/api/photos/state",
-            serde_json::json!({"photoIds": ids, "selectionState": "rejected"}),
+            serde_json::json!({
+                "photos": ids
+                    .iter()
+                    .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "selected"}))
+                    .collect::<Vec<_>>(),
+                "selectionState": "selected"
+            }),
             Some("http://camera.local"),
         )
         .await,
@@ -3262,7 +3338,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry["priorValue"] == "rejected")
+            .all(|entry| entry["priorValue"] == "selected")
     );
     let reopened = response_json(
         post_json(
@@ -3274,14 +3350,14 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
         .await,
     )
     .await;
-    assert_eq!(reopened["selectionCounts"]["rejected"], 3);
+    assert_eq!(reopened["selectionCounts"]["selected"], 3);
+    assert_eq!(reopened["selectionCounts"]["rejected"], 0);
     assert_eq!(reopened["selectionCounts"]["undecided"], 0);
-    assert_eq!(reopened["selectionCounts"]["selected"], 0);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
-/// A Photo that is no longer in the current Library is reported as a conflict
+/// A Photo that is no longer in the current Library is reported as missing
 /// and never rolls back the confirmed Photos of the same batch.
 #[tokio::test]
 async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
@@ -3300,7 +3376,11 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
             &router,
             "/api/photos/state",
             serde_json::json!({
-                "photoIds": [ids[0], missing, ids[1]],
+                "photos": [
+                    {"photoId": ids[0], "expectedCurrent": "undecided"},
+                    {"photoId": missing, "expectedCurrent": "undecided"},
+                    {"photoId": ids[1], "expectedCurrent": "undecided"}
+                ],
                 "selectionState": "selected"
             }),
             Some("http://camera.local"),
@@ -3312,12 +3392,16 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
     assert_eq!(applied.len(), 2);
     assert_eq!(applied[0]["photoId"], ids[0]);
     assert_eq!(applied[1]["photoId"], ids[1]);
-    let conflicts = result["conflicts"].as_array().unwrap();
-    assert_eq!(conflicts.len(), 1);
-    assert_eq!(conflicts[0]["photoId"], missing);
-    // The Library no longer holds a state for that Photo, so the conflict
-    // names it and nothing else.
-    assert_eq!(conflicts[0], serde_json::json!({ "photoId": missing }));
+    let missing_outcomes = result["missing"].as_array().unwrap();
+    assert_eq!(missing_outcomes.len(), 1);
+    assert_eq!(missing_outcomes[0]["photoId"], missing);
+    assert_eq!(
+        missing_outcomes[0],
+        serde_json::json!({ "photoId": missing })
+    );
+    assert!(result["changedElsewhere"].as_array().unwrap().is_empty());
+    // The Library no longer holds a state for that Photo, so the missing
+    // outcome names it and nothing else.
 
     // The confirmed Photos persisted; the unknown Photo changed nothing.
     let reopened = response_json(
@@ -3350,13 +3434,48 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
     let over_limit: Vec<String> = (0..=slipstream_core::PHOTO_STATE_BATCH_MAX)
         .map(|index| format!("00000000-0000-4000-8000-{index:012}"))
         .collect();
+    let valid_items = || {
+        ids.iter()
+            .map(
+                |photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}),
+            )
+            .collect::<Vec<_>>()
+    };
     for body in [
-        serde_json::json!({"photoIds": over_limit, "selectionState": "selected"}),
-        serde_json::json!({"photoIds": [ids[0], ids[0]], "selectionState": "selected"}),
-        serde_json::json!({"photoIds": [], "selectionState": "selected"}),
-        serde_json::json!({"photoIds": ids, "selectionState": "maybe"}),
-        serde_json::json!({"photoIds": ids, "rating": 3}),
-        serde_json::json!({"photoIds": ["NOT-A-PHOTO-ID"], "selectionState": "selected"}),
+        serde_json::json!({
+            "photos": over_limit
+                .into_iter()
+                .map(|photo_id| serde_json::json!({"photoId": photo_id, "expectedCurrent": "undecided"}))
+                .collect::<Vec<_>>(),
+            "selectionState": "selected"
+        }),
+        serde_json::json!({
+            "photos": [
+                {"photoId": ids[0], "expectedCurrent": "undecided"},
+                {"photoId": ids[0], "expectedCurrent": "undecided"}
+            ],
+            "selectionState": "selected"
+        }),
+        serde_json::json!({"photos": [], "selectionState": "selected"}),
+        serde_json::json!({"photos": valid_items(), "selectionState": "undecided"}),
+        serde_json::json!({"photos": valid_items(), "selectionState": "maybe"}),
+        serde_json::json!({"photos": valid_items(), "rating": 3}),
+        serde_json::json!({
+            "photos": [{"photoId": ids[0]}],
+            "selectionState": "selected"
+        }),
+        serde_json::json!({
+            "photos": [{
+                "photoId": ids[0],
+                "expectedCurrent": "undecided",
+                "unexpected": true
+            }],
+            "selectionState": "selected"
+        }),
+        serde_json::json!({
+            "photos": [{"photoId": "NOT-A-PHOTO-ID", "expectedCurrent": "undecided"}],
+            "selectionState": "selected"
+        }),
     ] {
         assert_eq!(
             post_json(

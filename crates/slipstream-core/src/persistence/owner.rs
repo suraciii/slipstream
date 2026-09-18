@@ -8,10 +8,11 @@ use crate::{
     AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
     DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
     OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
-    PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchConflict, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed, PreviewSeedResult,
-    PreviewState, RelativeOriginalPath, ScanLimits, ScanSnapshot, SelectionState,
+    PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
+    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanLimits, ScanSnapshot,
+    SelectionState,
     identity::{classify_name, source_revision},
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -242,14 +243,20 @@ fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), Mu
 fn validate_photo_state_batch_mutation(
     mutation: &PhotoStateBatchMutation,
 ) -> Result<(), MutationError> {
-    if mutation.photo_ids.is_empty()
-        || mutation.photo_ids.len() > crate::PHOTO_STATE_BATCH_MAX
+    if mutation.value == SelectionState::Undecided
+        || mutation.photos.is_empty()
+        || mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX
         || mutation
-            .photo_ids
+            .photos
             .iter()
+            .map(|photo| &photo.photo_id)
             .collect::<std::collections::BTreeSet<_>>()
             .len()
-            != mutation.photo_ids.len()
+            != mutation.photos.len()
+        || mutation
+            .photos
+            .iter()
+            .any(|photo| photo.photo_id.is_empty())
     {
         return Err(MutationError::Invalid);
     }
@@ -2792,8 +2799,8 @@ fn mutate_photo_state(
 }
 
 /// One bounded batch Selection State write. Every requested Photo is resolved
-/// inside one transaction and reports exactly one outcome, so a Photo the
-/// current Library no longer holds never rolls back the confirmed ones.
+/// inside one transaction and reports exactly one outcome, so matching Photos
+/// can be confirmed even when another requested Photo is missing or changed.
 fn mutate_photo_state_batch(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -2801,37 +2808,49 @@ fn mutate_photo_state_batch(
     mutation: PhotoStateBatchMutation,
 ) -> Result<PhotoStateBatchResult, MutationError> {
     mutation_transaction(state, database_name, connection, |transaction| {
-        let mut applied = Vec::with_capacity(mutation.photo_ids.len());
-        let mut conflicts = Vec::new();
-        for photo_id in &mutation.photo_ids {
+        let mut applied = Vec::with_capacity(mutation.photos.len());
+        let mut changed_elsewhere = Vec::new();
+        let mut missing = Vec::new();
+        for item in &mutation.photos {
             let row: Option<String> = transaction
                 .query_row(
                     "SELECT selection_state FROM photos WHERE id=?",
-                    [photo_id],
+                    [&item.photo_id],
                     |row| row.get(0),
                 )
                 .optional()
                 .map_err(mutation_error_from_sqlite)?;
             let Some(selection) = row else {
-                conflicts.push(PhotoStateBatchConflict {
-                    photo_id: photo_id.clone(),
+                missing.push(PhotoStateBatchMissing {
+                    photo_id: item.photo_id.clone(),
                 });
                 continue;
             };
             let prior_value =
                 parse_selection_state(&selection).map_err(|_| MutationError::Persistence)?;
+            if prior_value != item.expected_current {
+                changed_elsewhere.push(PhotoStateBatchChangedElsewhere {
+                    photo_id: item.photo_id.clone(),
+                    current_value: prior_value,
+                });
+                continue;
+            }
             transaction
                 .execute(
                     "UPDATE photos SET selection_state=? WHERE id=?",
-                    params![selection_state_value(mutation.value), photo_id],
+                    params![selection_state_value(mutation.value), &item.photo_id],
                 )
                 .map_err(mutation_error_from_sqlite)?;
             applied.push(PhotoStateBatchApplied {
-                photo_id: photo_id.clone(),
+                photo_id: item.photo_id.clone(),
                 prior_value,
             });
         }
-        Ok(PhotoStateBatchResult { applied, conflicts })
+        Ok(PhotoStateBatchResult {
+            applied,
+            changed_elsewhere,
+            missing,
+        })
     })
 }
 
@@ -2880,7 +2899,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LibraryRoot, identity::original_id};
+    use crate::{LibraryRoot, PhotoStateBatchItem, identity::original_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -4222,25 +4241,33 @@ mod tests {
     /// state is read or written.
     #[test]
     fn batch_photo_state_validation_classifies_malformed_requests_as_invalid() {
+        let item = |photo_id: &str| crate::PhotoStateBatchItem {
+            photo_id: photo_id.to_owned(),
+            expected_current: SelectionState::Undecided,
+        };
         let valid = PhotoStateBatchMutation {
-            photo_ids: vec!["one".to_owned(), "two".to_owned()],
+            photos: vec![item("one"), item("two")],
             value: SelectionState::Selected,
         };
         assert_eq!(validate_photo_state_batch_mutation(&valid), Ok(()));
         let malformed = [
             PhotoStateBatchMutation {
-                photo_ids: Vec::new(),
+                photos: Vec::new(),
                 value: SelectionState::Rejected,
             },
             PhotoStateBatchMutation {
-                photo_ids: vec!["one".to_owned(), "one".to_owned()],
+                photos: vec![item("one"), item("one")],
                 value: SelectionState::Rejected,
             },
             PhotoStateBatchMutation {
-                photo_ids: (0..=crate::PHOTO_STATE_BATCH_MAX)
-                    .map(|index| format!("photo-{index}"))
-                    .collect(),
+                photos: vec![item("one")],
                 value: SelectionState::Undecided,
+            },
+            PhotoStateBatchMutation {
+                photos: (0..=crate::PHOTO_STATE_BATCH_MAX)
+                    .map(|index| item(&format!("photo-{index}")))
+                    .collect(),
+                value: SelectionState::Selected,
             },
         ];
         for mutation in malformed {
@@ -4249,6 +4276,144 @@ mod tests {
                 Err(MutationError::Invalid)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn batch_photo_state_compares_each_photo_and_reports_a_complete_partition() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 1.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: ids[0].clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+
+        let result = persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: vec![
+                    PhotoStateBatchItem {
+                        photo_id: ids[0].clone(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                    PhotoStateBatchItem {
+                        photo_id: ids[1].clone(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                    PhotoStateBatchItem {
+                        photo_id: "missing-photo".to_owned(),
+                        expected_current: SelectionState::Undecided,
+                    },
+                ],
+                value: SelectionState::Rejected,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.applied,
+            vec![PhotoStateBatchApplied {
+                photo_id: ids[1].clone(),
+                prior_value: SelectionState::Undecided,
+            }]
+        );
+        assert_eq!(
+            result.changed_elsewhere,
+            vec![PhotoStateBatchChangedElsewhere {
+                photo_id: ids[0].clone(),
+                current_value: SelectionState::Selected,
+            }]
+        );
+        assert_eq!(
+            result.missing,
+            vec![PhotoStateBatchMissing {
+                photo_id: "missing-photo".to_owned(),
+            }]
+        );
+        let after = persistence.snapshot().await.unwrap();
+        assert_eq!(
+            after
+                .photos
+                .iter()
+                .map(|photo| photo.selection_state)
+                .collect::<Vec<_>>(),
+            vec![SelectionState::Selected, SelectionState::Rejected]
+        );
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_photo_state_rolls_back_earlier_matches_when_a_later_write_fails() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 1.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let escaped_id = ids[1].replace('\'', "''");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_batch_second BEFORE UPDATE OF selection_state ON photos\n                 WHEN OLD.id = '{escaped_id}'\n                 BEGIN SELECT RAISE(ABORT, 'forced batch failure'); END;"
+            ))
+            .unwrap();
+
+        let result = persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: ids
+                    .iter()
+                    .map(|photo_id| PhotoStateBatchItem {
+                        photo_id: photo_id.clone(),
+                        expected_current: SelectionState::Undecided,
+                    })
+                    .collect(),
+                value: SelectionState::Selected,
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(result.is_err());
+        let after = persistence.snapshot().await.unwrap();
+        assert!(
+            after
+                .photos
+                .iter()
+                .all(|photo| photo.selection_state == SelectionState::Undecided)
+        );
+        persistence.shutdown().unwrap();
     }
 
     #[tokio::test]
