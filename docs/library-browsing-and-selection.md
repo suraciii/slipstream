@@ -564,8 +564,10 @@ The selection tray must state `Selection remains active` after a batch
 operation. It must show the active source and must distinguish the visible
 filtered result count from the Selection State counts for the complete source.
 
-The **Select** mode must be enterable and leavable from a keyboard, and
-`Escape` must empty the multi-selection. The Grid decision and Rating keys keep
+The **Select** mode must be enterable and leavable from a keyboard. `Clear`
+and `Escape` empty the multi-selection and leave **Select** mode, including
+when the tray currently shows `0 / 100 Photos`. Opening or reopening a source
+also leaves Select mode. The Grid decision and Rating keys keep
 their existing meaning for the focused Photo.
 
 A range extends over the Photos the Grid has loaded. A position the Grid has
@@ -593,9 +595,15 @@ Photo recoverable and must not present the batch as complete.
 The Grid must report applied, changed-elsewhere, and missing Photos separately.
 A changed-elsewhere Photo remains selected for review or retry. The result must
 identify missing Photos as `no longer in this Library`, identify concurrent
-state differences as `changed elsewhere`, and offer `Review` for the latter.
-`Review` focuses the affected cells and opens no modal. Review must refresh
-that Photo's current facts before another decision can be confirmed.
+state differences as `changed elsewhere`, and offer a `Review N` action for the
+latter, where `N` is the number of affected Photos. `Review N` focuses the
+affected cells and opens no modal. Review must refresh each affected Photo's
+current facts before another decision can be confirmed.
+
+A missing Photo remains visible in the selection result and the tray count
+until the Photographer clears it or opens another source, but it is marked
+`no longer in this Library` and is excluded from later batch requests. It does
+not consume a retry or create a new decision count.
 
 A batched Selection State change is one undoable change: Undo restores the
 prior Selection State of every Photo the batch confirmed, as one unit. The
@@ -621,11 +629,14 @@ Opening or reopening a source clears the multi-selection; scrolling and Grid
 renders must not. A batch decision or one batch Album addition keeps the
 multi-selection, so the same Photos can take another decision or join another
 Album; only the clear exit, `Escape`, and opening or reopening a source empty
-it. When a batch settles in an Album, the Grid must report that the durable
-Photo View resume position is unchanged, for example `Album resume point
-unchanged: Photo 12.` The batch actions must remain reachable from a keyboard,
-and the count and every batch outcome must be announced on the Grid's status
-surface.
+it. After a batch Selection State decision or batch Album addition settles in
+an Album, the Grid must report that the durable Photo View resume position is
+unchanged, for example `Album resume point unchanged: Photo 12.` The
+**Remove added Photos** compensation reports the ordinary Album removal result
+instead. If it removes the saved Photo, it reports the resulting saved
+position, or that no saved position remains. The batch actions must remain
+reachable from a keyboard, and the count and every batch outcome must be
+announced on the Grid's status surface.
 
 ## Failure Behavior
 
@@ -650,9 +661,12 @@ If a selection or Rating change cannot persist, Slipstream must identify the aff
 
 If a batch contains both confirmed and unsuccessful Photos, Slipstream must
 present the confirmed result and the unsuccessful Photos separately. A
-changed-elsewhere Photo must remain recoverable through review and retry. A
+changed-elsewhere Photo must remain recoverable through Review and retry. A
 transport failure must leave the admitted batch retryable without claiming
-which Photos the server confirmed.
+which Photos the server confirmed. A malformed or incomplete batch response is
+untrusted: Slipstream must move no Photo facts, progress counts, or Undo
+entries from it, must keep the selection retryable, and must identify the
+batch as needing retry rather than inventing per-Photo outcomes.
 
 If a scoped **Remove added Photos** compensation cannot persist, Slipstream
 must identify the Album and retain the compensation action for retry when the

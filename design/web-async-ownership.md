@@ -353,8 +353,12 @@ current; a source change detaches its continuation and the confirmed server
 work stays committed. Its settlement reports `applied`, `changedElsewhere`,
 and `missing` outcomes from one bounded batch response. The server never
 silently overwrites a changed expected value. Applied Photos enter the one
-Undo description; unsuccessful Photos remain selected for review or retry.
-A batch Undo is one settlement family of sequential single-Photo
+Undo description; changed Photos remain selected for `Review N` and retry;
+missing Photos remain selected as non-retryable results until clear or source
+change. A malformed response, including an omitted, duplicate, invented, or
+obsolete outcome field, is untrusted: it moves no facts, counts, or Undo
+entries and leaves the whole selection retryable. A batch Undo is one
+settlement family of sequential single-Photo
 compare-and-set writes: the browser retires only the Photos whose `409` proves
 the value it would restore is no longer current, keeps the remaining Photos
 retryable after any other answered non-success, and keeps the whole

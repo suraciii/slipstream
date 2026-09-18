@@ -696,6 +696,14 @@ mod tests {
             let request = &case["request"];
             assert_eq!(request["method"], "POST");
             assert_eq!(request["path"], "/api/photos/state");
+            assert_eq!(
+                keys(&request["body"]),
+                BTreeSet::from(["selectionState".to_owned(), "photos".to_owned()])
+            );
+            assert!(matches!(
+                request["body"]["selectionState"].as_str(),
+                Some("selected" | "rejected")
+            ));
             let photos = request["body"]["photos"]
                 .as_array()
                 .expect("batch request photos");
@@ -760,7 +768,12 @@ mod tests {
             assert!(request["body"]["photoIds"].as_array().unwrap().len() <= 100);
             let response = &case["response"];
             assert!(response["albumId"].is_string());
-            assert!(response["albums"].is_array());
+            let albums = response["albums"].as_array().unwrap();
+            assert!(!albums.is_empty());
+            assert!(albums[0]["id"].is_string());
+            assert!(albums[0]["name"].is_string());
+            assert!(albums[0]["photoCount"].is_number());
+            assert!(albums[0]["hasSavedPosition"].is_boolean());
             match case["name"].as_str().unwrap() {
                 "add-result" => assert_eq!(
                     keys(response),
@@ -787,7 +800,7 @@ mod tests {
         let invalid = contract["invalidRequests"]
             .as_array()
             .expect("invalid request examples");
-        assert_eq!(invalid.len(), 3);
+        assert_eq!(invalid.len(), 6);
         for example in invalid {
             assert!(example["name"].is_string());
             assert!(example["route"].is_string());
@@ -799,11 +812,14 @@ mod tests {
             "photo-state invalid examples use the photo-state error"
         );
         assert_eq!(invalid[1]["error"], "Invalid Photo state batch");
+        assert_eq!(invalid[3]["error"], "Invalid Photo state batch");
+        assert_eq!(invalid[4]["error"], "Invalid Photo state batch");
+        assert_eq!(invalid[5]["error"], "Invalid Photo state batch");
 
         let malformed = contract["malformedResponses"]
             .as_array()
             .expect("malformed response examples");
-        assert_eq!(malformed.len(), 3);
+        assert_eq!(malformed.len(), 5);
         for example in malformed {
             assert!(example["name"].is_string());
             assert!(matches!(
@@ -811,11 +827,22 @@ mod tests {
                 Some("photoStateBatch" | "albumMembership")
             ));
             assert!(example["response"].is_object());
-            assert!(example["error"].as_str().unwrap().starts_with("Invalid "));
+            assert_eq!(example["classification"], "malformed");
         }
         assert!(malformed[0]["response"].get("missing").is_none());
         assert!(malformed[1]["response"].get("conflicts").is_some());
         assert!(malformed[2]["response"].get("addedCount").is_some());
+        assert_eq!(
+            malformed[3]["response"]["applied"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            malformed[4]["response"]["applied"][0]["photoId"],
+            "$unrequestedPhotoId"
+        );
     }
 
     #[test]

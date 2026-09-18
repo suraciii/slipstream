@@ -24,15 +24,15 @@ Implement the following product behavior:
 
 These decisions are the implementation contract for this plan:
 
-1. Selection remains after a batch decision or one batch Album addition. Clear, Escape, source open, and source reopen empty it.
+1. Selection remains after a batch decision or one batch Album addition. Clear and Escape empty it and leave Select mode, including from an empty `0 / 100 Photos` tray; source open and source reopen also empty it and leave Select mode. A missing Photo remains counted and visible in the result until clear or source change, but it is excluded from later requests.
 2. Select and Reject share the existing one-level Selection State Undo. Add to Album remains outside global Undo.
 3. Add to Album exposes a scoped compensating action named `Remove added Photos`. It removes only Photos added by that operation and does not claim to restore historical Album positions.
 4. The recommended concurrency policy is optimistic comparison for the initial batch write. A Photo whose Selection State changed after the browser last confirmed it is not overwritten.
-5. A batch in an Album does not move the durable Photo View resume position. The result surface says that the resume point is unchanged.
+5. A batch Selection State decision or batch Album addition in an Album does not move the durable Photo View resume position. The result surface says that the resume point is unchanged. `Remove added Photos` is an ordinary Album removal and reports the resulting saved position when it removes the saved Photo.
 6. Progress labels distinguish the active filtered sequence from counts over the complete source.
 7. No new global history abstraction, modal conflict workflow, or batch Undo endpoint is added.
 
-The current repository implements the older batch contract: existing Photos are last-writer-wins, missing Photos are the only batch conflicts, and Album membership writes return counts through the general Album summary response. Those contracts must change only in the slices below.
+The current repository implements the older batch contract: existing Photos are last-writer-wins, missing Photos are the only batch conflicts, and Album membership writes return counts through the general Album summary response. Those contracts must change only in the slices below. The old executable route fixtures remain a transitional baseline during the contract PR because the route implementation changes in Slices 2 and 3; Slice 3 must retire the old `photoIds`/`conflicts` vectors and replace the old response golden before this Epic can be complete.
 
 ## Ownership and Delivery Rules
 
@@ -76,6 +76,7 @@ The repository has one authoritative definition for the new behavior before impl
 - `design/photo-organization.md`
 - `design/web-async-ownership.md` only if the scoped Album compensation settlement needs a durable ownership rule
 - `compatibility/protocol/batch-workflows.json`
+- `crates/slipstream-compat/src/lib.rs`
 - `compatibility/protocol/browse-vectors.json`
 - `compatibility/protocol/responses.json`
 - `plans/library-browser-batch-workflows-implementation.md`
@@ -88,13 +89,14 @@ The repository has one authoritative definition for the new behavior before impl
 - Define the difference between `Visible results` and `Source progress`.
 - Define the response shape for Album membership additions so the browser knows which requested Photos were newly added and which were already members.
 - Add examples that cover a full success, a partial result, a changed-elsewhere result, a missing Photo, and a scoped Album compensation.
-- Add or update protocol vectors for every new wire shape. The contract examples may live in `batch-workflows.json` before the route fixtures move to the executable browse vectors, but every vector must have an executing consumer.
+- Add or update protocol vectors for every new wire shape. The target examples live in `batch-workflows.json` and have an executing structural consumer in `slipstream-compat`; the old route fixtures are explicitly transitional and Slice 3 owns their replacement in the executable browse vectors and response goldens. Every vector must have an executing consumer.
 
 ### Exit criteria
 
 - An independent reviewer can derive the expected UI and wire behavior without reading the implementation.
 - No current spec still says that existing Photos are silently overwritten if the optimistic policy is selected.
 - The product wording does not call Album compensation `Undo`.
+- If old route fixtures remain during this slice, the exact retirement owner and completion gate are recorded above; no final Epic acceptance may pass while both old and new batch shapes are active route contracts.
 
 ## Slice 1: Selection Tray, Results, and Progress Scope
 
@@ -117,10 +119,10 @@ The current batch UI makes its lifecycle visible without changing the server con
 - Add an expected-state map alongside `multiSelection`. This map records the last confirmed Selection State for each selected Photo and is updated only after a confirmed result.
 - Render the tray while Select mode is active, including `0 / 100` before the first selection.
 - Keep the tray after successful Select/Reject and show the global Undo action separately from the selection controls.
-- Render the Album resume message only when the active source is an Album and a batch action settles.
+- Render the Album resume message only when the active source is an Album and a batch Selection State decision or batch Album addition settles. Render the ordinary saved-position result for `Remove added Photos` when it removes the saved Photo.
 - Render `Visible results` and `Source progress` as separate labels using the existing source total and `selectionCounts` values.
 - Keep the existing disabled-control focus hand-off. Pending results must park focus on a stable control and restore it only when the held control is still available.
-- Keep `Clear`, Escape, source open, and failed reopen paths using `clearMultiSelection` and `resetGridMultiSelection` so DOM markers and model state cannot diverge.
+- Keep `Clear`, Escape, source open, and failed reopen paths using `clearMultiSelection` and `resetGridMultiSelection` so DOM markers and model state cannot diverge. Select mode exposes its exit even at `0 / 100 Photos`; `Review N` focuses changed Photos without opening a modal, while missing Photos remain visible but are not resubmitted.
 
 ### Tests
 
@@ -189,7 +191,7 @@ Do not call this operation `Undo` in the user-facing surface or in the domain mo
 ### Implementation notes
 
 - Avoid changing the general `AlbumMutationResult` shape for create, rename, delete, and reorder. Add a dedicated membership batch result or a dedicated application method so unrelated Album routes do not gain meaningless fields.
-- Keep the existing single-member route for Photo View membership toggles. Add a separate bounded batch-removal route only if reusing the single-member route would create more than one admitted ownership path or lose atomic result semantics.
+- Keep the existing single-member route for Photo View membership toggles. Add the dedicated bounded `POST /api/albums/{albumId}/members/batch-remove` route rather than issuing up to 100 independent requests.
 - The client compensation record belongs to the page-level batch workflow and expires on source change, a new membership action, or application teardown.
 - A compensation settlement must not replace a newer Album action's status.
 
@@ -265,9 +267,10 @@ The transaction must compare each existing Photo's current state with its expect
 
 - Capture expected state when a Photo enters the multi-selection.
 - Update expected state to the new value only for `applied` outcomes.
-- Keep changed and missing Photos in the multi-selection, but do not fabricate or move their facts.
-- `Review` refreshes the affected bounded facts and replaces their expected state before a retry.
-- A retry sends only the still-selected Photos whose expected state is known.
+- Keep changed and missing Photos in the multi-selection, but do not fabricate or move their facts. Missing Photos remain counted for presentation but are not retry candidates.
+- `Review N` focuses and refreshes the N changed bounded facts, then replaces their expected states before a retry.
+- A retry sends only the still-selected changed Photos whose expected state is known.
+- A malformed or incomplete response moves no local facts, progress counts, or Undo entries; the whole selection remains retryable.
 - Batch Undo continues to use the existing single-Photo compare-and-set route and remains independent of the new initial-write comparison.
 
 ### Tests

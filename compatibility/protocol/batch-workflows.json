@@ -92,14 +92,21 @@
         "albumId": "$albumId",
         "addedPhotoIds": ["$photoId"],
         "alreadyMemberPhotoIds": ["$secondPhotoId"],
-        "albums": []
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Review",
+            "photoCount": 2,
+            "hasSavedPosition": false
+          }
+        ]
       }
     },
     {
       "name": "remove-added-result",
       "request": {
         "method": "POST",
-        "path": "/api/albums/$albumId/members/remove-added",
+        "path": "/api/albums/$albumId/members/batch-remove",
         "body": {
           "photoIds": ["$photoId", "$secondPhotoId"]
         }
@@ -108,7 +115,14 @@
         "albumId": "$albumId",
         "removedPhotoIds": ["$photoId"],
         "alreadyAbsentPhotoIds": ["$secondPhotoId"],
-        "albums": []
+        "albums": [
+          {
+            "id": "$albumId",
+            "name": "Review",
+            "photoCount": 1,
+            "hasSavedPosition": false
+          }
+        ]
       }
     }
   ],
@@ -146,11 +160,49 @@
     },
     {
       "name": "album-compensation-duplicate-photo",
-      "route": "/api/albums/$albumId/members/remove-added",
+      "route": "/api/albums/$albumId/members/batch-remove",
       "body": {
         "photoIds": ["$photoId", "$photoId"]
       },
       "error": "Invalid membership batch"
+    },
+    {
+      "name": "photo-state-batch-empty",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "selected",
+        "photos": []
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
+      "name": "photo-state-batch-invalid-state",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "maybe",
+        "photos": [
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "undecided"
+          }
+        ]
+      },
+      "error": "Invalid Photo state batch"
+    },
+    {
+      "name": "photo-state-batch-unknown-field",
+      "route": "/api/photos/state",
+      "body": {
+        "selectionState": "selected",
+        "photos": [
+          {
+            "photoId": "$photoId",
+            "expectedCurrent": "undecided",
+            "unexpected": true
+          }
+        ]
+      },
+      "error": "Invalid Photo state batch"
     }
   ],
   "malformedResponses": [
@@ -161,7 +213,7 @@
         "applied": [],
         "changedElsewhere": []
       },
-      "error": "Invalid Photo state batch response"
+      "classification": "malformed"
     },
     {
       "name": "photo-state-batch-uses-obsolete-conflicts",
@@ -172,7 +224,7 @@
         "missing": [],
         "conflicts": []
       },
-      "error": "Invalid Photo state batch response"
+      "classification": "malformed"
     },
     {
       "name": "album-add-uses-counts-without-identities",
@@ -183,7 +235,41 @@
         "alreadyMemberCount": 0,
         "albums": []
       },
-      "error": "Invalid Album membership response"
+      "classification": "malformed"
+    },
+    {
+      "name": "photo-state-batch-duplicate-outcome",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided"
+          },
+          {
+            "photoId": "$photoId",
+            "priorValue": "undecided"
+          }
+        ],
+        "changedElsewhere": [],
+        "missing": []
+      },
+      "classification": "malformed"
+    },
+    {
+      "name": "photo-state-batch-invented-outcome",
+      "kind": "photoStateBatch",
+      "response": {
+        "applied": [
+          {
+            "photoId": "$unrequestedPhotoId",
+            "priorValue": "undecided"
+          }
+        ],
+        "changedElsewhere": [],
+        "missing": []
+      },
+      "classification": "malformed"
     }
   ]
 }

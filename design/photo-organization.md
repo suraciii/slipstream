@@ -100,21 +100,36 @@ A bounded batch membership result identifies `addedPhotoIds` and
   "albumId": "album-1",
   "addedPhotoIds": ["photo-1"],
   "alreadyMemberPhotoIds": ["photo-2"],
-  "albums": []
+  "albums": [
+    {
+      "id": "album-1",
+      "name": "Review",
+      "photoCount": 2,
+      "hasSavedPosition": false
+    }
+  ]
 }
 ```
 
 The browser may retain the returned `addedPhotoIds` as a page-level
-compensation record. A dedicated **Remove added Photos** command accepts only
-that bounded record, removes the listed members that are still present, and
-reports `removedPhotoIds` and `alreadyAbsentPhotoIds`:
+compensation record. The dedicated bounded command
+`POST /api/albums/{albumId}/members/batch-remove` accepts only that record,
+removes the listed members that are still present, and reports
+`removedPhotoIds` and `alreadyAbsentPhotoIds`:
 
 ```json
 {
   "albumId": "album-1",
   "removedPhotoIds": ["photo-1"],
   "alreadyAbsentPhotoIds": ["photo-2"],
-  "albums": []
+  "albums": [
+    {
+      "id": "album-1",
+      "name": "Review",
+      "photoCount": 1,
+      "hasSavedPosition": false
+    }
+  ]
 }
 ```
 
