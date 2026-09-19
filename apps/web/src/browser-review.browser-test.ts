@@ -12112,9 +12112,14 @@ test("a Photo View navigation binds again the strip thumbnails it detached mid-t
       images.map((image) => image.getAttribute("src") ?? ""),
     );
   expect(sources).toHaveLength(4);
-  sources.forEach((source, index) => {
-    expect(source).toContain(`/api/derivatives/${ids[index]}/thumbnail/`);
-  });
+  for (const [index] of sources.entries()) {
+    await expect(
+      strip.locator(".filmstrip-cell img").nth(index),
+    ).toHaveAttribute(
+      "src",
+      new RegExp(`/api/derivatives/${ids[index]}/thumbnail/`),
+    );
+  }
 });
 
 test("the filmstrip marks the current Photo and keeps its decisions truthful", async ({
