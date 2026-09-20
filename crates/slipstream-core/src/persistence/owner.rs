@@ -483,7 +483,7 @@ impl Persistence {
         &self,
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
-    ) -> Result<ScanSnapshot, PersistenceError> {
+    ) -> Result<ScanApplication, PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ApplyScan {
             discovered,
@@ -1378,14 +1378,84 @@ fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
                 .map_err(|_| PersistenceError::InvalidLegacyData)?;
         }
     }
+    // Rebuild photos without violating the album foreign keys: unload the
+    // album tables, replace photos, then recreate them with identical DDL and
+    // every original row. One transaction keeps the migration atomic.
+    let albums: Vec<(String, String, i64)> = transaction
+        .prepare("SELECT id,name,created_at FROM albums ORDER BY created_at,id")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::InvalidLegacyData)?;
+    let members: Vec<(String, String, i64)> = transaction
+        .prepare("SELECT album_id,photo_id,position FROM album_members ORDER BY album_id,position")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::InvalidLegacyData)?;
+    let progress: Vec<(String, String)> = transaction
+        .prepare("SELECT album_id,photo_id FROM album_progress ORDER BY album_id")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::InvalidLegacyData)?;
     transaction
         .execute_batch(
-            "DROP TABLE photos;
+            "DROP TABLE album_progress;
+             DROP TABLE album_members;
+             DROP TABLE albums;
+             DROP TABLE photos;
              ALTER TABLE photos_v6 RENAME TO photos;
              CREATE INDEX photos_original ON photos(original_id);
+             CREATE TABLE albums(
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK(length(name) BETWEEN 1 AND 120),
+               created_at INTEGER NOT NULL);
+             CREATE TABLE album_members(
+               album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+               photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+               position INTEGER NOT NULL CHECK(position >= 0),
+               PRIMARY KEY(album_id, photo_id),
+               UNIQUE(album_id, position));
+             CREATE TABLE album_progress(
+               album_id TEXT PRIMARY KEY REFERENCES albums(id) ON DELETE CASCADE,
+               photo_id TEXT NOT NULL,
+               FOREIGN KEY(album_id, photo_id) REFERENCES album_members(album_id, photo_id) ON DELETE CASCADE);
+             CREATE INDEX album_members_photo ON album_members(photo_id);
              PRAGMA user_version = 6;",
         )
         .map_err(|_| PersistenceError::Storage)?;
+    {
+        let mut insert_album = transaction
+            .prepare("INSERT INTO albums(id,name,created_at) VALUES(?,?,?)")
+            .map_err(|_| PersistenceError::Storage)?;
+        for (id, name, created_at) in &albums {
+            insert_album
+                .execute(params![id, name, created_at])
+                .map_err(|_| PersistenceError::InvalidLegacyData)?;
+        }
+        let mut insert_member = transaction
+            .prepare("INSERT INTO album_members(album_id,photo_id,position) VALUES(?,?,?)")
+            .map_err(|_| PersistenceError::Storage)?;
+        for (album_id, photo_id, position) in &members {
+            insert_member
+                .execute(params![album_id, photo_id, position])
+                .map_err(|_| PersistenceError::InvalidLegacyData)?;
+        }
+        let mut insert_progress = transaction
+            .prepare("INSERT INTO album_progress(album_id,photo_id) VALUES(?,?)")
+            .map_err(|_| PersistenceError::Storage)?;
+        for (album_id, photo_id) in &progress {
+            insert_progress
+                .execute(params![album_id, photo_id])
+                .map_err(|_| PersistenceError::InvalidLegacyData)?;
+        }
+    }
     validate_canonical_schema(transaction, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
@@ -2457,11 +2527,7 @@ fn apply_scan(
             .map_err(|_| PersistenceError::Storage)?;
         for fingerprint in &recovery.fingerprints {
             let changed = upsert_fingerprint
-                .execute(params![
-                    fingerprint.digest,
-                    fingerprint.path,
-                    fingerprint.path,
-                ])
+                .execute(params![fingerprint.digest, fingerprint.path])
                 .map_err(|_| PersistenceError::Storage)?;
             if changed != 1 {
                 return Err(PersistenceError::InvalidRecovery);
@@ -3397,6 +3463,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::source_revision;
     use crate::{LibraryRoot, PhotoStateBatchItem, identity::original_id};
     use serde::Deserialize;
     use std::{
@@ -3505,7 +3572,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
     }
 
     // album-language-legacy:start v4-migration-test
@@ -3608,9 +3675,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
-        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -3619,7 +3686,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v6_database_is_rejected_without_changes() {
+    fn newer_v7_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -3627,7 +3694,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 6)
+            .pragma_update(None, "user_version", 7)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -3711,7 +3778,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -3807,7 +3874,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,preview_source,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                params![photo_id, original_id, 0_i64, 1_i64, "ready", "matching-jpeg", "matching-jpeg", "preview-revision", 8_i64, 4_i64, "cache-revision", "shoot/A.JPG", "selected", 5_i64],
+                params![photo_id, original_id, 0_i64, 1_i64, "ready", "matching-jpeg", "matching-jpeg", source_revision("shoot/A.JPG", 12, 1000.0).unwrap(), 8_i64, 4_i64, "cache-revision", "shoot/A.JPG", "selected", 5_i64],
             )
             .unwrap();
         connection
@@ -3838,22 +3905,12 @@ mod tests {
         let snapshot = persistence.snapshot().await.unwrap();
         let photo = &snapshot.photos[0];
         assert_eq!(photo.id, photo_id);
-        assert_eq!(photo.raw_original_id, None);
-        assert_eq!(
-            photo.jpeg_original_id.as_deref(),
-            Some(original_id.as_str())
-        );
-        assert!(!photo.ambiguous);
+        assert_eq!(photo.original_id, original_id);
         assert!(photo.available);
         assert_eq!(photo.preview_state, PreviewState::Ready);
         assert_eq!(
-            photo.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(photo.preview_source, Some(PreviewCandidate::MatchingJpeg));
-        assert_eq!(
             photo.preview_source_revision.as_deref(),
-            Some("preview-revision")
+            Some(source_revision("shoot/A.JPG", 12, 1000.0).unwrap().as_str())
         );
         assert_eq!(photo.preview_width, Some(8));
         assert_eq!(photo.preview_height, Some(4));
@@ -3892,7 +3949,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -4165,12 +4222,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_order_uses_raw_authority_ties_paths_and_retains_unavailable_facts() {
+    async fn capture_order_orders_each_photo_by_its_own_original_and_retains_unavailable_facts() {
         let (_base, library, state, name, _path) = fixture();
         let vectors = capture_order_vectors();
         let disagreement = vectors
             .iter()
-            .find(|vector| vector.name == "raw-jpeg-disagreement-uses-raw")
+            .find(|vector| vector.name == "independent-photos-order-by-their-own-capture-time")
             .unwrap();
         let missing_partition = vectors
             .iter()
@@ -4335,39 +4392,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.originals.len(), 2);
-        assert_eq!(first.photos.len(), 1);
-        let pair = &first.photos[0];
-        assert!(pair.available);
-        assert!(!pair.ambiguous);
-        assert_eq!(pair.preview_state, PreviewState::InspectionPending);
-        assert_eq!(pair.preview_candidate, Some(PreviewCandidate::MatchingJpeg));
-        let pair_id = pair.id.clone();
-        let raw_id = pair.raw_original_id.clone().unwrap();
-        let jpeg_id = pair.jpeg_original_id.clone().unwrap();
+        assert_eq!(first.photos.len(), 2);
+        let raw_photo = first
+            .photos
+            .iter()
+            .find(|photo| {
+                first
+                    .originals
+                    .iter()
+                    .any(|original| original.id == photo.original_id && original.kind == OriginalKind::Raw)
+            })
+            .unwrap();
+        let jpeg_photo = first
+            .photos
+            .iter()
+            .find(|photo| photo.id != raw_photo.id)
+            .unwrap();
+        assert!(raw_photo.available);
+        assert!(jpeg_photo.available);
+        assert_eq!(raw_photo.preview_state, PreviewState::InspectionPending);
 
         let unavailable = persistence
             .apply_scan(Vec::new(), Vec::new())
             .await
             .unwrap();
-        let missing = &unavailable.photos[0];
-        assert_eq!(missing.id, pair_id);
-        assert_eq!(missing.raw_original_id.as_deref(), Some(raw_id.as_str()));
-        assert_eq!(missing.jpeg_original_id.as_deref(), Some(jpeg_id.as_str()));
+        let missing = unavailable
+            .photos
+            .iter()
+            .find(|photo| photo.id == raw_photo.id)
+            .unwrap();
+        assert_eq!(missing.id, raw_photo.id);
+        assert_eq!(missing.original_id, raw_photo.original_id);
         assert!(!missing.available);
         assert_eq!(missing.preview_state, PreviewState::Unavailable);
 
         let restored = persistence.apply_scan(vec![raw], Vec::new()).await.unwrap();
-        let restored_photo = &restored.photos[0];
-        assert_eq!(restored_photo.id, pair_id);
+        let restored_photo = restored
+            .photos
+            .iter()
+            .find(|photo| photo.id == raw_photo.id)
+            .unwrap();
+        assert_eq!(restored_photo.id, raw_photo.id);
         assert!(restored_photo.available);
-        assert_eq!(
-            restored_photo.raw_original_id.as_deref(),
-            Some(raw_id.as_str())
-        );
-        assert_eq!(
-            restored_photo.jpeg_original_id.as_deref(),
-            Some(jpeg_id.as_str())
-        );
+        assert_eq!(restored_photo.original_id, raw_photo.original_id);
         assert_eq!(
             restored_photo.preview_state,
             PreviewState::InspectionPending
@@ -4486,7 +4553,7 @@ mod tests {
     // album-language-legacy:end v2-reconciliation-test
 
     #[tokio::test]
-    async fn preserves_preview_facts_only_for_unchanged_selected_source_and_uses_cas() {
+    async fn preserves_preview_facts_only_for_unchanged_original_and_uses_cas() {
         let (_base, library, state, name, _path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -4494,10 +4561,8 @@ mod tests {
             library.canonical_path().to_string_lossy().into_owned(),
         )
         .unwrap();
-        let raw = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
-        let jpeg = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
         let first = persistence
-            .apply_scan(vec![raw.clone(), jpeg.clone()], Vec::new())
+            .apply_scan(vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)], Vec::new())
             .await
             .unwrap();
         let photo_id = first.photos[0].id.clone();
@@ -4507,54 +4572,50 @@ mod tests {
                 .seed_preview(PreviewSeed {
                     photo_id: photo_id.clone(),
                     state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::MatchingJpeg,
+                    source: crate::PreviewSource::JpegOriginal,
                     expected_source_revision: revision.clone(),
                     width: Some(100),
                     height: Some(50),
                     cache_revision: Some("cache-v1".to_owned()),
-                    actual_source: None,
-                    actual_source_revision: None,
                 })
                 .await
                 .unwrap(),
             PreviewSeedResult::Applied
         );
         let unchanged = persistence
-            .apply_scan(vec![raw.clone(), jpeg.clone()], Vec::new())
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+            )
             .await
             .unwrap();
         assert_eq!(unchanged.photos[0].preview_state, PreviewState::Ready);
-        assert_eq!(
-            unchanged.photos[0].preview_source,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
         assert_eq!(
             unchanged.photos[0].cache_revision.as_deref(),
             Some("cache-v1")
         );
 
-        let changed_jpeg = discovered("one.JPG", OriginalKind::Jpeg, 5, 1001.0);
         let changed = persistence
-            .apply_scan(vec![raw, changed_jpeg], Vec::new())
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 5, 1001.0)],
+                Vec::new(),
+            )
             .await
             .unwrap();
         assert_eq!(
             changed.photos[0].preview_state,
             PreviewState::InspectionPending
         );
-        assert_eq!(changed.photos[0].preview_source, None);
         assert_eq!(
             persistence
                 .seed_preview(PreviewSeed {
                     photo_id,
                     state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::MatchingJpeg,
+                    source: crate::PreviewSource::JpegOriginal,
                     expected_source_revision: revision,
                     width: Some(100),
                     height: Some(50),
                     cache_revision: Some("stale".to_owned()),
-                    actual_source: None,
-                    actual_source_revision: None,
                 })
                 .await
                 .unwrap(),
@@ -4564,7 +4625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_cas_accepts_only_matching_jpeg_to_raw_fallback_with_both_revisions() {
+    async fn relocation_resets_preview_and_moves_identity_in_one_transaction() {
         let (_base, library, state, name, _path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -4572,67 +4633,59 @@ mod tests {
             library.canonical_path().to_string_lossy().into_owned(),
         )
         .unwrap();
-        let raw = discovered("one.ARW", OriginalKind::Raw, 3, 1000.0);
-        let jpeg = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
-        let initial = persistence
-            .apply_scan(vec![raw, jpeg], Vec::new())
+        let first = persistence
+            .apply_scan(vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)], Vec::new())
             .await
             .unwrap();
-        let photo_id = initial.photos[0].id.clone();
-        let jpeg_revision = source_revision("one.JPG", 4, 1000.0).unwrap();
-        let raw_revision = source_revision("one.ARW", 3, 1000.0).unwrap();
+        let photo = &first.photos[0];
+        let original_id = photo.original_id.clone();
+        let photo_id = photo.id.clone();
+        let revision = source_revision("one.JPG", 4, 1000.0).unwrap();
         assert_eq!(
             persistence
                 .seed_preview(PreviewSeed {
                     photo_id: photo_id.clone(),
                     state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::MatchingJpeg,
-                    expected_source_revision: jpeg_revision,
-                    width: Some(512),
-                    height: Some(341),
-                    cache_revision: Some("fallback".to_owned()),
-                    actual_source: Some(PreviewCandidate::EmbeddedRawJpeg),
-                    actual_source_revision: Some(raw_revision.clone()),
+                    source: crate::PreviewSource::JpegOriginal,
+                    expected_source_revision: revision,
+                    width: Some(100),
+                    height: Some(50),
+                    cache_revision: Some("cache-v1".to_owned()),
                 })
                 .await
                 .unwrap(),
             PreviewSeedResult::Applied
         );
-        let preserved = persistence
-            .apply_scan(
-                vec![
-                    discovered("one.ARW", OriginalKind::Raw, 3, 1000.0),
-                    discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0),
-                ],
+
+        // The same content re-discovered at a new Location with a proven
+        // relocation keeps the Photo identity, resets Preview inspection, and
+        // records the fresh fingerprint bound to the new Location.
+        let digest = crate::recovery::digest_bytes(b"payload");
+        let _ = digest;
+        let recovery = ScanRecoveryPlan {
+            relocations: [("moved/two.JPG".to_owned(), original_id.clone())].into(),
+            fingerprints: vec![DiscoveredFingerprint {
+                path: "moved/two.JPG".to_owned(),
+                digest: crate::recovery::digest_bytes(&[]),
+            }],
+        };
+        let relocated = persistence
+            .apply_scan_recovered(
+                vec![discovered("moved/two.JPG", OriginalKind::Jpeg, 4, 1000.0)],
                 Vec::new(),
+                recovery,
             )
             .await
             .unwrap();
+        assert_eq!(relocated.snapshot.photos.len(), 1);
+        assert_eq!(relocated.snapshot.photos[0].id, photo_id);
+        assert_eq!(relocated.relocated_originals, 1);
         assert_eq!(
-            preserved.photos[0].preview_source,
-            Some(PreviewCandidate::EmbeddedRawJpeg)
+            relocated.snapshot.originals[0].relative_path.as_str(),
+            "moved/two.JPG"
         );
-        assert_eq!(
-            preserved.photos[0].preview_source_revision.as_deref(),
-            Some(raw_revision.as_str())
-        );
-        assert_eq!(
-            persistence
-                .seed_preview(PreviewSeed {
-                    photo_id: photo_id.clone(),
-                    state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::EmbeddedRawJpeg,
-                    expected_source_revision: raw_revision.clone(),
-                    width: Some(512),
-                    height: Some(341),
-                    cache_revision: Some("inverse".to_owned()),
-                    actual_source: Some(PreviewCandidate::MatchingJpeg),
-                    actual_source_revision: Some(source_revision("one.JPG", 4, 1000.0).unwrap()),
-                })
-                .await
-                .unwrap(),
-            PreviewSeedResult::StaleIgnored
-        );
+        assert_eq!(relocated.snapshot.photos[0].preview_state, PreviewState::InspectionPending);
+        assert!(relocated.snapshot.photos[0].cache_revision.is_none());
         persistence.shutdown().unwrap();
     }
 
@@ -4688,36 +4741,35 @@ mod tests {
                 .seed_preview(PreviewSeed {
                     photo_id: photo_id.clone(),
                     state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::EmbeddedRawJpeg,
+                    source: crate::PreviewSource::RawEmbeddedJpeg,
                     expected_source_revision: raw_revision.clone(),
                     width: Some(512),
                     height: Some(341),
                     cache_revision: Some("raw-cache".to_owned()),
-                    actual_source: None,
-                    actual_source_revision: None,
                 })
                 .await
                 .unwrap(),
             PreviewSeedResult::Applied
         );
-        let jpeg = discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0);
-        let updated = first.apply_scan(vec![raw, jpeg], Vec::new()).await.unwrap();
-        assert_eq!(
-            updated.photos[0].preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
+        // A second scan with changed RAW facts makes the old revision stale.
+        let changed = discovered("one.ARW", OriginalKind::Raw, 7, 1002.0);
+        let updated = first.apply_scan(vec![changed], Vec::new()).await.unwrap();
+        let updated_photo = updated
+            .photos
+            .iter()
+            .find(|photo| photo.id == photo_id)
+            .unwrap();
+        assert_eq!(updated_photo.preview_state, PreviewState::InspectionPending);
         assert_eq!(
             first
                 .seed_preview(PreviewSeed {
                     photo_id,
                     state: PreviewState::Ready,
-                    expected_candidate: PreviewCandidate::EmbeddedRawJpeg,
+                    source: crate::PreviewSource::JpegOriginal,
                     expected_source_revision: raw_revision,
                     width: Some(512),
                     height: Some(341),
                     cache_revision: Some("stale".to_owned()),
-                    actual_source: None,
-                    actual_source_revision: None,
                 })
                 .await
                 .unwrap(),

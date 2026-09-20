@@ -1,21 +1,36 @@
 [
   {
-    "name": "raw-jpeg-disagreement-uses-raw",
+    "name": "independent-photos-order-by-their-own-capture-time",
     "rawPath": "pair.ARW",
     "rawOrderKey": "2026-01-01T11:00:00.000000000",
     "jpegPath": "pair.JPG",
     "jpegOrderKey": "2026-01-01T10:00:00.000000000",
-    "expectedPaths": ["middle.JPG", "pair.ARW", "a.JPG", "z.JPG", "missing.JPG"]
+    "expectedPaths": [
+      "pair.JPG",
+      "middle.JPG",
+      "pair.ARW",
+      "a.JPG",
+      "z.JPG",
+      "missing.JPG"
+    ]
   },
   {
     "name": "equal-time-ties-use-path-then-photo-id-bytes",
     "orderKey": "2026-01-01T12:00:00.000000000",
-    "expectedPaths": ["a.JPG", "z.JPG"],
-    "expectedPhotoIds": ["a-photo", "z-photo"]
+    "expectedPaths": [
+      "a.JPG",
+      "z.JPG"
+    ],
+    "expectedPhotoIds": [
+      "a-photo",
+      "z-photo"
+    ]
   },
   {
     "name": "missing-capture-time-is-a-final-path-partition",
-    "expectedPaths": ["missing.JPG"]
+    "expectedPaths": [
+      "missing.JPG"
+    ]
   },
   {
     "name": "camera-local-offset-is-not-applied-to-order-key",

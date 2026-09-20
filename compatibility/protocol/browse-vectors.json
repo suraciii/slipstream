@@ -1,817 +1,826 @@
 [
   {
+    "expected": {
+      "body": {
+        "albums": [
+          {
+            "hasSavedPosition": false,
+            "id": "$albumId",
+            "name": "Compat Album",
+            "photoCount": 2
+          }
+        ],
+        "photoCount": 3,
+        "publication": "$publication",
+        "published": true,
+        "scan": {
+          "completed": 3,
+          "fingerprints": {
+            "enrolled": 3,
+            "pending": 0
+          },
+          "lastRecovery": {
+            "fingerprintedOriginals": 0,
+            "relocatedPhotos": 0,
+            "unavailablePhotos": 0
+          },
+          "publication": "$publication",
+          "state": "idle",
+          "total": 3
+        }
+      },
+      "status": 200
+    },
     "name": "overview-populated-library",
     "request": {
       "method": "GET",
       "path": "/api/overview"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "published": true,
-        "publication": "$publication",
-        "photoCount": 2,
-        "scan": {
-          "state": "idle",
-          "publication": "$publication",
-          "completed": 2,
-          "total": 2
-        },
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Compat Album",
-            "photoCount": 2,
-            "hasSavedPosition": false
-          }
-        ]
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-open-library",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "photos": [
+          {
+            "available": true,
+            "id": "$photoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "pair.JPG",
+            "preview": {
+              "height": 45,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$thumbnailUrl",
+              "url": "$reviewUrl",
+              "width": 90
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          },
+          {
+            "available": true,
+            "id": "$secondPhotoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "later.JPG",
+            "preview": {
+              "height": 60,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$secondThumbnailUrl",
+              "url": "$secondReviewUrl",
+              "width": 120
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          },
+          {
+            "available": true,
+            "id": "$thirdPhotoId",
+            "original": {
+              "available": true,
+              "kind": "raw"
+            },
+            "originalFilename": "pair.ARW",
+            "preview": {
+              "state": "inspection-pending"
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          }
+        ],
+        "start": 0,
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-window-library-populated",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=60"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "start": 0,
-        "total": 2,
-        "photos": [
-          {
-            "id": "$photoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "pair.ARW",
-            "originals": [
-              {
-                "kind": "raw",
-                "available": true
-              },
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 90,
-              "height": 45,
-              "limitedDetail": true,
-              "url": "$reviewUrl",
-              "thumbnailUrl": "$thumbnailUrl"
-            }
-          },
-          {
-            "id": "$secondPhotoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "later.JPG",
-            "originals": [
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 120,
-              "height": 60,
-              "limitedDetail": true,
-              "url": "$secondReviewUrl",
-              "thumbnailUrl": "$secondThumbnailUrl"
-            }
-          }
-        ]
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "photos": [
+          {
+            "available": true,
+            "id": "$thirdPhotoId",
+            "original": {
+              "available": true,
+              "kind": "raw"
+            },
+            "originalFilename": "pair.ARW",
+            "preview": {
+              "state": "inspection-pending"
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          }
+        ],
+        "start": 2,
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-window-empty-after-library",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=2&limit=1"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "start": 2,
-        "total": 2,
-        "photos": []
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Browse window is invalid"
+      },
+      "status": 400
+    },
     "name": "browse-window-zero-limit",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=0"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Browse window is invalid"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Browse window is invalid"
+      },
+      "status": 400
+    },
     "name": "browse-window-oversized-limit",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=61"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Browse window is invalid"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Browse window is invalid"
+      },
+      "status": 400
+    },
     "name": "browse-window-missing-limit",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Browse window is invalid"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Browse window is invalid"
+      },
+      "status": 400
+    },
     "name": "browse-window-missing-start",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?limit=1"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Browse window is invalid"
-      }
     }
   },
   {
-    "name": "browse-close",
-    "request": {
-      "method": "DELETE",
-      "path": "/api/browse/$token",
-      "headers": {
-        "origin": "http://camera.local"
-      }
-    },
     "expected": {
       "status": 204
+    },
+    "name": "browse-close",
+    "request": {
+      "headers": {
+        "origin": "http://camera.local"
+      },
+      "method": "DELETE",
+      "path": "/api/browse/$token"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Browse source expired or not found"
+      },
+      "status": 404
+    },
     "name": "browse-window-after-close-not-found",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=1"
-    },
-    "expected": {
-      "status": 404,
-      "body": {
-        "error": "Browse source expired or not found"
-      }
     }
   },
   {
+    "expected": {
+      "status": 204
+    },
     "name": "browse-close-idempotent",
     "request": {
-      "method": "DELETE",
-      "path": "/api/browse/$token",
       "headers": {
         "origin": "http://camera.local"
-      }
-    },
-    "expected": {
-      "status": 204
+      },
+      "method": "DELETE",
+      "path": "/api/browse/$token"
     }
   },
   {
-    "name": "browse-open-missing-album-id",
-    "request": {
-      "method": "POST",
-      "path": "/api/browse",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
-      "body": {
-        "source": "album"
-      }
-    },
     "expected": {
-      "status": 400,
       "body": {
         "error": "Invalid Album source"
-      }
-    }
-  },
-  {
-    "name": "browse-open-unknown-album",
+      },
+      "status": 400
+    },
+    "name": "browse-open-missing-album-id",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "source": "album"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "album",
-        "albumId": "0000000000000000000000000000000000000000000000000000000000000000"
-      }
-    },
+      "method": "POST",
+      "path": "/api/browse"
+    }
+  },
+  {
     "expected": {
-      "status": 404,
       "body": {
         "error": "Browse source expired or not found"
-      }
-    }
-  },
-  {
-    "name": "browse-open-invalid-preferred-photo",
+      },
+      "status": 404
+    },
+    "name": "browse-open-unknown-album",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "albumId": "0000000000000000000000000000000000000000000000000000000000000000",
+        "source": "album"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "photoId": "short"
-      }
-    },
+      "method": "POST",
+      "path": "/api/browse"
+    }
+  },
+  {
     "expected": {
-      "status": 400,
       "body": {
         "error": "Invalid preferred Photo"
-      }
-    }
-  },
-  {
-    "name": "browse-open-unknown-source-kind",
+      },
+      "status": 400
+    },
+    "name": "browse-open-invalid-preferred-photo",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "photoId": "short",
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "photo-set"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid browse source"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid browse source"
+      },
+      "status": 400
+    },
+    "name": "browse-open-unknown-source-kind",
+    "request": {
+      "body": {
+        "source": "photo-set"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/browse"
+    }
+  },
+  {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-open-foreign-origin-is-admitted",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "https://foreign.example"
       },
-      "body": {
-        "source": "library"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
-    "name": "browse-close-foreign-origin-is-admitted",
-    "request": {
-      "method": "DELETE",
-      "path": "/api/browse/$token",
-      "headers": {
-        "origin": "https://foreign.example"
-      }
-    },
     "expected": {
       "status": 204
+    },
+    "name": "browse-close-foreign-origin-is-admitted",
+    "request": {
+      "headers": {
+        "origin": "https://foreign.example"
+      },
+      "method": "DELETE",
+      "path": "/api/browse/$token"
     }
   },
   {
+    "capture": "publication",
+    "expected": {
+      "body": {
+        "children": [],
+        "limit": 60,
+        "parent": "",
+        "publication": "$publication",
+        "start": 0,
+        "total": 0
+      },
+      "status": 200
+    },
     "name": "file-locations-first-window-binds-publication",
     "request": {
       "method": "GET",
       "path": "/api/file-locations?start=0&limit=60"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "publication": "$publication",
-        "parent": "",
-        "start": 0,
-        "limit": 60,
-        "total": 0,
-        "children": []
-      }
-    },
-    "capture": "publication"
+    }
   },
   {
+    "expected": {
+      "body": {
+        "children": [],
+        "limit": 60,
+        "parent": "",
+        "publication": "$publication",
+        "start": 0,
+        "total": 0
+      },
+      "status": 200
+    },
     "name": "file-locations-retained-window-uses-publication",
     "request": {
       "method": "GET",
       "path": "/api/file-locations?publication=$publication&parent=&start=0&limit=60"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "publication": "$publication",
-        "parent": "",
-        "start": 0,
-        "limit": 60,
-        "total": 0,
-        "children": []
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "File Location window is invalid"
+      },
+      "status": 400
+    },
     "name": "file-locations-window-limit-zero",
     "request": {
       "method": "GET",
       "path": "/api/file-locations?start=0&limit=0"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "File Location window is invalid"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid Original Folder"
+      },
+      "status": 400
+    },
     "name": "file-locations-malformed-parent",
     "request": {
       "method": "GET",
       "path": "/api/file-locations?publication=$publication&parent=%2Fabs&start=0&limit=60"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid Original Folder"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Unknown Original Folder"
+      },
+      "status": 404
+    },
     "name": "file-locations-unknown-parent",
     "request": {
       "method": "GET",
       "path": "/api/file-locations?publication=$publication&parent=missing&start=0&limit=60"
-    },
-    "expected": {
-      "status": 404,
-      "body": {
-        "error": "Unknown Original Folder"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "folder-source-open-root-empty",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "folderPath": "",
+        "publication": "$publication",
+        "source": "folder"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "folder",
-        "folderPath": "",
-        "publication": "$publication"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid Folder source"
+      },
+      "status": 400
+    },
     "name": "folder-source-missing-publication",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "folderPath": "",
+        "source": "folder"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "folder",
-        "folderPath": ""
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid Folder source"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid Folder source"
+      },
+      "status": 400
+    },
     "name": "folder-source-malformed-path",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "folderPath": "/abs",
+        "publication": "$publication",
+        "source": "folder"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "folder",
-        "folderPath": "/abs",
-        "publication": "$publication"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid Folder source"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
-    "name": "folder-source-unknown-folder",
-    "request": {
-      "method": "POST",
-      "path": "/api/browse",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
-      "body": {
-        "source": "folder",
-        "folderPath": "missing",
-        "publication": "$publication"
-      }
-    },
     "expected": {
-      "status": 404,
       "body": {
         "error": "Unknown Original Folder"
-      }
-    }
-  },
-  {
-    "name": "browse-open-library-capture-time-desc",
+      },
+      "status": 404
+    },
+    "name": "folder-source-unknown-folder",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "folderPath": "missing",
+        "publication": "$publication",
+        "source": "folder"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "order": "capture-time-desc"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
+    "name": "browse-open-library-capture-time-desc",
+    "request": {
+      "body": {
+        "order": "capture-time-desc",
+        "source": "library"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/browse"
+    }
+  },
+  {
+    "expected": {
+      "body": {
+        "photos": [
+          {
+            "available": true,
+            "id": "$secondPhotoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "later.JPG",
+            "preview": {
+              "height": 60,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$secondThumbnailUrl",
+              "url": "$secondReviewUrl",
+              "width": 120
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          },
+          {
+            "available": true,
+            "id": "$photoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "pair.JPG",
+            "preview": {
+              "height": 45,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$thumbnailUrl",
+              "url": "$reviewUrl",
+              "width": 90
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          },
+          {
+            "available": true,
+            "id": "$thirdPhotoId",
+            "original": {
+              "available": true,
+              "kind": "raw"
+            },
+            "originalFilename": "pair.ARW",
+            "preview": {
+              "state": "inspection-pending"
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          }
+        ],
+        "start": 0,
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-window-library-capture-time-desc",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=60"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "start": 0,
-        "total": 2,
-        "photos": [
-          {
-            "id": "$secondPhotoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "later.JPG",
-            "originals": [
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 120,
-              "height": 60,
-              "limitedDetail": true,
-              "url": "$secondReviewUrl",
-              "thumbnailUrl": "$secondThumbnailUrl"
-            }
-          },
-          {
-            "id": "$photoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "pair.ARW",
-            "originals": [
-              {
-                "kind": "raw",
-                "available": true
-              },
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 90,
-              "height": 45,
-              "limitedDetail": true,
-              "url": "$reviewUrl",
-              "thumbnailUrl": "$thumbnailUrl"
-            }
-          }
-        ]
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid browse order"
+      },
+      "status": 400
+    },
     "name": "browse-open-library-invalid-order",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "order": "newest-first",
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "order": "newest-first"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid browse order"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid browse order"
+      },
+      "status": 400
+    },
     "name": "browse-open-library-album-order-is-rejected",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "order": "album-order",
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "order": "album-order"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid browse order"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid browse order"
+      },
+      "status": 400
+    },
     "name": "browse-open-folder-album-order-is-rejected",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "folderPath": "",
+        "order": "album-order",
+        "publication": "$publication",
+        "source": "folder"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "folder",
-        "folderPath": "",
-        "publication": "$publication",
-        "order": "album-order"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid browse order"
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 0
+      },
+      "status": 200
+    },
     "name": "browse-open-library-selection-selected",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "selection": "selected",
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "selection": "selected"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 0,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "browse-open-library-selection-all-is-explicit",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "selection": "all",
+        "source": "library"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "selection": "all"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
-    "name": "browse-open-library-invalid-selection",
-    "request": {
-      "method": "POST",
-      "path": "/api/browse",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
-      "body": {
-        "source": "library",
-        "selection": "maybe"
-      }
-    },
     "expected": {
-      "status": 400,
       "body": {
         "error": "Invalid browse selection"
-      }
+      },
+      "status": 400
+    },
+    "name": "browse-open-library-invalid-selection",
+    "request": {
+      "body": {
+        "selection": "maybe",
+        "source": "library"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Photo not found"
+      },
+      "status": 404
+    },
     "name": "photo-albums-unknown-photo",
     "request": {
       "method": "GET",
       "path": "/api/photos/00000000-0000-4000-8000-000000000000/albums"
-    },
-    "expected": {
-      "status": 404,
-      "body": {
-        "error": "Photo not found"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid Photo"
+      },
+      "status": 400
+    },
     "name": "photo-albums-invalid-photo",
     "request": {
       "method": "GET",
       "path": "/api/photos/NOT-A-ID/albums"
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid Photo"
-      }
     }
   },
   {
-    "name": "photo-state-batch-reports-changed-and-missing-photos",
-    "request": {
-      "method": "POST",
-      "path": "/api/photos/state",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
-      "body": {
-        "photos": [
-          {
-            "photoId": "$photoId",
-            "expectedCurrent": "selected"
-          },
-          {
-            "photoId": "00000000-0000-4000-8000-000000000000",
-            "expectedCurrent": "undecided"
-          }
-        ],
-        "selectionState": "selected"
-      }
-    },
     "expected": {
-      "status": 200,
       "body": {
         "applied": [],
         "changedElsewhere": [
           {
-            "photoId": "$photoId",
-            "currentValue": "undecided"
+            "currentValue": "undecided",
+            "photoId": "$photoId"
           }
         ],
         "missing": [
@@ -819,198 +828,214 @@
             "photoId": "00000000-0000-4000-8000-000000000000"
           }
         ]
-      }
-    }
-  },
-  {
-    "name": "photo-state-batch-duplicate-photo-is-rejected",
-    "request": {
-      "method": "POST",
-      "path": "/api/photos/state",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
       },
+      "status": 200
+    },
+    "name": "photo-state-batch-reports-changed-and-missing-photos",
+    "request": {
       "body": {
         "photos": [
           {
-            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "selected",
+            "photoId": "$photoId"
           },
           {
-            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255",
-            "expectedCurrent": "undecided"
+            "expectedCurrent": "undecided",
+            "photoId": "00000000-0000-4000-8000-000000000000"
           }
         ],
         "selectionState": "selected"
-      }
-    },
-    "expected": {
-      "status": 400,
-      "body": {
-        "error": "Invalid Photo state batch"
-      }
-    }
-  },
-  {
-    "name": "browse-open-library-capture-time-asc",
-    "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "library",
-        "order": "capture-time-asc"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/photos/state"
     }
   },
   {
+    "expected": {
+      "body": {
+        "error": "Invalid Photo state batch"
+      },
+      "status": 400
+    },
+    "name": "photo-state-batch-duplicate-photo-is-rejected",
+    "request": {
+      "body": {
+        "photos": [
+          {
+            "expectedCurrent": "undecided",
+            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
+          },
+          {
+            "expectedCurrent": "undecided",
+            "photoId": "22aabb24fc11ac401ef1989dd4f0579579b4928169040cde3546d89c4cea7255"
+          }
+        ],
+        "selectionState": "selected"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/photos/state"
+    }
+  },
+  {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 3
+        },
+        "token": "$token",
+        "total": 3
+      },
+      "status": 200
+    },
+    "name": "browse-open-library-capture-time-asc",
+    "request": {
+      "body": {
+        "order": "capture-time-asc",
+        "source": "library"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/browse"
+    }
+  },
+  {
+    "expected": {
+      "body": {
+        "completed": 3,
+        "fingerprints": {
+          "enrolled": 3,
+          "pending": 0
+        },
+        "lastRecovery": {
+          "fingerprintedOriginals": 0,
+          "relocatedPhotos": 0,
+          "unavailablePhotos": 0
+        },
+        "publication": "$publication",
+        "state": "idle",
+        "total": 3
+      },
+      "status": 200
+    },
     "name": "status-published-library",
     "request": {
       "method": "GET",
       "path": "/api/status"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "state": "idle",
-        "publication": "$publication",
-        "completed": 2,
-        "total": 2
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 0,
+        "selectionCounts": {
+          "rejected": 0,
+          "selected": 0,
+          "undecided": 2
+        },
+        "token": "$token",
+        "total": 2
+      },
+      "status": 200
+    },
     "name": "browse-open-album-default-order",
     "request": {
-      "method": "POST",
-      "path": "/api/browse",
+      "body": {
+        "albumId": "$albumId",
+        "source": "album"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "source": "album",
-        "albumId": "$albumId"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "token": "$token",
-        "total": 2,
-        "position": 0,
-        "selectionCounts": {
-          "selected": 0,
-          "rejected": 0,
-          "undecided": 2
-        }
-      }
+      "method": "POST",
+      "path": "/api/browse"
     }
   },
   {
+    "expected": {
+      "body": {
+        "photos": [
+          {
+            "available": true,
+            "id": "$secondPhotoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "later.JPG",
+            "preview": {
+              "height": 60,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$secondThumbnailUrl",
+              "url": "$secondReviewUrl",
+              "width": 120
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          },
+          {
+            "available": true,
+            "id": "$photoId",
+            "original": {
+              "available": true,
+              "kind": "jpeg"
+            },
+            "originalFilename": "pair.JPG",
+            "preview": {
+              "height": 45,
+              "limitedDetail": true,
+              "source": "jpeg-original",
+              "state": "ready",
+              "thumbnailUrl": "$thumbnailUrl",
+              "url": "$reviewUrl",
+              "width": 90
+            },
+            "rating": 0,
+            "selectionState": "undecided"
+          }
+        ],
+        "start": 0,
+        "total": 2
+      },
+      "status": 200
+    },
     "name": "browse-window-album-order",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token?start=0&limit=60"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "start": 0,
-        "total": 2,
-        "photos": [
-          {
-            "id": "$secondPhotoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "later.JPG",
-            "originals": [
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 120,
-              "height": 60,
-              "limitedDetail": true,
-              "url": "$secondReviewUrl",
-              "thumbnailUrl": "$secondThumbnailUrl"
-            }
-          },
-          {
-            "id": "$photoId",
-            "available": true,
-            "ambiguous": false,
-            "originalFilename": "pair.ARW",
-            "originals": [
-              {
-                "kind": "raw",
-                "available": true
-              },
-              {
-                "kind": "jpeg",
-                "available": true
-              }
-            ],
-            "selectionState": "undecided",
-            "rating": 0,
-            "preview": {
-              "state": "ready",
-              "source": "matching-jpeg",
-              "width": 90,
-              "height": 45,
-              "limitedDetail": true,
-              "url": "$reviewUrl",
-              "thumbnailUrl": "$thumbnailUrl"
-            }
-          }
-        ]
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "position": 1
+      },
+      "status": 200
+    },
     "name": "browse-position-pair-in-album",
     "request": {
       "method": "GET",
       "path": "/api/browse/$token/position?photoId=$photoId"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "position": 1
-      }
     }
   },
   {
-    "name": "photo-albums-success",
-    "request": {
-      "method": "GET",
-      "path": "/api/photos/$photoId/albums"
-    },
     "expected": {
-      "status": 200,
       "body": {
         "albums": [
           {
@@ -1018,214 +1043,227 @@
             "name": "Compat Album"
           }
         ]
-      }
+      },
+      "status": 200
+    },
+    "name": "photo-albums-success",
+    "request": {
+      "method": "GET",
+      "path": "/api/photos/$photoId/albums"
     }
   },
   {
+    "expected": {
+      "body": {
+        "height": 45,
+        "limitedDetail": true,
+        "source": "jpeg-original",
+        "stale": false,
+        "state": "ready",
+        "url": "$reviewUrl",
+        "width": 90
+      },
+      "status": 200
+    },
     "name": "photo-preview-success",
     "request": {
       "method": "GET",
       "path": "/api/photos/$photoId/preview"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "state": "ready",
-        "source": "matching-jpeg",
-        "stale": false,
-        "width": 90,
-        "height": 45,
-        "limitedDetail": true,
-        "url": "$reviewUrl"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "height": 45,
+        "limitedDetail": true,
+        "source": "jpeg-original",
+        "stale": false,
+        "state": "ready",
+        "url": "$thumbnailUrl",
+        "width": 90
+      },
+      "status": 200
+    },
     "name": "photo-thumbnail-success",
     "request": {
       "method": "GET",
       "path": "/api/photos/$photoId/thumbnail"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "state": "ready",
-        "source": "matching-jpeg",
-        "stale": false,
-        "width": 90,
-        "height": 45,
-        "limitedDetail": true,
-        "url": "$thumbnailUrl"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "captureTime": "2026-01-01T09:00:00.000000000"
+      },
+      "status": 200
+    },
     "name": "photo-metadata-success",
     "request": {
       "method": "GET",
       "path": "/api/photos/$photoId/metadata"
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "captureTime": "2026-01-01T09:00:00.000000000"
-      }
     }
   },
   {
+    "expected": {
+      "body": {
+        "albums": [
+          {
+            "hasSavedPosition": false,
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2
+          }
+        ]
+      },
+      "status": 200
+    },
     "name": "album-rename",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/rename",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
       "body": {
         "name": "Renamed Compat Album"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Renamed Compat Album",
-            "photoCount": 2,
-            "hasSavedPosition": false
-          }
-        ]
-      }
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/albums/$albumId/rename"
     }
   },
   {
+    "expected": {
+      "body": {
+        "addedPhotoIds": [],
+        "albumId": "$albumId",
+        "albums": [
+          {
+            "hasSavedPosition": false,
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2
+          }
+        ],
+        "alreadyMemberPhotoIds": [
+          "$photoId"
+        ]
+      },
+      "status": 200
+    },
     "name": "album-add-existing-member",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/members",
+      "body": {
+        "photoIds": [
+          "$photoId"
+        ]
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "photoIds": ["$photoId"]
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albumId": "$albumId",
-        "addedPhotoIds": [],
-        "alreadyMemberPhotoIds": ["$photoId"],
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Renamed Compat Album",
-            "photoCount": 2,
-            "hasSavedPosition": false
-          }
-        ]
-      }
+      "method": "POST",
+      "path": "/api/albums/$albumId/members"
     }
   },
   {
+    "expected": {
+      "body": {
+        "albums": [
+          {
+            "hasSavedPosition": false,
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2
+          }
+        ]
+      },
+      "status": 200
+    },
     "name": "album-reorder",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/order",
+      "body": {
+        "photoIds": [
+          "$photoId",
+          "$secondPhotoId"
+        ]
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "photoIds": ["$photoId", "$secondPhotoId"]
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Renamed Compat Album",
-            "photoCount": 2,
-            "hasSavedPosition": false
-          }
-        ]
-      }
+      "method": "POST",
+      "path": "/api/albums/$albumId/order"
     }
   },
   {
+    "expected": {
+      "body": {
+        "albums": [
+          {
+            "hasSavedPosition": true,
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 2
+          }
+        ]
+      },
+      "status": 200
+    },
     "name": "album-set-progress",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/progress",
-      "headers": {
-        "content-type": "application/json",
-        "origin": "http://camera.local"
-      },
       "body": {
         "photoId": "$photoId"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Renamed Compat Album",
-            "photoCount": 2,
-            "hasSavedPosition": true
-          }
-        ]
-      }
+      },
+      "headers": {
+        "content-type": "application/json",
+        "origin": "http://camera.local"
+      },
+      "method": "POST",
+      "path": "/api/albums/$albumId/progress"
     }
   },
   {
+    "expected": {
+      "body": {
+        "albums": [
+          {
+            "hasSavedPosition": true,
+            "id": "$albumId",
+            "name": "Renamed Compat Album",
+            "photoCount": 1
+          }
+        ]
+      },
+      "status": 200
+    },
     "name": "album-remove-member",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/members/remove",
+      "body": {
+        "photoId": "$secondPhotoId"
+      },
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {
-        "photoId": "$secondPhotoId"
-      }
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albums": [
-          {
-            "id": "$albumId",
-            "name": "Renamed Compat Album",
-            "photoCount": 1,
-            "hasSavedPosition": true
-          }
-        ]
-      }
+      "method": "POST",
+      "path": "/api/albums/$albumId/members/remove"
     }
   },
   {
+    "expected": {
+      "body": {
+        "albums": []
+      },
+      "status": 200
+    },
     "name": "album-delete",
     "request": {
-      "method": "POST",
-      "path": "/api/albums/$albumId/delete",
+      "body": {},
       "headers": {
         "content-type": "application/json",
         "origin": "http://camera.local"
       },
-      "body": {}
-    },
-    "expected": {
-      "status": 200,
-      "body": {
-        "albums": []
-      }
+      "method": "POST",
+      "path": "/api/albums/$albumId/delete"
     }
   }
 ]

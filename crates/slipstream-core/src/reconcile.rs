@@ -195,7 +195,7 @@ mod tests {
     fn ids(paths: &[(&str, &str)]) -> HashMap<String, String> {
         paths
             .iter()
-            .map(|(path, id)| (path.to_owned(), id.to_owned()))
+            .map(|(path, id)| ((*path).to_owned(), (*id).to_owned()))
             .collect()
     }
 
@@ -205,7 +205,7 @@ mod tests {
         let existing = [photo("p1", "o1")];
         let mapping = ids(&[("shoot/a.jpg", "o1")]);
         let reconciled = reconcile(&discovered, &existing, &mapping, || {
-            Ok::<(), ()>("p-new".to_owned())
+            Ok::<String, ()>("p-new".to_owned())
         })
         .unwrap();
         assert_eq!(reconciled.len(), 1);
@@ -222,7 +222,7 @@ mod tests {
         let existing = [photo("p1", "o1")];
         let mapping = ids(&[("moved/a.jpg", "o1")]);
         let reconciled = reconcile(&discovered, &existing, &mapping, || {
-            Ok::<(), ()>("p-new".to_owned())
+            Ok::<String, ()>("p-new".to_owned())
         })
         .unwrap();
         assert_eq!(reconciled[0].id, "p1");
@@ -239,7 +239,7 @@ mod tests {
         let mut allocated = 0;
         let reconciled = reconcile(&discovered, &[], &mapping, || {
             allocated += 1;
-            Ok::<(), ()>(format!("p{allocated}"))
+            Ok::<String, ()>(format!("p{allocated}"))
         })
         .unwrap();
         assert_eq!(reconciled.len(), 2);
@@ -251,7 +251,7 @@ mod tests {
     fn remembers_unavailable_photo_with_its_decisions() {
         let existing = [photo("p1", "o1")];
         let reconciled = reconcile(&[], &existing, &HashMap::new(), || {
-            Ok::<(), ()>("p-new".to_owned())
+            Ok::<String, ()>("p-new".to_owned())
         })
         .unwrap();
         assert_eq!(reconciled.len(), 1);
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn preview_preserves_only_matching_location_size_and_mtime() {
         let discovered = original("shoot/a.jpg", OriginalKind::Jpeg);
-        let photo = ReconciledPhoto {
+        let record = ReconciledPhoto {
             id: "p1".to_owned(),
             original_id: "o1".to_owned(),
             original: Some(discovered.clone()),
@@ -299,7 +299,7 @@ mod tests {
             sort_path: "shoot/a.jpg".to_owned(),
             prior: None,
         };
-        let selected = selected_source(&photo);
+        let selected = selected_source(&record);
         let mut prior = photo("p1", "o1");
         prior.preview_state = PreviewState::Ready;
         let revision = crate::source_revision("shoot/a.jpg", 10, 1_000.0).unwrap();
@@ -322,7 +322,7 @@ mod tests {
         let moved = ReconciledPhoto {
             sort_path: "moved/a.jpg".to_owned(),
             original: Some(original("moved/a.jpg", OriginalKind::Jpeg)),
-            ..photo.clone()
+            ..record.clone()
         };
         assert!(!preview_should_preserve(
             &prior,

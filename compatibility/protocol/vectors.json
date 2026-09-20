@@ -66,9 +66,18 @@
     "expected": {
       "status": 200,
       "body": {
-        "state": "idle",
-        "publication": "$publication",
         "completed": 0,
+        "fingerprints": {
+          "enrolled": 0,
+          "pending": 0
+        },
+        "lastRecovery": {
+          "fingerprintedOriginals": 0,
+          "relocatedPhotos": 0,
+          "unavailablePhotos": 0
+        },
+        "publication": "$publication",
+        "state": "idle",
         "total": 0
       }
     }

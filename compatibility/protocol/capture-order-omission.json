@@ -1,14 +1,18 @@
 {
-  "orderedPaths": ["z.JPG", "a.jpg"],
+  "orderedPaths": [
+    "z.JPG",
+    "a.jpg"
+  ],
   "allowedKeys": [
     "id",
     "available",
-    "ambiguous",
-    "originals",
+    "original",
     "originalFilename",
     "selectionState",
     "rating",
     "preview"
   ],
-  "optionalKeys": ["originalFilename"]
+  "optionalKeys": [
+    "originalFilename"
+  ]
 }

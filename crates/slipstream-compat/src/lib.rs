@@ -459,6 +459,8 @@ mod tests {
             "sqlite/schema-v4.sql",
             "sqlite/schema-v5.json",
             "sqlite/schema-v5.sql",
+            "sqlite/schema-v6.json",
+            "sqlite/schema-v6.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -986,7 +988,7 @@ mod tests {
 
     #[test]
     fn canonical_schema_snapshots_execute_with_bundled_sqlite() {
-        for version in ["v4", "v5"] {
+        for version in ["v4", "v5", "v6"] {
             let connection = Connection::open_in_memory().unwrap();
             connection
                 .execute_batch(

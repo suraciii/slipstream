@@ -314,14 +314,20 @@ impl CacheDirectory {
             || manifest.source_mtime_ms != original.facts.mtime_ms
             || (source == PreviewSource::JpegOriginal
                 && manifest.embedded_candidate_identity.is_some())
-            || photo.preview_source_revision.as_deref()
-                != source_revision(
-                    original.relative_path.as_str(),
-                    original.facts.size,
-                    original.facts.mtime_ms,
-                )
-                .ok()
+            || photo
+                .preview_source_revision
                 .as_deref()
+                .is_some_and(|stored| {
+                    stored
+                        != source_revision(
+                            original.relative_path.as_str(),
+                            original.facts.size,
+                            original.facts.mtime_ms,
+                        )
+                        .ok()
+                        .as_deref()
+                        .unwrap_or("")
+                })
         {
             return Ok(None);
         }
@@ -1861,6 +1867,7 @@ const fn no_follow_flag() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OriginalKind;
     use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
     use std::{
         fs,
@@ -2175,13 +2182,9 @@ mod tests {
         let cache_key = ready.cache_key.clone();
         let photo = PhotoRecord {
             id: "photo-1".to_owned(),
-            raw_original_id: Some("raw-id".to_owned()),
-            jpeg_original_id: Some("jpeg-id".to_owned()),
-            ambiguous: false,
+            original_id: "raw-id".to_owned(),
             available: true,
             preview_state: crate::PreviewState::Ready,
-            preview_candidate: Some(PreviewCandidate::MatchingJpeg),
-            preview_source: Some(PreviewCandidate::EmbeddedRawJpeg),
             preview_source_revision: Some(source_revision("one.ARW", 12, raw_revision).unwrap()),
             preview_width: Some(2),
             preview_height: Some(2),

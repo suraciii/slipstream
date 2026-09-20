@@ -300,8 +300,6 @@ pub(crate) struct SharedLibrary {
     pub(crate) snapshot: RwLock<Option<Published>>,
     pub(crate) published: AtomicBool,
     pub(crate) failed: AtomicBool,
-    pub(crate) fingerprint_counts:
-        Mutex<Option<(std::time::Instant, slipstream_core::persistence::FingerprintCounts)>>,
     pub(crate) awaiting_scan: AtomicUsize,
     pub(crate) runs_started: AtomicU64,
     pub(crate) runs_completed: AtomicU64,
@@ -539,7 +537,6 @@ impl Application {
             snapshot: RwLock::new(published_initial.then(|| Published::new(persisted))),
             published: AtomicBool::new(published_initial),
             failed: AtomicBool::new(false),
-            fingerprint_counts: Mutex::new(None),
             awaiting_scan: AtomicUsize::new(0),
             runs_started: AtomicU64::new(0),
             runs_completed: AtomicU64::new(0),
@@ -665,12 +662,11 @@ impl Application {
             fingerprinted_originals: outcome.fingerprinted_originals,
             unavailable_photos: outcome.unavailable_photos,
         });
-        let fingerprints = self
-            .cached_fingerprint_counts()
-            .map(|counts| FingerprintProgressWire {
-                enrolled: counts.enrolled,
-                pending: counts.pending,
-            });
+        let counts = self.library.fingerprint_counts();
+        let fingerprints = Some(FingerprintProgressWire {
+            enrolled: counts.enrolled,
+            pending: counts.pending,
+        });
         match progress.phase {
             ScanPhase::Discovering => ScanStatusWire {
                 state: "discovering",
@@ -752,22 +748,6 @@ impl Application {
         }
     }
 
-    /// Fingerprint enrollment counters, refreshed at most once every five
-    /// seconds so status polling never turns into per-request SQLite work.
-    fn cached_fingerprint_counts(&self) -> Option<slipstream_core::persistence::FingerprintCounts> {
-        {
-            let cache = self.shared.fingerprint_counts.lock().unwrap();
-            if cache
-                .as_ref()
-                .is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(5))
-            {
-                return cache.map(|(_, counts)| counts);
-            }
-        }
-        let counts = self.library.fingerprint_counts().ok()?;
-        *self.shared.fingerprint_counts.lock().unwrap() = Some((std::time::Instant::now(), counts));
-        Some(counts)
-    }
 
     pub(crate) fn current_publication(&self) -> Option<String> {
         self.shared

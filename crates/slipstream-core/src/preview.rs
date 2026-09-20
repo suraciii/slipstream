@@ -1602,7 +1602,6 @@ mod tests {
             .find(|photo| photo.id == malformed_id)
             .unwrap();
         assert_eq!(photo.preview_state, PreviewState::InspectionPending);
-        assert!(photo.preview_source.is_none());
         assert!(photo.cache_revision.is_none());
         assert!(matches!(
             runtime.block_on(
@@ -1680,11 +1679,6 @@ mod tests {
         let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
         let photo = snapshot.photos.iter().find(|photo| photo.id == id).unwrap();
         assert_eq!(photo.preview_state, PreviewState::Unavailable);
-        assert_eq!(
-            photo.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(photo.preview_source, Some(PreviewCandidate::MatchingJpeg));
         assert!(photo.preview_source_revision.is_some());
 
         fixture.service.shutdown().unwrap();
@@ -1732,13 +1726,11 @@ mod tests {
             runtime.block_on(fixture.library.seed_preview(PreviewSeed {
                 photo_id: id.clone(),
                 state: PreviewState::Unavailable,
-                expected_candidate: PreviewCandidate::MatchingJpeg,
-                expected_source_revision: revision.clone(),
+                source: PreviewSource::JpegOriginal,
+                expected_source_revision: revision,
                 width: None,
                 height: None,
                 cache_revision: None,
-                actual_source: Some(PreviewCandidate::MatchingJpeg),
-                actual_source_revision: Some(revision),
             })),
             Ok(PreviewSeedResult::Applied)
         ));
@@ -1779,7 +1771,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires SLIPSTREAM_RAW_SAMPLE"]
-    fn corrupt_matching_jpeg_falls_back_to_raw_and_recovers_after_replacement() {
+    fn raw_photo_previews_from_embedded_jpeg_independent_of_sibling_jpeg() {
         let (sample, source_before) = raw_sample();
         let raw_name = format!(
             "one.{}",
@@ -1789,7 +1781,7 @@ mod tests {
                 .unwrap_or("ARW")
         );
         let base = std::env::temp_dir().join(format!(
-            "slipstream-preview-fallback-{}-{}",
+            "slipstream-preview-independent-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1809,100 +1801,72 @@ mod tests {
         let library = Arc::new(Library::open(config()).unwrap());
         runtime.block_on(library.scan()).unwrap();
         let service = PreviewService::new(library.clone(), base.join("cache")).unwrap();
-        let id = photo_id(&library);
-        let fallback = runtime
-            .block_on(service.review(id.clone(), DerivativePriority::Current))
-            .unwrap();
-        let PreviewRequestResult::Current(fallback) = fallback else {
-            panic!("expected a RAW fallback Preview")
-        };
-        assert_eq!(fallback.source, PreviewCandidate::EmbeddedRawJpeg);
         let snapshot = runtime.block_on(library.snapshot()).unwrap();
-        let photo = snapshot.photos.iter().find(|photo| photo.id == id).unwrap();
-        assert_eq!(photo.preview_state, PreviewState::Ready);
-        assert_eq!(
-            photo.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(
-            photo.preview_source,
-            Some(PreviewCandidate::EmbeddedRawJpeg)
-        );
-        let raw = snapshot
-            .originals
+        // The RAW and its corrupt same-basename JPEG are independent Photos.
+        let raw_photo = snapshot
+            .photos
             .iter()
-            .find(|original| original.relative_path.as_str() == raw_name)
+            .find(|photo| {
+                snapshot
+                    .originals
+                    .iter()
+                    .any(|original| original.id == photo.original_id && original.kind == crate::OriginalKind::Raw)
+            })
             .unwrap();
-        assert_eq!(
-            photo.preview_source_revision.as_deref(),
-            Some(
-                source_revision(
-                    raw.relative_path.as_str(),
-                    raw.facts.size,
-                    raw.facts.mtime_ms,
-                )
-                .unwrap()
-                .as_str()
-            )
-        );
+        let jpeg_photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| {
+                snapshot
+                    .originals
+                    .iter()
+                    .any(|original| original.id == photo.original_id && original.kind == crate::OriginalKind::Jpeg)
+            })
+            .unwrap();
+        assert_ne!(raw_photo.id, jpeg_photo.id);
+
+        // The RAW Photo previews from its own embedded JPEG.
+        let raw_ready = runtime
+            .block_on(service.review(raw_photo.id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(raw_ready) = raw_ready else {
+            panic!("expected a RAW embedded Preview")
+        };
+        assert_eq!(raw_ready.source, PreviewSource::RawEmbeddedJpeg);
+
+        // The corrupt JPEG Photo is independently unavailable.
+        let jpeg_result = runtime
+            .block_on(service.review(jpeg_photo.id.clone(), DerivativePriority::Current))
+            .unwrap();
+        assert!(matches!(
+            jpeg_result,
+            PreviewRequestResult::Unavailable(PreviewUnavailable {
+                reason: PreviewUnavailableReason::NoUsableSource
+            })
+        ));
+
+        // Replacing the JPEG bytes recovers only the JPEG Photo; the RAW
+        // Photo keeps its embedded source and its Preview.
+        fs::write(base.join("originals/one.JPG"), jpeg(64, 32)).unwrap();
+        runtime.block_on(library.scan()).unwrap();
+        let repaired = runtime
+            .block_on(service.review(jpeg_photo.id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(repaired) = repaired else {
+            panic!("expected the replaced JPEG Photo to preview")
+        };
+        assert_eq!(repaired.source, PreviewSource::JpegOriginal);
+        let raw_after = runtime
+            .block_on(service.review(raw_photo.id.clone(), DerivativePriority::Current))
+            .unwrap();
+        let PreviewRequestResult::Current(raw_after) = raw_after else {
+            panic!("expected the RAW Photo to keep its embedded Preview")
+        };
+        assert_eq!(raw_after.source, PreviewSource::RawEmbeddedJpeg);
+        assert!(!raw_after.generated);
 
         service.shutdown().unwrap();
         library.shutdown().unwrap();
-        let reopened = Arc::new(Library::open(config()).unwrap());
-        let reopened_service = PreviewService::new(reopened.clone(), base.join("cache")).unwrap();
-        let reopened_result = runtime
-            .block_on(reopened_service.review(id.clone(), DerivativePriority::Current))
-            .unwrap();
-        let PreviewRequestResult::Current(reopened_ready) = reopened_result else {
-            panic!("expected the reopened RAW fallback Preview")
-        };
-        assert_eq!(reopened_ready.source, PreviewCandidate::EmbeddedRawJpeg);
-        assert!(!reopened_ready.generated);
-
-        runtime.block_on(reopened.scan()).unwrap();
-        let preserved = runtime
-            .block_on(reopened.snapshot())
-            .unwrap()
-            .photos
-            .into_iter()
-            .find(|photo| photo.id == id)
-            .unwrap();
-        assert_eq!(preserved.preview_state, PreviewState::Ready);
-        assert_eq!(
-            preserved.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(
-            preserved.preview_source,
-            Some(PreviewCandidate::EmbeddedRawJpeg)
-        );
-
-        fs::write(base.join("originals/one.JPG"), jpeg(64, 32)).unwrap();
-        runtime.block_on(reopened.scan()).unwrap();
-        let upgraded = runtime
-            .block_on(reopened_service.review(id.clone(), DerivativePriority::Current))
-            .unwrap();
-        let PreviewRequestResult::Current(upgraded) = upgraded else {
-            panic!("expected a matching JPEG Preview after replacement")
-        };
-        assert_eq!(upgraded.source, PreviewCandidate::MatchingJpeg);
-        let upgraded_photo = runtime
-            .block_on(reopened.snapshot())
-            .unwrap()
-            .photos
-            .into_iter()
-            .find(|photo| photo.id == id)
-            .unwrap();
-        assert_eq!(
-            upgraded_photo.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(
-            upgraded_photo.preview_source,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        reopened_service.shutdown().unwrap();
-        reopened.shutdown().unwrap();
         assert_eq!(original_snapshot(&copied_raw), copied_before);
         assert_eq!(original_snapshot(&sample), source_before);
         let _ = fs::remove_dir_all(base);
@@ -1932,12 +1896,15 @@ mod tests {
         let library = Arc::new(Library::open(config).unwrap());
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(library.scan()).unwrap();
-        let id = runtime
-            .block_on(library.snapshot())
-            .unwrap()
+        let snapshot = runtime.block_on(library.snapshot()).unwrap();
+        let id = snapshot
             .photos
             .iter()
-            .find(|photo| photo.raw_original_id.is_some())
+            .find(|photo| {
+                snapshot.originals.iter().any(|original| {
+                    original.id == photo.original_id && original.kind == crate::OriginalKind::Raw
+                })
+            })
             .unwrap()
             .id
             .clone();
@@ -1948,7 +1915,7 @@ mod tests {
         let PreviewRequestResult::Current(ready) = result else {
             panic!("expected current Sony Preview")
         };
-        assert_eq!(ready.source, PreviewCandidate::EmbeddedRawJpeg);
+        assert_eq!(ready.source, PreviewSource::RawEmbeddedJpeg);
         assert_eq!(ready.embedded_candidate_identity.as_deref(), Some("2"));
         assert_eq!((ready.width, ready.height), (2560, 1707));
         service.shutdown().unwrap();

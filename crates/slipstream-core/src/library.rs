@@ -228,6 +228,7 @@ pub struct Library {
     enrollment_join: Mutex<Option<JoinHandle<()>>>,
     progress: Arc<Mutex<ScanProgress>>,
     outcome: Arc<Mutex<Option<ScanOutcome>>>,
+    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
     lifecycle: Mutex<Lifecycle>,
     shutdown: Mutex<Option<Result<(), LibraryError>>>,
 }
@@ -291,6 +292,9 @@ impl Library {
         let progress = Arc::new(Mutex::new(ScanProgress::default()));
         let outcome = Arc::new(Mutex::new(None::<ScanOutcome>));
         let enrollment = Arc::new((Mutex::new(EnrollmentState::default()), Condvar::new()));
+        let fingerprint_counts = Arc::new(Mutex::new(
+            crate::persistence::FingerprintCounts::default(),
+        ));
         let worker_root = root.clone();
         let worker_native_work = native_work.clone();
         let worker_persistence = persistence.clone();
@@ -298,6 +302,7 @@ impl Library {
         let worker_progress = Arc::clone(&progress);
         let worker_outcome = Arc::clone(&outcome);
         let worker_enrollment = Arc::clone(&enrollment);
+        let worker_counts = Arc::clone(&fingerprint_counts);
         let join = thread::Builder::new()
             .name("slipstream-scanner".to_owned())
             .spawn(move || {
@@ -311,6 +316,7 @@ impl Library {
                     worker_progress,
                     worker_outcome,
                     worker_enrollment,
+                    worker_counts,
                 )
             })
             .map_err(|_| LibraryError::ScannerStopped)?;
@@ -318,6 +324,7 @@ impl Library {
         let enrollment_native_work = native_work.clone();
         let enrollment_persistence = persistence.clone();
         let enrollment_shared = Arc::clone(&enrollment);
+        let enrollment_counts = Arc::clone(&fingerprint_counts);
         let enrollment_join = thread::Builder::new()
             .name("slipstream-fingerprints".to_owned())
             .spawn(move || {
@@ -326,6 +333,7 @@ impl Library {
                     enrollment_native_work,
                     enrollment_persistence,
                     enrollment_shared,
+                    enrollment_counts,
                 )
             })
             .map_err(|_| LibraryError::ScannerStopped)?;
@@ -342,6 +350,7 @@ impl Library {
             enrollment_join: Mutex::new(Some(enrollment_join)),
             progress,
             outcome,
+            fingerprint_counts,
             lifecycle: Mutex::new(Lifecycle { open: true }),
             shutdown: Mutex::new(None),
         })
@@ -362,12 +371,11 @@ impl Library {
         *self.outcome.lock().unwrap()
     }
 
-    /// Truthful fingerprint enrollment counters for status reporting.
-    pub fn fingerprint_counts(&self) -> Result<crate::persistence::FingerprintCounts, LibraryError> {
-        let _admission = self.admit()?;
-        self.persistence
-            .fingerprint_counts_blocking()
-            .map_err(LibraryError::from)
+    /// Truthful fingerprint enrollment counters for status reporting. The
+    /// enrollment worker and the scanner refresh these after every committed
+    /// change, so reading them never blocks on SQLite.
+    pub fn fingerprint_counts(&self) -> crate::persistence::FingerprintCounts {
+        *self.fingerprint_counts.lock().unwrap()
     }
 
     pub(crate) fn native_work_budget(&self) -> NativeWorkBudget {
@@ -703,6 +711,7 @@ fn scanner_main(
     progress: Arc<Mutex<ScanProgress>>,
     outcome: Arc<Mutex<Option<ScanOutcome>>>,
     enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
+    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
@@ -786,6 +795,9 @@ fn scanner_main(
                             fingerprinted_originals: applied.fingerprinted_originals,
                             unavailable_photos: unavailable,
                         });
+                        if let Ok(counts) = persistence.fingerprint_counts_blocking() {
+                            *fingerprint_counts.lock().unwrap() = counts;
+                        }
                         Ok(applied.snapshot)
                     })
                     .map(Arc::new);
@@ -824,7 +836,14 @@ fn enrollment_main(
     native_work: NativeWorkBudget,
     persistence: Persistence,
     enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
+    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
 ) {
+    let refresh_counts = |persistence: &Persistence| {
+        if let Ok(counts) = persistence.fingerprint_counts_blocking() {
+            *fingerprint_counts.lock().unwrap() = counts;
+        }
+    };
+    refresh_counts(&persistence);
     let mut deferred: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
     loop {
@@ -896,6 +915,7 @@ fn enrollment_main(
                 };
                 if persistence.store_fingerprint_blocking(fingerprint).is_ok() {
                     deferred.remove(&target.original_id);
+                    refresh_counts(&persistence);
                 } else {
                     deferred.insert(target.original_id.clone(), std::time::Instant::now());
                 }
@@ -912,7 +932,7 @@ mod tests {
     use super::*;
     use crate::{
         OriginalKind,
-        identity::{original_id, paired_photo_id},
+        identity::original_id,
         persistence::PersistenceError,
     };
     use rusqlite::{Connection, params};
@@ -1110,13 +1130,11 @@ mod tests {
                 .seed_preview(PreviewSeed {
                     photo_id: "missing".to_owned(),
                     state: crate::PreviewState::Failed,
-                    expected_candidate: crate::PreviewCandidate::MatchingJpeg,
+                    source: crate::PreviewSource::JpegOriginal,
                     expected_source_revision: "missing".to_owned(),
                     width: None,
                     height: None,
                     cache_revision: None,
-                    actual_source: None,
-                    actual_source_revision: None,
                 })
                 .await,
             Err(LibraryError::Closed)
@@ -1254,7 +1272,7 @@ mod tests {
         let database = state.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v5.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
             .unwrap();
         connection
             .execute(
@@ -1315,21 +1333,26 @@ mod tests {
                 params![id,path,kind,size,1.0_f64,available,capture_state,capture_key,capture_field,capture_revision],
             ).unwrap();
         }
-        let pair_id = paired_photo_id(&raw_id, &jpeg_id);
+        let legacy_photo = "legacy-raw-photo";
+        let legacy_jpeg_photo = "legacy-jpeg-photo";
         let missing_photo_id = "legacy-missing-photo";
         connection.execute(
-            "INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,preview_state,preview_candidate,preview_source,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?,?,?,0,1,'ready','matching-jpeg','matching-jpeg','old-preview',800,600,'old-cache','a.ARW','selected',5)",
-            params![pair_id,raw_id,jpeg_id],
+            "INSERT INTO photos(id,original_id,available,preview_state,preview_source_revision,preview_width,preview_height,cache_revision,sort_path,selection_state,rating) VALUES(?, ?,1,'ready','old-preview',800,600,'old-cache','a.ARW','selected',5)",
+            params![legacy_photo, raw_id],
         ).unwrap();
         connection.execute(
-            "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES(?,?,0,0,'unavailable','missing.JPG','rejected',2)",
-            params![missing_photo_id,missing_id],
+            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES(?, ?,1,'inspection-pending','a.JPG','undecided',0)",
+            params![legacy_jpeg_photo, jpeg_id],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES(?, ?,0,'unavailable','missing.JPG','rejected',2)",
+            params![missing_photo_id, missing_id],
         ).unwrap();
         connection
             .execute("INSERT INTO albums VALUES('set','Keep',1)", [])
             .unwrap();
         connection
-            .execute("INSERT INTO album_members VALUES('set',?,0)", [&pair_id])
+            .execute("INSERT INTO album_members VALUES('set',?,0)", [legacy_photo])
             .unwrap();
         connection
             .execute(
@@ -1363,7 +1386,7 @@ mod tests {
         let old_jpeg = fs::read(config.library_root.join("shoot/a.JPG")).unwrap();
         fs::write(config.library_root.join("a.ARW"), b"sibling-raw").unwrap();
         let legacy_original = original_id("a.ARW");
-        let legacy_photo = paired_photo_id(&legacy_original, &original_id("a.JPG"));
+        let legacy_photo = "legacy-raw-photo".to_owned();
 
         expand_library(config.clone()).unwrap();
         let connection = Connection::open(&database).unwrap();
@@ -1371,7 +1394,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             connection
@@ -1449,7 +1472,7 @@ mod tests {
         let sibling_photo = snapshot
             .photos
             .iter()
-            .find(|photo| photo.raw_original_id.as_deref() == Some(sibling.id.as_str()))
+            .find(|photo| photo.original_id == sibling.id)
             .unwrap();
         assert_ne!(sibling_photo.id, legacy_photo);
         assert_eq!(sibling_photo.id.len(), 36);

@@ -318,9 +318,12 @@ pub(crate) fn photo_summary_indexed_with_url(
         unreachable!("summarized Photo has no Original record")
     };
     let original_filename = ordering_original_filename(photo, originals, originals_by_id);
-    let source = single
-        .filter(|original| original.available && original.error_category.is_none())
-        .map(|original| preview_source(original.kind.preview_source()));
+    let source = match photo.preview_state {
+        slipstream_core::PreviewState::Ready => single
+            .filter(|original| original.available && original.error_category.is_none())
+            .map(|original| preview_source(original.kind.preview_source())),
+        _ => None,
+    };
     let state = preview_state(photo.preview_state);
     PhotoSummary {
         id: photo.id.clone(),
