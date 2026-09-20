@@ -13965,6 +13965,101 @@ test("a RAW and its JPEG render independent Grid cells with the JPEG's rotation"
   expect(oriented!.indicatorsOverlapImage).toBe(false);
 });
 
+
+test("the recovery review entry restores a moved Photo without a rescan", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await mkdir(join(base, "state"), { recursive: true });
+  await mkdir(join(base, "cache"), { recursive: true });
+  await chmod(join(base, "state"), 0o700);
+  // One unavailable Photo with retained decisions, remembered under
+  // shoot/a.JPG; its file will appear at moved/a.JPG only after the startup
+  // scan settles, so only the manual recovery path can restore it.
+  const seed = `
+    const { Database } = await import("bun:sqlite");
+    const database = new Database(process.env.STATE_DB);
+    database.exec(await Bun.file(process.env.SCHEMA_PATH).text());
+    database.run("INSERT INTO library_metadata VALUES('canonical_root',?1)", [process.env.ROOT]);
+    database.run(
+      "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state,capture_source_revision) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','shoot/a.JPG','jpeg',11,1.0,0,'missing','remembered-revision')",
+    );
+    database.run(
+      "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',0,'unavailable','shoot/a.JPG','selected',3)",
+    );
+    database.run("INSERT INTO albums VALUES('set','Trip',1)");
+    database.run(
+      "INSERT INTO album_members VALUES('set','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',0)",
+    );
+    database.close();
+  `;
+  execFileSync("bun", ["-e", seed], {
+    env: {
+      ...process.env,
+      STATE_DB: join(base, "state", "library.sqlite"),
+      ROOT: root,
+      SCHEMA_PATH: join(process.cwd(), "compatibility/sqlite/schema-v6.sql"),
+    },
+  });
+  const running = await server(base, root);
+  await mkdir(join(root, "moved"));
+  await writeFile(join(root, "moved", "a.JPG"), await jpeg());
+
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
+  // The remembered unavailable Photo stays visible with its facts.
+  await expect(
+    page.locator(".cell-facts").first(),
+  ).toHaveText("Photo unavailable · Preview unavailable");
+
+  // The scan notice names the unavailable Original and offers the one
+  // bounded review entry.
+  const notice = page.locator("[data-recovery-notice]");
+  await expect(notice).toHaveText(/1 Photo still unavailable\./);
+  await notice.getByRole("button", { name: "Review unavailable originals" }).click();
+
+  const panel = page.locator("[data-recovery-panel]");
+  await expect(panel).toBeVisible();
+  await expect(page.locator("[data-recovery-summary]")).toHaveText(
+    "1 Photo unavailable",
+  );
+  await expect(page.locator("[data-recovery-list] li")).toHaveText(
+    "shoot/a.JPG — JPEG — Selected · 3 stars · 1 album",
+  );
+
+  // The folder-prefix batch proposes the mapping; without a fingerprint the
+  // old content cannot be verified and the proposal says so.
+  await page.locator("[data-recovery-old-prefix]").fill("shoot");
+  await page.locator("[data-recovery-new-prefix]").fill("moved");
+  await page.getByRole("button", { name: "Propose batch mappings" }).click();
+  await expect(
+    page.locator("[data-recovery-proposals] li .recovery-proposal-path"),
+  ).toHaveText("shoot/a.JPG → moved/a.JPG");
+  await expect(
+    page.locator("[data-recovery-proposals] li .recovery-proposal-facts"),
+  ).toHaveText("Ready to recover · Old content cannot be verified");
+  await expect(page.locator("[data-recovery-note]")).toBeVisible();
+
+  // The explicit confirmation commits the mapping; no rescan ran.
+  await page.getByRole("button", { name: "Apply 1 mapping" }).click();
+  await expect(panel).toBeHidden();
+  await expect(notice).toHaveText(/Updated locations for 1 Photo\./);
+  // The restored cell keeps its facts slot but hides it: no unavailable
+  // fact remains.
+  await expect(page.locator(".cell-facts").first()).toBeHidden();
+  await expect
+    .poll(() =>
+      page
+        .locator(".photo-cell img")
+        .first()
+        .evaluate(
+          (image: HTMLImageElement) =>
+            image.complete && image.naturalWidth > 0,
+        ),
+    )
+    .toBe(true);
+});
+
 test("Grid placeholders and late thumbnails never change cell geometry", async ({
   page,
 }) => {
