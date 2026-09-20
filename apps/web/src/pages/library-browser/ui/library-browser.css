@@ -135,7 +135,10 @@
   padding: 0.4rem 0.5rem;
   border-color: transparent;
   background: transparent;
+  color: inherit;
   text-align: left;
+  text-decoration: none;
+  cursor: pointer;
 }
 
 .source-card:hover:not(:disabled) {
@@ -201,6 +204,13 @@
   background: transparent;
   color: var(--muted);
   font-size: 0.72rem;
+}
+
+/* Resume resolves a saved position, so it reads as an action rather than as
+   the Album's Grid destination. */
+.album-resume {
+  color: var(--focus);
+  font-weight: 650;
 }
 
 .folder-expand {
