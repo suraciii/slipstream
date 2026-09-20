@@ -151,7 +151,7 @@ type BrowsePhoto = {
   selectionState: string;
   rating: number;
   originalFilename?: string;
-  originals?: ReadonlyArray<Readonly<{ kind: string }>>;
+  original?: Readonly<{ kind: string; available: boolean }>;
 };
 type AlbumMember = BrowsePhoto & { photoId: string; position: number };
 type AlbumState = { id: string; position: number; members: AlbumMember[] };
@@ -11682,7 +11682,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
           ...body,
           photos: body.photos.map((photo) => ({
             ...photo,
-            ambiguous: true,
+            original: { kind: "raw", available: true },
           })),
         },
       });
@@ -11702,14 +11702,14 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await image.scrollIntoViewIfNeeded();
   const cell = page.locator('[data-photo-index="0"]');
   const facts = cell.locator(".cell-facts");
-  const factsText = "Ambiguous pairing · Thumbnail delivery failed";
+  const factsText = "RAW · Thumbnail delivery failed";
   const accessibleName =
-    "Photo 1 of 1 — photo.jpg — Undecided — 0 stars — Ambiguous pairing — Thumbnail delivery failed";
+    "Photo 1 of 1 — photo.jpg — Undecided — 0 stars — RAW — Thumbnail delivery failed";
   await expect(image).toHaveAttribute("alt", "Photo 1 of 1");
   await expect(facts).toBeVisible();
   await expect(facts).toHaveText(factsText);
   await expect(cell).toHaveAccessibleName(
-    /Photo 1 of 1.*Ambiguous pairing.*Thumbnail delivery failed/,
+    /Photo 1 of 1.*RAW.*Thumbnail delivery failed/,
   );
   expect(thumbnailApiRequests).toBe(0);
   expect(derivativeRequests).toBe(1);
@@ -11778,7 +11778,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   expect(derivativeRequests).toBe(1);
 });
 
-test("Grid presents independent Photo, pairing, and Preview facts without removing actions", async ({
+test("Grid presents Photo, Original kind, and Preview facts without removing actions", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -11801,13 +11801,7 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
     const body = (await response.json()) as {
       start: number;
       total: number;
-      photos: Array<
-        BrowsePhoto & {
-          ambiguous: boolean;
-          originals: Array<Readonly<{ kind: string; available: boolean }>>;
-          preview: Readonly<{ state: string }>;
-        }
-      >;
+      photos: Array<BrowsePhoto & { preview: Readonly<{ state: string }> }>;
     };
     const photos = body.photos.map((photo) => {
       const position = ids.indexOf(photo.id);
@@ -11815,16 +11809,13 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
         return {
           ...photo,
           available: false,
-          originals: photo.originals.map((original) => ({
-            ...original,
-            available: false,
-          })),
+          original: { ...photo.original!, available: false },
           preview: { state: "unavailable" },
         };
       if (position === 1)
         return {
           ...photo,
-          ambiguous: true,
+          original: { kind: "raw", available: true },
           preview: { state: "unavailable" },
         };
       if (position === 2)
@@ -11850,7 +11841,7 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
     "Photo unavailable · Preview unavailable",
   );
   await expect(second.locator(".cell-facts")).toHaveText(
-    "Ambiguous pairing · Preview unavailable",
+    "RAW · Preview unavailable",
   );
   await expect(third.locator(".cell-facts")).toHaveText("Preview unavailable");
   await expect(fourth.locator(".cell-facts")).toHaveText("Preview failed");
@@ -11858,7 +11849,7 @@ test("Grid presents independent Photo, pairing, and Preview facts without removi
     /Photo 1 of 4.*Photo unavailable.*Preview unavailable/,
   );
   await expect(second).toHaveAccessibleName(
-    /Photo 2 of 4.*Ambiguous pairing.*Preview unavailable/,
+    /Photo 2 of 4.*RAW.*Preview unavailable/,
   );
   await expect(third).toHaveAccessibleName(/Photo 3 of 4.*Preview unavailable/);
   await expect(fourth).toHaveAccessibleName(/Photo 4 of 4.*Preview failed/);
@@ -12815,14 +12806,16 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
     }
     const response = await route.fetch();
     const body = (await response.json()) as {
-      photos: Array<{ id: string; ambiguous: boolean }>;
+      photos: Array<{ id: string; original: { kind: string } }>;
     };
     await route.fulfill({
       response,
       json: {
         ...body,
         photos: body.photos.map((photo) =>
-          photo.id === factPhotoId ? { ...photo, ambiguous: true } : photo,
+          photo.id === factPhotoId
+            ? { ...photo, original: { kind: "raw", available: true } }
+            : photo,
         ),
       },
     });
@@ -12870,7 +12863,7 @@ test("Grid cells keep uniform cards while displaying true Photo aspect ratios", 
     // Exactly one cell renders the Photo-state indicator, and it is the
     // portrait whose thumbnail is loaded.
     expect(cells.filter((cell) => cell.facts !== null)).toHaveLength(1);
-    expect(portrait!.facts).toBe("Ambiguous pairing");
+    expect(portrait!.facts).toBe("RAW");
     expect(landscape!.facts).toBeNull();
     // Sources below the bounded derivative target keep their exact pixels.
     expect([landscape!.naturalWidth, landscape!.naturalHeight]).toEqual([
@@ -13908,13 +13901,13 @@ test("EXIF-rotated thumbnails display the corrected orientation exactly once", a
   expect(cell!.indicatorsOverlapImage).toBe(false);
 });
 
-test("a RAW and JPEG pair renders one Grid cell with the JPEG's single rotation", async ({
+test("a RAW and its JPEG render independent Grid cells with the JPEG's rotation", async ({
   page,
 }) => {
   const { base, root } = await fixture();
-  // Same stem, two Originals, so the pair forms one Photo. The JPEG claims EXIF
-  // orientation 6 (320x180 displayed as 180x320) and the RAW bytes are
-  // deliberately unreadable, so the Preview comes from the matching JPEG.
+  // Same stem, two independent Photos. The JPEG claims EXIF orientation 6
+  // (320x180 displayed as 180x320); the RAW bytes are deliberately
+  // unreadable, so it never borrows the sibling JPEG's Preview.
   await writeFile(
     join(root, "a.jpg"),
     withExifOrientation(await jpegWithSize(page, 320, 180), 6),
@@ -13924,47 +13917,52 @@ test("a RAW and JPEG pair renders one Grid cell with the JPEG's single rotation"
   const opened = (await (
     await post(running.url, "/api/browse", { source: "library" })
   ).json()) as { token: string; total: number };
-  const paired = await browseWindow(running.url, opened.token, 0);
+  const independent = await browseWindow(running.url, opened.token, 0);
   await fetch(`${running.url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: running.url },
   });
-  // Pairing is name-based and independent of byte validity: the RAW and the
-  // JPEG are one Photo with both members, not two Photos.
-  expect(paired.total).toBe(1);
+  // Naming alone never shares identity: the RAW and the JPEG are two
+  // independent Photos.
+  expect(independent.total).toBe(2);
   expect(
-    paired.photos[0]!.originals?.map((original) => original.kind).sort(),
+    independent.photos
+      .map((photo) => photo.original?.kind)
+      .sort(),
   ).toEqual(["jpeg", "raw"]);
   await page.goto(running.url);
-  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
   await waitForGridFrame(page);
-  await expect(page.locator(".photo-cell[data-photo-index]")).toHaveCount(1);
+  await expect(page.locator(".photo-cell[data-photo-index]")).toHaveCount(2);
+  // Exactly one cell renders the JPEG's Preview with orientation 6 baked
+  // once: 180x320. A second rotation would render 320x180.
   await expect
     .poll(() =>
-      page
-        .locator(".photo-cell img")
-        .first()
-        .evaluate((image: HTMLImageElement) =>
+      page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll<HTMLImageElement>(".photo-cell img"),
+        ).map((image: HTMLImageElement) =>
           image.complete && image.naturalWidth > 0
             ? `${image.naturalWidth}x${image.naturalHeight}`
             : "pending",
         ),
+      ),
     )
-    .toBe("180x320");
-  const [cell] = await gridCellGeometry(page);
-  expect(cell).toBeDefined();
-  // Orientation 6 is baked once for the pair too: a second rotation would
-  // render 320x180.
-  expect(cell!.naturalWidth).toBe(180);
-  expect(cell!.naturalHeight).toBe(320);
-  expect(cell!.imageHeight).toBeGreaterThan(cell!.imageWidth);
+    .toContain("180x320");
+  const cells = await gridCellGeometry(page);
+  expect(cells).toHaveLength(2);
+  const oriented = cells.find(
+    (cell) => cell.naturalWidth === 180 && cell.naturalHeight === 320,
+  );
+  expect(oriented).toBeDefined();
+  expect(oriented!.imageHeight).toBeGreaterThan(oriented!.imageWidth);
   // The complete composition displays: the ratio survives, nothing crops, and
   // no indicator covers the image.
-  expectAspectRatio(cell!);
-  expect(cell!.imageInsideMedia).toBe(true);
-  expect(cell!.imageWidth).toBeLessThanOrEqual(cell!.mediaWidth + 1);
-  expect(cell!.imageHeight).toBeLessThanOrEqual(cell!.mediaHeight + 1);
-  expect(cell!.indicatorsOverlapImage).toBe(false);
+  expectAspectRatio(oriented!);
+  expect(oriented!.imageInsideMedia).toBe(true);
+  expect(oriented!.imageWidth).toBeLessThanOrEqual(oriented!.mediaWidth + 1);
+  expect(oriented!.imageHeight).toBeLessThanOrEqual(oriented!.mediaHeight + 1);
+  expect(oriented!.indicatorsOverlapImage).toBe(false);
 });
 
 test("Grid placeholders and late thumbnails never change cell geometry", async ({

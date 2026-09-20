@@ -585,7 +585,7 @@ describe("SourceGridOwner", () => {
     expect(owner.photoAt(240)?.id).toBe("photo-240");
   });
 
-  test("retains independent Photo, pairing, and Preview facts in a bounded window", async () => {
+  test("retains Photo, Original kind, and Preview facts in a bounded window", async () => {
     const photos = [
       {
         ...photo("unavailable-photo"),
@@ -593,8 +593,8 @@ describe("SourceGridOwner", () => {
         preview: { state: "unavailable" as const },
       },
       {
-        ...photo("ambiguous-photo"),
-        ambiguous: true,
+        ...photo("raw-photo"),
+        original: { kind: "raw" as const, available: true },
       },
       {
         ...photo("failed-preview"),
@@ -624,17 +624,17 @@ describe("SourceGridOwner", () => {
     expect(owner.retainedFactCount).toBe(photos.length);
     expect(owner.photoAt(0)).toMatchObject({
       available: false,
-      ambiguous: false,
+      original: { kind: "jpeg", available: true },
       preview: { state: "unavailable" },
     });
     expect(owner.photoAt(1)).toMatchObject({
       available: true,
-      ambiguous: true,
+      original: { kind: "raw", available: true },
       preview: { state: "inspection-pending" },
     });
     expect(owner.photoAt(2)).toMatchObject({
       available: true,
-      ambiguous: false,
+      original: { kind: "jpeg", available: true },
       preview: { state: "failed" },
     });
   });
