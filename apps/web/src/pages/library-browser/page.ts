@@ -1283,7 +1283,19 @@ export function mountLibraryBrowser(
         sourceGrid.kind === "album" &&
         sourceGrid.albumId === albumId
       )
-        await openSource("library");
+        // The open Album's destination became invalid, so the current entry is
+        // replaced with All Photos rather than left naming a deleted Album.
+        await openSource(
+          "library",
+          undefined,
+          undefined,
+          undefined,
+          "source-default",
+          "all",
+          {
+            address: "replace",
+          },
+        );
       return;
     }
 
@@ -1326,7 +1338,19 @@ export function mountLibraryBrowser(
       result.ok &&
       createdAlbum
     )
-      await openSource("album", createdAlbum);
+      // Creating an Album from the Sources panel chooses a new destination, so
+      // it creates one Grid entry exactly like choosing any other source.
+      await openSource(
+        "album",
+        createdAlbum,
+        undefined,
+        undefined,
+        "source-default",
+        "all",
+        {
+          address: "push",
+        },
+      );
   };
 
   const addFolderToAlbum = (albumId: string): void => {

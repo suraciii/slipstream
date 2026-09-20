@@ -5938,11 +5938,24 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
         "This Album contains no Photos. Add Photos from another source's Photo View.",
       ),
     ).toBeVisible();
+    // Creating an Album chooses a new destination, so the address names the
+    // exact Album the Grid presents.
+    const createdAddress = new URL(page.url());
+    expect(createdAddress.searchParams.get("source")).toBe("album");
+    expect(createdAddress.searchParams.get("photoId")).toBeNull();
+    expect(createdAddress.searchParams.get("albumId")).toBeTruthy();
     if (viewport.width === 390) await openSources(page);
     const created = page.getByRole("link", {
       name: new RegExp(`^${createdName} 0 Photos`),
     });
     await expect(created).toHaveClass(/active/);
+    // The entry names that same Album, so Back and Forward follow it.
+    expect(new URL(page.url()).searchParams.get("albumId")).toBe(
+      new URL(
+        (await created.getAttribute("href"))!,
+        running.url,
+      ).searchParams.get("albumId"),
+    );
     await expect(
       page.getByRole("button", { name: `Rename ${createdName}` }),
     ).toBeVisible();
@@ -6073,10 +6086,36 @@ test("deleting the open album returns to the All Photos source", async ({
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: /Session 0 Photos/ }).click();
   await expect(page.getByRole("heading", { name: "Session" })).toBeVisible();
+  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+  // Choosing the Album created one Grid destination naming it.
+  const albumAddress = new URL(page.url());
+  expect(albumAddress.searchParams.get("source")).toBe("album");
+  const deletedAlbumId = albumAddress.searchParams.get("albumId");
+  expect(deletedAlbumId).toBeTruthy();
   await page.getByRole("button", { name: "Delete Session" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
   await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  // The open Album's destination became invalid, so the entry is replaced with
+  // All Photos instead of left naming a deleted Album.
+  const replaced = new URL(page.url());
+  expect(replaced.search).toBe("");
+  expect(replaced.searchParams.get("albumId")).toBeNull();
+
+  // A later Photo open therefore addresses All Photos, and Back returns to
+  // the All Photos Grid rather than reporting a deleted Album.
+  const length = await historyLength(page);
+  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("albumId")).toBeNull();
+  expect(new URL(page.url()).searchParams.get("source")).toBeNull();
+  expect(await historyLength(page)).toBe(length + 1);
+  await traverseHistory(page, "back");
+  await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+  await expect(
+    page.getByText("This Album is no longer available."),
+  ).toBeHidden();
 });
 
 test("the current photo joins and leaves albums from the photo view", async ({
