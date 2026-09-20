@@ -551,6 +551,7 @@ async function openGrid(page: Page, url: string, name: string) {
   await openSources(page);
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   await page
+    .locator("[data-source-list]")
     .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
   await page
@@ -7959,7 +7960,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
       body: JSON.stringify({
         state: "ready",
         url: "/review.jpg",
-        source: "matching-jpeg",
+        source: "jpeg-original",
         stale: true,
         message: "Showing retained Preview.",
       }),
