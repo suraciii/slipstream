@@ -4790,6 +4790,356 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
     let _ = fs::remove_dir_all(base);
 }
 
+/// Deterministic manual-recovery HTTP fixture: one unavailable Photo with a
+/// retained Rating, Selection State, and Album membership, seeded before the
+/// Application opens. `fingerprint` optionally seeds a matching fingerprint
+/// for the remembered bytes.
+fn recovery_http_fixture(fingerprint: bool) -> (PathBuf, Config) {
+    let (base, config) = prepare_fixture();
+    fs::create_dir_all(&config.state_directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            config.state_directory.clone(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    let database =
+        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    database
+        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO library_metadata VALUES('canonical_root',?)",
+            [config.library_root.to_str().unwrap()],
+        )
+        .unwrap();
+    database.execute(
+        "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state,capture_source_revision) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','shoot/a.JPG','jpeg',11,1.0,0,'missing','remembered-revision')",
+        [],
+    ).unwrap();
+    database.execute(
+        "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',0,'unavailable','shoot/a.JPG','selected',3)",
+        [],
+    ).unwrap();
+    database
+        .execute("INSERT INTO albums VALUES('set','Trip',1)", [])
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO album_members VALUES('set','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',0)",
+            [],
+        )
+        .unwrap();
+    if fingerprint {
+        database.execute(
+            "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',?,11,1.0)",
+            [slipstream_core::digest_bytes(b"jpeg-bytes-a")],
+        ).unwrap();
+    }
+    drop(database);
+    (base, config)
+}
+
+async fn library_window(router: &Router) -> serde_json::Value {
+    let opened = response_json(
+        post_json(
+            router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let token = opened["token"].as_str().unwrap();
+    response_json(
+        send(
+            router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=60"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // The moved file appears only after the settled scan, so no automatic
+    // recovery can act and the persisted record stays unavailable.
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/recovery/unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    let record = &unavailable["unavailable"][0];
+    assert_eq!(record["location"], "shoot/a.JPG");
+    assert_eq!(record["kind"], "jpeg");
+    assert_eq!(record["rating"], 3);
+    assert_eq!(record["selectionState"], "selected");
+    assert_eq!(record["fingerprintEnrolled"], false);
+    assert_eq!(record["albumCount"], 1);
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let proposal = &proposals["proposals"][0];
+    assert_eq!(proposal["outcome"], "matched");
+    assert_eq!(proposal["verified"], false);
+    assert_eq!(proposal["toLocation"], "moved/a.JPG");
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+    assert_eq!(applied["unavailablePhotos"], 0);
+
+    // The restored Photo keeps its identity, decisions, and Album membership.
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 1);
+    let photo = &window["photos"][0];
+    assert_eq!(photo["id"], "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    assert_eq!(photo["available"], true);
+    assert_eq!(photo["originalFilename"], "a.JPG");
+    assert_eq!(photo["rating"], 3);
+    assert_eq!(photo["selectionState"], "selected");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_retires_discovered_destination_photo() {
+    let (base, config) = recovery_http_fixture(false);
+    // The moved file exists before open, so the initial scan discovers it as
+    // a new default-state Photo occupying the destination.
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // Both records are visible: the remembered unavailable Photo and the
+    // newly discovered occupier.
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 2);
+    let discovered = window["photos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|photo| photo["id"].as_str().unwrap().to_owned())
+        .find(|id| id != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        .unwrap();
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let proposal = &proposals["proposals"][0];
+    assert_eq!(proposal["outcome"], "occupied");
+    assert_eq!(proposal["retire"]["photoId"].as_str().unwrap(), discovered);
+
+    // Without the explicit retire the whole batch is refused with a 409.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","retireDestination":true}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 1);
+    let photo = &window["photos"][0];
+    assert_eq!(photo["id"], "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    assert_eq!(photo["rating"], 3);
+    assert_eq!(photo["selectionState"], "selected");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
+    let (base, config) = recovery_http_fixture(true);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    // Different content than the enrolled fingerprint.
+    fs::write(config.library_root.join("moved/a.JPG"), b"other-bytes").unwrap();
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(proposals["proposals"][0]["outcome"], "content-mismatch");
+
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = response_json(refused).await;
+    assert_eq!(body["rejections"][0]["reason"], "content-mismatch");
+
+    // Matching content verifies and commits.
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(proposals["proposals"][0]["outcome"], "matched");
+    assert_eq!(proposals["proposals"][0]["verified"], true);
+
+    let single = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(single["outcome"], "matched");
+    assert_eq!(single["verified"], true);
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_validates_requests() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let escape = post_json(
+        &router,
+        "/api/recovery/propose",
+        serde_json::json!({"oldPrefix":"..","newPrefix":"moved"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(escape.status(), StatusCode::BAD_REQUEST);
+
+    let unknown = post_json(
+        &router,
+        "/api/recovery/propose",
+        serde_json::json!({"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let empty = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let stale = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let body = response_json(stale).await;
+    assert_eq!(body["rejections"][0]["reason"], "stale");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 async fn send(router: &Router, request: Request<Body>) -> Response<Body> {
     tower::ServiceExt::oneshot(router.clone(), request)
         .await
