@@ -20,6 +20,30 @@ pub struct ScanStatusWire {
     pub completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// The committed recovery result of the most recent completed scan, once
+    /// one has completed since the server started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recovery: Option<ScanRecoveryWire>,
+    /// Truthful background fingerprint enrollment counters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprints: Option<FingerprintProgressWire>,
+}
+
+/// Recovery facts from the most recent committed scan.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRecoveryWire {
+    pub relocated_photos: usize,
+    pub fingerprinted_originals: usize,
+    pub unavailable_photos: usize,
+}
+
+/// Background fingerprint enrollment counters.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintProgressWire {
+    pub enrolled: usize,
+    pub pending: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -209,8 +233,7 @@ pub struct FolderAlbumMutationResponse {
 pub struct PhotoSummary {
     pub id: String,
     pub available: bool,
-    pub ambiguous: bool,
-    pub originals: Vec<OriginalWire>,
+    pub original: OriginalWire,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
     pub selection_state: &'static str,
@@ -279,32 +302,33 @@ pub(crate) fn photo_summary_indexed_with_url(
     preview_url: Option<String>,
     thumbnail_url: Option<String>,
 ) -> PhotoSummary {
-    let original = |id: &Option<String>, kind: &'static str| {
-        id.as_ref().and_then(|id| {
-            originals_by_id
-                .get(id)
-                .and_then(|position| originals.get(*position))
-                .map(|original| OriginalWire {
-                    kind,
-                    available: original.available,
-                })
-        })
+    let single = originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| originals.get(*position));
+    let original = single.map(|original| OriginalWire {
+        kind: match original.kind {
+            slipstream_core::OriginalKind::Raw => "raw",
+            slipstream_core::OriginalKind::Jpeg => "jpeg",
+        },
+        available: original.available,
+    });
+    let Some(original) = original else {
+        // A Photo without its Original record cannot be summarized; callers
+        // resolve unknown Photos before reaching this point.
+        unreachable!("summarized Photo has no Original record")
     };
     let original_filename = ordering_original_filename(photo, originals, originals_by_id);
-    let originals = [
-        original(&photo.raw_original_id, "raw"),
-        original(&photo.jpeg_original_id, "jpeg"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let source = photo.preview_source.map(preview_candidate);
+    let source = match photo.preview_state {
+        slipstream_core::PreviewState::Ready => single
+            .filter(|original| original.available && original.error_category.is_none())
+            .map(|original| preview_source(original.kind.preview_source())),
+        _ => None,
+    };
     let state = preview_state(photo.preview_state);
     PhotoSummary {
         id: photo.id.clone(),
         available: photo.available,
-        ambiguous: photo.ambiguous,
-        originals,
+        original,
         original_filename,
         selection_state: selection_state(photo.selection_state),
         rating: photo.rating,
@@ -333,12 +357,10 @@ fn ordering_original_filename(
     originals: &[slipstream_core::OriginalRecord],
     originals_by_id: &std::collections::HashMap<String, usize>,
 ) -> Option<String> {
-    [&photo.raw_original_id, &photo.jpeg_original_id]
-        .into_iter()
-        .flatten()
-        .filter_map(|id| originals_by_id.get(id))
-        .filter_map(|position| originals.get(*position))
-        .find_map(|original| {
+    originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| originals.get(*position))
+        .and_then(|original| {
             let path = original.relative_path.as_str();
             let filename = path.rsplit('/').next().unwrap_or(path);
             (!filename.is_empty()).then(|| filename.to_owned())
@@ -371,11 +393,8 @@ pub(crate) fn preview_state(state: PreviewState) -> &'static str {
     }
 }
 
-pub(crate) fn preview_candidate(candidate: PreviewCandidate) -> &'static str {
-    match candidate {
-        PreviewCandidate::MatchingJpeg => "matching-jpeg",
-        PreviewCandidate::EmbeddedRawJpeg => "embedded-raw-jpeg",
-    }
+pub(crate) fn preview_source(source: PreviewSource) -> &'static str {
+    source.wire_name()
 }
 
 pub(crate) fn derivative_target_name(target: DerivativeTarget) -> &'static str {
@@ -413,7 +432,7 @@ impl PreviewResponse {
     ) -> Self {
         Self {
             state: "ready",
-            source: Some(preview_candidate(ready.source)),
+            source: Some(ready.source.wire_name()),
             stale: Some(stale),
             width: Some(ready.width),
             height: Some(ready.height),
@@ -459,4 +478,142 @@ impl PreviewResponse {
 pub struct DerivativeDelivery {
     pub cache_key: String,
     pub bytes: Vec<u8>,
+}
+
+/// One unavailable Photo listed by the bounded recovery review entry.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnavailableOriginalWire {
+    pub original_id: String,
+    pub photo_id: String,
+    pub location: String,
+    pub kind: &'static str,
+    pub rating: u8,
+    pub selection_state: &'static str,
+    pub fingerprint_enrolled: bool,
+    pub album_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverySurveyWire {
+    pub unavailable: Vec<UnavailableOriginalWire>,
+}
+
+impl From<slipstream_core::RecoverySurvey> for RecoverySurveyWire {
+    fn from(survey: slipstream_core::RecoverySurvey) -> Self {
+        Self {
+            unavailable: survey
+                .unavailable
+                .into_iter()
+                .map(|record| UnavailableOriginalWire {
+                    original_id: record.original_id,
+                    photo_id: record.photo_id,
+                    location: record.relative_path,
+                    kind: match record.kind {
+                        slipstream_core::OriginalKind::Raw => "raw",
+                        slipstream_core::OriginalKind::Jpeg => "jpeg",
+                    },
+                    rating: record.rating,
+                    selection_state: match record.selection_state {
+                        slipstream_core::SelectionState::Undecided => "undecided",
+                        slipstream_core::SelectionState::Selected => "selected",
+                        slipstream_core::SelectionState::Rejected => "rejected",
+                    },
+                    fingerprint_enrolled: record.fingerprint.is_some(),
+                    album_count: record.album_count,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The occupying record an explicit retire-and-bind may replace.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetireCandidateWire {
+    pub photo_id: String,
+    pub original_id: String,
+    pub location: String,
+}
+
+/// One inspectable proposed mapping for an unavailable Original.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryProposalWire {
+    pub original_id: String,
+    pub photo_id: String,
+    pub from_location: String,
+    pub to_location: String,
+    pub kind: &'static str,
+    pub outcome: &'static str,
+    /// True when a persisted fingerprint matched the candidate digest; false
+    /// means historical content could not be verified and the confirmation
+    /// must say so.
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retire: Option<RetireCandidateWire>,
+}
+
+impl From<slipstream_core::ManualProposal> for RecoveryProposalWire {
+    fn from(proposal: slipstream_core::ManualProposal) -> Self {
+        let outcome = match &proposal.outcome {
+            slipstream_core::ManualOutcome::Matched => "matched",
+            slipstream_core::ManualOutcome::ContentMismatch => "content-mismatch",
+            slipstream_core::ManualOutcome::Missing => "missing",
+            slipstream_core::ManualOutcome::KindMismatch => "kind-mismatch",
+            slipstream_core::ManualOutcome::Unreadable => "unreadable",
+            slipstream_core::ManualOutcome::Occupied { .. } => "occupied",
+            slipstream_core::ManualOutcome::Colliding => "colliding",
+        };
+        let retire = match proposal.outcome {
+            slipstream_core::ManualOutcome::Occupied {
+                retire: Some(retire),
+            } => Some(RetireCandidateWire {
+                photo_id: retire.photo_id,
+                original_id: retire.original_id,
+                location: retire.location,
+            }),
+            _ => None,
+        };
+        Self {
+            original_id: proposal.original_id,
+            photo_id: proposal.photo_id,
+            from_location: proposal.from_location,
+            to_location: proposal.to_location,
+            kind: match proposal.kind {
+                slipstream_core::OriginalKind::Raw => "raw",
+                slipstream_core::OriginalKind::Jpeg => "jpeg",
+            },
+            outcome,
+            verified: proposal.verified,
+            retire,
+        }
+    }
+}
+
+/// Committed result of one manual relocation batch.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryApplyResponseWire {
+    pub relocated_photos: u64,
+    pub unavailable_photos: u64,
+}
+
+/// One per-mapping rejection for a refused batch.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRejectionWire {
+    pub original_id: String,
+    pub reason: &'static str,
+}
+
+/// Structured 409 body for a rejected recovery batch: one primary message
+/// plus per-mapping reasons. The whole batch is refused without partial
+/// association.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRejectionResponseWire {
+    pub message: &'static str,
+    pub rejections: Vec<RecoveryRejectionWire>,
 }

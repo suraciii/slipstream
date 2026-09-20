@@ -4,7 +4,7 @@ import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
 
 type ViewSelectionState = "undecided" | "selected" | "rejected";
-type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
+type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
 /**
  * Grid thumbnail sizes. Each step is the cell box the CSS renders; the Grid
@@ -171,7 +171,28 @@ export type LibraryBrowserIntent =
       value: ViewSelectionState | number;
     }>
   | Readonly<{ kind: "membership-toggle"; albumId: string; member: boolean }>
-  | Readonly<{ kind: "membership-retry" }>;
+  | Readonly<{ kind: "membership-retry" }>
+  | Readonly<{ kind: "recovery-entry" | "recovery-close" }>
+  | Readonly<{
+      kind: "recovery-propose";
+      oldPrefix: string;
+      newPrefix: string;
+    }>
+  | Readonly<{
+      kind: "recovery-propose-single";
+      originalId: string;
+      newLocation: string;
+    }>
+  | Readonly<{
+      kind: "recovery-apply";
+      items: ReadonlyArray<
+        Readonly<{
+          originalId: string;
+          newLocation: string;
+          retireDestination: boolean;
+        }>
+      >;
+    }>;
 
 type GridThumbnailBinding = Readonly<{
   photoId: string;
@@ -253,7 +274,7 @@ export type FolderAlbumViewModel = Readonly<{
 type GridPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
-  ambiguous: boolean;
+  original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
   originalFilename?: string;
   selectionState: ViewSelectionState;
   rating: number;
@@ -261,6 +282,35 @@ type GridPhotoViewModel = Readonly<{
     state: "inspection-pending" | "ready" | "unavailable" | "failed";
     thumbnailUrl?: string;
   }>;
+}>;
+
+/// One unavailable Original the bounded recovery review entry lists.
+export type RecoveryEntryViewModel = Readonly<{
+  originalId: string;
+  location: string;
+  kind: "raw" | "jpeg";
+  rating: number;
+  selectionState: ViewSelectionState;
+  albumCount: number;
+  fingerprintEnrolled: boolean;
+}>;
+
+/// One inspectable proposed mapping for an unavailable Original.
+export type RecoveryProposalViewModel = Readonly<{
+  originalId: string;
+  fromLocation: string;
+  toLocation: string;
+  kind: "raw" | "jpeg";
+  outcome:
+    | "matched"
+    | "content-mismatch"
+    | "missing"
+    | "kind-mismatch"
+    | "unreadable"
+    | "occupied"
+    | "colliding";
+  verified: boolean;
+  retire: Readonly<{ photoId: string; location: string }> | null;
 }>;
 
 type GridBatchResultViewModel = Readonly<{
@@ -477,6 +527,25 @@ export interface LibraryBrowserView {
   setAlbumFormMessage(formId: string, message: string): void;
   setAlbumFormPending(formId: string, pending: boolean, name?: string): void;
   dismissAlbumForm(formId: string): void;
+  /// Presents the committed recovery counts of the last scan and, while
+  /// Originals remain unavailable, the one bounded review entry.
+  setRecoveryNotice(
+    model: Readonly<{
+      relocatedPhotos: number;
+      unavailablePhotos: number;
+    }>,
+  ): void;
+  /// Opens the recovery review with the remembered facts of every
+  /// unavailable Original.
+  openRecoveryPanel(entries: ReadonlyArray<RecoveryEntryViewModel>): void;
+  /// Presents inspectable proposed mappings; each occupied destination that
+  /// an explicit retire-and-bind may replace carries its checkbox.
+  renderRecoveryProposals(
+    proposals: ReadonlyArray<RecoveryProposalViewModel>,
+  ): void;
+  setRecoveryPending(pending: boolean): void;
+  setRecoveryMessage(text?: string): void;
+  closeRecoveryPanel(): void;
   dispose(): void;
 }
 
@@ -509,6 +578,7 @@ export function createLibraryBrowserView(
         <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
           <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
           <p data-summary-status role="status">Loading Library…</p>
+          <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
           <div class="source-list" data-source-list></div>
           <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
         </nav>
@@ -569,6 +639,27 @@ export function createLibraryBrowserView(
             <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
           </section>
         </section>
+        <section class="recovery-panel" data-recovery-panel hidden aria-labelledby="recovery-title">
+          <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
+          <p class="recovery-summary" data-recovery-summary role="status"></p>
+          <ul class="recovery-list" data-recovery-list></ul>
+          <div class="recovery-forms">
+            <div class="recovery-batch">
+              <label>Old folder prefix<input data-recovery-old-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2023/travel" /></label>
+              <label>New folder prefix<input data-recovery-new-prefix type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel" /></label>
+              <button type="button" data-recovery-propose>Propose batch mappings</button>
+            </div>
+            <div class="recovery-single">
+              <label>Single Original<select data-recovery-single-original></select></label>
+              <label>New location<input data-recovery-single-location type="text" autocomplete="off" spellcheck="false" placeholder="2024/travel/renamed.ARW" /></label>
+              <button type="button" data-recovery-propose-single>Propose this mapping</button>
+            </div>
+          </div>
+          <p class="recovery-note" data-recovery-note hidden>Old content cannot be verified for Originals without a fingerprint. Review every mapping and confirm explicitly.</p>
+          <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
+          <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
+          <p class="recovery-message" data-recovery-message role="alert" hidden></p>
+        </section>
       </section>
     </div>`;
 
@@ -587,6 +678,82 @@ export function createLibraryBrowserView(
   const sourceScrim = required<HTMLElement>(root, "[data-source-scrim]");
   const connection = required<HTMLElement>(root, "[data-connection]");
   const summaryStatus = required<HTMLElement>(root, "[data-summary-status]");
+  const recoveryNotice = required<HTMLElement>(root, "[data-recovery-notice]");
+  const recoveryPanel = required<HTMLElement>(root, "[data-recovery-panel]");
+  const recoverySummary = required<HTMLElement>(
+    root,
+    "[data-recovery-summary]",
+  );
+  const recoveryList = required<HTMLElement>(root, "[data-recovery-list]");
+  const recoveryOldPrefix = required<HTMLInputElement>(
+    root,
+    "[data-recovery-old-prefix]",
+  );
+  const recoveryNewPrefix = required<HTMLInputElement>(
+    root,
+    "[data-recovery-new-prefix]",
+  );
+  const recoveryPropose = required<HTMLButtonElement>(
+    root,
+    "[data-recovery-propose]",
+  );
+  const recoverySingleOriginal = required<HTMLSelectElement>(
+    root,
+    "[data-recovery-single-original]",
+  );
+  const recoverySingleLocation = required<HTMLInputElement>(
+    root,
+    "[data-recovery-single-location]",
+  );
+  const recoveryProposeSingle = required<HTMLButtonElement>(
+    root,
+    "[data-recovery-propose-single]",
+  );
+  const recoveryNote = required<HTMLElement>(root, "[data-recovery-note]");
+  const recoveryProposalList = required<HTMLElement>(
+    root,
+    "[data-recovery-proposals]",
+  );
+  const recoveryApply = required<HTMLButtonElement>(
+    root,
+    "[data-recovery-apply]",
+  );
+  const recoveryMessage = required<HTMLElement>(
+    root,
+    "[data-recovery-message]",
+  );
+  const recoveryClose = required<HTMLButtonElement>(
+    root,
+    "[data-recovery-close]",
+  );
+  let recoveryCurrentProposals: ReadonlyArray<RecoveryProposalViewModel> = [];
+  const recoveryRetireSelection = new Map<string, boolean>();
+  const recoveryOutcomeLabel = (
+    outcome: RecoveryProposalViewModel["outcome"],
+  ): string =>
+    ({
+      matched: "Ready to recover",
+      "content-mismatch": "Content differs from the remembered fingerprint",
+      missing: "No file at the destination",
+      "kind-mismatch": "Destination format differs",
+      unreadable: "Destination cannot be read",
+      occupied: "Destination already holds another Photo",
+      colliding: "Another mapping targets this destination",
+    })[outcome];
+  const updateRecoveryApply = (): void => {
+    const applicable = recoveryCurrentProposals.filter(
+      (proposal) =>
+        proposal.outcome === "matched" ||
+        (proposal.outcome === "occupied" &&
+          proposal.retire &&
+          recoveryRetireSelection.get(proposal.originalId)),
+    );
+    recoveryApply.textContent =
+      applicable.length === 1
+        ? "Apply 1 mapping"
+        : `Apply ${applicable.length} mappings`;
+    recoveryApply.hidden = applicable.length === 0;
+  };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
@@ -3270,6 +3437,40 @@ export function createLibraryBrowserView(
   stageObserver.observe(stage);
   back.addEventListener("click", () => send({ kind: "show-grid" }));
   refresh.addEventListener("click", () => send({ kind: "refresh" }));
+  recoveryClose.addEventListener("click", () =>
+    send({ kind: "recovery-close" }),
+  );
+  recoveryPropose.addEventListener("click", () =>
+    send({
+      kind: "recovery-propose",
+      oldPrefix: recoveryOldPrefix.value.trim(),
+      newPrefix: recoveryNewPrefix.value.trim(),
+    }),
+  );
+  recoveryProposeSingle.addEventListener("click", () =>
+    send({
+      kind: "recovery-propose-single",
+      originalId: recoverySingleOriginal.value,
+      newLocation: recoverySingleLocation.value.trim(),
+    }),
+  );
+  recoveryApply.addEventListener("click", () => {
+    const items = recoveryCurrentProposals
+      .filter(
+        (proposal) =>
+          proposal.outcome === "matched" ||
+          (proposal.outcome === "occupied" &&
+            proposal.retire &&
+            recoveryRetireSelection.get(proposal.originalId)),
+      )
+      .map((proposal) => ({
+        originalId: proposal.originalId,
+        newLocation: proposal.toLocation,
+        retireDestination: proposal.outcome === "occupied",
+      }));
+    if (items.length === 0) return;
+    send({ kind: "recovery-apply", items });
+  });
   gridEmptyAction.addEventListener("click", () =>
     send({ kind: "library-check" }),
   );
@@ -3765,6 +3966,138 @@ export function createLibraryBrowserView(
       albumForm = undefined;
       if (sourceModel) renderSources(sourceModel);
     },
+    setRecoveryNotice(model) {
+      if (!alive) return;
+      const parts: string[] = [];
+      if (model.relocatedPhotos > 0)
+        parts.push(
+          `Updated locations for ${formatPhotoCount(model.relocatedPhotos)}.`,
+        );
+      if (model.unavailablePhotos > 0)
+        parts.push(
+          `${formatPhotoCount(model.unavailablePhotos)} still unavailable.`,
+        );
+      recoveryNotice.replaceChildren();
+      if (parts.length === 0) {
+        recoveryNotice.hidden = true;
+        return;
+      }
+      recoveryNotice.append(document.createTextNode(parts.join(" ")));
+      if (model.unavailablePhotos > 0) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "summary-action";
+        button.textContent = "Review unavailable originals";
+        button.addEventListener("click", () =>
+          send({ kind: "recovery-entry" }),
+        );
+        recoveryNotice.append(" ", button);
+      }
+      recoveryNotice.hidden = false;
+    },
+    openRecoveryPanel(entries) {
+      if (!alive) return;
+      recoveryCurrentProposals = [];
+      recoveryRetireSelection.clear();
+      recoverySummary.textContent = `${formatPhotoCount(entries.length)} unavailable`;
+      const rows = entries.slice(0, 100).map((entry) => {
+        const item = document.createElement("li");
+        const decisions = [
+          selectionLabel(entry.selectionState),
+          entry.rating > 0 ? `${entry.rating} stars` : null,
+          entry.albumCount > 0
+            ? `${entry.albumCount} album${entry.albumCount === 1 ? "" : "s"}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        const fingerprint = entry.fingerprintEnrolled
+          ? "Fingerprint on file"
+          : "No fingerprint";
+        item.textContent = `${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint}`;
+        return item;
+      });
+      if (entries.length > 100) {
+        const more = document.createElement("li");
+        more.textContent = `…and ${entries.length - 100} more`;
+        rows.push(more);
+      }
+      recoveryList.replaceChildren(...rows);
+      recoverySingleOriginal.replaceChildren(
+        ...entries.map((entry) =>
+          Object.assign(document.createElement("option"), {
+            value: entry.originalId,
+            textContent: entry.location,
+          }),
+        ),
+      );
+      recoveryProposalList.replaceChildren();
+      recoveryProposalList.hidden = true;
+      recoveryNote.hidden = true;
+      recoveryApply.hidden = true;
+      recoveryMessage.hidden = true;
+      recoverySingleLocation.value = "";
+      recoveryPanel.hidden = false;
+    },
+    renderRecoveryProposals(proposals) {
+      if (!alive) return;
+      recoveryCurrentProposals = proposals;
+      recoveryNote.hidden = !proposals.some((proposal) => !proposal.verified);
+      const rows = proposals.map((proposal) => {
+        const item = document.createElement("li");
+        const heading = document.createElement("p");
+        heading.className = "recovery-proposal-path";
+        heading.textContent = `${proposal.fromLocation} → ${proposal.toLocation}`;
+        const facts = document.createElement("p");
+        facts.className = "recovery-proposal-facts";
+        facts.textContent = `${recoveryOutcomeLabel(proposal.outcome)} · ${
+          proposal.verified
+            ? "Content verified"
+            : "Old content cannot be verified"
+        }`;
+        item.append(heading, facts);
+        if (proposal.outcome === "occupied" && proposal.retire) {
+          const retireLabel = document.createElement("label");
+          retireLabel.className = "recovery-retire";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.addEventListener("change", () => {
+            recoveryRetireSelection.set(proposal.originalId, checkbox.checked);
+            updateRecoveryApply();
+          });
+          retireLabel.append(
+            checkbox,
+            document.createTextNode(
+              `Replace the discovered Photo at ${proposal.retire.location}`,
+            ),
+          );
+          item.append(retireLabel);
+        }
+        return item;
+      });
+      recoveryProposalList.replaceChildren(...rows);
+      recoveryProposalList.hidden = proposals.length === 0;
+      updateRecoveryApply();
+    },
+    setRecoveryPending(pending) {
+      if (!alive) return;
+      recoveryPropose.disabled = pending;
+      recoveryProposeSingle.disabled = pending;
+      recoveryApply.disabled = pending;
+    },
+    setRecoveryMessage(text) {
+      if (!alive) return;
+      if (!text) {
+        recoveryMessage.hidden = true;
+        return;
+      }
+      recoveryMessage.textContent = text;
+      recoveryMessage.hidden = false;
+    },
+    closeRecoveryPanel() {
+      if (!alive) return;
+      recoveryPanel.hidden = true;
+    },
     dispose() {
       if (!alive) return;
       alive = false;
@@ -3813,7 +4146,7 @@ function gridPhotoFacts(
 ): string[] {
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
-  if (photo.ambiguous) facts.push("Ambiguous pairing");
+  if (photo.original.kind === "raw") facts.push("RAW");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
@@ -3832,7 +4165,7 @@ function gridCellSignature(
     photo.id,
     photo.originalFilename ?? "",
     photo.available ? "available" : "unavailable",
-    photo.ambiguous ? "ambiguous" : "paired",
+    photo.original.kind,
     photo.selectionState,
     String(photo.rating),
     photo.preview.state,
@@ -3891,9 +4224,9 @@ function gridThumbnailTarget(
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {
-  return source === "matching-jpeg"
+  return source === "jpeg-original"
     ? "JPEG"
-    : source === "embedded-raw-jpeg"
+    : source === "raw-embedded-jpeg"
       ? "RAW embedded JPEG"
       : "—";
 }

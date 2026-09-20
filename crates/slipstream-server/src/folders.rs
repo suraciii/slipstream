@@ -34,10 +34,9 @@ pub(crate) struct FolderIndex {
 impl FolderIndex {
     /// Derives the Folder index from Published ordering Original Locations.
     ///
-    /// A Photo projects through its RAW Original Location when one exists and
-    /// otherwise through its JPEG Original Location, so a paired Photo counts
-    /// once. Remembered unavailable Originals keep their last known Location
-    /// and therefore keep their Folder projection.
+    /// A Photo projects through its own Original File's Location, so every
+    /// Photo counts once. Remembered unavailable Originals keep their last
+    /// known Location and therefore keep their Folder projection.
     pub(crate) fn derive(
         photos: &[slipstream_core::PhotoRecord],
         originals_by_id: &HashMap<String, usize>,
@@ -45,13 +44,8 @@ impl FolderIndex {
     ) -> Self {
         let mut direct_counts: HashMap<String, usize> = HashMap::new();
         for photo in photos {
-            let ordering_id = photo
-                .raw_original_id
-                .as_deref()
-                .or(photo.jpeg_original_id.as_deref());
-            let Some(ordering_id) = ordering_id else {
-                continue;
-            };
+            let ordering_id = photo.original_id.as_str();
+            let ordering_id: &str = ordering_id;
             let Some(&position) = originals_by_id.get(ordering_id) else {
                 continue;
             };
@@ -165,13 +159,8 @@ impl FolderIndex {
         };
         let mut ids = Vec::new();
         for photo in photos {
-            let ordering_id = photo
-                .raw_original_id
-                .as_deref()
-                .or(photo.jpeg_original_id.as_deref());
-            let Some(ordering_id) = ordering_id else {
-                continue;
-            };
+            let ordering_id = photo.original_id.as_str();
+            let ordering_id: &str = ordering_id;
             let Some(&position) = originals_by_id.get(ordering_id) else {
                 continue;
             };

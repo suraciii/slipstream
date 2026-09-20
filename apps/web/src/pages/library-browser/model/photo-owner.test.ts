@@ -30,8 +30,7 @@ const deferred = <T>(): Deferred<T> => {
 const fact = (id: string): PhotoSummary => ({
   id,
   available: true,
-  ambiguous: false,
-  originals: [{ kind: "jpeg", available: true }],
+  original: { kind: "jpeg", available: true },
   selectionState: "undecided",
   rating: 0,
   preview: { state: "inspection-pending" },
@@ -221,7 +220,7 @@ describe("PhotoOwner", () => {
       Response.json({
         state: "ready",
         url: "/review.jpg",
-        source: "matching-jpeg",
+        source: "jpeg-original",
       }),
     );
     expect((await preview).kind).toBe("detached");
@@ -239,7 +238,7 @@ describe("PhotoOwner", () => {
           Response.json({
             state: "ready",
             url: "/review.jpg",
-            source: "matching-jpeg",
+            source: "jpeg-original",
           }),
         ),
       source,

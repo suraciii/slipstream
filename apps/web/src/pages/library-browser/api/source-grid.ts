@@ -66,20 +66,15 @@ const validPhotoSummary = (value: unknown): value is PhotoSummary => {
   )
     return false;
   if (
-    !Array.isArray(value.originals) ||
-    !value.originals.every(
-      (original) =>
-        isRecord(original) &&
-        (original.kind === "raw" || original.kind === "jpeg") &&
-        typeof original.available === "boolean",
-    )
+    !isRecord(value.original) ||
+    !(value.original.kind === "raw" || value.original.kind === "jpeg") ||
+    typeof value.original.available !== "boolean"
   )
     return false;
   return (
     typeof value.id === "string" &&
     value.id.length > 0 &&
     typeof value.available === "boolean" &&
-    typeof value.ambiguous === "boolean" &&
     validOptional(
       value.originalFilename,
       (item) => typeof item === "string" && item.length > 0,
@@ -92,7 +87,7 @@ const validPhotoSummary = (value: unknown): value is PhotoSummary => {
     Number(value.rating) <= 5 &&
     validOptional(
       preview.source,
-      (source) => source === "matching-jpeg" || source === "embedded-raw-jpeg",
+      (source) => source === "jpeg-original" || source === "raw-embedded-jpeg",
     ) &&
     validOptional(preview.width, Number.isInteger) &&
     validOptional(preview.height, Number.isInteger) &&

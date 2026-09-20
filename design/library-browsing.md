@@ -59,10 +59,10 @@ One process may retain only a bounded number of Snapshots. Explicit close, idle 
 A Browse Window is a bounded consecutive range within one Browse Snapshot. Each item contains only the facts needed by Grid View and Photo View:
 
 - position and Photo ID;
-- availability and ambiguity;
+- availability of the Photo and its Original;
 - Selection State and Rating;
-- Original kinds and availability;
-- the ordering Original Location's filename, because Grid View and Photo View identify a Photo by the Original File the Photographer decides on;
+- the single Original's kind;
+- the ordering Original filename, because Grid View and Photo View identify a Photo by the Original File the Photographer decides on;
 - current thumbnail and review-Preview facts; and
 - derivative URLs only when current cache identities are known.
 
@@ -70,16 +70,14 @@ The ordering Original filename is a basename only. The relative Location,
 absolute paths, and the Library Folder's absolute path never cross this
 boundary.
 
-A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library.
+A request must provide a start position and bounded limit. The server enforces a small maximum. No browser-facing route may use omission of the limit to mean the complete Library. Each Grid item's Photo summary carries one `original` fact with its kind and availability; the retired `ambiguous` and `originals` array fields must not appear in any current response.
 
 ### Photo Review Metadata
 
 Photo View obtains a bounded, Photo-scoped metadata view through
 `GET /api/photos/{id}/metadata`. The response contains only Capture Time,
-Aperture, ISO, Shutter Speed, and Focal Length when the authoritative
-Original provides them. The server selects the RAW Original when it owns the
-authoritative Capture Time and falls back to the paired JPEG when RAW does
-not. Missing fields are omitted from the response and are rendered as `—` by
+Aperture, ISO, Shutter Speed, and Focal Length when the Photo's own
+Original File provides them. Missing fields are omitted from the response and are rendered as `—` by
 the browser. Reading metadata is read-only and failure does not make the Photo
 unavailable or block review actions.
 
@@ -116,7 +114,9 @@ Loading Status reports real phases and counts. It distinguishes:
 - opening admitted persisted state;
 - discovering supported Original Files;
 - inspecting Capture Time facts;
+- recovering relocated Original Files;
 - applying a completed scan;
+- enrolling content fingerprints;
 - idle;
 - failed with the prior Published Library retained; and
 - initializing when no Published Library exists.
@@ -150,8 +150,13 @@ POST   /api/browse
 GET    /api/browse/{token}?start={position}&limit={count}
 GET    /api/browse/{token}/position?photoId={id}
 GET    /api/photos/{id}/albums
+GET    /api/recovery/unavailable
+POST   /api/recovery/propose
+POST   /api/recovery/apply
 DELETE /api/browse/{token}
 ```
+
+Loading Status also reports the committed recovery result of the most recent completed scan as `lastRecovery {relocatedPhotos, fingerprintedOriginals, unavailablePhotos}` and the enrollment counters as `fingerprints {enrolled, pending}`. The scan phase `recovering` covers fingerprint comparison for candidate locations. The recovery routes serve the bounded manual recovery contract in [Photo Library and Albums](../docs/photo-library.md): `unavailable` lists remembered facts, `propose` returns inspectable mappings without writing, and `apply` commits one approved batch of relocations with per-mapping revalidation. A proposal carries a per-mapping outcome of `matched`, `content-mismatch`, `missing`, `kind-mismatch`, `unreadable`, `occupied`, or `colliding`, and marks the mapping verified only when a persisted fingerprint matched the candidate digest.
 
 When a Published Library exists, both `GET /api/overview` and
 `GET /api/status` include its opaque publication generation. The browser uses
@@ -503,7 +508,7 @@ A failed File Location request does not clear successfully loaded Folder nodes. 
 
 A failed Browse Window request does not clear successfully loaded windows. The browser identifies the failed range and retries that range.
 
-A bounded Grid Photo fact retains the server-supplied Photo availability, pairing ambiguity, and Preview state independently. A browser-owned thumbnail delivery failure remains bounded and attached to that Photo without replacing those server facts. None of these outcomes blocks sibling cells, navigation, Selection State, or Rating.
+A bounded Grid Photo fact retains the server-supplied Photo availability, Original availability, and Preview state independently. A browser-owned thumbnail delivery failure remains bounded and attached to that Photo without replacing those server facts. None of these outcomes blocks sibling cells, navigation, Selection State, or Rating.
 
 A background rescan failure retains the prior Published Library and reports an actionable failed status. It must not publish a partial order. Root binding mismatch, schema rejection, sidecar admission failure, and invalid storage layout remain hard failures rather than background warnings.
 
@@ -586,7 +591,8 @@ Verification must include a generated Library projection with at least 40,000 Ph
 
 - Library Overview size does not grow with Photo count except encoded counts and Album summaries;
 - every File Location Window respects an enforced maximum, retained windows share one publication, expiration reloads rather than mixes generations, and no route returns the complete Folder tree or complete recursive membership;
-- File Location counts deduplicate RAW/JPEG pairs and include remembered unavailable Photos at their last known Locations;
+- File Location counts count each Photo once and include remembered unavailable Photos at their last known Locations;
+- a moved Original File is restored before any new Photo is allocated, and an ambiguous or unprovable group stays unavailable without state transfer;
 - the first Grid becomes interactive without a complete Photo transfer;
 - every Browse Window respects the enforced maximum;
 - browser-retained Folder nodes, Photo facts, and rendered cells remain bounded while navigating and scrolling from the first to a late position;
@@ -600,6 +606,7 @@ Verification must include a generated Library projection with at least 40,000 Ph
 - Selection State, Rating, undo, and saved Album position mutations refresh only affected facts and survive restart;
 - a batch Selection State write compares every existing requested Photo with its expected state in one transaction, reports exactly one non-overlapping `applied`, `changedElsewhere`, or `missing` outcome per request item, never overwrites a changed Photo, rejects an over-limit or malformed request before any write, moves the source's decision counts only for confirmed Photos, and undoes as one unit through per-Photo compare-and-set;
 - current Preview work outranks adjacent and Grid work under the shared capacity-two budget;
+- the manual recovery routes list remembered unavailable facts, return inspectable proposals without writing, commit one approved batch atomically, and refuse a stale or colliding batch without partial association;
 - a generated thumbnail and review Preview are reused from server cache after process restart and from browser HTTP cache when identity is unchanged;
 - a source revision change cannot reuse an old derivative as current;
 - cache removal rebuilds derivatives without changing SQLite user state or Original File hashes;

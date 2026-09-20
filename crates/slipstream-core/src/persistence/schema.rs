@@ -7,6 +7,7 @@ const SCHEMA_V2_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/
 const SCHEMA_V3_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v3.json");
 const SCHEMA_V4_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v4.json");
 const SCHEMA_V5_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v5.json");
+const SCHEMA_V6_MANIFEST: &str = include_str!("../../../../compatibility/sqlite/schema-v6.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaVersion {
@@ -15,6 +16,7 @@ pub enum SchemaVersion {
     V3,
     V4,
     V5,
+    V6,
 }
 
 impl SchemaVersion {
@@ -25,6 +27,7 @@ impl SchemaVersion {
             Self::V3 => SCHEMA_V3_MANIFEST,
             Self::V4 => SCHEMA_V4_MANIFEST,
             Self::V5 => SCHEMA_V5_MANIFEST,
+            Self::V6 => SCHEMA_V6_MANIFEST,
         }
     }
 }

@@ -38,6 +38,9 @@ pub(crate) fn classify_extension(extension: &[u8]) -> Option<OriginalKind> {
     }
 }
 
+/// The base name without its final extension. Historical pairing grouped
+/// same-stem RAW/JPEG files; with independent Photos this remains only as a
+/// compatibility reference for legacy fixtures.
 pub fn pairing_stem(name: &str) -> &str {
     name.rfind('.')
         .map_or(name, |dot| if dot > 0 { &name[..dot] } else { name })
@@ -57,15 +60,6 @@ pub fn original_id(path: &str) -> String {
 
 pub fn standalone_photo_id(original_id: &str) -> String {
     digest(&[b"photo\0", original_id.as_bytes()])
-}
-
-pub fn paired_photo_id(raw_original_id: &str, jpeg_original_id: &str) -> String {
-    digest(&[
-        b"photo\0",
-        raw_original_id.as_bytes(),
-        b"\0",
-        jpeg_original_id.as_bytes(),
-    ])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,7 +93,6 @@ mod tests {
     #[derive(Deserialize)]
     struct Contract {
         vectors: Vec<Vector>,
-        paired: Pair,
     }
 
     #[derive(Deserialize)]
@@ -114,16 +107,6 @@ mod tests {
         photo_id: String,
         #[serde(rename = "sourceRevision")]
         source_revision: String,
-    }
-
-    #[derive(Deserialize)]
-    struct Pair {
-        #[serde(rename = "rawOriginalId")]
-        raw_original_id: String,
-        #[serde(rename = "jpegOriginalId")]
-        jpeg_original_id: String,
-        #[serde(rename = "photoId")]
-        photo_id: String,
     }
 
     fn contract_path() -> PathBuf {
@@ -210,12 +193,5 @@ mod tests {
                 vector.source_revision
             );
         }
-        assert_eq!(
-            paired_photo_id(
-                &contract.paired.raw_original_id,
-                &contract.paired.jpeg_original_id
-            ),
-            contract.paired.photo_id
-        );
     }
 }

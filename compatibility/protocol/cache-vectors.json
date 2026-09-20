@@ -1,8 +1,11 @@
 [
   {
     "name": "matching-jpeg-derivative",
-    "setup": "matching-jpeg",
-    "request": { "method": "GET", "target": "generated-derivative" },
+    "setup": "jpeg-original",
+    "request": {
+      "method": "GET",
+      "target": "generated-derivative"
+    },
     "expected": {
       "status": 200,
       "headers": {
@@ -13,12 +16,18 @@
       "etagPattern": "^\"[a-f0-9]{64}\"$",
       "minimumBodyBytes": 1
     },
-    "revalidation": { "header": "if-none-match", "expectedStatus": 304 }
+    "revalidation": {
+      "header": "if-none-match",
+      "expectedStatus": 304
+    }
   },
   {
     "name": "fingerprinted-web-asset",
     "setup": "web-asset",
-    "request": { "method": "GET", "path": "/assets/app.js" },
+    "request": {
+      "method": "GET",
+      "path": "/assets/app.js"
+    },
     "expected": {
       "status": 200,
       "headers": {

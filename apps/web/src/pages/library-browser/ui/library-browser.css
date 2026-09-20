@@ -1975,6 +1975,119 @@
   }
 }
 
+/* Recovery review: one bounded entry from scan results, remembered facts,
+   inspectable proposals, and explicit confirmation. */
+.recovery-notice {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+}
+
+.recovery-panel {
+  position: fixed;
+  inset: 10% auto auto 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  width: min(680px, calc(100vw - 2rem));
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--surface, #1d1f24);
+  color: inherit;
+  border: 1px solid var(--border, #33363d);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.45);
+}
+
+.recovery-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.recovery-summary {
+  margin: 0.5rem 0 0;
+  font-size: 0.88rem;
+}
+
+.recovery-list {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+}
+
+.recovery-forms {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.recovery-batch,
+.recovery-single {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+}
+
+.recovery-batch label,
+.recovery-single label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  flex: 1 1 10rem;
+}
+
+.recovery-note {
+  margin: 0.25rem 0;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-proposals {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.recovery-proposal-path {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.recovery-proposal-facts {
+  margin: 0.1rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.recovery-retire {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+.recovery-message {
+  margin: 0.25rem 0 0;
+  font-size: 0.85rem;
+  color: var(--danger, #e5484d);
+}
+
 @media (max-width: 420px) {
   .app-header h1 {
     font-size: 0.92rem;

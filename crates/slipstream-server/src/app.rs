@@ -73,6 +73,30 @@ impl Published {
     }
 }
 
+/// One confirmed mapping from the review entry's apply request.
+#[derive(Clone)]
+pub(crate) struct RecoveryApplyItem {
+    pub original_id: String,
+    pub new_location: String,
+    pub retire_destination: bool,
+}
+
+/// Structured failure for one manual recovery apply request.
+pub(crate) enum RecoveryApplyError {
+    Invalid,
+    Rejected {
+        message: &'static str,
+        rejections: Vec<RecoveryRejectionWire>,
+    },
+    Server(ServerError),
+}
+
+impl From<ServerError> for RecoveryApplyError {
+    fn from(error: ServerError) -> Self {
+        Self::Server(error)
+    }
+}
+
 /// The PhotoRecord for one Photo ID inside an immutable Published Library.
 fn published_photo<'a>(
     published: &'a Published,
@@ -85,20 +109,17 @@ fn published_photo<'a>(
 }
 
 /// The authoritative Capture Time order key for one Photo: the RAW
-/// Original's key when present, otherwise the paired JPEG's, matching the
-/// persisted deterministic order's COALESCE.
+/// The Photo's single Original's Capture Time order key in the Published
+/// Library, matching the persisted deterministic order.
 fn published_capture_key<'a>(
     published: &'a Published,
     photo: &slipstream_core::PhotoRecord,
 ) -> Option<&'a str> {
-    let original_key = |id: &Option<String>| -> Option<&'a str> {
-        published
-            .originals_by_id
-            .get(id.as_deref()?)
-            .and_then(|position| published.snapshot.originals.get(*position))
-            .and_then(|original| original.capture.order_key.as_deref())
-    };
-    original_key(&photo.raw_original_id).or_else(|| original_key(&photo.jpeg_original_id))
+    published
+        .originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| published.snapshot.originals.get(*position))
+        .and_then(|original| original.capture.order_key.as_deref())
 }
 
 /// The authoritative Capture Time order key for one Photo ID in the
@@ -367,16 +388,13 @@ impl SharedLibrary {
             let Some(photo) = published.snapshot.photos.get(position) else {
                 return false;
             };
-            [
-                photo.jpeg_original_id.as_ref(),
-                photo.raw_original_id.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            .filter_map(|id| published.originals_by_id.get(id))
-            .filter_map(|position| published.snapshot.originals.get(*position))
-            .cloned()
-            .collect::<Vec<_>>()
+            [Some(&photo.original_id)]
+                .into_iter()
+                .flatten()
+                .filter_map(|id| published.originals_by_id.get(id))
+                .filter_map(|position| published.snapshot.originals.get(*position))
+                .cloned()
+                .collect::<Vec<_>>()
         };
         let Some(photo) = published.snapshot.photos.get_mut(position) else {
             return false;
@@ -614,13 +632,7 @@ impl Application {
                 .get(position)
                 .ok_or(ServerError::PhotoNotFound)?;
             let mut candidates = Vec::new();
-            for id in [
-                photo.raw_original_id.as_ref(),
-                photo.jpeg_original_id.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for id in [Some(&photo.original_id)].into_iter().flatten() {
                 let Some(position) = published.originals_by_id.get(id).copied() else {
                     continue;
                 };
@@ -661,17 +673,241 @@ impl Application {
         .map_err(|error| ServerError::Join(error.to_string()))?
     }
 
+    /// One consistent read of unavailable Photos plus Album memberships for
+    /// the bounded recovery review entry.
+    pub(crate) async fn recovery_survey(&self) -> Result<RecoverySurveyWire, ServerError> {
+        Ok(self.library.recovery_survey().await?.into())
+    }
+
+    /// Proposes one folder-prefix batch of relocations for unavailable
+    /// Originals, reading candidates through confined descriptors.
+    pub(crate) async fn recovery_propose_batch(
+        &self,
+        old_prefix: &str,
+        new_prefix: &str,
+    ) -> Result<Vec<RecoveryProposalWire>, ServerError> {
+        let survey = self.library.recovery_survey().await?;
+        let snapshot = self.library.snapshot().await?;
+        let old = old_prefix.to_owned();
+        let new = new_prefix.to_owned();
+        let root = self.library_root.clone();
+        let proposals = tokio::task::spawn_blocking(move || {
+            let root =
+                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
+            let native_work = slipstream_core::NativeWorkBudget::new();
+            slipstream_core::plan_manual_relocations(
+                &root,
+                &native_work,
+                &survey,
+                &snapshot,
+                &old,
+                &new,
+            )
+            .map_err(|_| ServerError::FolderInvalid)
+        })
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))??;
+        Ok(proposals.into_iter().map(Into::into).collect())
+    }
+
+    /// Proposes one mapping for a single unavailable Original, for renamed
+    /// or split files a folder-prefix batch cannot express.
+    pub(crate) async fn recovery_propose_single(
+        &self,
+        original_id: &str,
+        new_location: &str,
+    ) -> Result<RecoveryProposalWire, ServerError> {
+        let survey = self.library.recovery_survey().await?;
+        let snapshot = self.library.snapshot().await?;
+        if !survey
+            .unavailable
+            .iter()
+            .any(|record| record.original_id == original_id)
+        {
+            return Err(ServerError::PhotoNotFound);
+        }
+        let original_id = original_id.to_owned();
+        let location = new_location.to_owned();
+        let root = self.library_root.clone();
+        let proposal = tokio::task::spawn_blocking(move || {
+            let root =
+                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
+            let native_work = slipstream_core::NativeWorkBudget::new();
+            slipstream_core::plan_single_relocation(
+                &root,
+                &native_work,
+                &survey,
+                &snapshot,
+                &original_id,
+                &location,
+            )
+            .map_err(|_| ServerError::FolderInvalid)
+        })
+        .await
+        .map_err(|error| ServerError::Join(error.to_string()))??;
+        Ok(proposal.into())
+    }
+
+    /// Commits one confirmed manual relocation batch. Filesystem evidence is
+    /// gathered through confined read-only descriptors, digest-verified
+    /// whenever a persisted fingerprint exists, and the whole batch commits
+    /// atomically or is refused without partial association.
+    pub(crate) async fn recovery_apply(
+        self: &Arc<Self>,
+        items: Vec<RecoveryApplyItem>,
+    ) -> Result<RecoveryApplyResponseWire, RecoveryApplyError> {
+        if items.is_empty() {
+            return Err(RecoveryApplyError::Invalid);
+        }
+        let survey = self
+            .library
+            .recovery_survey()
+            .await
+            .map_err(|error| RecoveryApplyError::Server(error.into()))?;
+        let mut unavailable_ids = std::collections::HashSet::new();
+        let mut original_ids = std::collections::HashSet::new();
+        let mut fingerprints = std::collections::HashMap::new();
+        for record in &survey.unavailable {
+            unavailable_ids.insert(record.original_id.clone());
+            if let Some(digest) = &record.fingerprint {
+                fingerprints.insert(record.original_id.clone(), digest.clone());
+            }
+        }
+        let root = self.library_root.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let root =
+                slipstream_core::LibraryRoot::open(root).map_err(|_| ServerError::StorageLayout)?;
+            let mut rejections = Vec::new();
+            let mut relocations = Vec::new();
+            for item in items {
+                let reject = |rejections: &mut Vec<RecoveryRejectionWire>, reason: &'static str| {
+                    rejections.push(RecoveryRejectionWire {
+                        original_id: item.original_id.clone(),
+                        reason,
+                    });
+                };
+                if !original_ids.insert(item.original_id.clone()) {
+                    reject(&mut rejections, "colliding");
+                    continue;
+                }
+                if !unavailable_ids.contains(&item.original_id) {
+                    reject(&mut rejections, "stale");
+                    continue;
+                }
+                let Ok(path) =
+                    slipstream_core::RelativeOriginalPath::parse(item.new_location.clone())
+                else {
+                    reject(&mut rejections, "invalid-location");
+                    continue;
+                };
+                let Ok(capability) = root.original(path) else {
+                    reject(&mut rejections, "missing");
+                    continue;
+                };
+                let facts = match fingerprints.get(&item.original_id) {
+                    Some(expected) => {
+                        let digest = capability.digest_file();
+                        match digest {
+                            Ok(checked) if checked.digest == *expected => checked.facts,
+                            Ok(_) => {
+                                reject(&mut rejections, "content-mismatch");
+                                continue;
+                            }
+                            Err(_) => {
+                                reject(&mut rejections, "unreadable");
+                                continue;
+                            }
+                        }
+                    }
+                    None => match capability.facts() {
+                        Ok(facts) => facts,
+                        Err(_) => {
+                            reject(&mut rejections, "unreadable");
+                            continue;
+                        }
+                    },
+                };
+                relocations.push(slipstream_core::RequestedRelocation {
+                    original_id: item.original_id,
+                    to_location: item.new_location,
+                    facts,
+                    retire_destination: item.retire_destination,
+                });
+            }
+            Ok::<_, ServerError>((rejections, relocations))
+        })
+        .await
+        .map_err(|error| RecoveryApplyError::Server(ServerError::Join(error.to_string())))?
+        .map_err(RecoveryApplyError::Server)?;
+        let (rejections, relocations) = worker;
+        if !rejections.is_empty() {
+            return Err(RecoveryApplyError::Rejected {
+                message: "Recovery batch rejected without changes",
+                rejections,
+            });
+        }
+        let applied = self
+            .library
+            .apply_relocations(relocations)
+            .await
+            .map_err(|error| match error {
+                LibraryError::Persistence(
+                    slipstream_core::persistence::PersistenceError::InvalidRecoveryMapping {
+                        original_id,
+                        reason,
+                    },
+                ) => RecoveryApplyError::Rejected {
+                    message: "Recovery batch conflicts with current Library state; rescan and review again",
+                    rejections: vec![RecoveryRejectionWire {
+                        original_id,
+                        reason,
+                    }],
+                },
+                LibraryError::Persistence(
+                    slipstream_core::persistence::PersistenceError::InvalidRecovery,
+                ) => RecoveryApplyError::Rejected {
+                    message: "Recovery batch conflicts with current Library state; rescan and review again",
+                    rejections: Vec::new(),
+                },
+                other => RecoveryApplyError::Server(other.into()),
+            })?;
+        self.shared
+            .publish_fresh(&self.library)
+            .await
+            .map_err(|error| RecoveryApplyError::Server(error.into()))?;
+        // The committed counts become the recovery counts the scan status
+        // reports, so the review notice stays truthful between scans.
+        self.library
+            .note_manual_recovery(applied.relocated_photos, applied.unavailable_photos);
+        Ok(RecoveryApplyResponseWire {
+            relocated_photos: applied.relocated_photos,
+            unavailable_photos: applied.unavailable_photos,
+        })
+    }
+
     /// Truthful Library status: the scanner owns measurable phases and
     /// counters, and the shared flags decide idle, failed, or initializing.
     pub(crate) fn scan_status(&self) -> ScanStatusWire {
         let progress = self.library.scan_progress();
         let publication = self.current_publication();
+        let last_recovery = self.library.scan_outcome().map(|outcome| ScanRecoveryWire {
+            relocated_photos: outcome.relocated_originals,
+            fingerprinted_originals: outcome.fingerprinted_originals,
+            unavailable_photos: outcome.unavailable_photos,
+        });
+        let counts = self.library.fingerprint_counts();
+        let fingerprints = Some(FingerprintProgressWire {
+            enrolled: counts.enrolled,
+            pending: counts.pending,
+        });
         match progress.phase {
             ScanPhase::Discovering => ScanStatusWire {
                 state: "discovering",
                 publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Inspecting => ScanStatusWire {
                 state: "inspecting",
@@ -680,12 +916,26 @@ impl Application {
                 total: progress
                     .inspect_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                last_recovery,
+                fingerprints,
+            },
+            ScanPhase::Recovering => ScanStatusWire {
+                state: "recovering",
+                publication: publication.clone(),
+                completed: Some(usize::try_from(progress.hashed).unwrap_or(usize::MAX)),
+                total: progress
+                    .hash_total
+                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Applying => ScanStatusWire {
                 state: "applying",
                 publication: publication.clone(),
                 completed: None,
                 total: None,
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Idle => {
                 if self.shared.awaiting_scan.load(Ordering::Relaxed) > 0 {
@@ -695,6 +945,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 } else if self.shared.failed.load(Ordering::Relaxed) {
                     ScanStatusWire {
@@ -702,6 +954,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 } else if self.shared.published.load(Ordering::Relaxed) {
                     let photo_count = self.published_photo_count();
@@ -710,6 +964,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: Some(photo_count),
                         total: Some(photo_count),
+                        last_recovery,
+                        fingerprints,
                     }
                 } else {
                     ScanStatusWire {
@@ -717,6 +973,8 @@ impl Application {
                         publication,
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 }
             }
@@ -1035,16 +1293,13 @@ impl Application {
                 .filter_map(|id| source.photos_by_id.get(id).copied())
                 .filter_map(|position| source.snapshot.photos.get(position))
                 .map(|photo| {
-                    let originals = [
-                        photo.jpeg_original_id.as_ref(),
-                        photo.raw_original_id.as_ref(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| source.originals_by_id.get(id))
-                    .filter_map(|position| source.snapshot.originals.get(*position))
-                    .cloned()
-                    .collect();
+                    let originals = [Some(&photo.original_id)]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| source.originals_by_id.get(id))
+                        .filter_map(|position| source.snapshot.originals.get(*position))
+                        .cloned()
+                        .collect();
                     PreviewFacts::from_records(photo.clone(), originals)
                 })
                 .collect::<Vec<_>>()
@@ -1334,16 +1589,13 @@ impl Application {
         let published = guard.as_ref()?;
         let position = published.photos_by_id.get(photo_id).copied()?;
         let photo = published.snapshot.photos.get(position)?;
-        let originals = [
-            photo.jpeg_original_id.as_ref(),
-            photo.raw_original_id.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|id| published.originals_by_id.get(id))
-        .filter_map(|position| published.snapshot.originals.get(*position))
-        .cloned()
-        .collect();
+        let originals = [Some(&photo.original_id)]
+            .into_iter()
+            .flatten()
+            .filter_map(|id| published.originals_by_id.get(id))
+            .filter_map(|position| published.snapshot.originals.get(*position))
+            .cloned()
+            .collect();
         Some(PreviewFacts::from_records(photo.clone(), originals))
     }
 
@@ -1399,7 +1651,6 @@ impl Application {
                         self.shared
                             .patch_photo_if_source_matches(facts, |photo| {
                                 photo.preview_state = PreviewState::Ready;
-                                photo.preview_source = Some(ready.source);
                                 photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
@@ -1410,7 +1661,6 @@ impl Application {
                         self.shared
                             .patch_photo(photo_id, |photo| {
                                 photo.preview_state = PreviewState::Ready;
-                                photo.preview_source = Some(ready.source);
                                 photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
@@ -1478,7 +1728,6 @@ impl Application {
         self.shared
             .patch_photo(photo_id, |photo| {
                 photo.preview_state = state;
-                photo.preview_source = None;
                 photo.preview_width = None;
                 photo.preview_height = None;
                 photo.cache_revision = None;
@@ -1494,7 +1743,6 @@ impl Application {
         self.shared
             .patch_photo_if_source_matches(facts, |photo| {
                 photo.preview_state = state;
-                photo.preview_source = None;
                 photo.preview_width = None;
                 photo.preview_height = None;
                 photo.cache_revision = None;
@@ -1518,8 +1766,6 @@ impl Application {
         self.shared
             .patch_photo_if_source_matches(facts, |photo| {
                 photo.preview_state = persisted.photo.preview_state;
-                photo.preview_candidate = persisted.photo.preview_candidate;
-                photo.preview_source = persisted.photo.preview_source;
                 photo.preview_source_revision = persisted.photo.preview_source_revision.clone();
                 photo.preview_width = persisted.photo.preview_width;
                 photo.preview_height = persisted.photo.preview_height;
@@ -1598,13 +1844,11 @@ impl Application {
     }
 }
 
-fn preview_source_revision(facts: &PreviewFacts, source: PreviewCandidate) -> Option<String> {
-    let original_id = match source {
-        PreviewCandidate::MatchingJpeg => facts.photo.jpeg_original_id.as_ref(),
-        PreviewCandidate::EmbeddedRawJpeg => facts.photo.raw_original_id.as_ref(),
-    }?;
+fn preview_source_revision(facts: &PreviewFacts, _source: PreviewSource) -> Option<String> {
     let original = facts.originals.iter().find(|original| {
-        &original.id == original_id && original.available && original.error_category.is_none()
+        original.id == facts.photo.original_id
+            && original.available
+            && original.error_category.is_none()
     })?;
     source_revision(
         original.relative_path.as_str(),

@@ -16,35 +16,87 @@ If the configured Library Folder does not exist, is not a directory, or cannot b
 
 ## Photos
 
-Slipstream presents one logical Photo for one photograph.
+Slipstream presents one Photo for one independently managed supported Original File.
 
-A RAW Original and JPEG Original must form one Photo when all of these conditions hold:
+RAW and JPEG Originals are independent Photos even when they share a directory and base name. Naming alone must not share Selection State, Rating, Album membership, or Preview.
 
-- they are in the same directory;
-- their file names differ only by a recognized RAW or JPEG extension;
-- exactly one matching RAW Original and one matching JPEG Original exist.
+The first product supports RAW and JPEG Originals. It does not add TIFF support.
 
-A RAW or JPEG without a match forms its own Photo.
-
-When matching is ambiguous, Slipstream must keep the files as separate Photos. It must not guess from capture time or visual similarity in the first product.
-
-The JPEG Original is not a disposable derivative. It remains an Original File and must not be modified.
+A JPEG Original is not a disposable derivative. It remains an Original File and must not be modified.
 
 ## Stable Identity
 
 An Original File and Photo must keep their persisted identities after first discovery. Their current Original Locations must not be their identities.
 
-Slipstream must retain Album membership, Selection State, and Rating across an ordinary rescan when an Original File remains at the same Location with the same file size and modification time.
+Slipstream must retain Album membership, Selection State, Rating, and saved Album positions across an ordinary rescan when an Original File remains recoverable.
 
-Moving or renaming Original Files outside Slipstream may create a new Photo and leave the prior Photo unavailable. Ordinary rescan must not guess a move or silently transfer state by filename, Capture Time, camera metadata, inode, content similarity, or another heuristic.
+A moved or renamed Original File must keep its identity when a scan can prove one exact content match under the Location Recovery rules below. Ordinary rescan must not guess a move or silently transfer state by filename, Capture Time, camera metadata, inode, content similarity, or another heuristic.
 
 An unavailable Photo must retain its recorded state until the Photographer removes it from Slipstream. Slipstream must not silently transfer that state to a different file.
 
+## Content Fingerprints
+
+Slipstream persists a content fingerprint for every Original File it can read: the SHA-256 digest of the complete content together with the size and modification time observed while hashing.
+
+A fingerprint is exact-content evidence, not identity. Independent Originals may share one fingerprint, and changed content must not keep an old fingerprint.
+
+Slipstream must establish fingerprints automatically in the background. Enrollment must:
+
+- read Originals through the existing confined read-only access;
+- keep memory independent of file size and cancel between chunks;
+- run one bounded worker that yields to foreground Preview work;
+- pause while a scan runs;
+- resume incomplete enrollment after restart; and
+- verify the source revision before and after hashing.
+
+Slipstream must report truthful enrollment progress. It must not promise instant readiness: the first enrollment requires approximately one complete read of every Original File without a fingerprint.
+
+Slipstream must not fingerprint an Original File larger than 4 GiB. Such a file keeps no automatic recovery evidence and remains eligible for manual recovery only.
+
+Automatic recovery applies only to fingerprints completed before an Original became unavailable. Slipstream must not infer historical fingerprints for Originals that were already missing.
+
+## Location Recovery
+
+Slipstream must recover a moved Original File when a scan can prove one exact match. Automatic recovery applies when all of these conditions hold:
+
+- a remembered Original File is missing at its Original Location;
+- exactly one candidate Original of the same supported kind exists below the current Library Folder with the exact same content and no other owner; and
+- a persisted fingerprint proves that content.
+
+A recovered Original File keeps its Original File ID and Photo ID. Its Photo keeps Selection State, Rating, Album membership and order, and saved Album positions.
+
+Slipstream must resolve recovery before it allocates and publishes new Photos. It must not publish temporary duplicates and later merge them. When known files exchange Locations in one scan, Slipstream must reconcile the provable content permutation.
+
+If the old Original File remains and an equal copy appears, Slipstream must discover an independent Photo at the new Location and must not transfer state. When the remembered Location instead provably carries different bytes and exactly one exact copy of the remembered content exists elsewhere, the identity follows the copy. If multiple equal candidates or multiple owners exist, Slipstream must preserve the unresolved records and must not choose by enumeration order, basename, Capture Time, camera metadata, inode, or visual similarity. The Photographer resolves that group through manual recovery.
+
+Changed content plus a changed Location is not guaranteed to recover automatically. Incomplete traversal, inaccessible storage, uncertain candidate revisions, and unreadable candidates must not be treated as proof of absence or uniqueness.
+
+Recovery must search only supported descendants of the admitted Library Folder. Moving the configured Library Folder itself remains a Library Expansion.
+
+## Manual Recovery
+
+Every unavailable Original File must remain listed with its remembered Location, filename, kind, Rating, Selection State, Album count, and whether a fingerprint exists.
+
+The Photographer must be able to review unavailable Originals and propose new Locations through one bounded `Review unavailable originals` entry from the scan result or an affected Photo.
+
+Slipstream must support two proposal forms:
+
+- a batch mapping from one old Folder prefix to one new Folder prefix that keeps each relative suffix; and
+- a single mapping from one remembered Original File to one new Location for a renamed or split file.
+
+Every proposed mapping must be inspectable before it is applied, and proposal must never write. A proposal for an Original File without a persisted fingerprint must state that the old content cannot be verified and must require explicit confirmation. A fingerprinted Original File must be verified against its persisted fingerprint at proposal and at commit.
+
+Slipstream must apply a batch atomically with revalidation at commit. It must reject the whole batch with per-mapping reasons when any mapping is stale, colliding, or occupied without a permitted retire, and it must not apply a partial association.
+
+A destination Location may already belong to a Photo discovered by an earlier scan. Slipstream must not silently merge the two Photos, and default Rating or Selection State must not be proof that the destination Photo is disposable. Slipstream may offer an explicit retire-and-bind action only when the destination Photo is otherwise unreferenced with no non-default decisions and no Album membership, and it must show which record will be retired. If the destination Photo has independent user state, Slipstream must preserve both Photos and report the conflict. Recovery must not delete any filesystem file.
+
+Recovery must use server-relative Library Locations. It must not require a client file upload or expose an arbitrary server path. Recovery must not import or write an XMP Sidecar and must preserve the Photo's Rating in Slipstream.
+
 ## Expanding a Photo Library
 
-The server operator may expand the Photo Library by replacing its current Library Folder with an ancestor directory that contains it. This is a controlled Library operation, not automatic move detection.
+The server operator may expand the Photo Library by replacing its current Library Folder with an ancestor directory that contains it. This is a controlled Library operation, not Location Recovery.
 
-Before changing state, Slipstream must prove that the current Library Folder is the same directory found beneath the proposed Folder. It must not guess individual file moves.
+Before changing state, Slipstream must prove that the current Library Folder is the same directory found beneath the proposed Folder. It must not resolve individual file moves as part of an expansion.
 
 A successful expansion must:
 
@@ -59,13 +111,13 @@ Slipstream may invalidate and rebuild Capture Time inspection facts, Preview fac
 
 Expansion requires a stopped Library and a verified backup. If Slipstream cannot prove the ancestor relationship or preserve every remembered Original Location without conflict, it must reject the expansion without changing the current Library.
 
-The first product does not support arbitrary per-file relinking, automatic move detection, multiple Library Folders, or moving the Library to an unrelated directory.
+The first product does not support a continuous filesystem watcher, global disk search, multiple Library Folders, or moving the Library to an unrelated directory.
 
 For example, expanding `/photos/26-spring` to `/photos` keeps `26-spring/a.ARW` as the same Original File and discovers supported files in sibling directories. Changing `/photos/26-spring` to unrelated `/archive` is not a Library Expansion.
 
 ## Capture Time
 
-Capture Time is optional camera metadata. Slipstream uses it to order `All Photos` and Original Folder sources in the Library Browser. Capture Time must not determine pairing or change an Album's membership order.
+Capture Time is optional camera metadata. Slipstream uses it to order `All Photos` and Original Folder sources in the Library Browser. Capture Time must not change an Album's membership order.
 
 Slipstream must inspect each available Original independently. It must use the first valid base field in this order:
 
@@ -78,9 +130,9 @@ Capture ordering uses the camera-local date and time. Slipstream must not conver
 
 A missing or malformed subsecond value must contribute zero. Slipstream must normalize valid subseconds to nine decimal digits; digits beyond the first nine do not affect ordering. A missing or malformed offset remains unknown and does not invalidate an otherwise valid Capture Time.
 
-Slipstream must not use EXIF `DateTime`, GPS time, filesystem modification time, a filename, Preview metadata, XMP, or another Original as a guessed fallback.
+Slipstream must not use EXIF `DateTime`, GPS time, filesystem modification time, a filename, Preview metadata, or XMP as a guessed fallback.
 
-For a RAW/JPEG pair, a valid RAW Capture Time is authoritative. A valid matching JPEG Capture Time is used only when RAW has no valid Capture Time. If both Originals have valid values that differ, Slipstream must retain the disagreement and use RAW for ordering. If both have valid timezone offsets that differ, that is also a disagreement. A known offset on one Original and an unknown offset on the other is not a disagreement.
+Capture Time comes from the Photo's own Original File. A relocated Original File re-derives its capture facts from its current bytes; a value retained from the old Location must not remain authoritative.
 
 Missing, invalid, or failed capture metadata must not make an otherwise readable Photo unavailable. A Photo without an authoritative Capture Time remains browsable and sorts in the missing-time partition.
 
@@ -92,7 +144,7 @@ Original Folders and Albums are separate organization axes.
 
 An Original Folder answers where Original Files are known to exist. Its membership is derived from Original Locations and changes only when a completed scan publishes added, removed, or changed Locations. Remembered unavailable Originals remain projected at their last known Locations. An Original Folder does not own Photos, Selection State, Rating, or saved position.
 
-For Folder browsing, a Photo belongs to the parent directory of its ordering Original Location. The ordering Original Location is the RAW Original Location when the Photo contains RAW. Otherwise it is the JPEG Original Location. A RAW/JPEG pair therefore appears once rather than once per Original File.
+For Folder browsing, a Photo belongs to the parent directory of its own Original Location. Independent Photos that share a base name therefore appear once each.
 
 Selecting an Original Folder must include Photos in that Folder and every descendant Folder. It must include remembered unavailable Photos at their last known Original Locations. The interface must identify this recursive behavior instead of implying that only direct children are shown.
 
@@ -104,7 +156,7 @@ One Photo may belong to multiple Albums. New members append in the order supplie
 
 The Photographer may add or remove Photos from an Album. A Photo's Selection State and Rating belong to the Photo, not to one Album membership. The same decision therefore appears in every Album that contains the Photo.
 
-Indexing a directory must not automatically create an Album. A Folder and an Album may have the same display name, but the interface must keep File Locations and Albums visibly separate. The first product does not provide Album Groups, Smart Albums, synchronized Folder-backed Albums, folder mutation, or automatic move detection.
+Indexing a directory must not automatically create an Album. A Folder and an Album may have the same display name, but the interface must keep File Locations and Albums visibly separate. The first product does not provide Album Groups, Smart Albums, synchronized Folder-backed Albums, folder mutation, or automatic merging of conflicting user state.
 
 ## Rescanning
 
@@ -112,10 +164,12 @@ The Photographer must be able to request a rescan. Slipstream may also scan at s
 
 A rescan must:
 
+- resolve provable moved Originals before allocating and publishing new Photos;
 - add newly discovered supported files below the current Library Folder;
-- refresh a changed file's Preview state;
+- refresh a changed file's Preview state and content fingerprint;
+- drop a stale fingerprint whose observed size or modification time no longer matches;
 - mark missing files unavailable;
-- inspect Capture Time for newly discovered or changed available Originals;
+- inspect Capture Time for newly discovered, changed, or relocated available Originals;
 - reuse persisted Capture Time facts for unchanged Originals;
 - retain the last successfully inspected Capture Time for a remembered unavailable Original;
 - publish one completed Library snapshot without exposing partial reordering while the rescan runs;
@@ -132,13 +186,13 @@ A failure to inspect one file must identify that file and allow other valid Phot
 
 A database or indexing failure must not change Original Files.
 
-If a previously paired RAW or JPEG changes so that the pair becomes ambiguous, Slipstream must preserve existing records and identify the ambiguity. Automatic state splitting or merging is not required in the first product.
+If a scan cannot prove one exact candidate for a missing Original File, Slipstream must keep the affected Photo unavailable and must not transfer its state to another file.
 
 A malformed or unavailable capture metadata value must affect only that Original's capture fact. Slipstream must continue indexing valid sibling Photos. It must not use filesystem modification time or another guessed value to hide the failure.
 
 ## Examples
 
-The following files form two Photos:
+The following files form three Photos:
 
 ```text literal
 shoot/DSCF0001.RAF
@@ -146,7 +200,7 @@ shoot/DSCF0001.JPG
 shoot/DSCF0002.RAF
 ```
 
-`DSCF0001.RAF` and `DSCF0001.JPG` form one Photo. `DSCF0002.RAF` forms another Photo.
+`DSCF0001.RAF`, `DSCF0001.JPG`, and `DSCF0002.RAF` are independent Photos with their own decisions, Albums, and Previews. `DSCF0001.RAF` and `DSCF0001.JPG` share only a base name.
 
 The filesystem contains `RAW/26春节`, and the Photographer also creates an Album named `26春节`. The File Location changes when a completed rescan observes changed Original Locations. The Album changes only through explicit membership operations.
 

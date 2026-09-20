@@ -81,7 +81,7 @@ const validPreview = (value: unknown): value is PreviewResponse =>
     value.state === "failed") &&
   optional(
     value.source,
-    (source) => source === "matching-jpeg" || source === "embedded-raw-jpeg",
+    (source) => source === "jpeg-original" || source === "raw-embedded-jpeg",
   ) &&
   optional(value.stale, (stale) => typeof stale === "boolean") &&
   optional(value.width, Number.isInteger) &&

@@ -550,6 +550,38 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     let _ = fs::remove_dir_all(base);
 }
 
+fn reverse_substitute(
+    value: &serde_json::Value,
+    captures: &HashMap<String, String>,
+) -> serde_json::Value {
+    // Replace the longest capture values first so URLs collapse before the
+    // photo IDs they contain.
+    let mut by_value: Vec<(&String, &String)> = captures.iter().collect();
+    by_value.sort_by_key(|(_, value)| std::cmp::Reverse(value.len()));
+    fn walk(value: &serde_json::Value, by_value: &[(&String, &String)]) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => {
+                let mut result = text.clone();
+                for (placeholder, value) in by_value {
+                    result = result.replace(value.as_str(), &format!("${placeholder}"));
+                }
+                serde_json::Value::String(result)
+            }
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(|item| walk(item, by_value)).collect())
+            }
+            serde_json::Value::Object(entries) => serde_json::Value::Object(
+                entries
+                    .iter()
+                    .map(|(name, item)| (name.clone(), walk(item, by_value)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    walk(value, &by_value)
+}
+
 #[tokio::test]
 async fn browse_protocol_fixtures_execute_with_captured_token() {
     let vectors: Vec<serde_json::Value> = serde_json::from_slice(
@@ -594,8 +626,8 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
     let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     assert_eq!(
         photo_ids.len(),
-        2,
-        "populated protocol fixture must have two Photos"
+        3,
+        "populated protocol fixture must have three Photos"
     );
     let album = application
         .mutate_album(slipstream_core::AlbumMutation::Create {
@@ -611,8 +643,14 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         })
         .await
         .unwrap();
-    for photo_id in &photo_ids {
+    // The two JPEG Photos preview from their own bytes; the RAW fixture is
+    // arbitrary non-RAW bytes and stays terminally unavailable.
+    for (index, photo_id) in photo_ids.iter().enumerate() {
         let preview = application.preview(photo_id).await.unwrap();
+        if index == 2 {
+            assert_ne!(preview.state, "ready", "RAW fixture cannot preview");
+            continue;
+        }
         assert_eq!(preview.state, "ready", "fixture Preview must be ready");
         let thumbnail = application.thumbnail(photo_id).await.unwrap();
         assert_eq!(thumbnail.state, "ready", "fixture Thumbnail must be ready");
@@ -631,7 +669,10 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         ("albumId".to_owned(), album_id),
         ("photoId".to_owned(), photo_ids[0].clone()),
         ("secondPhotoId".to_owned(), photo_ids[1].clone()),
+        ("thirdPhotoId".to_owned(), photo_ids[2].clone()),
     ]);
+    let regenerate = std::env::var("SLIPSTREAM_REGENERATE_PROTOCOL").is_ok();
+    let mut regenerated: Vec<serde_json::Value> = Vec::new();
     let mut token = String::new();
     let mut publication = String::new();
     for vector in vectors {
@@ -700,19 +741,23 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
                 .get("photos")
                 .and_then(|value| value.as_array())
             {
-                for (index, photo) in photos.iter().take(2).enumerate() {
-                    let fields = if index == 0 {
-                        [
+                for (index, photo) in photos.iter().take(3).enumerate() {
+                    let fields = match index {
+                        0 => [
                             ("photoId", "id"),
                             ("reviewUrl", "preview.url"),
                             ("thumbnailUrl", "preview.thumbnailUrl"),
-                        ]
-                    } else {
-                        [
+                        ],
+                        1 => [
                             ("secondPhotoId", "id"),
                             ("secondReviewUrl", "preview.url"),
                             ("secondThumbnailUrl", "preview.thumbnailUrl"),
-                        ]
+                        ],
+                        _ => [
+                            ("thirdPhotoId", "id"),
+                            ("thirdReviewUrl", "preview.url"),
+                            ("thirdThumbnailUrl", "preview.thumbnailUrl"),
+                        ],
                     };
                     for (placeholder, field) in fields {
                         let value = field
@@ -742,6 +787,14 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
                 }
             }
         }
+        if regenerate {
+            let mut updated = vector.clone();
+            if let Some(actual_value) = actual.as_ref() {
+                updated["expected"]["body"] = reverse_substitute(actual_value, &captures);
+            }
+            regenerated.push(updated);
+            continue;
+        }
         if let (Some(actual_value), Some(expected)) =
             (actual.as_ref(), vector["expected"]["body"].as_object())
         {
@@ -752,6 +805,14 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
                 "{name}"
             );
         }
+    }
+    if regenerate {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../compatibility/protocol/browse-vectors.json");
+        fs::write(&path, serde_json::to_vec_pretty(&regenerated).unwrap()).unwrap();
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+        return;
     }
     assert!(!token.is_empty(), "fixtures must exercise a captured token");
     assert!(captures.contains_key("albumId"));
@@ -811,11 +872,32 @@ async fn response_goldens_match_real_serialized_routes() {
         actual: &serde_json::Value,
         captures: &HashMap<String, String>,
     ) {
+        if std::env::var("SLIPSTREAM_REGENERATE_PROTOCOL").is_ok() {
+            let updated = reverse_substitute(actual, captures);
+            let slot = goldens
+                .last()
+                .and_then(|last| last.as_object())
+                .and_then(|object| object.get("__regenerated"))
+                .and_then(|value| value.as_array())
+                .map(|values| values.len())
+                .unwrap_or(0);
+            let _ = slot;
+            REGOLDED.with(|cell| {
+                let mut map = cell.borrow_mut();
+                map.insert(index, updated);
+            });
+            return;
+        }
         assert_eq!(
             actual,
             &substitute(&goldens[index], captures),
             "response golden {index}"
         );
+    }
+
+    thread_local! {
+        static REGOLDED: std::cell::RefCell<HashMap<usize, serde_json::Value>> =
+            std::cell::RefCell::new(HashMap::new());
     }
 
     let (base, config) = prepare_populated_fixture();
@@ -833,7 +915,7 @@ async fn response_goldens_match_real_serialized_routes() {
             .id
             .clone()
     };
-    let photo_id = photo_id_for("pair.ARW");
+    let photo_id = photo_id_for("pair.JPG");
     let later_id = photo_id_for("later.JPG");
     let failed_id = photo_id_for("failed.JPG");
 
@@ -1120,6 +1202,22 @@ async fn response_goldens_match_real_serialized_routes() {
     .await;
     assert_golden(&goldens, 6, &unavailable, &captures);
 
+    if std::env::var("SLIPSTREAM_REGENERATE_PROTOCOL").is_ok() {
+        REGOLDED.with(|cell| {
+            let map = cell.borrow();
+            let mut updated: Vec<serde_json::Value> = goldens.clone();
+            for (index, value) in map.iter() {
+                updated[*index] = value.clone();
+            }
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../compatibility/protocol/responses.json");
+            fs::write(&path, serde_json::to_vec_pretty(&updated).unwrap()).unwrap();
+        });
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+        return;
+    }
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -1165,14 +1263,14 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
     )
     .await;
     assert_eq!(preview["state"], "ready");
-    assert_eq!(preview["source"], "matching-jpeg");
+    assert_eq!(preview["source"], "jpeg-original");
     let preview_url = preview["url"].as_str().unwrap().to_owned();
     for vector in vectors {
         let name = vector["name"].as_str().unwrap();
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
         let target = match vector["setup"].as_str().unwrap() {
-            "matching-jpeg" => {
+            "jpeg-original" => {
                 assert_eq!(request_definition["target"], "generated-derivative");
                 format!("http://camera.local{preview_url}")
             }
@@ -1222,7 +1320,7 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
                 name,
             );
         }
-        if vector["setup"] == "matching-jpeg" {
+        if vector["setup"] == "jpeg-original" {
             let cache_key = preview_url
                 .rsplit('/')
                 .next()
@@ -1353,7 +1451,7 @@ async fn photo_json_omits_optional_values_and_preserves_original_order() {
             .collect::<Vec<_>>()
     );
     for photo in list {
-        assert_eq!(photo["originals"][0]["kind"], "jpeg");
+        assert_eq!(photo["original"]["kind"], "jpeg");
         assert_eq!(
             photo["preview"],
             serde_json::json!({"state": "inspection-pending"})
@@ -2382,11 +2480,11 @@ async fn file_location_windows_derive_bounded_folders_from_one_publication() {
             .find(|child| child.location == location)
             .unwrap()
     };
-    // Paired RAW/JPEG Photos count once; counts are recursive.
+    // Folder counts are recursive and count independent Photos.
     assert_eq!(by_location("a").photo_count, 1);
     assert!(!by_location("a").has_descendant_folders);
     assert_eq!(by_location("ab").photo_count, 1);
-    assert_eq!(by_location("shoot").photo_count, 3);
+    assert_eq!(by_location("shoot").photo_count, 4);
     assert!(by_location("shoot").has_descendant_folders);
     assert_eq!(by_location("\u{76f8}\u{518c}").photo_count, 1);
     let publication = first.publication.clone();
@@ -2576,12 +2674,7 @@ async fn folder_sources_filter_ancestry_and_expire_with_publication() {
         let published = guard.as_ref().unwrap();
         let mut map = std::collections::HashMap::new();
         for photo in &published.snapshot.photos {
-            let ordering = photo
-                .raw_original_id
-                .as_deref()
-                .or(photo.jpeg_original_id.as_deref())
-                .unwrap();
-            let position = published.originals_by_id[ordering];
+            let position = published.originals_by_id[&photo.original_id];
             map.insert(
                 published.snapshot.originals[position]
                     .relative_path
@@ -2629,7 +2722,7 @@ async fn folder_sources_filter_ancestry_and_expire_with_publication() {
         },
     )
     .await;
-    assert_eq!(root_source.len(), 6);
+    assert_eq!(root_source.len(), 7);
     assert!(root_source.contains(&photo_a));
     assert!(root_source.contains(&ids["b.JPG"]));
 
@@ -4697,6 +4790,399 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
     let _ = fs::remove_dir_all(base);
 }
 
+/// Deterministic manual-recovery HTTP fixture: one unavailable Photo with a
+/// retained Rating, Selection State, and Album membership, seeded before the
+/// Application opens. `fingerprint` optionally seeds a matching fingerprint
+/// for the remembered bytes.
+fn recovery_http_fixture(fingerprint: bool) -> (PathBuf, Config) {
+    let (base, config) = prepare_fixture();
+    fs::create_dir_all(&config.state_directory).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            config.state_directory.clone(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    let database =
+        rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+    database
+        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO library_metadata VALUES('canonical_root',?)",
+            [config.library_root.to_str().unwrap()],
+        )
+        .unwrap();
+    database.execute(
+        "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state,capture_source_revision) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','shoot/a.JPG','jpeg',11,1.0,0,'missing','remembered-revision')",
+        [],
+    ).unwrap();
+    database.execute(
+        "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb','aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',0,'unavailable','shoot/a.JPG','selected',3)",
+        [],
+    ).unwrap();
+    database
+        .execute("INSERT INTO albums VALUES('set','Trip',1)", [])
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO album_members VALUES('set','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',0)",
+            [],
+        )
+        .unwrap();
+    if fingerprint {
+        database.execute(
+            "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',?,11,1.0)",
+            [slipstream_core::digest_bytes(b"jpeg-bytes-a")],
+        ).unwrap();
+    }
+    drop(database);
+    (base, config)
+}
+
+async fn library_window(router: &Router) -> serde_json::Value {
+    let opened = response_json(
+        post_json(
+            router,
+            "/api/browse",
+            serde_json::json!({"source":"library"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let token = opened["token"].as_str().unwrap();
+    response_json(
+        send(
+            router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/browse/{token}?start=0&limit=60"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // The moved file appears only after the settled scan, so no automatic
+    // recovery can act and the persisted record stays unavailable.
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/recovery/unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    let record = &unavailable["unavailable"][0];
+    assert_eq!(record["location"], "shoot/a.JPG");
+    assert_eq!(record["kind"], "jpeg");
+    assert_eq!(record["rating"], 3);
+    assert_eq!(record["selectionState"], "selected");
+    assert_eq!(record["fingerprintEnrolled"], false);
+    assert_eq!(record["albumCount"], 1);
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let proposal = &proposals["proposals"][0];
+    assert_eq!(proposal["outcome"], "matched");
+    assert_eq!(proposal["verified"], false);
+    assert_eq!(proposal["toLocation"], "moved/a.JPG");
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+    assert_eq!(applied["unavailablePhotos"], 0);
+
+    // The restored Photo keeps its identity, decisions, and Album membership.
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 1);
+    let photo = &window["photos"][0];
+    assert_eq!(photo["id"], "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    assert_eq!(photo["available"], true);
+    assert_eq!(photo["originalFilename"], "a.JPG");
+    assert_eq!(photo["rating"], 3);
+    assert_eq!(photo["selectionState"], "selected");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_retires_discovered_destination_photo() {
+    let (base, config) = recovery_http_fixture(false);
+    // The moved file exists before open, so the initial scan discovers it as
+    // a new default-state Photo occupying the destination.
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // Both records are visible: the remembered unavailable Photo and the
+    // newly discovered occupier.
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 2);
+    let discovered = window["photos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|photo| photo["id"].as_str().unwrap().to_owned())
+        .find(|id| id != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        .unwrap();
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let proposal = &proposals["proposals"][0];
+    assert_eq!(proposal["outcome"], "occupied");
+    assert_eq!(proposal["retire"]["photoId"].as_str().unwrap(), discovered);
+
+    // Without the explicit retire the whole batch is refused with a 409.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","retireDestination":true}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+
+    let window = library_window(&router).await;
+    assert_eq!(window["total"], 1);
+    let photo = &window["photos"][0];
+    assert_eq!(photo["id"], "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    assert_eq!(photo["rating"], 3);
+    assert_eq!(photo["selectionState"], "selected");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
+    let (base, config) = recovery_http_fixture(true);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    // Different content than the enrolled fingerprint.
+    fs::write(config.library_root.join("moved/a.JPG"), b"other-bytes").unwrap();
+
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(proposals["proposals"][0]["outcome"], "content-mismatch");
+
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = response_json(refused).await;
+    assert_eq!(body["rejections"][0]["reason"], "content-mismatch");
+
+    // Matching content verifies and commits.
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(proposals["proposals"][0]["outcome"], "matched");
+    assert_eq!(proposals["proposals"][0]["verified"], true);
+
+    let single = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(single["outcome"], "matched");
+    assert_eq!(single["verified"], true);
+
+    let applied = response_json(
+        post_json(
+            &router,
+            "/api/recovery/apply",
+            serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(applied["relocatedPhotos"], 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_rejects_duplicate_source_mappings() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    fs::write(config.library_root.join("moved/b.JPG"), b"jpeg-bytes-b").unwrap();
+
+    // Two mappings for one Original File are a colliding batch refused with
+    // a per-mapping reason.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"},
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG"}
+        ]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = response_json(refused).await;
+    assert_eq!(body["rejections"][0]["reason"], "colliding");
+
+    // The refusal leaves the Library untouched.
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/recovery/unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn recovery_http_validates_requests() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let escape = post_json(
+        &router,
+        "/api/recovery/propose",
+        serde_json::json!({"oldPrefix":"..","newPrefix":"moved"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(escape.status(), StatusCode::BAD_REQUEST);
+
+    let unknown = post_json(
+        &router,
+        "/api/recovery/propose",
+        serde_json::json!({"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    let empty = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let stale = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let body = response_json(stale).await;
+    assert_eq!(body["rejections"][0]["reason"], "stale");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 async fn send(router: &Router, request: Request<Body>) -> Response<Body> {
     tower::ServiceExt::oneshot(router.clone(), request)
         .await
@@ -5425,7 +5911,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     )
     .await;
     assert_eq!(preview["state"], "ready");
-    assert_eq!(preview["source"], "matching-jpeg");
+    assert_eq!(preview["source"], "jpeg-original");
     assert_eq!(preview["stale"], false);
     let url = preview["url"].as_str().unwrap().to_owned();
     let key = url.rsplit('/').next().unwrap().trim_end_matches(".jpg");
@@ -5624,7 +6110,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     .await;
     assert_eq!(stale["state"], "ready");
     assert_eq!(stale["stale"], true);
-    assert_eq!(stale["source"], "matching-jpeg");
+    assert_eq!(stale["source"], "jpeg-original");
     assert_eq!(stale["url"], changed_url);
     assert!(stale["message"].as_str().unwrap().contains("stale"));
 
@@ -5755,11 +6241,6 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
             .get(position)
             .expect("published Photo position exists");
         assert_eq!(photo.preview_state, PreviewState::Unavailable);
-        assert_eq!(
-            photo.preview_candidate,
-            Some(PreviewCandidate::MatchingJpeg)
-        );
-        assert_eq!(photo.preview_source, Some(PreviewCandidate::MatchingJpeg));
         assert!(photo.preview_source_revision.is_some());
     }
 
@@ -5821,31 +6302,18 @@ async fn browse_windows_report_the_ordering_original_filename() {
     assert_eq!(window.status(), StatusCode::OK);
     let window: serde_json::Value = response_json(window).await;
     let photos = window["photos"].as_array().unwrap();
-    assert_eq!(photos.len(), 2);
+    assert_eq!(photos.len(), 3);
 
-    // A RAW/JPEG pair carries the RAW Original filename; a JPEG-only Photo
-    // carries its own. Both are basenames, so the relative Location never
-    // crosses the boundary.
+    // Each Photo carries its own Original's filename. Both are basenames, so
+    // the relative Location never crosses the boundary.
     let by_name = |name: &str| {
         photos
             .iter()
             .find(|photo| photo["originalFilename"] == name)
             .unwrap_or_else(|| panic!("window is missing {name}"))
     };
-    assert_eq!(
-        by_name("IMG_4521.ARW")["originals"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        by_name("IMG_4522.JPG")["originals"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(by_name("IMG_4521.ARW")["original"]["kind"], "raw");
+    assert_eq!(by_name("IMG_4522.JPG")["original"]["kind"], "jpeg");
     assert!(!window.to_string().contains("shoot/"));
 
     application.shutdown().await.unwrap();
@@ -5914,7 +6382,7 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     )
     .await;
     assert_eq!(preview["state"], "ready");
-    assert_eq!(preview["source"], "matching-jpeg");
+    assert_eq!(preview["source"], "jpeg-original");
     let review_url = preview["url"].as_str().unwrap().to_owned();
     let review_key = review_url
         .rsplit('/')
@@ -5936,7 +6404,7 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let established = facts(&application, &photo_id).await;
     assert_eq!(
         established,
-        ("ready", Some("matching-jpeg"), Some(90), Some(45))
+        ("ready", Some("jpeg-original"), Some(90), Some(45))
     );
 
     let thumbnail = response_json(

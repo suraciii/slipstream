@@ -15,8 +15,8 @@ Slipstream initially serves one Photographer with one existing local or network-
 The first product must support this complete path:
 
 1. The Photographer opens Slipstream in a browser and immediately sees a progressively loaded Photo Library.
-2. Slipstream indexes the configured Library Folder without moving or changing Original Files.
-3. Slipstream pairs a RAW Original and matching JPEG Original as one Photo when they have the same base name in the same directory.
+2. Slipstream indexes the configured Library Folder without moving or changing Original Files, and restores the identity of a moved Original File when a scan proves it by exact content.
+3. Slipstream manages each supported Original File as an independent Photo, with RAW as the primary working material and JPEG independently readable and manageable.
 4. The Photographer browses `All Photos`, one Original Folder, or one Album in Grid View.
 5. The Photographer opens one Photo in Photo View from the Grid.
 6. A right swipe selects the Photo and a left swipe rejects it.
@@ -25,7 +25,7 @@ The first product must support this complete path:
 
 ## Preview Trust
 
-Slipstream must display a camera-produced representation when one is available. It uses a matching JPEG Original first and otherwise uses the RAW Original's largest usable embedded JPEG.
+Slipstream must display a camera-produced representation when one is available. A JPEG Photo's Preview uses its own content. A RAW Photo's Preview uses its own largest usable embedded JPEG. Slipstream must not substitute a sibling JPEG for a RAW Preview.
 
 This rule makes the Preview suitable for selection because it preserves the camera's white balance, picture style or film simulation, tone treatment, and orientation as encoded by the camera. Slipstream does not claim that the Preview exposes all recoverable RAW data or matches later output from a RAW editor.
 
@@ -35,6 +35,7 @@ Slipstream must identify the Preview Source. It must not describe an unavailable
 
 - **Selection first**: Every first-product capability must help the Photographer group, compare, select, reject, rate, or resume Photos.
 - **Camera-produced preview**: Prefer the camera's JPEG result over a new generic RAW interpretation.
+- **RAW-first independence**: RAW remains the primary working material, and each Original File is managed as an independent Photo.
 - **Original ownership**: Original Files remain in place and unchanged.
 - **Touch-native browsing**: Core selection works through direct gestures and also remains accessible through visible controls and keyboard input.
 - **Progressive use**: The Library Browser becomes useful without downloading every Photo fact or generating every Preview.

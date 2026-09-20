@@ -64,7 +64,6 @@ struct IdentityContract {
     #[serde(rename = "algorithmVersion")]
     algorithm_version: String,
     vectors: Vec<IdentityVector>,
-    paired: PairedVector,
 }
 
 #[cfg(test)]
@@ -87,17 +86,6 @@ struct IdentityVector {
     historical_cache_key: String,
     #[serde(rename = "historicalManifestIdentity")]
     historical_manifest_identity: String,
-}
-
-#[cfg(test)]
-#[derive(Deserialize)]
-struct PairedVector {
-    #[serde(rename = "rawOriginalId")]
-    raw_original_id: String,
-    #[serde(rename = "jpegOriginalId")]
-    jpeg_original_id: String,
-    #[serde(rename = "photoId")]
-    photo_id: String,
 }
 
 #[cfg(test)]
@@ -459,6 +447,8 @@ mod tests {
             "sqlite/schema-v4.sql",
             "sqlite/schema-v5.json",
             "sqlite/schema-v5.sql",
+            "sqlite/schema-v6.json",
+            "sqlite/schema-v6.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -977,16 +967,11 @@ mod tests {
                 vector.source_revision
             );
         }
-        let pair_seed = format!(
-            "{}\0{}",
-            contract.paired.raw_original_id, contract.paired.jpeg_original_id
-        );
-        assert_eq!(photo_id(&pair_seed), contract.paired.photo_id);
     }
 
     #[test]
     fn canonical_schema_snapshots_execute_with_bundled_sqlite() {
-        for version in ["v4", "v5"] {
+        for version in ["v4", "v5", "v6"] {
             let connection = Connection::open_in_memory().unwrap();
             connection
                 .execute_batch(

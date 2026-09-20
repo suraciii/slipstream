@@ -3,8 +3,7 @@
   "allowedKeys": [
     "id",
     "available",
-    "ambiguous",
-    "originals",
+    "original",
     "originalFilename",
     "selectionState",
     "rating",

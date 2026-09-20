@@ -17,6 +17,7 @@ mod native;
 pub mod persistence;
 pub mod preview;
 pub mod reconcile;
+mod recovery;
 
 #[cfg(test)]
 mod test_support;
@@ -40,18 +41,18 @@ pub use domain::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
     AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
     AlbumRecord, AlbumSummary, DiscoveredOriginal, MAXIMUM_FOLDER_ALBUM_PHOTOS,
-    OriginalErrorCategory, OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError,
-    PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoRecord, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchItem, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
-    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
+    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
+    OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoRecord,
+    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchItem,
+    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
     SelectionState,
 };
-pub use identity::{
-    InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,
+pub use identity::{InvalidModificationTime, original_id, source_revision, standalone_photo_id};
+pub use library::{
+    Library, LibraryConfig, LibraryError, ScanOutcome, ScanPhase, ScanProgress, expand_library,
 };
-pub use library::{Library, LibraryConfig, LibraryError, ScanPhase, ScanProgress, expand_library};
 pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
@@ -64,3 +65,9 @@ pub use preview::{
     PreviewUnavailableReason,
 };
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};
+pub use recovery::{
+    AppliedRelocations, ManualOutcome, ManualProposal, RecoveryProgress, RecoverySurvey,
+    RequestedRelocation, RetireSummary, UnavailablePhotoRecord, digest_bytes,
+    evidence_original_ids, parse_location_prefix, plan_manual_relocations, plan_recovery,
+    plan_single_relocation,
+};

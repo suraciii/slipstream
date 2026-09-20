@@ -10,13 +10,26 @@ The configured filesystem directory whose supported descendant files belong to t
 _Avoid_: Library Root, source root
 
 **Photo**:
-One photograph presented for browsing and selection. A Photo may contain a RAW Original and its matching JPEG Original, and remains the same Photo when a supported Library expansion changes their Locations.
+One independently managed supported Original File presented for browsing and selection. RAW and same-basename JPEG are independent Photos; their naming must not share decisions, Album membership, or Preview. A Photo keeps its identity when a supported operation changes its Original Location.
+_Avoid_: image pair, RAW/JPEG group
+
+**Content Fingerprint**:
+A persisted SHA-256 digest of one Original File's complete content together with the size and modification time observed while hashing. A Content Fingerprint is exact-content evidence for Location Recovery, not identity; independent Originals may share one.
+_Avoid_: checksum identity, hash as ID
+
+**Location Recovery**:
+The automatic or manual restoration of a remembered Original Location for an unavailable Original File: automatically when exact content evidence identifies one unambiguous candidate, manually with explicit confirmation when it cannot. Recovery never modifies or deletes an Original File.
+_Avoid_: relink, repair, reimport
+
+**Retire and Bind**:
+An explicit recovery action that binds an unavailable Original File to an occupied destination Location. It is available only when the destination Photo is otherwise unreferenced with default decisions and no Album membership. It shows the record that will be retired and must not delete a filesystem file.
+_Avoid_: replace, merge, overwrite
 
 **Capture Time**:
-The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time does not come from filesystem modification time and does not determine Album membership order.
+The optional camera-recorded local date and time used to order Photos in the Photo Library. Capture Time comes from the Photo's own Original File and does not come from filesystem modification time. It does not determine Album membership order.
 
 **Original File**:
-A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not modify it, and a supported Library expansion must not create a new identity for it.
+A RAW or JPEG file owned by the Photographer and known to Slipstream under one stable identity. Slipstream must not modify it, and a supported Library expansion or Location Recovery must not create a new identity for it.
 
 **Original Location**:
 The relative directory and filename used to find an Original File beneath the current Library Folder. A Location is not Original File identity.
@@ -41,7 +54,7 @@ A Photographer-owned external XMP file associated with a Photo and stored separa
 _Avoid_: sidecar when the kind is unclear, XMP Original, XMP Photo
 
 **Sidecar Association**:
-The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Locations. An unambiguous RAW/JPEG pair shares one association; the sidecar does not create a Photo or change its Original identity.
+The rule that links one same-directory, same-basename XMP Sidecar to one Photo through its Original Location. A sole RAW Original owns the association; a sole JPEG Original owns it only when no RAW shares the basename. Multiple eligible owners remain ambiguous and have no writable association. A Location or ownership change invalidates an existing synchronization baseline. The sidecar does not create a Photo or change its Original identity.
 _Avoid_: sidecar identity, filename identity
 
 **Sidecar Metadata**:
@@ -76,10 +89,10 @@ An optional zero-to-five-star assessment owned by a Photo. Rating is separate fr
 ## Preview
 
 **Preview**:
-The JPEG shown in Grid View or Photo View. It comes from a matching JPEG Original or the RAW Original's largest usable embedded JPEG.
+The JPEG shown in Grid View or Photo View. A JPEG Photo's Preview comes from its own content; a RAW Photo's Preview comes from its own largest usable embedded JPEG. A sibling JPEG must not substitute for a RAW Preview.
 
 **Preview Source**:
-The content used for a Preview: `matching-jpeg` or `embedded-raw-jpeg`.
+The content used for a Preview: `jpeg-original` or `raw-embedded-jpeg`. The legacy names `matching-jpeg` and `embedded-raw-jpeg` existed only in schema version 5, before independent Photos.
 
 **Detail Review**:
 Magnified Preview inspection for focus, motion, or expression. It is a Preview Zoom state in Photo View, not a separate mode. Its detail is limited by the Preview resolution.

@@ -147,9 +147,9 @@ When the Photographer opens or changes a source, Slipstream fixes that source's 
 3. For equal Capture Times and throughout the missing-time partition, the Photo's ordering Location by UTF-8 bytes.
 4. Photo ID by UTF-8 bytes when all earlier values tie.
 
-The Photo's ordering Location is its RAW Original Location when the Photo contains RAW. Otherwise it is its JPEG Original Location.
+The Photo's ordering Location is its own Original Location.
 
-Original Folder order must use the `All Photos` order filtered by component-aware Folder ancestry. A Folder named `a` must not include a sibling named `ab`. Folder filtering must count a RAW/JPEG pair once by the parent of its ordering Original Location.
+Original Folder order must use the `All Photos` order filtered by component-aware Folder ancestry. A Folder named `a` must not include a sibling named `ab`. Folder filtering must project each Photo once through the parent of its ordering Original Location.
 
 Album order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, Original Folder changes, and rescans must not reorder an Album.
 
@@ -172,7 +172,7 @@ view. Photos without a valid authoritative Capture Time sort last in both
 directions. Equal Capture Times keep the deterministic ordering Location and
 Photo ID tie-breakers; reversing the time direction never reverses those
 tie-breakers and never moves missing-time Photos ahead of timed Photos. Time
-ordering reuses the existing RAW/JPEG Capture Time authority and camera-local
+ordering uses the Photo's own Capture Time authority and camera-local
 normalization; it does not guess time zones and does not use file modification
 time.
 
@@ -220,7 +220,7 @@ A Grid cell must show, when available:
 - the Original filename;
 - Selection State;
 - Rating;
-- Photo unavailability and pairing ambiguity as distinct facts;
+- Photo and Original unavailability as distinct facts;
 - Preview unavailability or failure without removing the Photo from its position; and
 - thumbnail delivery failure without replacing the Photo or Preview facts above.
 
@@ -247,8 +247,7 @@ render beside or beneath the image area.
 
 Orientation follows the EXIF-corrected derivative dimensions. A Photo whose
 Preview derivative applies an EXIF rotation must display with the corrected
-orientation exactly once, and a RAW/JPEG pair remains one Photo with one
-cell.
+orientation exactly once. Each Photo has one Grid cell.
 
 While a thumbnail is not yet loaded or its dimensions are unknown, the cell
 must keep a stable placeholder. The placeholder must not fake an orientation
@@ -295,8 +294,8 @@ Photo View must show one current Photo as the primary content. It must also show
   ISO, Shutter Speed, and Focal Length.
 
 Capture metadata is read-only. A missing or unreadable field must display an
-explicit `—` value. The displayed values follow the same RAW-first, JPEG
-fallback authority used for Capture Time. Metadata loading failure must not
+explicit `—` value. The displayed values come from the Photo's own Original
+File. Metadata loading failure must not
 disable selection, Rating, navigation, or Preview behavior. Slipstream does
 not provide a general EXIF editor or an unbounded metadata browser.
 
@@ -345,7 +344,9 @@ Slipstream must distinguish these user-visible states:
 - preparing the current source order;
 - loading a bounded Grid or Photo window;
 - preparing a thumbnail or review Preview;
-- scanning the Library Folder; and
+- scanning the Library Folder;
+- recovering relocated Original Files;
+- enrolling content fingerprints; and
 - disconnected or failed.
 
 Slipstream must show a numeric count or percentage only when it knows the corresponding total and completed amount. Otherwise it must show the current phase without inventing progress.
@@ -353,6 +354,16 @@ Slipstream must show a numeric count or percentage only when it knows the corres
 An existing published Library must remain browsable while an ordinary background rescan checks for changes. The interface must show the current scan phase and real counts when available. If the check fails, Slipstream must retain the prior Published Library and offer **Retry Library Check**. When a replacement publishes, a completion notice must offer **Refresh Current Source**. Shared counts and the `Folders` section may refresh immediately, but Photos discovered by that scan appear in the open source only after the Photographer refreshes or reopens it; they must not move the current open view.
 
 On a new state store with no published Library, the browser may show initialization progress until the first scan publishes the Library.
+
+## Recovery Review
+
+A rescan that relocates or still misses Original Files must report committed recovery counts on the Library status, for example `Updated locations for 126 photos. 3 originals still unavailable.` A successful recovery must stay unobtrusive: it must not open a dialog or require a path entry.
+
+Slipstream must offer one bounded `Review unavailable originals` entry from the scan result and from an affected Photo. The entry must list remembered Locations, filenames, kinds, Ratings, Selection States, Album counts, and whether each Original has a fingerprint. It must let the Photographer propose mappings, inspect every proposal, and confirm an explicit apply under the [Photo Library and Albums](photo-library.md) manual recovery rules.
+
+Unavailable Photos must stay in their Grid positions and Albums with their remembered facts. Slipstream must not remove a Photo or its decisions only because its Original File is missing.
+
+Slipstream must show one primary actionable failure for an affected Photo. It must distinguish not found, unreadable, Preview failure, request failure, and disconnection. Once Original unavailability is established, it must suppress a redundant thumbnail-delivery error for that Photo.
 
 ## Empty Sources
 

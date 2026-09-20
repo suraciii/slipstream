@@ -1,112 +1,98 @@
 [
   {
-    "start": 0,
-    "total": 1,
     "photos": [
       {
-        "id": "$photoId",
         "available": true,
-        "ambiguous": false,
-        "originalFilename": "pair.ARW",
-        "originals": [
-          {
-            "kind": "raw",
-            "available": true
-          },
-          {
-            "kind": "jpeg",
-            "available": true
-          }
-        ],
-        "selectionState": "undecided",
-        "rating": 0,
+        "id": "$photoId",
+        "original": {
+          "available": true,
+          "kind": "jpeg"
+        },
+        "originalFilename": "pair.JPG",
         "preview": {
           "state": "inspection-pending"
-        }
+        },
+        "rating": 0,
+        "selectionState": "undecided"
       }
-    ]
+    ],
+    "start": 0,
+    "total": 1
   },
   {
-    "start": 0,
-    "total": 1,
     "photos": [
       {
-        "id": "$photoId",
         "available": true,
-        "ambiguous": false,
-        "originalFilename": "pair.ARW",
-        "originals": [
-          {
-            "kind": "raw",
-            "available": true
-          },
-          {
-            "kind": "jpeg",
-            "available": true
-          }
-        ],
-        "selectionState": "undecided",
-        "rating": 0,
+        "id": "$photoId",
+        "original": {
+          "available": true,
+          "kind": "jpeg"
+        },
+        "originalFilename": "pair.JPG",
         "preview": {
-          "state": "ready",
-          "source": "matching-jpeg",
-          "width": 90,
           "height": 45,
           "limitedDetail": true,
+          "source": "jpeg-original",
+          "state": "ready",
+          "thumbnailUrl": "$thumbnailUrl",
           "url": "$reviewUrl",
-          "thumbnailUrl": "$thumbnailUrl"
-        }
+          "width": 90
+        },
+        "rating": 0,
+        "selectionState": "undecided"
       }
-    ]
+    ],
+    "start": 0,
+    "total": 1
   },
   {
-    "albumId": "$albumId",
     "addedPhotoIds": ["$photoId"],
-    "alreadyMemberPhotoIds": [],
+    "albumId": "$albumId",
     "albums": [
       {
+        "hasSavedPosition": false,
         "id": "$albumId",
         "name": "Review",
-        "photoCount": 1,
-        "hasSavedPosition": false
+        "photoCount": 1
       }
-    ]
+    ],
+    "alreadyMemberPhotoIds": []
   },
   {
-    "state": "ready",
-    "source": "matching-jpeg",
-    "stale": false,
-    "width": 120,
     "height": 60,
     "limitedDetail": true,
-    "url": "$secondReviewUrl"
+    "source": "jpeg-original",
+    "stale": false,
+    "state": "ready",
+    "url": "$secondReviewUrl",
+    "width": 120
   },
   {
-    "state": "ready",
-    "source": "matching-jpeg",
-    "stale": true,
-    "width": 140,
     "height": 70,
     "limitedDetail": true,
+    "message": "Showing a stale Preview because current generation failed",
+    "source": "jpeg-original",
+    "stale": true,
+    "state": "ready",
     "url": "$secondReviewUrl",
-    "message": "Showing a stale Preview because current generation failed"
+    "width": 140
   },
   {
-    "state": "failed",
-    "message": "Request failed"
+    "message": "Request failed",
+    "state": "failed"
   },
   {
-    "state": "unavailable",
-    "message": "Original File is unavailable"
+    "message": "Original File is unavailable",
+    "state": "unavailable"
   },
   {
     "kind": "applied",
     "photoId": "$photoId",
     "undo": {
-      "photoId": "$photoId",
+      "expectedCurrent": 4,
       "field": "rating",
-      "priorValue": 2,
-      "expectedCurrent": 4
+      "photoId": "$photoId",
+      "priorValue": 2
     }
   },
   {
