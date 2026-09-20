@@ -62,7 +62,7 @@ test("the RAW plan keeps the exact serial native, service, and browser gate", ()
       expectedTests: [
         "confinement::tests::sony_original_remains_unchanged",
         "native::tests::sony_embedded_preview_is_largest_usable_candidate_and_original_is_unchanged",
-        "preview::tests::corrupt_matching_jpeg_falls_back_to_raw_and_recovers_after_replacement",
+        "preview::tests::raw_photo_previews_from_embedded_jpeg_independent_of_sibling_jpeg",
         "preview::tests::sony_opt_in_service_uses_largest_embedded_candidate_without_mutating_original",
       ],
     },
