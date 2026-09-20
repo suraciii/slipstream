@@ -64,7 +64,6 @@ struct IdentityContract {
     #[serde(rename = "algorithmVersion")]
     algorithm_version: String,
     vectors: Vec<IdentityVector>,
-    paired: PairedVector,
 }
 
 #[cfg(test)]
@@ -89,16 +88,6 @@ struct IdentityVector {
     historical_manifest_identity: String,
 }
 
-#[cfg(test)]
-#[derive(Deserialize)]
-struct PairedVector {
-    #[serde(rename = "rawOriginalId")]
-    raw_original_id: String,
-    #[serde(rename = "jpegOriginalId")]
-    jpeg_original_id: String,
-    #[serde(rename = "photoId")]
-    photo_id: String,
-}
 
 #[cfg(test)]
 mod tests {
@@ -979,11 +968,6 @@ mod tests {
                 vector.source_revision
             );
         }
-        let pair_seed = format!(
-            "{}\0{}",
-            contract.paired.raw_original_id, contract.paired.jpeg_original_id
-        );
-        assert_eq!(photo_id(&pair_seed), contract.paired.photo_id);
     }
 
     #[test]

@@ -29,12 +29,5 @@
       "historicalCacheKey": "49d81bab2c5ea3cbc7a6f9d2d40f5560174573c888009b26d2acf78f48067010",
       "historicalManifestIdentity": "213cdbe0e81343340fcd63b23c716bf34fbe3a99b20750a20e1bb3edf0fb42aa"
     }
-  ],
-  "paired": {
-    "rawPath": "春节/相机/_R5_0002.ARW",
-    "jpegPath": "春节/相机/_R5_0002.JPG",
-    "rawOriginalId": "045326f4482d3161c09523b07cd8535a5cad51e839a99cdc39cc456c2c54eae3",
-    "jpegOriginalId": "3ca931a2e714802590d05303c47b6bcf5e6181c8622855d373e6c3e5274d1190",
-    "photoId": "2ec4722cbab21b52c830cb36e5ee9b59df20bff38cfb6590c72a4b0e29e32dbe"
-  }
+  ]
 }

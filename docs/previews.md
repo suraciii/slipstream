@@ -4,18 +4,18 @@ A browser cannot display most RAW Originals directly. Slipstream needs a Preview
 
 ## Preview Source Order
 
-Slipstream must choose the first usable Preview Source in this order:
+Slipstream must select the Preview Source from the Photo's own Original File:
 
-1. a matching JPEG Original;
-2. the RAW Original's largest usable embedded JPEG.
+1. a JPEG Original's own content;
+2. a RAW Original's largest usable embedded JPEG.
 
 A Preview is usable when Slipstream can decode it, determine its dimensions and orientation, and produce a browser-displayable result.
 
-Slipstream must not generate a new interpretation from RAW sensor data in the first product. If neither source is usable, the Photo has no Preview.
+Slipstream must not generate a new interpretation from RAW sensor data in the first product, and it must not use another Original File's content. A RAW Photo must not use a same-basename JPEG as a fallback. If the Photo's own source is not usable, the Photo has no Preview.
 
 ## Trust Boundary
 
-A matching JPEG Original or embedded RAW JPEG may contain camera white balance, picture style, film simulation, tone treatment, crop, and orientation. Slipstream preserves this camera-produced appearance as the basis for selection.
+A JPEG Original's own content or an embedded RAW JPEG may contain camera white balance, picture style, film simulation, tone treatment, crop, and orientation. Slipstream preserves this camera-produced appearance as the basis for selection.
 
 Slipstream does not promise:
 
@@ -25,7 +25,7 @@ Slipstream does not promise:
 - monitor calibration beyond the browser and operating system's normal color handling;
 - identical appearance across uncalibrated displays.
 
-Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. It must identify limited detail when the Preview is smaller than the display or requested zoom requires.
+Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. The wire value is `jpeg-original` or `raw-embedded-jpeg`; the legacy names `matching-jpeg` and `embedded-raw-jpeg` existed only in schema version 5 and must not appear as current values. It must identify limited detail when the Preview is smaller than the display or requested zoom requires.
 
 ## Preview Normalization
 
@@ -66,7 +66,7 @@ Slipstream must not automatically generate every Library Preview. Demand-driven 
 
 ## Failure Behavior
 
-If a matching JPEG is corrupt and a RAW Original exists, Slipstream must try the RAW Original's embedded JPEG candidates, largest first. If no embedded candidate is usable, Slipstream must mark the Photo Preview unavailable. The interface must report the source it ultimately uses.
+If a JPEG Photo's own content is corrupt, Slipstream must mark that Photo's Preview unavailable. It must not substitute a same-basename RAW Original's embedded JPEG. If a RAW Photo's largest embedded candidate is unusable, Slipstream may try the next smaller candidate. If no candidate is usable, Slipstream must mark the Photo Preview unavailable. The interface must report the source it ultimately uses.
 
 If extraction, decoding, orientation, or derivative generation fails for every allowed source, Slipstream must mark the Photo Preview unavailable. It must not substitute an unrelated file or generic RAW development without identifying a different contract.
 
@@ -76,8 +76,8 @@ A Preview generation failure must not modify the Original File or remove an exis
 
 ## Examples
 
-`DSCF0001.RAF` and `DSCF0001.JPG` form one Photo. Slipstream derives its Preview from `DSCF0001.JPG` and labels the source `JPEG`.
+`DSCF0001.RAF` and `DSCF0001.JPG` are independent Photos. Slipstream derives the JPEG Photo's Preview from `DSCF0001.JPG` and labels the source `JPEG`. A corrupt `DSCF0001.JPG` does not change the RAW Photo's Preview, which still comes from its own embedded JPEG.
 
-`DSCF0002.RAF` has no matching JPEG and contains a 6240-by-4160 embedded JPEG. Slipstream uses that embedded JPEG and labels the source `RAW embedded JPEG`.
+`DSCF0002.RAF` contains a 6240-by-4160 embedded JPEG. Slipstream uses that embedded JPEG and labels the source `RAW embedded JPEG`.
 
 `DSCF0003.RAF` contains only a 640-by-480 embedded thumbnail. Slipstream may show it, but must identify that focus inspection is limited by the Preview resolution.

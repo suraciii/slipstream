@@ -47,7 +47,7 @@ One Photo Library Scope owns:
 - supported-file discovery;
 - stable Original File and Photo identities;
 - current Original Locations;
-- deterministic RAW/JPEG pairing;
+- content fingerprints and exact-content Location Recovery;
 - Photo records and availability;
 - Album membership;
 - derived read-only Original Folder navigation;
@@ -55,7 +55,7 @@ One Photo Library Scope owns:
 
 Every Original File read must resolve beneath the current Library Folder. Slipstream must reject traversal and symbolic-link escape. The Original File interface exposes no write or delete operation.
 
-The Library Folder is a location and discovery boundary, not Photo Library identity. Persisted Original File and Photo IDs are opaque after creation. Ordinary rescan does not infer moves. The explicit ancestor-expansion contract in [Photo Library Identity and Expansion](library-identity.md) is the only first-product operation that may change remembered Original Locations while preserving identity.
+The Library Folder is a location and discovery boundary, not Photo Library identity. Persisted Original File and Photo IDs are opaque after creation. Ordinary rescan restores a moved Original only from exact content-fingerprint evidence. The explicit ancestor-expansion contract in [Photo Library Identity and Expansion](library-identity.md) is the only first-product operation that may change remembered Original Locations while preserving identity.
 
 ### Library Browser Scope
 
@@ -69,7 +69,7 @@ The server is authoritative for Selection State and Rating. The browser must rec
 
 ### Indexing
 
-Indexing discovers supported files and records lightweight facts needed for pairing and invalidation. It does not decode every RAW or generate every Preview before the Photo Library becomes usable.
+Indexing discovers supported files and records lightweight facts needed for identity, Location Recovery, and invalidation. It does not decode every RAW or generate every Preview before the Photo Library becomes usable.
 
 After storage and state admission, an existing completed Library snapshot may remain browsable while an ordinary rescan builds its replacement in the background. A new state store exposes initialization progress until its first complete snapshot is published. A root binding, schema, sidecar, or confinement admission failure remains fail-closed.
 
@@ -78,7 +78,7 @@ A scan proceeds incrementally:
 1. Walk paths below the configured Library Folder.
 2. Classify recognized RAW and JPEG files.
 3. Record Original Location, size, modification time, and availability.
-4. Pair an unambiguous same-directory, same-base-name RAW and JPEG.
+4. Restore a moved Original File when one exact unclaimed fingerprint candidate exists, before allocating new Photos.
 5. Queue thumbnail work only as needed for visible browsing.
 
 A failure for one file is recorded for that file and does not roll back successfully indexed files.
@@ -93,13 +93,13 @@ At minimum, SQLite stores:
 - the admitted Library Folder binding;
 - stable Original File and Photo IDs;
 - Original Location, kind, size, modification time, availability, and derived Capture Time inspection facts;
-- Photo identity and RAW/JPEG references;
+- Photo identity and its single Original File reference;
 - Preview source, dimensions, cache revision, and failure state;
 - Album identity, name, order, and membership;
 - Photo Selection State and Rating;
 - per-Album saved position.
 
-Original bytes, matching JPEG bytes, and embedded RAW JPEG bytes do not belong in SQLite.
+Original bytes, JPEG Original bytes, and embedded RAW JPEG bytes do not belong in SQLite.
 
 Selection State and Rating update in one database transaction per Photo mutation. A mutation may update that Album's saved position in the same transaction. The browser holds one undo description containing the affected Photo, field, prior value, and expected current value; undo uses a compare-and-set transaction so it cannot overwrite a newer change. Album deletion removes membership and saved position, not Photo state or filesystem content.
 
@@ -133,7 +133,7 @@ Authentication and accounts require a separate future design.
 The initial codebase has these logical modules:
 
 - **Application** composes startup, shutdown, storage, queues, and server resources.
-- **Library** owns root containment, discovery, pairing, and Photo availability.
+- **Library** owns root containment, discovery, content fingerprints, Location Recovery, and Photo availability.
 - **Preview** owns source selection, embedded JPEG extraction, normalization, cache invalidation, and delivery.
 - **Browsing** owns Library Overview, hidden Browse Snapshots, bounded windows, and source navigation.
 - **Selection** owns Selection State, Rating, and saved Album position.
@@ -162,12 +162,12 @@ The first implementation proves this complete path:
 
 1. Start the server with one Photo Library directory.
 2. Open the Library Browser.
-3. Index a directory containing one RAW-only Photo and one RAW/JPEG Photo.
-4. Create one Album and add both Photos.
-5. Display both Photos in a progressively loaded Grid without a complete-Library response.
-6. Display the matching JPEG for the paired Photo in Photo View.
-7. Extract and display the largest usable embedded JPEG for the RAW-only Photo.
-8. Right-swipe one Photo to `selected` and left-swipe the other to `rejected`.
+3. Index a directory containing one RAW Original, one same-basename JPEG Original, and one RAW Original without a JPEG companion.
+4. Create one Album and add all three independent Photos.
+5. Display all three Photos in a progressively loaded Grid without a complete-Library response.
+6. Display the JPEG Original's own Preview in Photo View.
+7. Extract and display the largest usable embedded JPEG for each RAW Photo.
+8. Right-swipe one Photo to `selected` and left-swipe another to `rejected`.
 9. Set one Rating and undo one decision.
 10. Restart the server and restore cached Previews, the Album, decisions, Rating, and saved position.
 11. Prove that Original File bytes and metadata are unchanged.
@@ -184,7 +184,7 @@ The server reads RAW files through a native open-source library and sends JPEG d
 
 Browser-side RAW processing would transfer large files to each device, duplicate caches, consume mobile memory and battery, and complicate color and format support. It adds no value when the Photo Library already resides beside the server.
 
-### Selected: Embedded or Matching JPEG Only
+### Selected: Embedded or Own JPEG Only
 
 Camera-produced JPEG content satisfies the current selection problem with less complexity and more predictable appearance than a generic RAW development pipeline.
 
@@ -206,8 +206,9 @@ The first-slice gate must prove:
 
 - configured-root containment, including traversal and symbolic-link escape rejection;
 - indexing never writes, renames, moves, or deletes Original Files;
-- deterministic unambiguous RAW/JPEG pairing;
-- correct Preview Source order;
+- independent Photos with their own Preview Sources and no cross-file substitution;
+- a moved Original File is restored from one exact unambiguous candidate before new Photos are allocated;
+- correct own-file Preview Source selection;
 - embedded JPEG extraction for each supported sample camera;
 - visible orientation and dimensions match the camera Preview;
 - derivatives preserve a valid ICC profile or are correctly converted to sRGB;

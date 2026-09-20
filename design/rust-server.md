@@ -7,7 +7,7 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 ## Design Drivers
 
 - Original Files are irreplaceable and require descriptor-confined access.
-- Existing SQLite Library, Album, Selection State, Rating, and saved-position behavior must remain stable through the required v4-to-v5 terminology migration.
+- Existing SQLite Library, Album, Selection State, Rating, and saved-position behavior must remain stable through the required v5-to-v6 independent-Photo migration.
 - LibRaw and image processing are blocking native work and must remain bounded.
 - One Photographer and one Photo Library do not justify distributed services, an ORM, or an actor framework.
 - The service must support operator-controlled restart and rollback without modifying Original Files.
@@ -17,9 +17,9 @@ This decision corrects an earlier language-boundary drift. Selecting Bun for Web
 The Rust service is one modular monolith with these boundaries:
 
 - **Application and HTTP** own configuration, listener startup order, request limits, protocol mapping, static Web delivery, readiness, and graceful shutdown.
-- **Library and Confinement** own the current Library Folder descriptor, deterministic traversal, Original capabilities, stable persisted identity, Original Locations, pairing, and revision facts. Paths do not confer authority or identity.
+- **Library and Confinement** own the current Library Folder descriptor, deterministic traversal, Original capabilities, stable persisted identity, Original Locations, content fingerprints, Location Recovery, and revision facts. Paths do not confer authority or identity.
 - **Persistence** owns one SQLite connection on one dedicated thread with a bounded typed command queue. It owns schema validation, migration, sidecar admission, transactions, and durable state.
-- **Preview and Native** own bounded matching-JPEG reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
+- **Preview and Native** own bounded JPEG Original reads and a narrow C/C++ LibRaw plus libjpeg shim. The shim accepts an already-confined descriptor adapter, enumerates embedded JPEG candidates, fully validates JPEG bytes, and exposes no sensor unpack or RAW development operation.
 - **Derivative and Cache** own orientation, color, resize, encoding, scheduling, identity, atomic publication, stale fallback, and immutable delivery facts.
 
 The modules exchange domain values and typed failures. HTTP types do not enter Persistence or Native modules. Native error text and filesystem paths do not cross the protocol boundary.
@@ -84,7 +84,7 @@ The checked-in files under [`../compatibility/`](../compatibility/) are the auth
 
 **Fixture coverage boundary.** The browse and validation protocol vectors run against an empty fixture Library, so they pin validation, error, and empty shapes and the contract envelope; the cache vectors seed one Photo and one web asset and pin the derivative and web-asset response headers, ETag shape, and revalidation. Other success shapes and non-empty windows are pinned by the server test suite and the browser suite until Issue #266 lands. Every file under [`../compatibility/`](../compatibility/) must have an executing consumer; Issue #266 tracks the inventory check that enforces this rule.
 
-HTTP response shapes, SQLite v2 and v3 migration inputs, cache records, and existing persisted IDs remain compatible. Deterministic v3 identity vectors define preserved legacy values, not the allocator for new v4 records. SQLite v5 is the writable Album state defined by [Photo Library Identity and Expansion](library-identity.md) and [Photo Organization](photo-organization.md); older binaries reject it. Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
+HTTP response shapes, SQLite v2 and v3 migration inputs, cache records, and existing persisted IDs remain compatible. Deterministic v3 identity vectors define preserved legacy values, not the allocator for new v4 records. SQLite v6 is the writable independent-Photo and Album state defined by [Photo Library Identity and Expansion](library-identity.md) and [Photo Organization](photo-organization.md); older binaries reject it. Docker preserves bind-mounted state and cache while running the Rust service. The Rust service and Web application are the only production paths; Bun and TypeScript remain limited to Web, browser tests, and repository tooling.
 
 Golden JSON and SQL fixtures are the source of truth. Speculative shared code generation is rejected because the current protocol is small and generated bindings would create another build and compatibility boundary before demonstrated duplication.
 
@@ -98,7 +98,7 @@ Actix Web `4.15.0` was considered. It supports the required HTTP surface, but it
 
 ### SQLite: rusqlite with bundled SQLite
 
-rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v5 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
+rusqlite `0.40.2` is pinned with `bundled`. The probe executes the canonical v6 schema and reports a working SQLite runtime without depending on a deployment host's SQLite version or compile options. One dedicated bounded owner thread preserves the current serialization and direct `BEGIN IMMEDIATE` control.
 
 sqlx `0.9.0` was considered. Its pool, async facade, macro/offline metadata, and generic migration layer do not replace Slipstream's exact schema-shape validation and sidecar admission. It is rejected until concurrent connections or cross-database support become measured requirements.
 
@@ -142,12 +142,13 @@ The service preserves:
 
 - the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
 - strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
-- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
-- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3 and v4 as preserved migration inputs and v5 as required writable state;
+- canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, canonical v5-to-v6 independent-Photo migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
+- the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3, v4, and v5 as preserved migration inputs and v6 as required writable state;
 - exact preservation of existing Original File and Photo IDs as opaque values across migration and Library expansion, without recomputing them from the current Original Location;
 - Location-independent, state-store-unique allocation for every new Original File and Photo ID under current writable state;
 - source revision text and cache/manifest identity serialization, including Unicode and fractional modification times;
-- matching JPEG before largest usable embedded RAW JPEG;
+- each Photo's own Preview Source: JPEG Original content or the RAW Original's largest usable embedded JPEG;
+- exact-content Location Recovery for a moved Original File, bounded and resumable fingerprint enrollment, and no state transfer to a duplicate;
 - descriptor confinement, resource limits, atomic cache publication, truthful stale source, and Original zero mutation;
 - required absolute startup paths, loopback default, startup cleanup, signals, and idempotent close.
 
@@ -157,4 +158,4 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, and v5 schema shapes, legacy-ID and Album-state preservation, Location-independent new-ID allocation, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, v5, and v6 schema shapes, legacy-ID, Album-state, and independent-Photo preservation, Location-independent new-ID allocation, exact-content recovery, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.

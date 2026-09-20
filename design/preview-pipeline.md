@@ -4,7 +4,7 @@ Slipstream must turn large, mostly browser-incompatible Original Files into trus
 
 ## Design Drivers
 
-- A matching camera JPEG is the clearest available camera-produced representation.
+- A JPEG Original's own content is the clearest available camera-produced representation.
 - Most RAW files contain one or more embedded JPEG images, but dimensions and metadata vary by camera.
 - Selection must begin before the whole Photo Library is processed.
 - Mobile browsers should not download RAW files or perform RAW decoding.
@@ -18,10 +18,23 @@ Slipstream must turn large, mostly browser-incompatible Original Files into trus
 
 A Source Candidate is JPEG content that may represent a Photo:
 
-- the matching JPEG Original;
-- one JPEG embedded in the RAW Original.
+- the Photo's own JPEG Original content; or
+- one JPEG embedded in the Photo's own RAW Original.
 
-Candidates are ordered by product rules in [Photo Previews](../docs/previews.md). Embedded candidates within one RAW are ordered by pixel area, largest first.
+A Photo's candidates never include another Original File's content. Candidates are ordered by product rules in [Photo Previews](../docs/previews.md). Embedded candidates within one RAW are ordered by pixel area, largest first.
+
+### Preview Source State
+
+Each Photo's allowed Preview Source follows from its own Original kind: a JPEG Original is its own source (`jpeg-original`), and a RAW Original is its own embedded-JPEG source (`raw-embedded-jpeg`). A Photo has exactly one allowed source, and a sibling file never provides a second candidate.
+
+One persisted inspection state belongs to each Photo:
+
+- `inspection-pending` when no completed inspection exists for the current source revision;
+- `ready` when a usable source produced a current Derivative;
+- `failed` for a transient service or native failure that may be retried; and
+- `unavailable` when no allowed source is usable for the current revision.
+
+A Preview fact is seeded only against the source revision it was produced from. A seed whose expected source revision no longer matches is ignored. A changed source revision returns the Photo to `inspection-pending`, and a relocation invalidates the location-derived derivative identity even when the bytes are equal.
 
 ### Source Inspection
 
@@ -59,13 +72,11 @@ The first implementation may derive `detail-limited` from actual source and view
 
 ### Source Selection
 
-For a Photo with a matching JPEG Original, the Preview module first inspects that JPEG. If it is valid, it is selected.
+For a JPEG Photo, the Preview module inspects the Photo's own JPEG content. If it is valid, it is selected.
 
-If the matching JPEG is absent or invalid and a RAW Original exists, the module asks LibRaw for embedded JPEG candidates and selects the largest valid candidate.
+For a RAW Photo, the module asks LibRaw for embedded JPEG candidates and selects the largest valid candidate. If one embedded candidate fails to extract or decode, the module may try the next smaller candidate.
 
-If one embedded candidate fails to extract or decode, the module may try the next smaller candidate.
-
-No sensor-data unpacking, demosaicing, camera-profile rendering, or generic fallback is part of this pipeline.
+A RAW Photo must not fall back to a same-basename JPEG, and a JPEG Photo must not fall back to another Original's content. No sensor-data unpacking, demosaicing, camera-profile rendering, or generic fallback is part of this pipeline.
 
 ### Native Library Boundary
 
@@ -148,6 +159,8 @@ A native extraction failure is bounded to the affected Photo and candidate. The 
 
 If all candidates fail, Preview state becomes `unavailable`. Only terminal no-usable-source outcomes (`Malformed`, `Unsupported`, and `NoUsablePreview`) seed this durable state. Hard native failures such as `ResourceLimit`, `Io`, and `Internal` remain transient service errors and must not seed durable `unavailable`, so later requests can retry them. The scheduler must not retry continuously. A source change, explicit rescan, or explicit retry may make it eligible again.
 
+A RAW Photo's Preview failure must not substitute a same-basename JPEG, and a JPEG Photo's Preview failure must not substitute any other Original's content.
+
 If the server stops during generation, a temporary file is not considered a valid Derivative. Startup or later cache maintenance may remove abandoned temporary files.
 
 A malformed or adversarial file must not cause unbounded allocation based only on claimed dimensions. The implementation must enforce explicit input, pixel, output, memory, and concurrency limits.
@@ -180,9 +193,10 @@ The checked-in minimal fixture contract must cover generated, redistributable JP
 
 Implementation tests must prove:
 
-- a matching JPEG wins over an embedded RAW JPEG;
-- an invalid matching JPEG falls back to the largest valid embedded JPEG;
+- a JPEG Photo's own content is its only Preview Source and a RAW Photo uses only its own embedded candidates;
+- an unusable largest embedded candidate falls back to the next smaller embedded candidate;
 - embedded candidates are ordered by actual dimensions;
+- a RAW Photo never substitutes a same-basename JPEG, and a changed source revision returns the Photo to `inspection-pending`;
 - no code path unpacks RAW sensor pixels;
 - portrait and rotated samples display exactly once in the correct orientation;
 - output never exceeds source dimensions or target long edge;

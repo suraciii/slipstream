@@ -265,7 +265,7 @@ Thumbnail reads are owned by the source/Grid scope with key
 change or application teardown aborts old work. Only the captured generation
 may attach a thumbnail or mark its delivery failed. Answered and transport failures
 leave a stable failed-delivery placeholder; they present no summary or
-connectivity failure. Server-supplied Photo availability, pairing ambiguity,
+connectivity failure. Server-supplied Photo availability, Original availability,
 and Preview state remain bounded Photo facts; a browser-owned thumbnail
 delivery failure is retained separately and does not overwrite them.
 
@@ -312,6 +312,35 @@ newer form or draft.
 Answered `404`, `409`, and other `4xx` failures do not change connectivity.
 Transport failures and service failures (`5xx`) change connectivity only while
 the operation still owns the global Album settlement family.
+
+### Recovery review and relocation apply
+
+`GET /api/recovery/unavailable` is a presentation read owned by the application
+scope with the global `recovery-survey` key. Opening or refreshing the review
+supersedes an older survey; the response may write only while the review
+remains open and its key is current. Application teardown detaches it and
+presents nothing.
+
+`POST /api/recovery/propose` is a presentation read keyed by the current
+review generation. A newer proposal request supersedes an older one. An
+answered or transport failure keeps the review open, reports on the review
+surface, and does not change connectivity; a superseded failure is silent.
+
+`POST /api/recovery/apply` is an admitted server command. It always settles
+after send: once sent, the batch may commit on the server even when the review
+or the page closes. Success refreshes shared recovery facts and the affected
+open source; a late success must not overwrite a destination that a newer
+operation changed. An answered conflict keeps the prior mappings visible,
+reports the refusal on the review surface, and offers a fresh proposal. Other
+answered failures report that nothing was applied, and a transport failure
+leaves the batch retryable without claiming whether it committed. An apply
+failure that loses its review surface falls back to the Library summary.
+
+The review is one bounded entry. It must distinguish not found, unreadable,
+Preview failure, request failure, and disconnection, and it must show one
+primary actionable failure for the affected Photo. Thumbnail and Preview
+errors for a Photo whose Original unavailability is already established are
+suppressed as redundant.
 
 ### Photo-state persistence and Undo
 
@@ -583,6 +612,8 @@ Focused automated coverage must prove:
 - concurrent startup/explicit scan admissions run one application-owned leader,
   publish once, return one captured terminal status to all live waiters, and
   finish status accounting even when one or every HTTP waiter disconnects;
+- the recovery review loads one bounded survey, safely supersedes an older survey, and keeps an admitted apply settling after the review closes;
+- recovery proposals never write, a refused batch keeps its per-mapping reasons visible, and a late apply success cannot overwrite a destination changed by a newer operation;
 - every File Location, Browse open/window, current/adjacent Preview, and
   thumbnail failure follows its specified notice, retry, and Recovery route;
 - unrelated File Location or background success cannot release a current

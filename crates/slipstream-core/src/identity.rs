@@ -62,15 +62,6 @@ pub fn standalone_photo_id(original_id: &str) -> String {
     digest(&[b"photo\0", original_id.as_bytes()])
 }
 
-pub fn paired_photo_id(raw_original_id: &str, jpeg_original_id: &str) -> String {
-    digest(&[
-        b"photo\0",
-        raw_original_id.as_bytes(),
-        b"\0",
-        jpeg_original_id.as_bytes(),
-    ])
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidModificationTime;
 
@@ -102,7 +93,6 @@ mod tests {
     #[derive(Deserialize)]
     struct Contract {
         vectors: Vec<Vector>,
-        paired: Pair,
     }
 
     #[derive(Deserialize)]
@@ -117,16 +107,6 @@ mod tests {
         photo_id: String,
         #[serde(rename = "sourceRevision")]
         source_revision: String,
-    }
-
-    #[derive(Deserialize)]
-    struct Pair {
-        #[serde(rename = "rawOriginalId")]
-        raw_original_id: String,
-        #[serde(rename = "jpegOriginalId")]
-        jpeg_original_id: String,
-        #[serde(rename = "photoId")]
-        photo_id: String,
     }
 
     fn contract_path() -> PathBuf {
@@ -213,12 +193,5 @@ mod tests {
                 vector.source_revision
             );
         }
-        assert_eq!(
-            paired_photo_id(
-                &contract.paired.raw_original_id,
-                &contract.paired.jpeg_original_id
-            ),
-            contract.paired.photo_id
-        );
     }
 }

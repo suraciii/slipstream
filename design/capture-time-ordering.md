@@ -6,7 +6,8 @@ Slipstream needs camera capture ordering without discarding explicit Album seque
 
 - Legacy SQLite state persists explicit Album membership positions and saved Album positions under earlier Photo Set names.
 - Camera files often omit timezone and subsecond metadata.
-- A RAW/JPEG pair may contain missing, invalid, or conflicting metadata.
+- One Original may contain missing or invalid capture metadata.
+- A relocated Original File resets its capture facts and re-derives them from its current bytes.
 - Every Original read remains descriptor-confined and read-only.
 - One malformed Original must not invalidate valid sibling Photos.
 - A completed Library snapshot must have one stable order. Metadata inspection must not reorder it progressively after publication.
@@ -37,6 +38,8 @@ Each Original owns one derived capture fact:
 
 A failed fact remains eligible for retry. Missing and invalid facts are reused while their source revision remains unchanged.
 
+A relocated Original File resets to `pending`. Its capture facts are re-derived from its current bytes at the new Location, so a value retained from the old Location never orders the Photo.
+
 ## Metadata Semantics
 
 Inspect base fields in this order:
@@ -63,15 +66,9 @@ For a supported RAW container without a TIFF header at byte zero, a narrow LibRa
 
 ## Photo Capture Fact
 
-A Photo derives its authoritative ordering key from its Originals:
+A Photo's authoritative ordering key comes from its own Original File's capture fact. A Photo has no fallback to another Original File.
 
-1. a known RAW fact;
-2. otherwise a known matching JPEG fact;
-3. otherwise no authoritative key.
-
-RAW authority is independent of Preview Source authority. Matching JPEG remains the preferred Preview source, while RAW remains the primary capture record for chronology.
-
-A paired Photo has a capture disagreement when both Originals have known ordering keys that differ, or when both have known offsets that differ. One known and one unknown offset is incomplete metadata, not a disagreement. The disagreement is derived from Original facts and is not persisted separately. It does not make the Photo unavailable and is not exposed by the first browser protocol.
+A Photo whose own Original has no known key sorts in the missing-time partition until a current inspection produces one. A relocated Original returns to `pending`, so its Photo returns to the missing-time partition until its current bytes are inspected.
 
 ## Deterministic Library Order
 
@@ -84,7 +81,7 @@ Photo ordering Location by UTF-8 bytes,
 Photo ID by UTF-8 bytes
 ```
 
-The Photo ordering Location is the RAW Original Location when the Photo contains RAW; otherwise it is the JPEG Original Location.
+The Photo ordering Location is the Photo's own Original Location.
 
 Album queries continue to order only by `album_members.position`. Original Folder sources preserve the relative order of the filtered `All Photos` sequence.
 
@@ -136,9 +133,9 @@ Application validation enforces:
 - `pending` has no derived fact;
 - `failed` has no authoritative key and remains retryable.
 
-Do not add a winning timestamp or disagreement column to `photos`. Query and domain mapping derive RAW-first authority and disagreement from the joined Original rows.
+Do not add a winning timestamp column to `photos`. Query and domain mapping derive the Photo's ordering key from its single Original File row.
 
-The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction. It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and saved virtual-group position. The later v4-to-v5 Album migration preserves those same values while adopting canonical Album names. Exact canonical-shape validation remains mandatory.
+The v2-to-v3 migration adds only derived metadata columns and changes `PRAGMA user_version` to `3` in one admitted `BEGIN IMMEDIATE` transaction. It preserves every existing row, identity, membership position, Selection State, Rating, Preview fact, and saved virtual-group position. The later v4-to-v5 Album migration preserves those same values while adopting canonical Album names, and the v5-to-v6 independent-Photo migration preserves every Original File's capture facts, including paired inputs whose RAW and JPEG become independent Photos. Exact canonical-shape validation remains mandatory.
 
 ## Rollback
 
@@ -150,8 +147,7 @@ Rollback stops the v3 process and restores the pre-upgrade v2 backup. There is n
 
 The browser obtains deterministic order through the hidden bounded Browse Snapshot protocol in [Scalable Library Browsing](library-browsing.md). The protocol must not expose one unbounded complete-Library response. Library and Original Folder Snapshots use Capture Time order; an Album Snapshot uses explicit membership position.
 
-Browse Windows do not expose Capture Time, offset, inspection state, or pair
-disagreement in every Grid item. Photo View may request the bounded review
+Browse Windows do not expose Capture Time, offset, or inspection state in every Grid item. Photo View may request the bounded review
 metadata view defined by [Scalable Library Browsing](library-browsing.md),
 which exposes Capture Time for the current Photo when available. Capture
 failures must not disable selection, Rating, navigation, or Preview behavior.
@@ -166,13 +162,13 @@ failures must not disable selection, Rating, navigation, or Preview behavior.
 
 This would make membership positions and explicit reorder ineffective while browsing an Album and unexpectedly change existing production sequences.
 
-### Selected: RAW-First Capture Authority
+### Selected: Per-Original Capture Authority
 
-RAW is the primary capture record. JPEG is the fallback when RAW has no valid key. Preview Source remains independent.
+Each Photo's ordering key comes from its own Original File. Independent RAW and JPEG Photos that share a base name keep their own capture facts and order separately, and Preview Source never influences chronology.
 
-### Rejected: Preview-Source Capture Authority
+### Rejected: Cross-Original Capture Authority
 
-JPEG-first metadata would couple chronology to appearance delivery and allow a regenerated matching JPEG to override valid RAW chronology.
+Using another Original File's metadata would couple independent Photos and could let a regenerated sibling override a valid chronology.
 
 ### Selected: Camera-Local Ordering
 
@@ -192,13 +188,13 @@ A lazy backfill would expose temporary path order and move Grid cells or Photo n
 
 ## Compatibility Fixtures
 
-- `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns RAW/JPEG authority, tie, missing-partition, and camera-local-offset ordering vectors.
-- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the identity-fence migration input; `schema-v5.sql` and `schema-v5.json` own the writable Album schema, while canonical v2 remains an earlier migration input.
-- Migration fixtures prove preservation of Photo identity, Albums, membership positions, Selection State, Rating, Preview facts, and saved Album positions, including the v4-to-v5 terminology migration.
+- `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns per-Original capture authority, tie, missing-partition, and camera-local-offset ordering vectors.
+- `compatibility/sqlite/schema-v3.sql` and `schema-v3.json` own the Capture Time migration shape; `schema-v4.sql` and `schema-v4.json` own the identity-fence migration input; `schema-v5.sql` and `schema-v5.json` own the Album schema migration input; `schema-v6.sql` and `schema-v6.json` own the writable independent-Photo schema, while canonical v2 remains an earlier migration input.
+- Migration fixtures prove preservation of Photo identity, Albums, membership positions, Selection State, Rating, Preview facts, and saved Album positions, including the v4-to-v5 terminology migration and the v5-to-v6 independent-Photo migration.
 - `compatibility/protocol/capture-order-omission.json` owns ordered-response and capture-field-omission vectors.
 - Browser tests own the filename-versus-capture-order example, recursive Original Folder filtering, and the explicit Album order example.
 - Generated metadata fixtures are minimal and redistributable. Real camera Originals remain opt-in and retain their SHA.
 
 ## Verification
 
-Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3 and v4-to-v5 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.
+Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.

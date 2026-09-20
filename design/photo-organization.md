@@ -7,11 +7,11 @@ Slipstream must expose the Photographer's existing directory organization withou
 - The filesystem owns Original Files and their physical directories.
 - SQLite owns virtual organization and user state.
 - Original Files remain descriptor-confined and read-only.
-- One Photo may represent a RAW Original and matching JPEG Original in one directory.
+- One Photo represents one independently managed Original File.
 - A Photo may belong to multiple virtual groups without copying bytes.
 - A Library may contain tens of thousands of Photos and directories.
 - No browser route may materialize a complete Library, complete Album membership, or complete Folder tree without a bound.
-- Ordinary rescan does not infer arbitrary moves or silently transfer state.
+- Ordinary rescan restores a moved Original only from exact content-fingerprint evidence and never transfers state by another heuristic.
 - The current need does not justify Folder persistence, Album hierarchy, rule-defined membership, or general asset management.
 
 ## Model
@@ -26,12 +26,7 @@ An Original Folder path is a mutable Location, not identity. The root uses one e
 
 ### Photo Folder Projection
 
-A Photo projects to one Original Folder through its ordering Original Location:
-
-1. the RAW Original Location when RAW exists;
-2. otherwise the JPEG Original Location.
-
-The RAW/JPEG pairing contract already requires an unambiguous pair to share one directory. The ordering rule nevertheless gives Folder projection one explicit owner and prevents a paired Photo from being counted twice.
+A Photo projects to one Original Folder through its own Original Location. Independent Photos that share a directory or base name project separately, so each Photo is counted once.
 
 A Folder source contains every Photo whose projected Folder equals the selected Folder or has it as a component-aware ancestor. Prefix text alone is insufficient: `a` is not an ancestor of `ab`.
 
@@ -74,7 +69,7 @@ File Location navigation reads one Published Library generation. It returns boun
 
 A response also reports its parent, requested range, total direct-child count, and one opaque publication value. The first request may omit publication and binds to the current Published Library. Every retained later window and Folder-source open supplies that exact value. The server enforces a small maximum window. No Overview or File Location route returns every Folder or every Photo in a Folder subtree.
 
-Direct-child Folder ordering uses relative Folder component bytes after UTF-8 validation. Folder count counts Photos, not Original Files, and counts a paired RAW/JPEG Photo once.
+Direct-child Folder ordering uses relative Folder component bytes after UTF-8 validation. Folder count counts Photos, not Original Files, and counts each Photo once.
 
 When a rescan replaces the current publication, a request carrying the old value fails as expired. The browser discards the old File Location tree and reloads one current publication instead of combining pages from different generations. The server need not retain an old complete Folder tree or create a second durable snapshot. Opening an Original Folder immediately creates a stable Browse Snapshot from the validated current publication.
 
@@ -84,7 +79,23 @@ The client submits one validated relative Original Folder Location, including th
 
 The server filters the Published Library's ordered Photos by component-aware Folder ancestry and stores only their Photo IDs in the existing bounded-lifecycle Browse Snapshot. Window traversal, Preview hydration, expiration, reconnect, cancellation, and current-fact refresh use the existing browsing contracts.
 
-A completed rescan may add or remove Folder nodes and may change newly opened Folder membership. An already open Folder source keeps its copied ID order. Ordinary external moves retain existing identity behavior: the prior Photo may remain unavailable at its remembered Folder and a Photo discovered at a new Location may receive a new identity.
+A completed rescan may add or remove Folder nodes and may change newly opened Folder membership. An already open Folder source keeps its copied ID order. A rescan restores a moved Original File only when one persisted Content Fingerprint identifies exactly one unclaimed same-kind candidate; otherwise the prior Photo remains unavailable at its remembered Folder and a file discovered at a new Location receives a new identity.
+
+### Location Recovery Application
+
+Automatic Location Recovery runs inside the scan application, before any new Original or Photo is allocated. Manual Location Recovery reuses the same rules from an explicit Photographer-approved batch.
+
+A recovery batch runs in one `BEGIN IMMEDIATE` transaction. Before writing, it revalidates every remembered Original File, its kind, and its destination Location against current state. It then moves affected Originals to temporary unique Locations and assigns their final Locations, so known Originals may exchange Locations without violating the unique Location constraint. A batch is all-or-nothing: a stale, colliding, or occupied destination without a permitted retire rejects the whole batch with per-mapping reasons and no partial association.
+
+A destination Location may already belong to a Photo discovered by an earlier scan. Retire-and-bind is allowed only when that destination Photo is otherwise unreferenced with default decisions and no Album membership, and the transaction removes exactly that record before binding the recovered Original. It must not delete a filesystem file. When the destination Photo has independent user state, the transaction preserves both records and reports the conflict.
+
+A relocation resets the affected Original's derived Capture Time facts to `pending` and invalidates location-derived Preview facts. Selection State, Rating, Album membership and order, and saved Album positions remain unchanged.
+
+### Fingerprint Persistence
+
+The state store persists one Content Fingerprint per Original File: a SHA-256 digest with the size and modification time observed while hashing. The digest is recovery evidence, not a unique key, and independent Originals may share one.
+
+Fingerprint enrollment runs after the structural migration and after every scan as bounded background work. It never holds a migration or scan transaction open. A fingerprint whose observed size or modification time no longer matches the discovered revision is dropped. Hash reads use the existing confined read-only descriptor and verify revision stability before and after hashing. An Original File larger than 4 GiB keeps no fingerprint and therefore no automatic recovery evidence.
 
 ### Album Mutations
 
@@ -169,21 +180,21 @@ An empty Album remains a valid source with total count zero and position zero. T
 
 ### Persistence Migration
 
-Canonical writable state uses Album language. SQLite schema version 5 uses `albums`, `album_members`, and `album_progress`, with `album_id` foreign-key columns and the `album_members_photo` reverse-membership index. It replaces active `photo_sets`, `photo_set_members`, `review_progress`, and Photo-Set-named columns.
+Canonical writable state uses independent-Photo language and Album language. SQLite schema version 6 stores exactly one `original_id` (`TEXT NOT NULL UNIQUE`) on each Photo row and adds the `original_fingerprints` table keyed by Original File ID. It replaces the v5 paired-Photo columns and the retired Preview Source names.
 
-The admitted v4-to-v5 migration runs in one `BEGIN IMMEDIATE` transaction and preserves:
+The admitted v5-to-v6 migration runs in one `BEGIN IMMEDIATE` transaction and preserves:
 
-- every Album ID, name, and creation order;
-- every Photo ID and Original File ID;
-- every membership and position;
-- every saved Photo;
-- Selection State and Rating;
-- Preview and Capture Time facts; and
-- the admitted Library Folder binding.
+- every Album ID, name, and creation order, the admitted Library Folder binding, every membership position and saved Photo, Selection State, Rating, Preview, and Capture Time fact;
+- every singleton and remembered unavailable Photo ID, Original File ID, user state value, and membership;
+- the legacy Photo ID and every user state reference on the RAW Original of a legacy pair, even when that RAW is unavailable;
+- the JPEG Original File ID of a legacy pair, which receives a new independent Photo ID with default decisions and no inherited Album memberships; and
+- every remembered unavailable record.
 
-A v4 binary rejects v5 as newer state. Rollback restores the verified pre-migration v4 backup and compatible image. There is no in-place down migration.
+A Preview survives the migration only when its legacy source matches the kept Original's kind and its revision matches current facts. A sibling-JPEG-derived Preview for a kept RAW is invalidated. Fingerprint enrollment starts after the migration transaction commits and never holds it open.
 
-Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures and the v4-to-v5 migration reader. Active Rust, protocol, Web, tests, and documentation use Album language. Legacy HTTP routes and browse-source values return `404` or validation failure rather than becoming indefinite aliases.
+The earlier admitted v4-to-v5 Album migration preserves every Album ID, name, and creation order, every Photo ID and Original File ID, every membership position and saved Photo, Selection State and Rating, Preview and Capture Time facts, and the admitted Library Folder binding. The v3-to-v4 identity migration remains an earlier preserved input. A v5 binary rejects v6 as newer state. Rollback restores the verified pre-migration v5 backup and compatible image. There is no in-place down migration.
+
+Legacy `Photo Set` names remain only in immutable v2-v4 compatibility fixtures and the v4-to-v5 migration reader. Legacy paired-Photo values and the old Preview Source names remain only in immutable v5 fixtures and the v5-to-v6 migration reader. Active Rust, protocol, Web, tests, and documentation use Album language and independent-Photo language. Legacy HTTP routes and browse-source values return `404` or validation failure rather than becoming indefinite aliases.
 
 ### Presentation
 
@@ -199,7 +210,7 @@ A root-level scan or publication failure cannot replace the prior Published Libr
 
 An Album mutation conflict or persistence failure leaves Original Files and unrelated state unchanged. The Web retains a recoverable source and identifies the failed action. It must not report a mutation as complete before confirmation.
 
-Schema migration fails closed before service admission when the v4 shape is not canonical, a sidecar exists, a transaction fails, or the resulting v5 shape is not exact. The pre-migration database remains recoverable from the required verified backup.
+Schema migration fails closed before service admission when the source shape is not canonical, a sidecar exists, a transaction fails, or the resulting v6 shape is not exact. The pre-migration database remains recoverable from the required verified backup.
 
 ## Options
 
@@ -247,11 +258,15 @@ A synchronized object has ambiguous ownership when the filesystem changes and ma
 
 Verification must prove:
 
-- exact v4-to-v5 migration and rollback preservation;
+- exact v5-to-v6 migration and rollback preservation, including the RAW-first pair split, independent JPEG defaults, singleton and unavailable records, and invalidated sibling-derived Previews;
+- exact v4-to-v5 and v3-to-v4 migration and rollback preservation;
+- automatic recovery restores one unambiguous candidate, refuses copies and ambiguous groups, and never transfers state to a duplicate;
+- a recovery batch is atomic, revalidates at commit, refuses stale, colliding, or occupied destinations without a permitted retire, retires only an unreferenced default destination, and never deletes a filesystem file;
+- a relocation resets Capture Time facts and invalidates location-derived Preview facts while preserving user state;
 - absence of active `Photo Set` names outside legacy migration inputs;
 - Album identity, unique names, empty state, order, saved position, idempotent add, removal compaction, and deletion safety;
 - recursive Folder-to-Album add preserves Folder-source order, is atomic and idempotent, reports counts, and rejects stale publications or over-limit Folders before mutation;
-- empty-Library root, root-level Photos, nested, Unicode, same-prefix, paired, JPEG-only, ambiguous, and remembered unavailable Folder projection;
+- empty-Library root, root-level Photos, nested, Unicode, same-prefix, independent RAW and JPEG, remembered unavailable Folder projection;
 - bounded direct-child Folder windows, single-publication pagination, expiration refresh, and rejection of malformed or absolute Locations;
 - no complete Folder tree or complete Folder membership route;
 - Folder source filtering by component-aware ancestry in Capture Time order;

@@ -50,7 +50,7 @@ pub use domain::{
     SelectionState,
 };
 pub use identity::{
-    InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,
+    InvalidModificationTime, original_id, source_revision, standalone_photo_id,
 };
 pub use library::{
     Library, LibraryConfig, LibraryError, ScanOutcome, ScanPhase, ScanProgress, expand_library,
