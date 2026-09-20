@@ -13926,9 +13926,7 @@ test("a RAW and its JPEG render independent Grid cells with the JPEG's rotation"
   // independent Photos.
   expect(independent.total).toBe(2);
   expect(
-    independent.photos
-      .map((photo) => photo.original?.kind)
-      .sort(),
+    independent.photos.map((photo) => photo.original?.kind).sort(),
   ).toEqual(["jpeg", "raw"]);
   await page.goto(running.url);
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
@@ -13964,7 +13962,6 @@ test("a RAW and its JPEG render independent Grid cells with the JPEG's rotation"
   expect(oriented!.imageHeight).toBeLessThanOrEqual(oriented!.mediaHeight + 1);
   expect(oriented!.indicatorsOverlapImage).toBe(false);
 });
-
 
 test("the recovery review entry restores a moved Photo without a rescan", async ({
   page,
@@ -14008,15 +14005,17 @@ test("the recovery review entry restores a moved Photo without a rescan", async 
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
   // The remembered unavailable Photo stays visible with its facts.
-  await expect(
-    page.locator(".cell-facts").first(),
-  ).toHaveText("Photo unavailable · Preview unavailable");
+  await expect(page.locator(".cell-facts").first()).toHaveText(
+    "Photo unavailable · Preview unavailable",
+  );
 
   // The scan notice names the unavailable Original and offers the one
   // bounded review entry.
   const notice = page.locator("[data-recovery-notice]");
   await expect(notice).toHaveText(/1 Photo still unavailable\./);
-  await notice.getByRole("button", { name: "Review unavailable originals" }).click();
+  await notice
+    .getByRole("button", { name: "Review unavailable originals" })
+    .click();
 
   const panel = page.locator("[data-recovery-panel]");
   await expect(panel).toBeVisible();
@@ -14053,8 +14052,7 @@ test("the recovery review entry restores a moved Photo without a rescan", async 
         .locator(".photo-cell img")
         .first()
         .evaluate(
-          (image: HTMLImageElement) =>
-            image.complete && image.naturalWidth > 0,
+          (image: HTMLImageElement) => image.complete && image.naturalWidth > 0,
         ),
     )
     .toBe(true);

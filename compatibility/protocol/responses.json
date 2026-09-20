@@ -46,9 +46,7 @@
     "total": 1
   },
   {
-    "addedPhotoIds": [
-      "$photoId"
-    ],
+    "addedPhotoIds": ["$photoId"],
     "albumId": "$albumId",
     "albums": [
       {

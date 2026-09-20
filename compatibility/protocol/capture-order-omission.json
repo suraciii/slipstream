@@ -1,8 +1,5 @@
 {
-  "orderedPaths": [
-    "z.JPG",
-    "a.jpg"
-  ],
+  "orderedPaths": ["z.JPG", "a.jpg"],
   "allowedKeys": [
     "id",
     "available",
@@ -12,7 +9,5 @@
     "rating",
     "preview"
   ],
-  "optionalKeys": [
-    "originalFilename"
-  ]
+  "optionalKeys": ["originalFilename"]
 }

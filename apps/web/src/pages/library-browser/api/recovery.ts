@@ -201,9 +201,7 @@ async function propose(
   fetcher: PhotoFetch,
   requestBody: object,
   validate: (body: unknown) => boolean,
-  extract: (
-    body: Record<string, unknown>,
-  ) => ReadonlyArray<RecoveryProposal>,
+  extract: (body: Record<string, unknown>) => ReadonlyArray<RecoveryProposal>,
   signal: AbortSignal,
 ): Promise<ProposeResult> {
   let response: Response;

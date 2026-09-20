@@ -529,10 +529,12 @@ export interface LibraryBrowserView {
   dismissAlbumForm(formId: string): void;
   /// Presents the committed recovery counts of the last scan and, while
   /// Originals remain unavailable, the one bounded review entry.
-  setRecoveryNotice(model: Readonly<{
-    relocatedPhotos: number;
-    unavailablePhotos: number;
-  }>): void;
+  setRecoveryNotice(
+    model: Readonly<{
+      relocatedPhotos: number;
+      unavailablePhotos: number;
+    }>,
+  ): void;
   /// Opens the recovery review with the remembered facts of every
   /// unavailable Original.
   openRecoveryPanel(entries: ReadonlyArray<RecoveryEntryViewModel>): void;

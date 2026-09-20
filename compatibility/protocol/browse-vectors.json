@@ -1143,18 +1143,14 @@
             "photoCount": 2
           }
         ],
-        "alreadyMemberPhotoIds": [
-          "$photoId"
-        ]
+        "alreadyMemberPhotoIds": ["$photoId"]
       },
       "status": 200
     },
     "name": "album-add-existing-member",
     "request": {
       "body": {
-        "photoIds": [
-          "$photoId"
-        ]
+        "photoIds": ["$photoId"]
       },
       "headers": {
         "content-type": "application/json",
@@ -1181,10 +1177,7 @@
     "name": "album-reorder",
     "request": {
       "body": {
-        "photoIds": [
-          "$photoId",
-          "$secondPhotoId"
-        ]
+        "photoIds": ["$photoId", "$secondPhotoId"]
       },
       "headers": {
         "content-type": "application/json",
