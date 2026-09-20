@@ -858,6 +858,10 @@ impl Application {
             .publish_fresh(&self.library)
             .await
             .map_err(|error| RecoveryApplyError::Server(error.into()))?;
+        // The committed counts become the recovery counts the scan status
+        // reports, so the review notice stays truthful between scans.
+        self.library
+            .note_manual_recovery(applied.relocated_photos, applied.unavailable_photos);
         Ok(RecoveryApplyResponseWire {
             relocated_photos: applied.relocated_photos,
             unavailable_photos: applied.unavailable_photos,

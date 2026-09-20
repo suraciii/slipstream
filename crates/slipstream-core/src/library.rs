@@ -372,6 +372,20 @@ impl Library {
         *self.outcome.lock().unwrap()
     }
 
+    /// Records one committed manual relocation batch in the recovery
+    /// counters the scan status reports, so the review notice stays truthful
+    /// between scans. Fingerprints discovered by the last scan are not part
+    /// of a manual batch and report zero.
+    pub fn note_manual_recovery(&self, relocated: u64, unavailable: u64) {
+        let relocated = usize::try_from(relocated).unwrap_or(usize::MAX);
+        let unavailable = usize::try_from(unavailable).unwrap_or(usize::MAX);
+        *self.outcome.lock().unwrap() = Some(ScanOutcome {
+            relocated_originals: relocated,
+            fingerprinted_originals: 0,
+            unavailable_photos: unavailable,
+        });
+    }
+
     /// Truthful fingerprint enrollment counters for status reporting. The
     /// enrollment worker and the scanner refresh these after every committed
     /// change, so reading them never blocks on SQLite.
