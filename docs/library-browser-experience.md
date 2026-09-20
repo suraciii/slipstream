@@ -5,14 +5,16 @@ where they were. A narrow screen must not become a stack of every desktop
 control. Browser Back must follow destinations inside the Library Browser
 before it leaves the site.
 
-This document owns screen composition, disclosure, and browser navigation.
+This document owns screen composition, observable disclosure behavior, and
+browser navigation; the shared modal lifecycle mechanism is owned by
+[Browser Navigation](../design/browser-navigation.md#responsive-presentation-boundary).
 [Library Browsing and Selection](library-browsing-and-selection.md) owns
 Photo actions, source order, progressive loading, gestures, persistence,
 failures, and Undo. Moving a control must preserve those rules.
 
 ```text diagram
 Library Browser
-├── Grid: Sources · View options · Select mode
+├── Grid: Sources · View options (incl. Album Resume) · Select mode
 │   └── Select mode: count · Done / Select · Reject · Add to Album
 ├── Photo: source return / Preview / Previous · position · Next
 │   └── Quick Action Dock: Reject · Rating · Select · More
@@ -46,11 +48,19 @@ visible name Library Folder. Long names must truncate without widening the
 screen and remain available to assistive technology; a pointer hover must
 reveal the complete name. Selecting a source closes Sources.
 
+A valid Album name must not widen Grid View or Photo View beyond the Library
+Browser at a supported viewport. Its visible current-source title may be
+visually truncated, but assistive technology must retain the complete Album
+name. Source rows must read as navigation rather than a collection of
+promotional cards.
+
 ## Grid View
 
 The normal header must contain the source title, a compact count or current
 loading status, View options, and Select mode. The Photo Grid fills the
-remaining area. Routine progress must not create another toolbar row.
+remaining area. Routine progress must not create another toolbar row. The
+Library refresh action is a recovery action and must not occupy a
+permanently prominent primary slot.
 
 View options must group these existing controls:
 
@@ -58,7 +68,8 @@ View options must group these existing controls:
 - source order;
 - Small, Medium, and Large thumbnail size;
 - complete source decision counts, distinct from the filtered result count;
-- source-specific actions, including Add Folder for an Original Folder; and
+- source-specific actions, including Add Folder for an Original Folder and
+  Resume for an Album with a saved position; and
 - Refresh Current Source when it is available.
 
 The header must indicate an active nondefault filter or order and the visible
@@ -88,8 +99,8 @@ Escape has the same effect. Source changes and source reopening retain their
 existing clear behavior.
 
 The selection tray must occupy a bottom action region with Select, Reject,
-and Add to Album. It remains visible with zero selected Photos, when batch
-actions are unavailable. The normal View controls must not remain stacked
+and Add to Album. It remains visible with zero selected Photos, and its batch
+actions are unavailable while nothing is selected. The normal View controls must not remain stacked
 above the tray. Desktop modifier selection must show this same selection
 surface whenever the multi-selection is nonempty.
 
@@ -124,7 +135,7 @@ A manual zoom must expose its current percentage and a direct Fit return.
 Wide Photo View may show its bounded neighbor strip. Narrow and short layouts
 must move that strip behind a Nearby Photos entry in Photo tools. This is the
 same bounded navigation surface, not a second timeline. Hiding it must release
-its image demand under the existing filmstrip lifecycle. The explicit
+its image demand under the existing bounded neighbor-strip lifecycle. The explicit
 Previous/Next pair remains available when the strip is closed.
 
 The mobile Quick Action Dock consists of Reject, Rating, Select, and More.
@@ -321,3 +332,7 @@ The Photographer opens Rating and closes it without selecting a value. The
 Photo address and history are unchanged. Opening tools and using browser Back
 closes the tools and follows the prior destination; a supported native close
 request instead closes only the tools.
+
+The Photographer opens the Album `26春节`, which has a saved position. Its
+Grid opens with Resume available. Resume opens the saved Photo, and Back
+returns to the Album Grid.

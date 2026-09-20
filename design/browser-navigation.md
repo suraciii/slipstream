@@ -59,13 +59,15 @@ IDs and Folder Locations must satisfy the existing API validators. A Location
 must remain relative and component-valid; an encoded slash is a separator
 after the single decode, not an escape from containment. Absolute Locations,
 `.` or `..` components, duplicate recognized parameters, empty required IDs,
-and source-incompatible options are invalid. An encoded reserved character
+an empty value for an optional parameter, and source-incompatible options
+are invalid. An encoded reserved character
 inside a valid Location must round-trip without double decoding.
 
-Unknown query keys are ignored and removed on canonicalization. Known invalid
-values produce an invalid-link explanation and the All Photos Grid, with one
-replacement of the current URL. This occurs before any request for the
-invalid source. The encoder omits defaults and emits recognized parameters
+Unknown query keys are ignored and removed on canonicalization; startup
+canonicalization performs that same single replacement of the current URL.
+Known invalid values produce an invalid-link explanation and the All Photos
+Grid, with one replacement of the current URL. This occurs before any request
+for the invalid source. The encoder omits defaults and emits recognized parameters
 in the order above. It must not place filenames, absolute paths, transient
 publication tokens, arbitrary return URLs, or UI panels in an address.
 
@@ -121,7 +123,7 @@ based solely on history.length or a same-origin referrer.
 Source selection creates one Grid entry. Resume from another source first
 commits that source's Grid entry and then resolves and opens its saved Photo;
 Resume from its current Grid adds only the Photo entry. A plain Grid open
-starts at index zero unless a browser anchor is being restored; the initial
+starts at index zero unless a restoration anchor is being restored; the initial
 saved position in the existing Browse response is used for Resume, not as an
 instruction to switch every Album open into Photo View. With no available
 saved position, keep the Grid and explain that Resume is unavailable. An

@@ -137,7 +137,7 @@ A Library Expansion retains its stricter offline contract. The expansion command
 
 ### Source Opening
 
-The Web application loads the Library Overview first. It may concurrently request the initial destination's Browse Snapshot so Grid placeholders appear immediately, but source navigation must not wait for that request. The bare application address selects All Photos. Addressed startup and its single bootstrap election follow [Browser Navigation](browser-navigation.md#destination-establishment).
+The Web application loads the Library Overview first. It may concurrently request the initial destination's Browse Snapshot so Grid placeholders appear immediately, but source navigation must not wait for that request, for a destination whose open needs no pending publication binding. The bare application address selects All Photos. Addressed startup and its single bootstrap election follow [Browser Navigation](browser-navigation.md#destination-establishment).
 
 Conceptual protocol surfaces are:
 
@@ -276,7 +276,7 @@ filtered view stays one bounded sequence with one meaning for every position.
 
 The server resolves Album saved position when it creates the Snapshot. It applies the unavailable-member fallback defined by the Product Spec. The browser does not download all members to reproduce this rule. Durable saved position changes only when a Photo becomes current in Photo View and the position write is confirmed; Grid scrolling remains browser-local. Saved position and view order are independent: the position resolves by Photo identity whichever order the open view uses.
 
-The saved position applies only to an open that supplies no explicit anchor. A view change (a new filter or order) anchors on the browser's current Photo by identity; when that Photo does not match the new view, the open starts at the view's first Photo rather than at the durable saved position.
+The saved position applies only to an Album open that requests Resume and supplies neither an addressed Photo nor a restored Grid anchor. A view change (a new filter or order) supplies the browser's current Photo by identity as its open anchor; when that Photo does not match the new view, the open starts at the view's first Photo rather than at the durable saved position. A restored Grid anchor is browser-history restoration state, not an open anchor.
 
 Every source open requires the published Library. An Album open reads the same Published snapshot as `library` and `folder` sources for its anchor, filter membership, and counts, and `album-order` is no exception even though its order comes from persisted membership position. An Album open therefore fails with the not-published response before any Snapshot exists instead of failing later at its first window.
 

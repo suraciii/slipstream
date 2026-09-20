@@ -19,7 +19,7 @@ The active Grid status and every source card must use `1 Photo` for one and `N P
 
 Source layout, its narrow-screen disclosure, and focus restoration follow [Library Browser Experience](library-browser-experience.md#screen-structure). Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
-On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation in the drawer.
+On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation behind the Sources disclosure.
 
 The current source must be visually and programmatically identifiable. Source state must not depend on color alone.
 
@@ -220,7 +220,7 @@ placement defined by [Library Browser Experience](library-browser-experience.md#
 - Preview Source;
 - the Albums that contain the current Photo;
 - controls for select, reject, clear, undo, and Rating;
-- previous and next navigation; and
+- previous and next navigation;
 - whether Preview detail is limited; and
 - review-relevant capture metadata when available: Capture Time, Aperture,
   ISO, Shutter Speed, and Focal Length.
@@ -456,7 +456,7 @@ can hover must not show them outside an in-progress decision drag.
 
 A committed swipe advances to the next Photo after the decision is accepted.
 
-Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses the explicit controls required below and may use the touch-only Rating Wheel defined in Mobile Photo View Quick Actions. Slipstream must provide visible controls equivalent to swipe actions.
+Vertical swipes do not record a decision. At supported narrow or short-landscape touch viewports, while the zoom state is Fit, a vertical gesture that begins on the Preview must scroll Photo View naturally. A two-finger pinch always zooms the Preview, and a manual zoom state gives one-finger dragging to bounded panning instead of decisions. Rating uses the explicit controls required below and may use the touch-only [Rating Wheel](#rating-wheel). Slipstream must provide visible controls equivalent to swipe actions.
 
 ### Rating Wheel
 
