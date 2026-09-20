@@ -1,5 +1,9 @@
 use super::*;
 use crate::folders::valid_folder_location;
+
+/// One manual recovery batch is bounded so a single request can never
+/// rewrite an unbounded slice of the Library.
+const MAXIMUM_RECOVERY_RELOCATIONS: usize = 10_000;
 #[derive(Clone)]
 pub(crate) struct WebRoot {
     path: PathBuf,
@@ -190,6 +194,15 @@ pub(crate) fn create_router_with_web_root(
             get(method_not_allowed).post(mutate_photo_state),
         )
         .route("/api/scan", get(method_not_allowed).post(scan))
+        .route("/api/recovery/unavailable", get(recovery_unavailable))
+        .route(
+            "/api/recovery/propose",
+            get(method_not_allowed).post(recovery_propose),
+        )
+        .route(
+            "/api/recovery/apply",
+            get(method_not_allowed).post(recovery_apply),
+        )
         .route(
             "/api/derivatives/{photo_id}/{target}/{filename}",
             get(get_derivative),
@@ -494,6 +507,151 @@ pub(crate) async fn scan(
     match state.application.rescan().await {
         Ok(response) => json_response(StatusCode::OK, &response),
         Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// Lists every unavailable Photo with its remembered folder, filename,
+/// format, and retained decisions for the bounded recovery review entry.
+pub(crate) async fn recovery_unavailable(
+    State(state): State<HttpState>,
+    _request: Request<Body>,
+) -> Response<Body> {
+    match state.application.recovery_survey().await {
+        Ok(response) => json_response(StatusCode::OK, &response),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// Proposes a batch of folder-prefix relocations, or one mapping for a
+/// single Original. Proposals are inspectable and never write.
+pub(crate) async fn recovery_propose(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(body) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
+    };
+    let valid_prefix = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|text| slipstream_core::parse_location_prefix(text).is_ok())
+    };
+    if has_exact_keys(body, &["oldPrefix", "newPrefix"]) {
+        let (Some(old_prefix), Some(new_prefix)) =
+            (body["oldPrefix"].as_str(), body["newPrefix"].as_str())
+        else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery prefix");
+        };
+        if !valid_prefix(&body["oldPrefix"]) || !valid_prefix(&body["newPrefix"]) {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery prefix");
+        }
+        return match state
+            .application
+            .recovery_propose_batch(old_prefix, new_prefix)
+            .await
+        {
+            Ok(proposals) => json_response(
+                StatusCode::OK,
+                &serde_json::json!({ "proposals": proposals }),
+            ),
+            Err(error) => ApiError::from(error).into_response(),
+        };
+    }
+    if has_exact_keys(body, &["originalId", "newLocation"]) {
+        let (Some(original_id), Some(new_location)) =
+            (body["originalId"].as_str(), body["newLocation"].as_str())
+        else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        };
+        if !valid_id(original_id)
+            || slipstream_core::RelativeOriginalPath::parse(new_location.to_owned()).is_err()
+        {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        }
+        return match state
+            .application
+            .recovery_propose_single(original_id, new_location)
+            .await
+        {
+            Ok(proposal) => json_response(StatusCode::OK, &proposal),
+            Err(error) => ApiError::from(error).into_response(),
+        };
+    }
+    api_error(StatusCode::BAD_REQUEST, "Invalid recovery request")
+}
+
+/// Commits one confirmed manual relocation batch. The whole batch commits
+/// atomically or is refused with per-mapping reasons.
+pub(crate) async fn recovery_apply(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let body = match read_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Some(object) = body.as_object() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid JSON body");
+    };
+    if !has_exact_keys(object, &["relocations"]) {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+    }
+    let Some(items) = object["relocations"].as_array() else {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+    };
+    if items.is_empty() || items.len() > MAXIMUM_RECOVERY_RELOCATIONS {
+        return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+    }
+    let mut parsed = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        };
+        let valid_item = has_exact_keys(item, &["originalId", "newLocation"])
+            || has_exact_keys(item, &["originalId", "newLocation", "retireDestination"]);
+        if !valid_item {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        }
+        let (Some(original_id), Some(new_location)) =
+            (item["originalId"].as_str(), item["newLocation"].as_str())
+        else {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        };
+        let retire_destination = match item.get("retireDestination") {
+            None => false,
+            Some(value) => value.as_bool().unwrap_or(false),
+        };
+        if !valid_id(original_id)
+            || slipstream_core::RelativeOriginalPath::parse(new_location.to_owned()).is_err()
+        {
+            return api_error(StatusCode::BAD_REQUEST, "Invalid recovery request");
+        }
+        parsed.push(crate::app::RecoveryApplyItem {
+            original_id: original_id.to_owned(),
+            new_location: new_location.to_owned(),
+            retire_destination,
+        });
+    }
+    match state.application.recovery_apply(parsed).await {
+        Ok(response) => json_response(StatusCode::OK, &response),
+        Err(crate::app::RecoveryApplyError::Invalid) => {
+            api_error(StatusCode::BAD_REQUEST, "Invalid recovery request")
+        }
+        Err(crate::app::RecoveryApplyError::Rejected {
+            message,
+            rejections,
+        }) => json_response(
+            StatusCode::CONFLICT,
+            &RecoveryRejectionResponseWire {
+                message,
+                rejections,
+            },
+        ),
+        Err(crate::app::RecoveryApplyError::Server(error)) => ApiError::from(error).into_response(),
     }
 }
 

@@ -31,8 +31,7 @@ const opened = (
 const photo = (id: string) => ({
   id,
   available: true,
-  ambiguous: false,
-  originals: [{ kind: "jpeg" as const, available: true }],
+  original: { kind: "jpeg" as const, available: true },
   selectionState: "undecided" as const,
   rating: 0,
   preview: { state: "inspection-pending" as const },

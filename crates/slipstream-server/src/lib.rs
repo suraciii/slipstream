@@ -69,8 +69,9 @@ pub use wire::{
     PreviewResponse, ScanStatusWire, SelectionCountsWire,
 };
 pub(crate) use wire::{
-    FingerprintProgressWire, ScanRecoveryWire, album_summary, photo_summary_indexed_with_url,
-    selection_state,
+    FingerprintProgressWire, RecoveryApplyResponseWire, RecoveryProposalWire,
+    RecoveryRejectionResponseWire, RecoveryRejectionWire, RecoverySurveyWire, ScanRecoveryWire,
+    album_summary, photo_summary_indexed_with_url, selection_state,
 };
 
 #[cfg(test)]

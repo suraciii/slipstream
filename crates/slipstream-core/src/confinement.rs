@@ -363,9 +363,11 @@ impl OriginalCapability {
         let mut buffer = vec![0_u8; DIGEST_CHUNK_BYTES];
         let mut consumed = 0_u64;
         while consumed < size {
-            let length = buffer.len().min(usize::try_from(size - consumed).map_err(|_| {
-                ConfinementError::ResourceLimit("Original File exceeds fingerprint read limit")
-            })?);
+            let length = buffer
+                .len()
+                .min(usize::try_from(size - consumed).map_err(|_| {
+                    ConfinementError::ResourceLimit("Original File exceeds fingerprint read limit")
+                })?);
             let chunk = &mut buffer[..length];
             let count = match sys::pread(file.as_raw_fd(), chunk, consumed) {
                 Ok(count) => count,
@@ -385,9 +387,8 @@ impl OriginalCapability {
                 ));
             }
             hasher.update(&chunk[..count]);
-            consumed += u64::try_from(count).map_err(|_| ConfinementError::Io(
-                "Original File could not be read completely",
-            ))?;
+            consumed += u64::try_from(count)
+                .map_err(|_| ConfinementError::Io("Original File could not be read completely"))?;
         }
         let after = stat_regular(file.as_raw_fd())?;
         if !same_revision(&before, &after) {

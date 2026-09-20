@@ -7,9 +7,9 @@
 use crate::{
     CacheDirectory, CacheError, CachedDerivative, DerivativeFailureKind, DerivativeIdentity,
     DerivativePriority, DerivativeResult, DerivativeScheduler, DerivativeTarget, Library,
-    LibraryError, OriginalCapability, OriginalRecord, PhotoRecord, PreviewSeed,
-    PreviewSeedResult, PreviewSource, PreviewState, ScanSnapshot, extract_embedded_jpeg,
-    inspect_matching_jpeg, source_revision,
+    LibraryError, OriginalCapability, OriginalRecord, PhotoRecord, PreviewSeed, PreviewSeedResult,
+    PreviewSource, PreviewState, ScanSnapshot, extract_embedded_jpeg, inspect_matching_jpeg,
+    source_revision,
 };
 use std::{
     collections::HashMap,
@@ -57,7 +57,7 @@ impl PreviewFacts {
             (original.id == self.photo.original_id
                 && original.available
                 && original.error_category.is_none())
-                .then_some((original.kind.preview_source(), original))
+            .then_some((original.kind.preview_source(), original))
         })
     }
 
@@ -1207,12 +1207,10 @@ impl PreviewContext {
             == stored_revision)
     }
 
-    fn current_source(
-        &self,
-    ) -> Option<(PreviewSource, &OriginalRecord, &OriginalCapability)> {
-        self.original.as_ref().map(|(original, capability)| {
-            (original.kind.preview_source(), original, capability)
-        })
+    fn current_source(&self) -> Option<(PreviewSource, &OriginalRecord, &OriginalCapability)> {
+        self.original
+            .as_ref()
+            .map(|(original, capability)| (original.kind.preview_source(), original, capability))
     }
 
     fn verify_current(
@@ -1807,20 +1805,18 @@ mod tests {
             .photos
             .iter()
             .find(|photo| {
-                snapshot
-                    .originals
-                    .iter()
-                    .any(|original| original.id == photo.original_id && original.kind == crate::OriginalKind::Raw)
+                snapshot.originals.iter().any(|original| {
+                    original.id == photo.original_id && original.kind == crate::OriginalKind::Raw
+                })
             })
             .unwrap();
         let jpeg_photo = snapshot
             .photos
             .iter()
             .find(|photo| {
-                snapshot
-                    .originals
-                    .iter()
-                    .any(|original| original.id == photo.original_id && original.kind == crate::OriginalKind::Jpeg)
+                snapshot.originals.iter().any(|original| {
+                    original.id == photo.original_id && original.kind == crate::OriginalKind::Jpeg
+                })
             })
             .unwrap();
         assert_ne!(raw_photo.id, jpeg_photo.id);

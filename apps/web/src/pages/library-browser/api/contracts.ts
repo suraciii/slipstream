@@ -1,4 +1,4 @@
-export type PreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
+export type PreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 export type SelectionState = "undecided" | "selected" | "rejected";
 /// One Selection State filter for an open source. `all` keeps every Photo of
 /// the source order; every other value keeps only matching Photos.
@@ -33,6 +33,12 @@ export type LibraryOverviewResponse = Readonly<{
     publication?: string;
     completed?: number;
     total?: number;
+    lastRecovery?: Readonly<{
+      relocatedPhotos: number;
+      fingerprintedOriginals: number;
+      unavailablePhotos: number;
+    }>;
+    fingerprints?: Readonly<{ enrolled: number; pending: number }>;
   }>;
   albums: ReadonlyArray<AlbumSummary>;
 }>;
@@ -51,10 +57,7 @@ export type BrowsePositionResponse = Readonly<{
 export type PhotoSummary = Readonly<{
   id: string;
   available: boolean;
-  ambiguous: boolean;
-  originals: ReadonlyArray<
-    Readonly<{ kind: "raw" | "jpeg"; available: boolean }>
-  >;
+  original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
   originalFilename?: string;
   selectionState: SelectionState;
   rating: number;

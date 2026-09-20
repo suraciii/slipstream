@@ -1,9 +1,9 @@
 use crate::{
     AlbumBrowseTarget, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
-    AlbumMutationResult, AlbumRecord, AlbumSummary, CaptureFact, LibraryRoot, NativeWorkBudget,
-    OriginalCapability, PhotoAlbumMembership, PhotoStateBatchMutation, PhotoStateBatchResult,
-    PhotoStateMutation, PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, ScanLimits,
-    ScanResult, ScanSnapshot,
+    AlbumMutationResult, AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact, LibraryRoot,
+    NativeWorkBudget, OriginalCapability, PhotoAlbumMembership, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
+    PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
@@ -292,9 +292,8 @@ impl Library {
         let progress = Arc::new(Mutex::new(ScanProgress::default()));
         let outcome = Arc::new(Mutex::new(None::<ScanOutcome>));
         let enrollment = Arc::new((Mutex::new(EnrollmentState::default()), Condvar::new()));
-        let fingerprint_counts = Arc::new(Mutex::new(
-            crate::persistence::FingerprintCounts::default(),
-        ));
+        let fingerprint_counts =
+            Arc::new(Mutex::new(crate::persistence::FingerprintCounts::default()));
         let worker_root = root.clone();
         let worker_native_work = native_work.clone();
         let worker_persistence = persistence.clone();
@@ -312,11 +311,13 @@ impl Library {
                     worker_persistence,
                     config.limits,
                     receiver,
-                    worker_state,
-                    worker_progress,
-                    worker_outcome,
-                    worker_enrollment,
-                    worker_counts,
+                    ScannerShared {
+                        state: worker_state,
+                        progress: worker_progress,
+                        outcome: worker_outcome,
+                        enrollment: worker_enrollment,
+                        fingerprint_counts: worker_counts,
+                    },
                 )
             })
             .map_err(|_| LibraryError::ScannerStopped)?;
@@ -451,6 +452,37 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.list_albums_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// One consistent read of unavailable Photos and Album memberships for
+    /// the manual recovery review entry.
+    pub async fn recovery_survey(&self) -> Result<RecoverySurvey, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.recovery_survey_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Revalidates and commits one confirmed manual relocation batch
+    /// atomically. Filesystem evidence was gathered through confined
+    /// descriptors before submission; the transaction rechecks every
+    /// persisted precondition.
+    pub async fn apply_relocations(
+        &self,
+        relocations: Vec<RequestedRelocation>,
+    ) -> Result<AppliedRelocations, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.apply_relocations_receiver(relocations)
         }?;
         receive
             .await
@@ -701,18 +733,30 @@ fn inspect_capture_facts(
     }
 }
 
+/// Shared handles the scanner thread owns for the lifetime of the Library.
+struct ScannerShared {
+    state: Arc<(Mutex<ScanState>, Condvar)>,
+    progress: Arc<Mutex<ScanProgress>>,
+    outcome: Arc<Mutex<Option<ScanOutcome>>>,
+    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
+    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
+}
+
 fn scanner_main(
     root: LibraryRoot,
     native_work: NativeWorkBudget,
     persistence: Persistence,
     limits: ScanLimits,
     receiver: std::sync::mpsc::Receiver<ScanCommand>,
-    state: Arc<(Mutex<ScanState>, Condvar)>,
-    progress: Arc<Mutex<ScanProgress>>,
-    outcome: Arc<Mutex<Option<ScanOutcome>>>,
-    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
-    fingerprint_counts: Arc<Mutex<crate::persistence::FingerprintCounts>>,
+    shared: ScannerShared,
 ) {
+    let ScannerShared {
+        state,
+        progress,
+        outcome,
+        enrollment,
+        fingerprint_counts,
+    } = shared;
     while let Ok(command) = receiver.recv() {
         match command {
             ScanCommand::Stop => break,
@@ -751,10 +795,8 @@ fn scanner_main(
                             &previous.originals,
                             &progress,
                         );
-                        let evidence_ids = crate::recovery::evidence_original_ids(
-                            &result.originals,
-                            &previous,
-                        );
+                        let evidence_ids =
+                            crate::recovery::evidence_original_ids(&result.originals, &previous);
                         let fingerprints = persistence
                             .recovery_facts_blocking(evidence_ids)
                             .map_err(LibraryError::from)?;
@@ -881,14 +923,17 @@ fn enrollment_main(
             if state.stopped {
                 return;
             }
-            let _unused = signal.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap().0;
+            let _unused = signal
+                .wait_timeout(state, std::time::Duration::from_secs(5))
+                .unwrap()
+                .0;
             continue;
         };
-        if let Some(deferred_at) = deferred.get(&target.original_id) {
-            if deferred_at.elapsed() < std::time::Duration::from_secs(60) {
-                thread::sleep(std::time::Duration::from_millis(250));
-                continue;
-            }
+        if let Some(deferred_at) = deferred.get(&target.original_id)
+            && deferred_at.elapsed() < std::time::Duration::from_secs(60)
+        {
+            thread::sleep(std::time::Duration::from_millis(250));
+            continue;
         }
         let relative = match crate::RelativeOriginalPath::parse(target.relative_path.clone()) {
             Ok(relative) => relative,
@@ -930,11 +975,7 @@ fn enrollment_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        OriginalKind,
-        identity::original_id,
-        persistence::PersistenceError,
-    };
+    use crate::{OriginalKind, identity::original_id, persistence::PersistenceError};
     use rusqlite::{Connection, params};
     use std::{
         fs,
@@ -1352,7 +1393,10 @@ mod tests {
             .execute("INSERT INTO albums VALUES('set','Keep',1)", [])
             .unwrap();
         connection
-            .execute("INSERT INTO album_members VALUES('set',?,0)", [legacy_photo])
+            .execute(
+                "INSERT INTO album_members VALUES('set',?,0)",
+                [legacy_photo],
+            )
             .unwrap();
         connection
             .execute(
@@ -1589,6 +1633,351 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    /// Deterministic manual-recovery fixture: one unavailable Photo with
+    /// retained decisions and Album membership, its file relocated on disk,
+    /// and optionally an occupying destination record.
+    fn manual_recovery_fixture(
+        occupant_state: Option<(&'static str, u8)>,
+        fingerprint: Option<bool>,
+    ) -> (TempTree, LibraryConfig) {
+        let (base, config) = fixture();
+        let root = &config.library_root;
+        fs::create_dir_all(root.join("moved")).unwrap();
+        fs::write(root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+        fs::create_dir_all(&config.state_directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&config.state_directory, fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let database = config.state_directory.join("library.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata VALUES('canonical_root',?)",
+                [root.to_str().unwrap()],
+            )
+            .unwrap();
+        let missing_id = original_id("shoot/a.JPG");
+        connection
+            .execute(
+                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state,capture_source_revision) VALUES(?,'shoot/a.JPG','jpeg',11,1.0,0,'missing','remembered-revision')",
+                params![missing_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('missing-photo',?,0,'unavailable','shoot/a.JPG','selected',3)",
+                params![missing_id],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO albums VALUES('set','Trip',1)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO album_members VALUES('set','missing-photo',0)",
+                [],
+            )
+            .unwrap();
+        if let Some((occupant_path, rating)) = occupant_state {
+            let occupant_original = original_id(occupant_path);
+            connection
+                .execute(
+                    "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state) VALUES(?,?,'jpeg',9,1.0,1,'pending')",
+                    params![occupant_original, occupant_path],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('occupant-photo',?,1,'inspection-pending',?,'undecided',?)",
+                    params![occupant_original, occupant_path, i64::from(rating)],
+                )
+                .unwrap();
+        }
+        if fingerprint == Some(true) {
+            connection
+                .execute(
+                    "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES(?,?,11,1.0)",
+                    params![missing_id, crate::digest_bytes(b"jpeg-bytes-a")],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        (base, config)
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_restores_unavailable_photo_without_fingerprint() {
+        let (base, config) = manual_recovery_fixture(None, Some(false));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        assert_eq!(survey.unavailable.len(), 1);
+        let record = &survey.unavailable[0];
+        assert_eq!(record.relative_path, "shoot/a.JPG");
+        assert_eq!(record.rating, 3);
+        assert!(record.fingerprint.is_none());
+        assert_eq!(record.album_count, 1);
+
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let budget = NativeWorkBudget::new();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals =
+            crate::plan_manual_relocations(&root, &budget, &survey, &snapshot, "shoot", "moved")
+                .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Matched
+        ));
+        assert!(!proposals[0].verified);
+        assert_eq!(proposals[0].to_location, "moved/a.JPG");
+
+        let capability = root
+            .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
+            .unwrap();
+        let facts = capability.facts().unwrap();
+        let applied = library
+            .apply_relocations(vec![crate::RequestedRelocation {
+                original_id: record.original_id.clone(),
+                to_location: "moved/a.JPG".to_owned(),
+                facts,
+                retire_destination: false,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(applied.relocated_photos, 1);
+        assert_eq!(applied.unavailable_photos, 0);
+
+        let snapshot = library.snapshot().await.unwrap();
+        let photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| photo.id == "missing-photo")
+            .unwrap();
+        assert!(photo.available);
+        assert_eq!(photo.rating, 3);
+        assert_eq!(photo.selection_state, crate::SelectionState::Selected);
+        let original = snapshot
+            .originals
+            .iter()
+            .find(|original| original.relative_path.as_str() == "moved/a.JPG")
+            .unwrap();
+        assert!(original.available);
+        // The remembered Location is gone.
+        assert!(
+            !snapshot
+                .originals
+                .iter()
+                .any(|original| original.relative_path.as_str() == "shoot/a.JPG")
+        );
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_verifies_fingerprinted_originals() {
+        let (base, config) = manual_recovery_fixture(None, Some(true));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        assert!(survey.unavailable[0].fingerprint.is_some());
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Matched
+        ));
+        assert!(proposals[0].verified);
+
+        // Different content at the candidate fails verification instead of
+        // silently rebinding identity.
+        fs::write(config.library_root.join("moved/a.JPG"), b"other-bytes").unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::ContentMismatch
+        ));
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_retires_only_unreferenced_default_destination() {
+        let (base, config) = manual_recovery_fixture(Some(("moved/a.JPG", 0)), Some(false));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Occupied { retire: Some(_) }
+        ));
+        let capability = root
+            .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
+            .unwrap();
+        let facts = capability.facts().unwrap();
+        let relocation = crate::RequestedRelocation {
+            original_id: survey.unavailable[0].original_id.clone(),
+            to_location: "moved/a.JPG".to_owned(),
+            facts,
+            retire_destination: false,
+        };
+        assert!(
+            library
+                .apply_relocations(vec![relocation.clone()])
+                .await
+                .is_err()
+        );
+
+        let applied = library
+            .apply_relocations(vec![crate::RequestedRelocation {
+                retire_destination: true,
+                ..relocation
+            }])
+            .await
+            .unwrap();
+        assert_eq!(applied.relocated_photos, 1);
+        let snapshot = library.snapshot().await.unwrap();
+        // The occupier's Photo and Original rows are retired; the relocated
+        // Photo keeps its identity and decisions.
+        assert!(
+            !snapshot
+                .photos
+                .iter()
+                .any(|photo| photo.id == "occupant-photo")
+        );
+        let photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| photo.id == "missing-photo")
+            .unwrap();
+        assert!(photo.available);
+        assert_eq!(photo.rating, 3);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_refuses_retire_with_user_state() {
+        let (base, config) = manual_recovery_fixture(Some(("moved/a.JPG", 4)), Some(false));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Occupied { retire: None }
+        ));
+        let capability = root
+            .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
+            .unwrap();
+        let facts = capability.facts().unwrap();
+        assert!(
+            library
+                .apply_relocations(vec![crate::RequestedRelocation {
+                    original_id: survey.unavailable[0].original_id.clone(),
+                    to_location: "moved/a.JPG".to_owned(),
+                    facts,
+                    retire_destination: true,
+                }])
+                .await
+                .is_err()
+        );
+        // Both records survive the refusal.
+        let snapshot = library.snapshot().await.unwrap();
+        assert!(
+            snapshot
+                .photos
+                .iter()
+                .any(|photo| photo.id == "occupant-photo")
+        );
+        assert!(
+            snapshot
+                .photos
+                .iter()
+                .any(|photo| photo.id == "missing-photo")
+        );
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_rejects_stale_and_colliding_batches() {
+        let (base, config) = manual_recovery_fixture(None, Some(false));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let capability = root
+            .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
+            .unwrap();
+        let facts = capability.facts().unwrap();
+        let original_id = survey.unavailable[0].original_id.clone();
+        // Colliding destinations reject the whole batch.
+        assert!(
+            library
+                .apply_relocations(vec![
+                    crate::RequestedRelocation {
+                        original_id: original_id.clone(),
+                        to_location: "moved/a.JPG".to_owned(),
+                        facts,
+                        retire_destination: false,
+                    },
+                    crate::RequestedRelocation {
+                        original_id: "unknown-original".to_owned(),
+                        to_location: "moved/a.JPG".to_owned(),
+                        facts,
+                        retire_destination: false,
+                    },
+                ])
+                .await
+                .is_err()
+        );
+        // An empty batch is not a recovery.
+        assert!(library.apply_relocations(vec![]).await.is_err());
+        library.shutdown().unwrap();
+        drop(base);
     }
 
     #[test]

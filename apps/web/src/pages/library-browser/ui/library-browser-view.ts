@@ -4,7 +4,7 @@ import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
 
 type ViewSelectionState = "undecided" | "selected" | "rejected";
-type ViewPreviewSource = "matching-jpeg" | "embedded-raw-jpeg";
+type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
 
 /**
  * Grid thumbnail sizes. Each step is the cell box the CSS renders; the Grid
@@ -253,7 +253,7 @@ export type FolderAlbumViewModel = Readonly<{
 type GridPhotoViewModel = Readonly<{
   id: string;
   available: boolean;
-  ambiguous: boolean;
+  original: Readonly<{ kind: "raw" | "jpeg"; available: boolean }>;
   originalFilename?: string;
   selectionState: ViewSelectionState;
   rating: number;
@@ -3813,7 +3813,7 @@ function gridPhotoFacts(
 ): string[] {
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
-  if (photo.ambiguous) facts.push("Ambiguous pairing");
+  if (photo.original.kind === "raw") facts.push("RAW");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
@@ -3832,7 +3832,7 @@ function gridCellSignature(
     photo.id,
     photo.originalFilename ?? "",
     photo.available ? "available" : "unavailable",
-    photo.ambiguous ? "ambiguous" : "paired",
+    photo.original.kind,
     photo.selectionState,
     String(photo.rating),
     photo.preview.state,
@@ -3891,9 +3891,9 @@ function gridThumbnailTarget(
 }
 
 function sourceLabel(source?: ViewPreviewSource): string {
-  return source === "matching-jpeg"
+  return source === "jpeg-original"
     ? "JPEG"
-    : source === "embedded-raw-jpeg"
+    : source === "raw-embedded-jpeg"
       ? "RAW embedded JPEG"
       : "—";
 }

@@ -139,17 +139,19 @@ pub fn preview_should_preserve(
         return false;
     }
 
-    previous_originals.get(previous_path).is_some_and(|previous| {
-        previous.kind
-            == match selected_original.kind {
-                OriginalKind::Raw => OriginalKind::Raw,
-                OriginalKind::Jpeg => OriginalKind::Jpeg,
-            }
-            && previous.available
-            && previous.error_category.is_none()
-            && previous.facts.size == previous_size
-            && previous.facts.mtime_ms == previous_mtime
-    })
+    previous_originals
+        .get(previous_path)
+        .is_some_and(|previous| {
+            previous.kind
+                == match selected_original.kind {
+                    OriginalKind::Raw => OriginalKind::Raw,
+                    OriginalKind::Jpeg => OriginalKind::Jpeg,
+                }
+                && previous.available
+                && previous.error_category.is_none()
+                && previous.facts.size == previous_size
+                && previous.facts.mtime_ms == previous_mtime
+        })
 }
 
 #[cfg(test)]

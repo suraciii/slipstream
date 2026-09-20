@@ -558,10 +558,7 @@ fn reverse_substitute(
     // photo IDs they contain.
     let mut by_value: Vec<(&String, &String)> = captures.iter().collect();
     by_value.sort_by_key(|(_, value)| std::cmp::Reverse(value.len()));
-    fn walk(
-        value: &serde_json::Value,
-        by_value: &[(&String, &String)],
-    ) -> serde_json::Value {
+    fn walk(value: &serde_json::Value, by_value: &[(&String, &String)]) -> serde_json::Value {
         match value {
             serde_json::Value::String(text) => {
                 let mut result = text.clone();

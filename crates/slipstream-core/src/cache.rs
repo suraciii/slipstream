@@ -1676,7 +1676,7 @@ fn selected_original<'a>(
         (original.id == photo.original_id
             && original.available
             && original.error_category.is_none())
-            .then_some((original.kind.preview_source(), original))
+        .then_some((original.kind.preview_source(), original))
     })
 }
 

@@ -5,15 +5,15 @@ use super::{
 use crate::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
     AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
-    AlbumRecord, AlbumSummary, CaptureFact, CaptureMetadataState, CaptureTimeField,
-    DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory,
-    OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
-    PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, OriginalFingerprint,
-    PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanLimits,
-    ScanSnapshot,
-    SelectionState,
+    AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact, CaptureMetadataState,
+    CaptureTimeField, DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
+    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
+    OriginalScanError, PhotoAlbumMembership, PhotoRecord, PhotoStateBatchApplied,
+    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
+    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState, RecoverySurvey,
+    RelativeOriginalPath, RequestedRelocation, ScanLimits, ScanSnapshot, SelectionState,
+    UnavailablePhotoRecord,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -289,6 +289,11 @@ enum Command {
     NextFingerprintTarget(Reply<Option<FingerprintTarget>>),
     StoreFingerprint(OriginalFingerprint, Reply<()>),
     FingerprintCounts(Reply<FingerprintCounts>),
+    RecoverySurvey(Reply<RecoverySurvey>),
+    ApplyRelocations {
+        relocations: Vec<RequestedRelocation>,
+        reply: Reply<AppliedRelocations>,
+    },
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
     ListAlbums(Reply<Vec<AlbumRecord>>),
     ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
@@ -455,9 +460,7 @@ impl Persistence {
         recovery: ScanRecoveryPlan,
     ) -> Result<ScanApplication, PersistenceError> {
         let receive = self.apply_scan_recovered_receiver(discovered, errors, recovery)?;
-        receive
-            .await
-            .unwrap_or(Err(PersistenceError::OwnerStopped))
+        receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
     }
 
     fn apply_scan_recovered_receiver(
@@ -465,7 +468,8 @@ impl Persistence {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
         recovery: ScanRecoveryPlan,
-    ) -> Result<oneshot::Receiver<Result<ScanApplication, PersistenceError>>, PersistenceError> {
+    ) -> Result<oneshot::Receiver<Result<ScanApplication, PersistenceError>>, PersistenceError>
+    {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ApplyScan {
             discovered,
@@ -595,6 +599,27 @@ impl Persistence {
         receive
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn recovery_survey_receiver(
+        &self,
+    ) -> Result<oneshot::Receiver<Result<RecoverySurvey, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RecoverySurvey(send))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn apply_relocations_receiver(
+        &self,
+        relocations: Vec<RequestedRelocation>,
+    ) -> Result<oneshot::Receiver<Result<AppliedRelocations, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ApplyRelocations {
+            relocations,
+            reply: send,
+        })?;
+        Ok(receive)
     }
 
     #[allow(dead_code)]
@@ -853,11 +878,21 @@ fn owner_main(
                 let _ = reply.send(result);
             }
             Command::StoreFingerprint(fingerprint, reply) => {
-                let result = store_fingerprint(&state, &database_name, &mut connection, fingerprint);
+                let result =
+                    store_fingerprint(&state, &database_name, &mut connection, fingerprint);
                 let _ = reply.send(result);
             }
             Command::FingerprintCounts(reply) => {
                 let result = fingerprint_counts(&connection);
+                let _ = reply.send(result);
+            }
+            Command::RecoverySurvey(reply) => {
+                let result = recovery_survey(&connection);
+                let _ = reply.send(result);
+            }
+            Command::ApplyRelocations { relocations, reply } => {
+                let result =
+                    apply_manual_relocations(&state, &database_name, &mut connection, &relocations);
                 let _ = reply.send(result);
             }
             Command::Preview(preview, reply) => {
@@ -1384,9 +1419,7 @@ fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
     let albums: Vec<(String, String, i64)> = transaction
         .prepare("SELECT id,name,created_at FROM albums ORDER BY created_at,id")
         .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::InvalidLegacyData)?;
@@ -1489,7 +1522,9 @@ fn original_facts_by_id(
                 (
                     row.get::<_, i64>(1)? != 0,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    row.get::<_, i64>(3)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     row.get::<_, f64>(4)?,
                     row.get::<_, String>(5)?,
                 ),
@@ -1510,12 +1545,7 @@ fn original_facts_by_id(
         .collect()
 }
 
-fn revision_matches(
-    stored: Option<&str>,
-    path: &str,
-    size: u64,
-    mtime_ms: f64,
-) -> bool {
+fn revision_matches(stored: Option<&str>, path: &str, size: u64, mtime_ms: f64) -> bool {
     let Some(stored) = stored else { return false };
     crate::source_revision(path, size, mtime_ms).is_ok_and(|current| current == stored)
 }
@@ -1640,7 +1670,10 @@ fn next_fingerprint_target(
                         "jpeg" => crate::OriginalKind::Jpeg,
                         _ => return Err(rusqlite::Error::InvalidQuery),
                     },
-                    size: row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    size: row
+                        .get::<_, i64>(3)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     mtime_ms: row.get(4)?,
                 })
             },
@@ -1681,6 +1714,234 @@ fn store_fingerprint(
             return Err(PersistenceError::InvalidRecovery);
         }
         Ok(())
+    })
+}
+
+/// One consistent read of every unavailable Photo plus the Album
+/// memberships, for the bounded manual recovery review entry.
+fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey, PersistenceError> {
+    let mut unavailable = Vec::new();
+    {
+        let mut statement = connection
+            .prepare(
+                "SELECT o.id,o.relative_path,o.kind,p.id,p.rating,p.selection_state,f.digest,
+                        (SELECT COUNT(*) FROM album_members m WHERE m.photo_id=p.id)
+                 FROM photos p
+                 JOIN original_files o ON o.id=p.original_id
+                 LEFT JOIN original_fingerprints f ON f.original_id=o.id
+                 WHERE p.available=0
+                 ORDER BY o.relative_path COLLATE BINARY",
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(UnavailablePhotoRecord {
+                    original_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                    kind: parse_kind(&row.get::<_, String>(2)?)?,
+                    photo_id: row.get(3)?,
+                    rating: row
+                        .get::<_, i64>(4)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    selection_state: parse_selection_state(&row.get::<_, String>(5)?)?,
+                    fingerprint: row.get(6)?,
+                    album_count: row
+                        .get::<_, i64>(7)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            })
+            .map_err(|_| PersistenceError::Storage)?;
+        for row in rows {
+            unavailable.push(row.map_err(|_| PersistenceError::Storage)?);
+        }
+    }
+    let mut referenced_photo_ids = HashSet::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT photo_id FROM album_members")
+            .map_err(|_| PersistenceError::Storage)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|_| PersistenceError::Storage)?;
+        for row in rows {
+            referenced_photo_ids.insert(row.map_err(|_| PersistenceError::Storage)?);
+        }
+    }
+    Ok(RecoverySurvey {
+        unavailable,
+        referenced_photo_ids,
+    })
+}
+
+/// Revalidates one confirmed manual relocation batch and commits it
+/// atomically. Every mapping is rechecked against the persisted state
+/// observed inside the transaction: stale confirmations, colliding
+/// destinations, occupied Locations without an explicit retire, and
+/// occupiers with independent user state reject the whole batch without
+/// partial association.
+fn apply_manual_relocations(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    relocations: &[RequestedRelocation],
+) -> Result<AppliedRelocations, PersistenceError> {
+    write_transaction(state, database_name, connection, |transaction| {
+        if relocations.is_empty() {
+            return Err(PersistenceError::InvalidRecovery);
+        }
+        let mut destinations = HashSet::with_capacity(relocations.len());
+        let mut relocating_ids = HashSet::with_capacity(relocations.len());
+        for relocation in relocations {
+            relocating_ids.insert(relocation.original_id.clone());
+        }
+        for relocation in relocations {
+            let to = RelativeOriginalPath::parse(relocation.to_location.clone())
+                .map_err(|_| PersistenceError::InvalidRecovery)?;
+            if !destinations.insert(to.as_str().to_owned()) {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+            let persisted = transaction
+                .query_row(
+                    "SELECT available,kind FROM original_files WHERE id=?",
+                    params![relocation.original_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|_| PersistenceError::Storage)?;
+            let Some((available, kind)) = persisted else {
+                return Err(PersistenceError::InvalidRecovery);
+            };
+            if available != 0 {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+            let filename = to.as_str().rsplit('/').next().unwrap_or_default();
+            let kind = parse_kind(&kind).map_err(|_| PersistenceError::Storage)?;
+            if classify_name(filename) != Some(kind) {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+            // A destination owned by another Original requires either a
+            // simultaneous relocation of that owner or an explicit retire of
+            // an otherwise unreferenced default-state occupier.
+            let owner = transaction
+                .query_row(
+                    "SELECT id FROM original_files WHERE relative_path=?",
+                    params![to.as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|_| PersistenceError::Storage)?;
+            if let Some(owner_id) = owner
+                && owner_id != relocation.original_id
+                && !relocating_ids.contains(&owner_id)
+            {
+                if !relocation.retire_destination {
+                    return Err(PersistenceError::InvalidRecovery);
+                }
+                let occupant = transaction
+                    .query_row(
+                        "SELECT id,rating,selection_state FROM photos WHERE original_id=?",
+                        params![owner_id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, i64>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|_| PersistenceError::Storage)?;
+                if let Some((photo_id, rating, selection_state)) = occupant {
+                    if rating != 0 || selection_state != "undecided" {
+                        return Err(PersistenceError::InvalidRecovery);
+                    }
+                    let members = transaction
+                        .query_row(
+                            "SELECT COUNT(*) FROM album_members WHERE photo_id=?",
+                            params![photo_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(|_| PersistenceError::Storage)?;
+                    if members != 0 {
+                        return Err(PersistenceError::InvalidRecovery);
+                    }
+                    transaction
+                        .execute("DELETE FROM photos WHERE id=?", params![photo_id])
+                        .map_err(|_| PersistenceError::Storage)?;
+                }
+                transaction
+                    .execute("DELETE FROM original_files WHERE id=?", params![owner_id])
+                    .map_err(|_| PersistenceError::Storage)?;
+            }
+        }
+        // Two-phase Location updates keep direct swaps from violating the
+        // UNIQUE(relative_path) constraint.
+        for relocation in relocations {
+            transaction
+                .execute(
+                    "UPDATE original_files SET relative_path=? WHERE id=?",
+                    params![
+                        format!("\u{0}manual/{}", relocation.original_id),
+                        relocation.original_id
+                    ],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+        }
+        for relocation in relocations {
+            let to = RelativeOriginalPath::parse(relocation.to_location.clone())
+                .map_err(|_| PersistenceError::InvalidRecovery)?;
+            let size =
+                i64::try_from(relocation.facts.size).map_err(|_| PersistenceError::Storage)?;
+            let changed = transaction
+                .execute(
+                    "UPDATE original_files SET relative_path=?,size=?,mtime_ms=?,available=1,
+                       error_category=NULL,error_message=NULL,
+                       capture_metadata_state='pending',capture_order_key=NULL,
+                       capture_time_field=NULL,capture_offset_minutes=NULL,
+                       capture_source_revision=NULL
+                     WHERE id=?",
+                    params![
+                        to.as_str(),
+                        size,
+                        relocation.facts.mtime_ms,
+                        relocation.original_id
+                    ],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            if changed != 1 {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+            transaction
+                .execute(
+                    "UPDATE photos SET available=1,preview_state='inspection-pending',
+                       preview_source_revision=NULL,preview_width=NULL,preview_height=NULL,
+                       cache_revision=NULL,sort_path=? WHERE original_id=?",
+                    params![to.as_str(), relocation.original_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            // Fingerprints always describe the current persisted revision:
+            // the Application layer verified the digest against the candidate
+            // before submitting, so the observed facts replace the stale ones.
+            transaction
+                .execute(
+                    "UPDATE original_fingerprints SET size=?,mtime_ms=? WHERE original_id=?",
+                    params![size, relocation.facts.mtime_ms, relocation.original_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+        }
+        let unavailable = transaction
+            .query_row("SELECT COUNT(*) FROM photos WHERE available=0", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| PersistenceError::Storage)?;
+        Ok(AppliedRelocations {
+            relocated_photos: relocations.len() as u64,
+            unavailable_photos: unavailable
+                .try_into()
+                .map_err(|_| PersistenceError::Storage)?,
+        })
     })
 }
 
@@ -1952,7 +2213,9 @@ fn expansion_plan(
     let photos = connection
         .prepare("SELECT id,original_id FROM photos ORDER BY id")
         .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
@@ -1997,7 +2260,13 @@ fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, 
         ),
         photos: rows!(
             "SELECT id,original_id,available,selection_state,rating FROM photos ORDER BY id",
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?
+            ))
         ),
         albums: rows!("SELECT id,name,created_at FROM albums ORDER BY id", |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -2304,7 +2573,10 @@ fn apply_scan(
         let mut persisted_by_path = HashMap::with_capacity(before.originals.len());
         for original in &before.originals {
             persisted_by_id.insert(original.id.clone(), original.clone());
-            persisted_by_path.insert(original.relative_path.as_str().to_owned(), original.id.clone());
+            persisted_by_path.insert(
+                original.relative_path.as_str().to_owned(),
+                original.id.clone(),
+            );
         }
         let mut discovered_by_path = HashMap::with_capacity(discovered.len());
         for original in discovered {
@@ -2458,9 +2730,10 @@ fn apply_scan(
         for photo in &reconciled {
             let selected = selected_source(photo);
             let selected_path = selected.map(|(original, _)| original.path.as_str().to_owned());
-            let preserve = photo.prior.as_ref().is_some_and(|prior| {
-                preview_should_preserve(prior, selected, &previous_originals)
-            });
+            let preserve = photo
+                .prior
+                .as_ref()
+                .is_some_and(|prior| preview_should_preserve(prior, selected, &previous_originals));
             let source_revision = if preserve {
                 photo
                     .prior
@@ -2480,10 +2753,12 @@ fn apply_scan(
                 .execute(params![
                     photo.id,
                     photo.original_id,
-                    i64::from(photo
-                        .original
-                        .as_ref()
-                        .is_some_and(|original| original.error_category.is_none())),
+                    i64::from(
+                        photo
+                            .original
+                            .as_ref()
+                            .is_some_and(|original| original.error_category.is_none())
+                    ),
                     preview_state_name(preview_state),
                     source_revision,
                     preserve
@@ -2550,7 +2825,6 @@ fn apply_scan(
         fingerprinted_originals: recovery.fingerprints.len(),
     })
 }
-
 
 fn seed_preview(
     state: &StateDirectory,
@@ -4397,10 +4671,9 @@ mod tests {
             .photos
             .iter()
             .find(|photo| {
-                first
-                    .originals
-                    .iter()
-                    .any(|original| original.id == photo.original_id && original.kind == OriginalKind::Raw)
+                first.originals.iter().any(|original| {
+                    original.id == photo.original_id && original.kind == OriginalKind::Raw
+                })
             })
             .unwrap();
         let jpeg_photo = first
@@ -4562,7 +4835,10 @@ mod tests {
         )
         .unwrap();
         let first = persistence
-            .apply_scan(vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)], Vec::new())
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+            )
             .await
             .unwrap();
         let photo_id = first.photos[0].id.clone();
@@ -4634,7 +4910,10 @@ mod tests {
         )
         .unwrap();
         let first = persistence
-            .apply_scan(vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)], Vec::new())
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
+                Vec::new(),
+            )
             .await
             .unwrap();
         let photo = &first.photos[0];
@@ -4684,7 +4963,10 @@ mod tests {
             relocated.snapshot.originals[0].relative_path.as_str(),
             "moved/two.JPG"
         );
-        assert_eq!(relocated.snapshot.photos[0].preview_state, PreviewState::InspectionPending);
+        assert_eq!(
+            relocated.snapshot.photos[0].preview_state,
+            PreviewState::InspectionPending
+        );
         assert!(relocated.snapshot.photos[0].cache_revision.is_none());
         persistence.shutdown().unwrap();
     }
