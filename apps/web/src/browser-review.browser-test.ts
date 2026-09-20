@@ -6227,11 +6227,12 @@ test("the membership panel lists the current Photo's Albums across sources and r
   await expect(membershipCheckbox(page, "Alpha")).toBeChecked();
   await expect(membershipCheckbox(page, "Beta")).toBeChecked();
 
+  // The Photo address preserves the destination across a reload, so the
+  // reloaded document reopens the same Photo in the same Album.
   await page.reload();
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await openSources(page);
-  await page.getByRole("link", { name: /^All Photos 1 Photo/ }).click();
-  await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
+  await expect(page.locator("[data-review]")).toBeVisible();
+  await expect(page.getByText("1 / 1")).toBeVisible();
   await expect(page.locator("[data-membership-list] li")).toHaveText([
     "Alpha",
     "Beta",
@@ -16804,6 +16805,7 @@ type NavigationEntry = Readonly<{
   version: number;
   entryId: string;
   anchor?: Readonly<{ photoId: string; indexHint: number; offset: number }>;
+  focus?: Readonly<{ kind: "grid" } | { kind: "photo"; photoId: string }>;
   parentGridEntryId?: string;
   folderPublication?: string;
 }>;
@@ -17206,8 +17208,9 @@ test.describe("browser navigation", () => {
     await expect(
       page.getByText("Library ready", { exact: true }),
     ).toBeVisible();
-    await openSources(page);
-    await page.getByRole("link", { name: /^Library Folder/ }).click();
+    // A directly loaded Folder destination binds to the current Published
+    // Library, and the entry it replaced records that provenance.
+    await page.goto(`${running.url}/?source=folder&folderPath=`);
     await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
     const folderAddress = new URL(page.url());
     expect(folderAddress.searchParams.get("folderPath")).toBe("");
@@ -17253,6 +17256,133 @@ test.describe("browser navigation", () => {
     expect((await navigationState(page))?.folderPublication).not.toBe(
       entry?.folderPublication,
     );
+  });
+
+  test("a failed traversal keeps its target URL and a retryable destination", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 600);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 600 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    const columns = await columnsAt(page);
+    const anchorIndex = 6 * columns;
+    await scrollGrid(page, 6 * 178);
+    await expect(
+      page.locator(`[data-photo-index="${anchorIndex}"]`),
+    ).toBeVisible();
+    await waitForGridPhotos(page);
+    const targetPhotoId = await cellPhotoId(page, anchorIndex);
+    await page.locator(`[data-photo-index="${anchorIndex}"]`).click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    const target = page.url();
+
+    // A bounded position lookup that fails is retryable, not evidence that
+    // the Photo disappeared: the destination keeps its address and the page
+    // presents the retryable state rather than the previous Grid.
+    await page.route(/\/api\/browse\/[^/]+\/position/, (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: "{}",
+      }),
+    );
+    await traverseHistory(page, "back");
+    await expect(page.getByText("Ready · 600 Photos")).toBeVisible();
+    // Page through the source so bounded retention evicts the opened Photo's
+    // facts, which is what forces the Forward traversal to resolve it through
+    // the bounded position endpoint.
+    const viewport = page.locator("[data-grid-viewport]");
+    const lastRow = Math.ceil(600 / columns) - 1;
+    for (let row = 12; row <= lastRow; row += 12) {
+      await viewport.evaluate((element, target) => {
+        element.scrollTop = target * 178;
+        element.dispatchEvent(new Event("scroll"));
+      }, row);
+      await expect(
+        page.locator(`[data-photo-index="${row * columns}"]`),
+      ).toBeVisible();
+      await waitForGridPhotos(page);
+    }
+    await traverseHistory(page, "forward");
+    await expect(
+      page.getByText("Could not load this source. Retry to continue."),
+    ).toBeVisible();
+    expect(page.url()).toBe(target);
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(targetPhotoId);
+    await expect(page.locator("[data-review]")).toBeHidden();
+    await expect(page.locator(".photo-cell")).toHaveCount(0);
+
+    // Retry re-establishes the destination the traversal asked for, so the
+    // Photo opens under the address the browser already chose.
+    await page.unroute(/\/api\/browse\/[^/]+\/position/);
+    await page.getByRole("button", { name: "Retry connection" }).click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    expect(page.url()).toBe(target);
+  });
+
+  test("an expired Browse token reopens the snapshot during a Forward traversal", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 400);
+    const running = await server(base, root);
+    const browseBodies = recordBrowseBodies(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 400 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="4"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("5 / 400")).toBeVisible();
+    const photoId = new URL(page.url()).searchParams.get("photoId");
+    expect(photoId).toBeTruthy();
+    await traverseHistory(page, "back");
+    await expect(page.getByText("Ready · 400 Photos")).toBeVisible();
+    // Scroll far enough that the bounded retention evicts the opened Photo's
+    // facts, so the Forward traversal must resolve it through the bounded
+    // position endpoint.
+    const viewport = page.locator("[data-grid-viewport]");
+    const columns = await columnsAt(page);
+    const lastRow = Math.ceil(400 / columns) - 1;
+    for (let row = 8; row <= lastRow; row += 8) {
+      await viewport.evaluate((element, target) => {
+        element.scrollTop = target * 178;
+        element.dispatchEvent(new Event("scroll"));
+      }, row);
+      await expect(
+        page.locator(`[data-photo-index="${row * columns}"]`),
+      ).toBeVisible();
+      await waitForGridPhotos(page);
+    }
+
+    // The Browse token the entry was resolved against has been released, so
+    // the position endpoint answers 404. The source is reopened exactly as an
+    // expired window is, and the Photo is resolved against the fresh
+    // Snapshot instead of being reported as gone.
+    let positionAnswers = 0;
+    await page.route(/\/api\/browse\/[^/]+\/position/, async (route) => {
+      positionAnswers += 1;
+      if (positionAnswers === 1)
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: "{}",
+        });
+      return route.continue();
+    });
+    await traverseHistory(page, "forward");
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("5 / 400")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(photoId);
+    expect(positionAnswers).toBeGreaterThanOrEqual(1);
+    // A fresh Snapshot was opened for the same source, order, and filter.
+    expect(browseBodies.length).toBeGreaterThan(1);
+    expect(browseBodies.at(-1)).toMatchObject({ source: "library" });
+    await page.unroute(/\/api\/browse\/[^/]+\/position/);
   });
 
   test("a failed traversal keeps its target URL and stays retryable", async ({
@@ -17500,6 +17630,55 @@ test.describe("browser navigation", () => {
     expect(scrolls).toBe(1);
     await page.getByRole("link", { name: /^All Photos 3 Photos/ }).click();
     await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+  });
+
+  test("a reloaded Grid destination restores its anchor and focuses the Grid", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 200);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    const columns = await columnsAt(page);
+    const anchorRow = 6;
+    const anchorIndex = anchorRow * columns;
+    await scrollGrid(page, anchorRow * 178);
+    await expect(
+      page.locator(`[data-photo-index="${anchorIndex}"]`),
+    ).toBeVisible();
+    await waitForGridPhotos(page);
+    // A programmatic activation opens the Photo without moving focus into the
+    // Grid, so the Grid entry records the Grid itself as its focus target.
+    await page.evaluate((index) => {
+      document
+        .querySelector<HTMLButtonElement>(`[data-photo-index="${index}"]`)!
+        .click();
+    }, anchorIndex);
+    await expect(page.locator("[data-review]")).toBeVisible();
+
+    await traverseHistory(page, "back");
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    // The Grid entry the Photo came from names the Grid itself as its focus
+    // target, because nothing moved focus into a cell.
+    const state = await navigationState(page);
+    expect(state?.focus).toEqual({ kind: "grid" });
+    const scrolledTop = await gridScrollTop(page);
+
+    // A reload re-establishes the destination from its address, so nothing
+    // moves focus into the Grid: the restoration leaves the Grid focused
+    // rather than the document body.
+    await page.reload();
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await expect
+      .poll(
+        async () => Math.abs((await gridScrollTop(page)) - scrolledTop) < 178,
+      )
+      .toBe(true);
+    await expect(page.locator("[data-grid-viewport]")).toBeFocused();
   });
 
   test("a 40,000-Photo Library restores a late Grid anchor and stays bounded", async ({

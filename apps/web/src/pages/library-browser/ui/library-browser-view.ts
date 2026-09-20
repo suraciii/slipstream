@@ -1725,41 +1725,50 @@ export function createLibraryBrowserView(
   /// anchor. A modified activation, a middle click, or a non-primary button
   /// keeps its native new-tab, copy-link, and download behavior.
   const interceptDestination = (
-    link: HTMLAnchorElement,
+    element: HTMLAnchorElement | HTMLButtonElement,
     activate: () => void,
   ) => {
-    link.addEventListener("click", (event) => {
+    element.addEventListener("click", (event) => {
+      const pointer = event as MouseEvent;
       if (
-        event.defaultPrevented ||
-        event.button !== 0 ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.shiftKey ||
-        event.altKey ||
-        link.getAttribute("aria-disabled") === "true"
+        pointer.defaultPrevented ||
+        pointer.button !== 0 ||
+        pointer.metaKey ||
+        pointer.ctrlKey ||
+        pointer.shiftKey ||
+        pointer.altKey
       )
         return;
-      event.preventDefault();
+      pointer.preventDefault();
       activate();
     });
   };
 
+  /// One source destination. A destination the Library can open right now is a
+  /// real same-origin anchor, so new-tab, copy-link, and download stay native.
+  /// A destination that cannot be opened yet — an unpublished Library Folder
+  /// root, or a Folder the current publication does not list — keeps button
+  /// semantics and no href, so an unmodified activation can never navigate the
+  /// document away from the application, and its native disabled state keeps
+  /// it out of the hover highlight.
   const createSourceButton = (
     name: string,
     count: number,
     active: boolean,
-    disableWhenEmpty = true,
-    href?: string,
+    address: string,
+    openable: boolean,
   ) => {
-    const element = (
-      href ? document.createElement("a") : document.createElement("button")
-    ) as HTMLAnchorElement;
-    if (href) element.href = href;
-    else element.type = "button";
+    const element: HTMLAnchorElement | HTMLButtonElement = openable
+      ? document.createElement("a")
+      : document.createElement("button");
+    if (openable) (element as HTMLAnchorElement).href = address;
+    else {
+      const button = element as HTMLButtonElement;
+      button.type = "button";
+      button.disabled = true;
+    }
     element.className = `source-card${active ? " active" : ""}`;
     if (active) element.setAttribute("aria-current", "true");
-    if (disableWhenEmpty && count === 0)
-      element.setAttribute("aria-disabled", "true");
     // The name may be visually truncated; the title keeps the full name
     // available on hover without changing the accessible name.
     element.title = name;
@@ -1825,18 +1834,19 @@ export function createLibraryBrowserView(
       );
       row.append(expand);
     }
+    // A Folder the current publication does not list is not an openable
+    // destination yet, so it keeps button semantics and no href.
     const button = createSourceButton(
       `${folder.name}${folder.hasDescendantFolders ? " · Subfolders" : ""}`,
       folder.photoCount,
       folder.active,
-      false,
       sourceAddress({
         kind: "folder",
         location: folder.location,
         name: folder.name,
       }),
+      folder.enabled,
     );
-    if (!folder.enabled) button.setAttribute("aria-disabled", "true");
     interceptDestination(button, () =>
       send({
         kind: "source-open",
@@ -2029,8 +2039,8 @@ export function createLibraryBrowserView(
       "All Photos",
       model.libraryCount,
       model.libraryActive,
-      false,
       sourceAddress({ kind: "library" }),
+      true,
     );
     library.dataset.focusKey = "source:library";
     interceptDestination(library, () =>
@@ -2050,16 +2060,15 @@ export function createLibraryBrowserView(
       );
       sourceList.append(retryFolders);
     }
+    // The Library Folder root opens only while the Library is published.
     const rootCard = createSourceButton(
       "Library Folder",
       model.libraryCount,
       model.rootActive,
-      false,
       sourceAddress({ kind: "folder", location: "", name: "Library Folder" }),
+      model.fileLocationsEnabled,
     );
     rootCard.dataset.focusKey = "source:folder:";
-    if (!model.fileLocationsEnabled)
-      rootCard.setAttribute("aria-disabled", "true");
     interceptDestination(rootCard, () =>
       send({
         kind: "source-open",
@@ -2111,8 +2120,8 @@ export function createLibraryBrowserView(
         album.name,
         album.photoCount,
         album.active,
-        false,
         sourceAddress({ kind: "album", id: album.id }),
+        true,
       );
       button.dataset.focusKey = `source:album:${album.id}`;
       interceptDestination(button, () =>
@@ -4039,17 +4048,26 @@ export function createLibraryBrowserView(
       };
     },
     restoreGridAnchor(model) {
-      if (!alive || gridView.hidden || gridTotal === 0) return;
-      const count = columns();
-      const target = Math.max(0, Math.min(gridTotal - 1, model.index));
-      gridViewport.scrollTop =
-        Math.floor(target / count) * rowPitch() + model.offset;
+      if (!alive || gridView.hidden) return;
       // The Grid itself owns focus when the restoration names no cell, and a
-      // cell that no longer exists leaves the Grid focused.
+      // cell that no longer exists leaves the Grid focused. The establishment
+      // path (a reload or a direct entry) has no activation that moved focus
+      // into the Grid, so the viewport takes it here rather than leaving the
+      // document body focused. preventScroll keeps the restored geometry.
       gridKeyboardIndex =
         model.focusIndex === undefined
           ? undefined
           : Math.max(0, Math.min(gridTotal - 1, model.focusIndex));
+      if (
+        gridKeyboardIndex === undefined &&
+        !gridLayer.contains(document.activeElement)
+      )
+        gridViewport.focus({ preventScroll: true });
+      if (gridTotal === 0) return;
+      const count = columns();
+      const target = Math.max(0, Math.min(gridTotal - 1, model.index));
+      gridViewport.scrollTop =
+        Math.floor(target / count) * rowPitch() + model.offset;
       scheduleGridRender();
     },
     closeTransientSurfaces() {

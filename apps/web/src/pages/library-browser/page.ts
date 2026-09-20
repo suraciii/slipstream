@@ -143,16 +143,27 @@ export function mountLibraryBrowser(
   const startup = navigation.start();
   // An invalid address is explained and replaced once with All Photos before
   // any request for the invalid source is made.
-  /// The destination whose establishment is in flight. A traversal that
-  /// arrives while a newer intent is establishing a different destination is
-  /// superseded, so it cannot repaint the destination the page has left.
-  let pendingDestination: NavigationDestination | undefined;
   let startupDestination: NavigationDestination =
     startup.kind === "destination" ? startup.destination : allPhotosDestination;
   let startupConsumed = false;
+  /// The destination whose establishment is in flight, so a traversal that
+  /// arrives while a newer intent is establishing a different destination is
+  /// superseded instead of repainting it.
+  let pendingDestination: NavigationDestination | undefined;
+  /// The destination a failed traversal asked for, so the source Retry
+  /// re-establishes it instead of reloading the Overview.
+  let retryableTraversal: NavigationDestination | undefined;
   let startupExplanation: string | undefined =
     startup.kind === "invalid"
       ? "That link is not a valid Library Browser address. Showing All Photos."
+      : undefined;
+  // A reloaded Grid entry keeps the anchor and focus target it recorded, so
+  // the destination it re-establishes restores where the Photographer left.
+  let startupRestoration: NavigationGridRestoration | undefined =
+    startup.kind === "destination" &&
+    startup.entry.anchor &&
+    startup.entry.focus
+      ? { anchor: startup.entry.anchor, focus: startup.entry.focus }
       : undefined;
   const view: LibraryBrowserView = createLibraryBrowserView(
     root,
@@ -334,12 +345,25 @@ export function mountLibraryBrowser(
         startupConsumed = true;
         const destination = startupDestination;
         const explanation = startupExplanation;
+        const restoration = startupRestoration;
         startupDestination = allPhotosDestination;
         startupExplanation = undefined;
-        await establishDestination(destination, {
+        startupRestoration = undefined;
+        const established = await establishDestination(destination, {
           addressed: true,
+          ...(restoration ? { restoration } : {}),
           ...(explanation ? { explanation } : {}),
         });
+        // A directly loaded Folder destination binds to the current Published
+        // Library, so the entry it replaced records that publication. Without
+        // the provenance a later traversal after a rescan would reopen the
+        // Folder silently instead of requiring the explicit confirmation.
+        if (established && sourceGrid.kind === "folder" && sourceGrid.token)
+          navigation.replaceGrid(
+            liveDestination(),
+            undefined,
+            fileLocations.publication,
+          );
         return;
       }
       const remembered =
@@ -1421,6 +1445,7 @@ export function mountLibraryBrowser(
     cancelScheduledGridRender();
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
+    retryableTraversal = undefined;
     pendingDestination = {
       source: requested.kind,
       ...(requested.kind === "folder"
@@ -1634,6 +1659,7 @@ export function mountLibraryBrowser(
   const reopenExpired = async (
     anchorIndex: number,
     expectedGeneration = sourceGrid.generation,
+    preferredPhotoId?: string,
   ) => {
     if (expectedGeneration !== sourceGrid.generation) return;
     pageBusy = true;
@@ -1655,7 +1681,10 @@ export function mountLibraryBrowser(
           ? { preferredPhotoId: photoOwner.lastCurrentPhotoId }
           : {}),
       });
+    // A traversal names the Photo it wants resolved, so it wins over the
+    // anchor the Grid or the current Photo would supply.
     const anchorId =
+      preferredPhotoId ??
       sourceGrid.photoAt(anchorIndex)?.id ??
       photoOwner.lastCurrentPhotoId ??
       currentPhoto()?.id;
@@ -3477,6 +3506,15 @@ export function mountLibraryBrowser(
       })();
       return;
     }
+    // A traversal whose bounded lookup failed keeps its destination retryable,
+    // so Retry re-establishes that destination rather than reloading the
+    // Overview.
+    const traversal = retryableTraversal;
+    if (traversal) {
+      retryableTraversal = undefined;
+      void establishDestination(traversal, { addressed: true });
+      return;
+    }
     if (!sourceGrid.retryRequired) {
       void application.loadOverview();
       return;
@@ -4138,16 +4176,83 @@ export function mountLibraryBrowser(
       photoId,
     );
     if (!sourceGrid.isCurrent(sourceGrid.authority)) return undefined;
-    if (resolved.kind !== "resolved")
+    if (resolved.kind === "expired")
+      // The Browse Snapshot this destination was resolved against has been
+      // released, so the source is reopened exactly as an expired window is
+      // and the Photo is resolved again against the fresh Snapshot.
+      return reopenForTraversedPhoto(destination, photoId);
+    if (resolved.kind === "missing")
       // A null position is the server confirming the Photo is absent from
       // this source and filter, which is the explained source-Grid fallback.
-      return resolved.kind === "missing" || resolved.kind === "expired"
-        ? fallbackToSourceGrid(
-            destination,
-            "This Photo is no longer in this view. Showing the source Grid.",
-          )
-        : false;
-    return openPhoto(resolved.position, "none");
+      return fallbackToSourceGrid(
+        destination,
+        "This Photo is no longer in this view. Showing the source Grid.",
+      );
+    if (resolved.kind === "resolved")
+      return openPhoto(resolved.position, "none");
+    // A failed or detached lookup never silently replaces the destination:
+    // only a superseded one stops here, and a failed one keeps the target
+    // URL with a retryable destination state.
+    return resolved.kind === "failed"
+      ? presentRetryableTraversal(destination)
+      : undefined;
+  };
+
+  /// Reopens the source an expired traversal was resolved against and
+  /// resolves its Photo again. The established expired-snapshot path owns the
+  /// reopen, so a released Browse token is answered by a fresh Snapshot
+  /// rather than by an explanation that claims the Photo is gone.
+  const reopenForTraversedPhoto = async (
+    destination: NavigationDestination,
+    photoId: string,
+  ): Promise<boolean | undefined> => {
+    await reopenExpired(
+      photoOwner.currentIndex,
+      sourceGrid.generation,
+      photoId,
+    );
+    if (!applicationAlive || !sourceGrid.token) return undefined;
+    if (!sourceGrid.isCurrent(sourceGrid.authority)) return undefined;
+    const reopened = sourceGrid.readGridPosition(sourceGrid.authority);
+    if (reopened !== undefined && sourceGrid.photoAt(reopened)?.id === photoId)
+      return openPhoto(reopened, "none");
+    const resolved = await sourceGrid.resolvePhotoPosition(
+      sourceGrid.authority,
+      photoId,
+    );
+    if (!sourceGrid.isCurrent(sourceGrid.authority)) return undefined;
+    if (resolved.kind === "resolved")
+      return openPhoto(resolved.position, "none");
+    if (resolved.kind === "missing")
+      return fallbackToSourceGrid(
+        destination,
+        "This Photo is no longer in this view. Showing the source Grid.",
+      );
+    // A second failure is retryable, not evidence that the Photo disappeared.
+    return resolved.kind === "failed"
+      ? presentRetryableTraversal(destination)
+      : undefined;
+  };
+
+  /// The retryable destination state a failed traversal keeps: the target URL
+  /// stays as the browser left it, the previous content is replaced by a
+  /// truthful shell, and the source Retry the failed-open path already owns
+  /// re-establishes this destination.
+  const presentRetryableTraversal = (
+    destination: NavigationDestination,
+  ): boolean => {
+    retryableTraversal = destination;
+    leavePhotoView();
+    view.prepareSourceOpen(sourceGrid.name);
+    setGridStatusText("Could not load this source. Retry to continue.");
+    const generation = String(sourceGrid.generation);
+    const claim = recoveryGate.issue("source-position", generation, {
+      owner: { scope: "source", generation },
+    });
+    recoveryGate.fail(claim, { transportLost: true });
+    syncConnection();
+    updateControls();
+    return false;
   };
 
   /// Renders a Grid destination the live Snapshot already serves and restores
@@ -4310,6 +4415,7 @@ export function mountLibraryBrowser(
 
   const applyTraversal = async (traversal: NavigationTraversal) => {
     if (!applicationAlive) return;
+    retryableTraversal = undefined;
     view.closeTransientSurfaces();
     const entry = traversal.entry;
     await establishDestination(traversal.destination, {
