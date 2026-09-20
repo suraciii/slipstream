@@ -84,6 +84,10 @@ defined by Web Async Ownership:
   disposes them. It owns only cross-owner interaction readiness and sequencing;
   it does not retain another owner's mutable state or reimplement that owner's
   transitions and async policies.
+- The **navigation owner** owns the page's browser address codec, history-entry
+  metadata, and pending destination identity under
+  [Browser Navigation](browser-navigation.md). It owns no source facts, HTTP,
+  or mutation state; the controller coordinates its destination intents.
 - The **application-lifetime owner** owns Library Overview, publication status,
   scan command settlement, application Recovery claims, and Summary
   presentation state.
@@ -237,9 +241,11 @@ mutation.
 
 The Quick Action Dock is a responsive presentation of existing intents. It
 must not become a second page controller or a second persistence admission. The
-Secondary Sheet presents existing Details, Album, Zoom, Clear, Undo, and
-navigation controls; each retains its existing owner, failure isolation, and
-focus restoration rules.
+Secondary Sheet presents existing Details, Album, Zoom, Clear, and Undo
+controls; each retains its existing owner, failure isolation, and focus
+restoration rules. Previous/Next remain in the primary navigation group.
+[Browser Navigation and Responsive Surfaces](browser-navigation.md#responsive-presentation-boundary)
+owns shared modal and disclosure lifecycle.
 
 ### Membership presentation state
 

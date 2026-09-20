@@ -105,7 +105,7 @@ A per-file capture failure does not abort valid sibling Photos. A root-level sca
 
 An open Browse Snapshot keeps its ordered Photo-ID sequence. Availability, Selection State, Rating, and Preview facts may refresh, but a rescan does not insert, remove, or reorder that Snapshot. Reopening `All Photos` may observe the newly published order.
 
-When an Album opens at an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member; without a saved Album position it starts at the first available member or, if none are available, the first member. A disconnected Album keeps mutation controls disabled until refreshed current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
+When explicit Album Resume resolves an unavailable saved Photo, Slipstream searches later members and then wraps once for an available member. If every member is unavailable, it remains at the saved member. Browse creation without a saved position still resolves its initial position to the first available member or, if none are available, the first member; this value does not force a Grid destination into Photo View. Grid entry and Resume presentation follow [Library Browser Experience](../docs/library-browser-experience.md#destinations-and-browser-history). A disconnected Album keeps mutation controls disabled until its required current facts and saved position are confirmed. `All Photos` and Original Folder sources have no durable position and reconnect through their current bounded windows.
 
 ## Persistence
 

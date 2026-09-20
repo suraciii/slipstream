@@ -137,7 +137,7 @@ A Library Expansion retains its stricter offline contract. The expansion command
 
 ### Source Opening
 
-The Web application loads the Library Overview first. It may concurrently request the first `All Photos` Browse Snapshot so Grid placeholders appear immediately, but source navigation must not wait for that request.
+The Web application loads the Library Overview first. It may concurrently request the initial destination's Browse Snapshot so Grid placeholders appear immediately, but source navigation must not wait for that request. The bare application address selects All Photos. Addressed startup and its single bootstrap election follow [Browser Navigation](browser-navigation.md#destination-establishment).
 
 Conceptual protocol surfaces are:
 
@@ -439,7 +439,10 @@ normal Photo path and no more.
 
 The strip is presentation state of the Photo surface, bounded at five
 entries: two Photos on each side of the current Photo, clamped at the
-source's ends. It renders only while Photo View is visible and draws its
+source's ends. The strip's responsive placement follows
+[Library Browser Experience](../docs/library-browser-experience.md#photo-view).
+It renders only while its owning Photo surface or Nearby Photos disclosure
+is visible and draws its
 thumbnails from the single `thumbnail-512` derivative. It deliberately does
 not reuse the Grid's cell composition: an entry crops that derivative to a
 square and places the Selection State badge over it, where a Grid cell keeps
@@ -500,7 +503,10 @@ Restoring transport reachability is not itself a recovery. It does not retire an
 
 If a Browse Snapshot still exists, reconnect reloads only the current bounded window. If it expired or the process restarted, the browser creates a new Snapshot for the same source, moves to the same Photo when it still exists, and tells the Photographer that the latest published order is now in use. Browser-local facts scoped to the retired Snapshot, including the temporary memory that keeps a removed Album member visible, are discarded only after the replacement Snapshot commits successfully. A failed reopen retains those facts with the recoverable current view.
 
-The first product does not promise durable `All Photos` or Original Folder position across browser reload. Album saved position remains durable SQLite state.
+Browser URLs restore addressed Photos and view options under
+[Browser Navigation](browser-navigation.md). Exact Grid placement after reload
+remains browser-local best effort; it is not a durable All Photos or Folder
+resume feature. Album saved position remains durable SQLite state.
 
 ## Failure Behavior
 

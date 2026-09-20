@@ -4,7 +4,7 @@ A Photographer opens Slipstream to browse the Photo Library, find Photos, and re
 
 ## Library Browser
 
-The Library Browser is Slipstream's primary screen. It must open directly to the `All Photos` Grid rather than an Album landing page. Source navigation must show:
+The Library Browser is Slipstream's primary screen. A bare application address must open directly to the `All Photos` Grid rather than an Album landing page. Addressed entry follows [Library Browser Experience](library-browser-experience.md#destinations-and-browser-history). Source navigation must show:
 
 - the Photo Library as the `All Photos` source;
 - the read-only Library Folder root and its Original Folders under a `Folders` section;
@@ -17,7 +17,7 @@ The `Folders` section presents the File Locations source defined by [Physical Fi
 
 The active Grid status and every source card must use `1 Photo` for one and `N Photos` for every other count in both visible and accessible text.
 
-A wide viewport must keep compact source navigation beside the Grid. A narrow viewport must place the same navigation in a drawer opened by a visible `Sources` control. The drawer must not consume the Grid's first viewport while closed, must close after the Photographer chooses a source, and must return focus to the `Sources` control when dismissed. Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
+Source layout, its narrow-screen disclosure, and focus restoration follow [Library Browser Experience](library-browser-experience.md#screen-structure). Both layouts must preserve the `Folders` and `Albums` distinction. A Folder and Album with the same name must remain distinguishable by section and source labeling. Changing source must not require entering a separate workflow.
 
 On a wide viewport, the Photographer must be able to resize the source navigation with its separator control by pointer drag or with the Left and Right Arrow keys while that control has focus, within a bounded width range. The separator must expose an accessible name. A narrow viewport must not offer the separator and must keep the source navigation in the drawer.
 
@@ -42,93 +42,21 @@ Slipstream follows this familiar Library-browser shape without adding desktop ed
 
 ## Presentation and Control Hierarchy
 
-The Library Browser must use the current Photo and Photo Grid as its dominant surfaces. Source navigation, status, and controls must support those surfaces without competing with them for attention or space.
-
-The Library Browser must expose exactly one main landmark while it loads and after it becomes usable, so assistive technology identifies one primary screen.
-
-The first product uses one neutral dark appearance. Color must communicate keyboard focus, Selection State, Rating, failure, or connectivity rather than decorate unrelated containers. The interface must not depend on color alone to communicate a Photo decision or control state.
-
-Required information must meet WCAG AA text contrast against its rendered background. Every visible interactive target must provide at least a 44 by 44 CSS-pixel target at supported narrow and short-landscape viewports. Focused controls must remain visibly distinguishable.
-
-Grid View must keep its current source name, truthful loading status, and Library refresh action compact so the Photo Grid remains visible. Source rows must read as navigation rather than a collection of promotional cards. The Library refresh action is a recovery action and must not occupy a permanently prominent primary slot.
-
-Album rename and delete are supporting actions. On a wide viewport whose primary pointer can hover, they may stay concealed until the Photographer hovers or focuses their Album row. They must remain visible without hover at supported touch and narrow viewports, and must remain reachable from the keyboard.
-
-A valid Album name must not widen Grid View or Photo View beyond the Library Browser at a supported viewport. Its visible current-source title may be visually truncated, but assistive technology must retain the complete Album name.
-
-Photo View must keep the Preview larger than any control group when the viewport can display a usable Preview. It must group selection decisions, Rating, Album membership, and navigation by purpose. Select and reject are the primary review actions; clear, undo, Preview zoom, and Album membership are supporting actions. Previous and next navigation must remain visible without implying a selection decision.
-
-When a short viewport cannot show a usable Preview and every control at once, Photo View must preserve a usable Preview and provide a vertical path to every existing control. It must not clip controls without a way to reach them. At supported narrow widths, Grid cells must divide each complete row evenly across the available Grid width, leaving no more than the ordinary inter-cell gap at the trailing edge. The `Library Folder` source label must remain fully readable.
-
-Clear must be unavailable while the current Photo is already `undecided`. Undo must be unavailable until the current source has an undoable Selection State or Rating change.
+[Library Browser Experience](library-browser-experience.md) owns responsive
+screen composition, control placement, modal behavior, space budgets, and
+browser navigation. The action semantics below apply regardless of where a
+control is presented. Clear is unavailable while the current Photo is already
+`undecided`; Undo is unavailable until the current source has an undoable
+Selection State or Rating change.
 
 ## Mobile Photo View Quick Actions
 
-Photographers often cull on a phone with one hand. A mobile Photo View must
-therefore keep the frequent actions near the Preview while leaving metadata,
-Album management, and detailed inspection reachable without competing for the
-same primary space.
-
-At supported narrow or short-landscape touch viewports, Photo View must provide
-one safe-area-aware **Quick Action Dock**. The Dock must present these
-high-frequency culling actions in this order:
-
-1. **Reject**;
-2. the current **Rating**; and
-3. **Select**.
-
-The Dock must remain available while Photo View scrolls through secondary
-content, must not cover the Preview or clip a control, and must give every
-visible action at least a 44 by 44 CSS-pixel target including the device
-safe-area inset. Select and Reject follow the Selection State rules and
-persistence ordering defined below.
-
-The Dock must also provide a visible **More** affordance that opens the mobile
-**Secondary Sheet**. The Sheet is the lower-frequency and supporting action
-surface. It must provide, without changing their existing semantics:
-
-- **Previous** and **Next** navigation;
-- **Clear** and **Undo**;
-- Capture Details;
-- Album membership and membership management; and
-- the complete Preview Zoom controls, including Fit, zoom out, the slider,
-  zoom in, and 100%.
-
-Previous and Next are navigation only. They must not imply a Selection State
-change. They remain separate controls in the Secondary Sheet rather than being
-combined with Select or Reject.
-
-The Secondary Sheet must be an accessible bottom surface with a programmatic
-name, a close action, and a bounded focus scope while it is open. Opening it
-must move focus to its first available control. Closing it by its close action,
-Escape, the platform back action, or its scrim must return focus to More when
-More remains available. While open, the underlying Photo View must not receive
-focus or pointer actions. Opening the Sheet cancels a pending or open Rating
-Wheel without a mutation. A failure loading Details or Album membership must
-remain isolated from Preview, Rating, Selection State, and navigation
-readiness.
-
-The action hierarchy is:
-
-```text diagram
-Photo View
-├── Preview
-├── Quick Action Dock: Reject · Rating · Select · More
-└── Secondary Sheet: Previous · Next · Clear · Undo · Details · Albums · Zoom
-```
-
-The Rating entry must communicate the current Rating and must provide a direct
-activation path to explicit controls for `0` through `5`. Selecting a value from
-that path uses the same Rating persistence and Undo rules as every other Rating
-control. At any moment, only one explicit Rating control group is active: the
-Dock entry or the path it opens. The touch-only Rating Wheel is an accelerator
-and must not replace either explicit path.
-
-The mobile action hierarchy must not create a new source, Photo, Album, Review
-Session, global frontend store, Rating store, or Undo model, and must not add an
-HTTP endpoint. The Wheel must reuse the existing Photo owner Rating mutation
-through the existing `/state` path. Wide desktop layouts may keep their
-existing grouping when the same controls and semantics remain available.
+The Quick Action Dock, Secondary Sheet, explicit Rating choices, and separate
+Photo navigation follow [Photo View](library-browser-experience.md#photo-view)
+and [Supporting Surfaces](library-browser-experience.md#supporting-surfaces).
+They reuse the existing Photo, Album, Rating, Selection State, and Undo owners
+and add no HTTP endpoint. The [Rating Wheel](#rating-wheel) remains an optional
+touch accelerator using the same Photo Rating mutation.
 
 ## Source Order
 
@@ -164,7 +92,7 @@ Grid View must expose one explicit order selection for the open source:
 
 A time order belongs to the open view only. It must never rewrite persisted
 Album member positions, and an Album's persisted order remains the default
-when it is reopened.
+when opened without an addressed order.
 
 The server applies the selected order to the complete source before it
 paginates windows, so Grid and Photo navigation share one globally ordered
@@ -178,9 +106,11 @@ time.
 
 Changing the order must keep the current Photo, resolved by Photo ID, and
 reposition the view around it. Opening or reopening a different source uses
-that source's default order. The first product does not persist the selected
-order across reloads. Album saved positions restore by Photo identity and are
-unaffected by the selected view order.
+that source's default order unless an addressed destination specifies another
+order. Committed order survives reload through the destination URL under
+[Browser History](library-browser-experience.md#destinations-and-browser-history).
+Album saved positions restore by Photo identity and are unaffected by the
+selected view order.
 
 ## Progressive Grid Loading
 
@@ -279,7 +209,9 @@ the Grid owns keyboard focus, so the control receives its own keys unchanged.
 
 ## Photo View
 
-Photo View must show one current Photo as the primary content. It must also show:
+Photo View must show one current Photo as the primary content. It must make
+the following facts and actions available, with their primary or disclosed
+placement defined by [Library Browser Experience](library-browser-experience.md#photo-view):
 
 - current position and total Photo count;
 - the Original filename when available;
@@ -310,8 +242,10 @@ explanation of the limit must remain available to assistive technology.
 
 The next and previous Photos must remain reachable without recording a decision.
 
-Photo View must show the current Photo's immediate neighbors as a bounded
-strip of thumbnails centered on the current Photo. Activating an entry
+Photo View must provide the current Photo's immediate neighbors as a bounded
+strip of thumbnails centered on the current Photo. Its wide and compact
+placement follows [Library Browser Experience](library-browser-experience.md#photo-view).
+Activating an entry
 navigates to that Photo, and the entry for the current Photo is marked as
 current and presents no activation.
 The strip is bounded independently of source size and follows the open
@@ -375,13 +309,22 @@ An empty Album must remain openable and manageable. Its Grid must say that the A
 
 ## Saved Position
 
-Slipstream must remember the last Photo shown in Photo View for each Album. Grid scrolling alone does not change durable saved position. Opening that Album must return to the saved Photo when it is still a member and available.
+Slipstream must remember the last Photo shown in Photo View for each Album.
+Grid scrolling alone does not change durable saved position. Opening the
+Album's Grid must expose Resume when a saved position exists. Resume must
+return to the saved Photo when it is still a member and available. An explicit
+Photo address takes precedence over that saved position. Source navigation and
+Resume history follow [Library Browser Experience](library-browser-experience.md#destinations-and-browser-history).
 
 If the saved Photo is unavailable, Slipstream must move to the next available member by membership position and wrap once to the first available member. If no member is available, Slipstream must keep the saved member current.
 
-Removing the saved Photo from the Album clears that Album's saved position. The next opening starts at its first available member, or its first member when none are available.
+Removing the saved Photo from the Album clears that Album's saved position
+and removes its Resume availability. Opening the Album still shows its Grid;
+opening a Photo from that Grid establishes a new saved position.
 
-The first product does not persist an `All Photos` or Original Folder position across browser reloads. Grid scroll position and the current Photo in those sources are browser-local.
+The first product does not persist a durable `All Photos` or Original Folder
+resume position. Their addressed Photo and browser-local Grid restoration
+follow [Returning to a Grid](library-browser-experience.md#returning-to-a-grid).
 
 ## Album Management
 
@@ -393,7 +336,7 @@ The Photographer must be able to rename an Album and delete an Album after a con
 
 Photo View must let the Photographer add the current Photo to one or more Albums. Adding a Photo that already belongs to an Album must not create a duplicate membership. When the current source is an Album, Photo View must let the Photographer remove the current Photo from that Album.
 
-When the current source is an Original Folder, the Grid header must offer one
+When the current source is an Original Folder, View options must offer one
 explicit **Add Folder** action. The Photographer chooses an Album and confirms
 the action. Slipstream adds every Photo in that Folder and its descendants in
 the same order as the open Folder source. The browser sends the Folder
@@ -466,8 +409,8 @@ the open source, and must show how much of that source is decided.
 The filter is a view option of the open source. It must not create a source or
 an Album, and it must not change Album membership, Album member position, or
 Original Files. The filter and the view order are independent: changing one
-keeps the other. The first product does not keep the filter across a browser
-reload.
+keeps the other. Committed filter values survive reload through the destination URL
+under [Browser History](library-browser-experience.md#destinations-and-browser-history).
 
 The server applies the filter to the open source's complete order before the
 view is frozen, so the reported Photo count is the filtered count and the
@@ -749,8 +692,7 @@ The selection tray must state `Selection remains active` after a batch
 operation. It must show the active source and must distinguish the visible
 filtered result count from the Selection State counts for the complete source.
 
-The **Select** mode must be enterable and leavable from a keyboard. `Clear`
-and `Escape` empty the multi-selection and leave **Select** mode, including
+The **Select** mode must be enterable and leavable from a keyboard. The clear exit labeled Done and `Escape` empty the multi-selection and leave **Select** mode, including
 when the tray currently shows `0 / 100 Photos`. Opening or reopening a source
 also leaves Select mode. The Grid decision and Rating keys keep
 their existing meaning for the focused Photo.
@@ -876,7 +818,7 @@ If an ephemeral server-side browse snapshot expires or is lost after server rest
 
 A Library contains 36,997 Photos. Slipstream displays the Library count and first Grid window without transferring all 36,997 Photo facts. Scrolling loads later windows while the source order remains stable.
 
-The Photographer opens the Album `26春节`, activates its fourth Grid cell, and later returns to the source list. Reopening that Album returns to the saved Photo when it remains available.
+The Photographer opens the Album `26春节`, activates its fourth Grid cell, and later returns to the source list. Opening that Album's Grid exposes Resume, which returns to the saved Photo when it remains available.
 
 The filesystem also contains the Original Folder `RAW/26春节`. Opening it shows Photos from that Folder and its descendants in Capture Time order. Its matching name does not connect it to the Album or change Album membership.
 
