@@ -5092,6 +5092,49 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
 }
 
 #[tokio::test]
+async fn recovery_http_rejects_duplicate_source_mappings() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    fs::create_dir_all(config.library_root.join("moved")).unwrap();
+    fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+    fs::write(config.library_root.join("moved/b.JPG"), b"jpeg-bytes-b").unwrap();
+
+    // Two mappings for one Original File are a colliding batch refused with
+    // a per-mapping reason.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"},
+            {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG"}
+        ]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = response_json(refused).await;
+    assert_eq!(body["rejections"][0]["reason"], "colliding");
+
+    // The refusal leaves the Library untouched.
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/recovery/unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn recovery_http_validates_requests() {
     let (base, config) = recovery_http_fixture(false);
     let application = Application::open(&config).await.unwrap();

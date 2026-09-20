@@ -4011,7 +4011,10 @@ export function createLibraryBrowserView(
         ]
           .filter(Boolean)
           .join(" · ");
-        item.textContent = `${entry.location} — ${entry.kind.toUpperCase()} — ${decisions}`;
+        const fingerprint = entry.fingerprintEnrolled
+          ? "Fingerprint on file"
+          : "No fingerprint";
+        item.textContent = `${entry.location} — ${entry.kind.toUpperCase()} — ${decisions} — ${fingerprint}`;
         return item;
       });
       if (entries.length > 100) {

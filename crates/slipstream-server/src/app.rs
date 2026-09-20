@@ -765,6 +765,7 @@ impl Application {
             .await
             .map_err(|error| RecoveryApplyError::Server(error.into()))?;
         let mut unavailable_ids = std::collections::HashSet::new();
+        let mut original_ids = std::collections::HashSet::new();
         let mut fingerprints = std::collections::HashMap::new();
         for record in &survey.unavailable {
             unavailable_ids.insert(record.original_id.clone());
@@ -785,6 +786,10 @@ impl Application {
                         reason,
                     });
                 };
+                if !original_ids.insert(item.original_id.clone()) {
+                    reject(&mut rejections, "colliding");
+                    continue;
+                }
                 if !unavailable_ids.contains(&item.original_id) {
                     reject(&mut rejections, "stale");
                     continue;
@@ -846,12 +851,24 @@ impl Application {
             .apply_relocations(relocations)
             .await
             .map_err(|error| match error {
-                LibraryError::Persistence(slipstream_core::persistence::PersistenceError::InvalidRecovery) => {
-                    RecoveryApplyError::Rejected {
-                        message: "Recovery batch conflicts with current Library state; rescan and review again",
-                        rejections: Vec::new(),
-                    }
-                }
+                LibraryError::Persistence(
+                    slipstream_core::persistence::PersistenceError::InvalidRecoveryMapping {
+                        original_id,
+                        reason,
+                    },
+                ) => RecoveryApplyError::Rejected {
+                    message: "Recovery batch conflicts with current Library state; rescan and review again",
+                    rejections: vec![RecoveryRejectionWire {
+                        original_id,
+                        reason,
+                    }],
+                },
+                LibraryError::Persistence(
+                    slipstream_core::persistence::PersistenceError::InvalidRecovery,
+                ) => RecoveryApplyError::Rejected {
+                    message: "Recovery batch conflicts with current Library state; rescan and review again",
+                    rejections: Vec::new(),
+                },
                 other => RecoveryApplyError::Server(other.into()),
             })?;
         self.shared

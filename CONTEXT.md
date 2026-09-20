@@ -18,7 +18,7 @@ A persisted SHA-256 digest of one Original File's complete content together with
 _Avoid_: checksum identity, hash as ID
 
 **Location Recovery**:
-The automatic or manual restoration of a remembered Original Location for an unavailable Original File when exact content evidence identifies one unambiguous candidate. Recovery never modifies or deletes an Original File.
+The automatic or manual restoration of a remembered Original Location for an unavailable Original File: automatically when exact content evidence identifies one unambiguous candidate, manually with explicit confirmation when it cannot. Recovery never modifies or deletes an Original File.
 _Avoid_: relink, repair, reimport
 
 **Retire and Bind**:

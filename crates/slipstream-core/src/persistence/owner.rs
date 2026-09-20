@@ -52,6 +52,10 @@ pub enum PersistenceError {
     InvalidLegacyData,
     InvalidExpansion,
     InvalidRecovery,
+    InvalidRecoveryMapping {
+        original_id: String,
+        reason: &'static str,
+    },
     IdCollision,
     Storage,
     OwnerStopped,
@@ -70,6 +74,9 @@ impl fmt::Display for PersistenceError {
             Self::InvalidLegacyData => "SQLite legacy data cannot be migrated safely",
             Self::InvalidExpansion => "Photo Library expansion could not be proven safely",
             Self::InvalidRecovery => "Original File recovery could not be proven safely",
+            Self::InvalidRecoveryMapping { .. } => {
+                "Original File recovery could not be proven safely"
+            }
             Self::IdCollision => "SQLite identity allocation collided with existing state",
             Self::Storage => "SQLite persistence failed",
             Self::OwnerStopped => "SQLite persistence owner stopped unexpectedly",
@@ -128,6 +135,7 @@ fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
         | PersistenceError::InvalidLegacyData
         | PersistenceError::InvalidExpansion
         | PersistenceError::InvalidRecovery
+        | PersistenceError::InvalidRecoveryMapping { .. }
         | PersistenceError::IdCollision
         | PersistenceError::Storage => MutationError::Persistence,
     }
@@ -1794,13 +1802,27 @@ fn apply_manual_relocations(
         let mut destinations = HashSet::with_capacity(relocations.len());
         let mut relocating_ids = HashSet::with_capacity(relocations.len());
         for relocation in relocations {
-            relocating_ids.insert(relocation.original_id.clone());
+            // Two mappings for one Original File are a colliding batch: only
+            // one Location could win, so the batch is refused as a whole.
+            if !relocating_ids.insert(relocation.original_id.clone()) {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "colliding",
+                });
+            }
         }
         for relocation in relocations {
-            let to = RelativeOriginalPath::parse(relocation.to_location.clone())
-                .map_err(|_| PersistenceError::InvalidRecovery)?;
+            let to = RelativeOriginalPath::parse(relocation.to_location.clone()).map_err(|_| {
+                PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "invalid-location",
+                }
+            })?;
             if !destinations.insert(to.as_str().to_owned()) {
-                return Err(PersistenceError::InvalidRecovery);
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "colliding",
+                });
             }
             let persisted = transaction
                 .query_row(
@@ -1811,15 +1833,24 @@ fn apply_manual_relocations(
                 .optional()
                 .map_err(|_| PersistenceError::Storage)?;
             let Some((available, kind)) = persisted else {
-                return Err(PersistenceError::InvalidRecovery);
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "stale",
+                });
             };
             if available != 0 {
-                return Err(PersistenceError::InvalidRecovery);
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "stale",
+                });
             }
             let filename = to.as_str().rsplit('/').next().unwrap_or_default();
             let kind = parse_kind(&kind).map_err(|_| PersistenceError::Storage)?;
             if classify_name(filename) != Some(kind) {
-                return Err(PersistenceError::InvalidRecovery);
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "kind-mismatch",
+                });
             }
             // A destination owned by another Original requires either a
             // simultaneous relocation of that owner or an explicit retire of
@@ -1837,7 +1868,10 @@ fn apply_manual_relocations(
                 && !relocating_ids.contains(&owner_id)
             {
                 if !relocation.retire_destination {
-                    return Err(PersistenceError::InvalidRecovery);
+                    return Err(PersistenceError::InvalidRecoveryMapping {
+                        original_id: relocation.original_id.clone(),
+                        reason: "occupied",
+                    });
                 }
                 let occupant = transaction
                     .query_row(
@@ -1855,7 +1889,10 @@ fn apply_manual_relocations(
                     .map_err(|_| PersistenceError::Storage)?;
                 if let Some((photo_id, rating, selection_state)) = occupant {
                     if rating != 0 || selection_state != "undecided" {
-                        return Err(PersistenceError::InvalidRecovery);
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "occupied",
+                        });
                     }
                     let members = transaction
                         .query_row(
@@ -1865,7 +1902,10 @@ fn apply_manual_relocations(
                         )
                         .map_err(|_| PersistenceError::Storage)?;
                     if members != 0 {
-                        return Err(PersistenceError::InvalidRecovery);
+                        return Err(PersistenceError::InvalidRecoveryMapping {
+                            original_id: relocation.original_id.clone(),
+                            reason: "occupied",
+                        });
                     }
                     transaction
                         .execute("DELETE FROM photos WHERE id=?", params![photo_id])
@@ -1890,8 +1930,12 @@ fn apply_manual_relocations(
                 .map_err(|_| PersistenceError::Storage)?;
         }
         for relocation in relocations {
-            let to = RelativeOriginalPath::parse(relocation.to_location.clone())
-                .map_err(|_| PersistenceError::InvalidRecovery)?;
+            let to = RelativeOriginalPath::parse(relocation.to_location.clone()).map_err(|_| {
+                PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "invalid-location",
+                }
+            })?;
             let size =
                 i64::try_from(relocation.facts.size).map_err(|_| PersistenceError::Storage)?;
             let changed = transaction
@@ -1911,9 +1955,12 @@ fn apply_manual_relocations(
                 )
                 .map_err(|_| PersistenceError::Storage)?;
             if changed != 1 {
-                return Err(PersistenceError::InvalidRecovery);
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "stale",
+                });
             }
-            transaction
+            let changed = transaction
                 .execute(
                     "UPDATE photos SET available=1,preview_state='inspection-pending',
                        preview_source_revision=NULL,preview_width=NULL,preview_height=NULL,
@@ -1921,6 +1968,12 @@ fn apply_manual_relocations(
                     params![to.as_str(), relocation.original_id],
                 )
                 .map_err(|_| PersistenceError::Storage)?;
+            if changed != 1 {
+                return Err(PersistenceError::InvalidRecoveryMapping {
+                    original_id: relocation.original_id.clone(),
+                    reason: "stale",
+                });
+            }
             // Fingerprints always describe the current persisted revision:
             // the Application layer verified the digest against the candidate
             // before submitting, so the observed facts replace the stale ones.

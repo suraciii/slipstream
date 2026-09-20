@@ -1994,6 +1994,181 @@ mod tests {
         drop(base);
     }
 
+    #[tokio::test]
+    async fn manual_recovery_rejects_duplicate_source_mappings() {
+        let (base, config) = manual_recovery_fixture(None, Some(false));
+        fs::write(base.0.join("originals/moved/b.JPG"), b"jpeg-bytes-b").unwrap();
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let first = root
+            .original(crate::RelativeOriginalPath::parse("moved/a.JPG").unwrap())
+            .unwrap();
+        let second = root
+            .original(crate::RelativeOriginalPath::parse("moved/b.JPG").unwrap())
+            .unwrap();
+        let original_id = survey.unavailable[0].original_id.clone();
+        // Two mappings for one Original File are a colliding batch: only one
+        // Location could win, so the whole batch is refused with a reason.
+        let error = match library
+            .apply_relocations(vec![
+                crate::RequestedRelocation {
+                    original_id: original_id.clone(),
+                    to_location: "moved/a.JPG".to_owned(),
+                    facts: first.facts().unwrap(),
+                    retire_destination: false,
+                },
+                crate::RequestedRelocation {
+                    original_id,
+                    to_location: "moved/b.JPG".to_owned(),
+                    facts: second.facts().unwrap(),
+                    retire_destination: false,
+                },
+            ])
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate source mappings must be rejected"),
+        };
+        assert!(matches!(
+            error,
+            LibraryError::Persistence(PersistenceError::InvalidRecoveryMapping {
+                reason: "colliding",
+                ..
+            })
+        ));
+        // The refusal leaves the Library untouched.
+        let snapshot = library.snapshot().await.unwrap();
+        let photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| photo.id == "missing-photo")
+            .unwrap();
+        assert!(!photo.available);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_reports_verified_content_behind_an_occupied_destination() {
+        let (base, config) = manual_recovery_fixture(Some(("moved/a.JPG", 4)), Some(true));
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &LibraryRoot::open(config.library_root.clone()).unwrap(),
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Occupied { retire: None }
+        ));
+        // The destination content matched the persisted fingerprint, so the
+        // proposal reports verification even without a permitted retire.
+        assert!(proposals[0].verified);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    fn seed_fingerprint(base: &TempTree, relative_path: &str, bytes: &[u8]) {
+        let connection = Connection::open(base.0.join("state").join("library.sqlite")).unwrap();
+        let original_id: String = connection
+            .query_row(
+                "SELECT id FROM original_files WHERE relative_path=?",
+                [relative_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO original_fingerprints(original_id,digest,size,mtime_ms) \
+                 VALUES(?,?,?,1.0)",
+                params![
+                    original_id,
+                    crate::digest_bytes(bytes),
+                    i64::try_from(bytes.len()).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_recovery_follows_a_unique_exact_candidate() {
+        let (base, initial_config) = fixture();
+        fs::write(base.0.join("originals/a.JPG"), b"jpeg-bytes-a").unwrap();
+        let library = Library::open(initial_config).unwrap();
+        let first = library.scan().await.unwrap();
+        let photo_id = first.photos[0].id.clone();
+        library.shutdown().unwrap();
+        seed_fingerprint(&base, "a.JPG", b"jpeg-bytes-a");
+        fs::create_dir(base.0.join("originals/moved")).unwrap();
+        fs::rename(
+            base.0.join("originals/a.JPG"),
+            base.0.join("originals/moved/a.JPG"),
+        )
+        .unwrap();
+        let library = Library::open(config(&base)).unwrap();
+        let second = library.scan().await.unwrap();
+        assert_eq!(second.photos.len(), 1);
+        assert_eq!(second.photos[0].id, photo_id);
+        assert!(second.photos[0].available);
+        assert!(
+            second
+                .originals
+                .iter()
+                .any(|original| original.relative_path.as_str() == "moved/a.JPG")
+        );
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_recovery_treats_unreadable_same_kind_candidates_as_ambiguous() {
+        use std::os::unix::fs::PermissionsExt;
+        let (base, initial_config) = fixture();
+        fs::write(base.0.join("originals/a.JPG"), b"jpeg-bytes-a").unwrap();
+        let library = Library::open(initial_config).unwrap();
+        let first = library.scan().await.unwrap();
+        let photo_id = first.photos[0].id.clone();
+        library.shutdown().unwrap();
+        seed_fingerprint(&base, "a.JPG", b"jpeg-bytes-a");
+        fs::create_dir_all(base.0.join("originals/moved")).unwrap();
+        fs::rename(
+            base.0.join("originals/a.JPG"),
+            base.0.join("originals/moved/a.JPG"),
+        )
+        .unwrap();
+        let locked = base.0.join("originals/locked/b.JPG");
+        fs::create_dir_all(base.0.join("originals/locked")).unwrap();
+        fs::write(&locked, b"jpeg-bytes-a").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let library = Library::open(config(&base)).unwrap();
+        let second = library.scan().await.unwrap();
+        let photo = second
+            .photos
+            .iter()
+            .find(|photo| photo.id == photo_id)
+            .unwrap();
+        // The unreadable same-kind candidate could hold the same content,
+        // so the scan must not treat uniqueness as proven.
+        assert!(!photo.available);
+        assert!(
+            second
+                .originals
+                .iter()
+                .any(|original| original.relative_path.as_str() == "a.JPG" && !original.available)
+        );
+        library.shutdown().unwrap();
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o644));
+        drop(base);
+    }
+
     #[test]
     fn persistence_backpressure_remains_typed_at_library_boundary() {
         let error = LibraryError::Persistence(PersistenceError::Saturated);

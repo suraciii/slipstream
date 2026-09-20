@@ -67,7 +67,7 @@ A recovered Original File keeps its Original File ID and Photo ID. Its Photo kee
 
 Slipstream must resolve recovery before it allocates and publishes new Photos. It must not publish temporary duplicates and later merge them. When known files exchange Locations in one scan, Slipstream must reconcile the provable content permutation.
 
-If the old Original File remains and an equal copy appears, Slipstream must discover an independent Photo at the new Location and must not transfer state. If multiple equal candidates or multiple owners exist, Slipstream must preserve the unresolved records and must not choose by enumeration order, basename, Capture Time, camera metadata, inode, or visual similarity. The Photographer resolves that group through manual recovery.
+If the old Original File remains and an equal copy appears, Slipstream must discover an independent Photo at the new Location and must not transfer state. When the remembered Location instead provably carries different bytes and exactly one exact copy of the remembered content exists elsewhere, the identity follows the copy. If multiple equal candidates or multiple owners exist, Slipstream must preserve the unresolved records and must not choose by enumeration order, basename, Capture Time, camera metadata, inode, or visual similarity. The Photographer resolves that group through manual recovery.
 
 Changed content plus a changed Location is not guaranteed to recover automatically. Incomplete traversal, inaccessible storage, uncertain candidate revisions, and unreadable candidates must not be treated as proof of absence or uniqueness.
 

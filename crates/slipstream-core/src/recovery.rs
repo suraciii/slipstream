@@ -108,6 +108,7 @@ pub fn plan_recovery(
 
     progress.hash_total = hash_targets.len() as u64;
     let mut hashed: HashMap<String, HashedFile> = HashMap::new();
+    let mut failed_kinds: Vec<crate::OriginalKind> = Vec::new();
     for target in hash_targets {
         let permit = native_work.acquire();
         let result = root
@@ -128,6 +129,7 @@ pub fn plan_recovery(
             }
             Err(_) => {
                 progress.failed_hashes += 1;
+                failed_kinds.push(target.kind);
             }
         }
         progress.hashed += 1;
@@ -192,8 +194,10 @@ pub fn plan_recovery(
         .iter()
         .map(|(digest, (originals, files))| (digest, originals, files))
     {
-        if originals.len() != 1 || files.len() != 1 {
+        if originals.len() != 1 || files.len() != 1 || failed_kinds.contains(&originals[0].kind) {
             // Ambiguous or incomplete evidence: preserve records untouched.
+            // An unreadable candidate of the same kind could hold the same
+            // content, so a failed hash must not become proof of uniqueness.
             continue;
         }
         let original = originals[0];
@@ -430,19 +434,19 @@ fn evaluate_candidate(
         Ok(capability) => capability,
         Err(_) => return ManualOutcome::Missing,
     };
-    let verified = if let Some(expected) = record.fingerprint.as_deref() {
+    // A persisted fingerprint is verified against the destination content;
+    // a match falls through so the outcome below reports the destination
+    // state, and any mismatch or read failure refuses the mapping.
+    if let Some(expected) = record.fingerprint.as_deref() {
         let permit = native_work.acquire();
         let digest = capability.digest_file();
         drop(permit);
         match digest {
-            Ok(checked) if checked.digest == expected => true,
+            Ok(checked) if checked.digest == expected => {}
             Ok(_) => return ManualOutcome::ContentMismatch,
             Err(_) => return ManualOutcome::Unreadable,
         }
-    } else {
-        false
-    };
-    let _ = verified;
+    }
     match occupant {
         // A destination owned by the record itself is an in-place restore;
         // there is no separate occupant to retire or conflict with.
@@ -521,13 +525,12 @@ pub fn plan_manual_relocations(
                 &to_location,
             )
         };
+        // Verification is exactly "the destination content matched the
+        // persisted fingerprint": every outcome below proved the digest,
+        // and rows without a fingerprint stay unverified.
         let verified = record.fingerprint.is_some()
-            && matches!(outcome, ManualOutcome::Matched)
-            && occupant
-                .map(|owner| owner.id == record.original_id)
-                .unwrap_or(true)
-            || record.fingerprint.is_some()
-                && matches!(outcome, ManualOutcome::Occupied { retire: Some(_) });
+            && (matches!(outcome, ManualOutcome::Matched)
+                || matches!(outcome, ManualOutcome::Occupied { .. }));
         proposals.push(ManualProposal {
             original_id: record.original_id.clone(),
             photo_id: record.photo_id.clone(),
@@ -579,12 +582,8 @@ pub fn plan_single_relocation(
         to_location,
     );
     let verified = record.fingerprint.is_some()
-        && matches!(outcome, ManualOutcome::Matched)
-        && occupant
-            .map(|owner| owner.id == original_id)
-            .unwrap_or(true)
-        || record.fingerprint.is_some()
-            && matches!(outcome, ManualOutcome::Occupied { retire: Some(_) });
+        && (matches!(outcome, ManualOutcome::Matched)
+            || matches!(outcome, ManualOutcome::Occupied { .. }));
     Ok(ManualProposal {
         original_id: record.original_id.clone(),
         photo_id: record.photo_id.clone(),

@@ -14024,7 +14024,7 @@ test("the recovery review entry restores a moved Photo without a rescan", async 
     "1 Photo unavailable",
   );
   await expect(page.locator("[data-recovery-list] li")).toHaveText(
-    "shoot/a.JPG — JPEG — Selected · 3 stars · 1 album",
+    "shoot/a.JPG — JPEG — Selected · 3 stars · 1 album — No fingerprint",
   );
 
   // The folder-prefix batch proposes the mapping; without a fingerprint the

@@ -34,10 +34,9 @@ pub(crate) struct FolderIndex {
 impl FolderIndex {
     /// Derives the Folder index from Published ordering Original Locations.
     ///
-    /// A Photo projects through its RAW Original Location when one exists and
-    /// otherwise through its JPEG Original Location, so a paired Photo counts
-    /// once. Remembered unavailable Originals keep their last known Location
-    /// and therefore keep their Folder projection.
+    /// A Photo projects through its own Original File's Location, so every
+    /// Photo counts once. Remembered unavailable Originals keep their last
+    /// known Location and therefore keep their Folder projection.
     pub(crate) fn derive(
         photos: &[slipstream_core::PhotoRecord],
         originals_by_id: &HashMap<String, usize>,
