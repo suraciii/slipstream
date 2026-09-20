@@ -10,10 +10,11 @@ use crate::{
     OriginalFacts, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
     PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
-    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanLimits, ScanSnapshot,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, OriginalFingerprint,
+    PreviewSeed, PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanLimits,
+    ScanSnapshot,
     SelectionState,
-    identity::{classify_name, source_revision},
+    identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
 use rusqlite::{
@@ -50,6 +51,7 @@ pub enum PersistenceError {
     RootMismatch,
     InvalidLegacyData,
     InvalidExpansion,
+    InvalidRecovery,
     IdCollision,
     Storage,
     OwnerStopped,
@@ -67,6 +69,7 @@ impl fmt::Display for PersistenceError {
             Self::RootMismatch => "SQLite database belongs to a different Photo Library root",
             Self::InvalidLegacyData => "SQLite legacy data cannot be migrated safely",
             Self::InvalidExpansion => "Photo Library expansion could not be proven safely",
+            Self::InvalidRecovery => "Original File recovery could not be proven safely",
             Self::IdCollision => "SQLite identity allocation collided with existing state",
             Self::Storage => "SQLite persistence failed",
             Self::OwnerStopped => "SQLite persistence owner stopped unexpectedly",
@@ -124,6 +127,7 @@ fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
         | PersistenceError::RootMismatch
         | PersistenceError::InvalidLegacyData
         | PersistenceError::InvalidExpansion
+        | PersistenceError::InvalidRecovery
         | PersistenceError::IdCollision
         | PersistenceError::Storage => MutationError::Persistence,
     }
@@ -274,9 +278,17 @@ enum Command {
     ApplyScan {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
+        recovery: ScanRecoveryPlan,
         failure_after_first: bool,
-        reply: Reply<ScanSnapshot>,
+        reply: Reply<ScanApplication>,
     },
+    RecoveryFacts {
+        original_ids: Vec<String>,
+        reply: Reply<Vec<OriginalFingerprint>>,
+    },
+    NextFingerprintTarget(Reply<Option<FingerprintTarget>>),
+    StoreFingerprint(OriginalFingerprint, Reply<()>),
+    FingerprintCounts(Reply<FingerprintCounts>),
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
     ListAlbums(Reply<Vec<AlbumRecord>>),
     ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
@@ -430,7 +442,39 @@ impl Persistence {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
     ) -> Result<ScanSnapshot, PersistenceError> {
-        self.apply_scan_inner(discovered, errors, false).await
+        Ok(self
+            .apply_scan_recovered(discovered, errors, ScanRecoveryPlan::default())
+            .await?
+            .snapshot)
+    }
+
+    pub async fn apply_scan_recovered(
+        &self,
+        discovered: Vec<DiscoveredOriginal>,
+        errors: Vec<OriginalScanError>,
+        recovery: ScanRecoveryPlan,
+    ) -> Result<ScanApplication, PersistenceError> {
+        let receive = self.apply_scan_recovered_receiver(discovered, errors, recovery)?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    fn apply_scan_recovered_receiver(
+        &self,
+        discovered: Vec<DiscoveredOriginal>,
+        errors: Vec<OriginalScanError>,
+        recovery: ScanRecoveryPlan,
+    ) -> Result<oneshot::Receiver<Result<ScanApplication, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ApplyScan {
+            discovered,
+            errors,
+            recovery,
+            failure_after_first: false,
+            reply: send,
+        })?;
+        Ok(receive)
     }
 
     #[cfg(test)]
@@ -440,20 +484,12 @@ impl Persistence {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
     ) -> Result<ScanSnapshot, PersistenceError> {
-        self.apply_scan_inner(discovered, errors, true).await
-    }
-
-    async fn apply_scan_inner(
-        &self,
-        discovered: Vec<DiscoveredOriginal>,
-        errors: Vec<OriginalScanError>,
-        failure_after_first: bool,
-    ) -> Result<ScanSnapshot, PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ApplyScan {
             discovered,
             errors,
-            failure_after_first,
+            recovery: ScanRecoveryPlan::default(),
+            failure_after_first: true,
             reply: send,
         })?;
         receive.await.unwrap_or(Err(PersistenceError::OwnerStopped))
@@ -492,13 +528,70 @@ impl Persistence {
         discovered: Vec<DiscoveredOriginal>,
         errors: Vec<OriginalScanError>,
     ) -> Result<ScanSnapshot, PersistenceError> {
+        Ok(self
+            .apply_scan_recovered_blocking(discovered, errors, ScanRecoveryPlan::default())?
+            .snapshot)
+    }
+
+    pub(crate) fn apply_scan_recovered_blocking(
+        &self,
+        discovered: Vec<DiscoveredOriginal>,
+        errors: Vec<OriginalScanError>,
+        recovery: ScanRecoveryPlan,
+    ) -> Result<ScanApplication, PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ApplyScan {
             discovered,
             errors,
+            recovery,
             failure_after_first: false,
             reply: send,
         })?;
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn recovery_facts_blocking(
+        &self,
+        original_ids: Vec<String>,
+    ) -> Result<Vec<OriginalFingerprint>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RecoveryFacts {
+            original_ids,
+            reply: send,
+        })?;
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn next_fingerprint_target_blocking(
+        &self,
+    ) -> Result<Option<FingerprintTarget>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::NextFingerprintTarget(send))?;
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn store_fingerprint_blocking(
+        &self,
+        fingerprint: OriginalFingerprint,
+    ) -> Result<(), PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::StoreFingerprint(fingerprint, send))?;
+        receive
+            .blocking_recv()
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+    }
+
+    pub(crate) fn fingerprint_counts_blocking(
+        &self,
+    ) -> Result<FingerprintCounts, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::FingerprintCounts(send))?;
         receive
             .blocking_recv()
             .unwrap_or(Err(PersistenceError::OwnerStopped))
@@ -733,6 +826,7 @@ fn owner_main(
             Command::ApplyScan {
                 discovered,
                 errors,
+                recovery,
                 failure_after_first,
                 reply,
             } => {
@@ -742,8 +836,28 @@ fn owner_main(
                     &mut connection,
                     &discovered,
                     &errors,
+                    &recovery,
                     failure_after_first,
                 );
+                let _ = reply.send(result);
+            }
+            Command::RecoveryFacts {
+                original_ids,
+                reply,
+            } => {
+                let result = recovery_facts(&connection, &original_ids);
+                let _ = reply.send(result);
+            }
+            Command::NextFingerprintTarget(reply) => {
+                let result = next_fingerprint_target(&connection);
+                let _ = reply.send(result);
+            }
+            Command::StoreFingerprint(fingerprint, reply) => {
+                let result = store_fingerprint(&state, &database_name, &mut connection, fingerprint);
+                let _ = reply.send(result);
+            }
+            Command::FingerprintCounts(reply) => {
+                let result = fingerprint_counts(&connection);
                 let _ = reply.send(result);
             }
             Command::Preview(preview, reply) => {
@@ -846,7 +960,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 5)
+    preflight_schema_for_max_version(connection, canonical_root, 6)
 }
 
 fn preflight_schema_for_max_version(
@@ -873,6 +987,8 @@ fn preflight_schema_for_max_version(
         4 => validate_canonical_schema(connection, SchemaVersion::V4)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         5 => validate_canonical_schema(connection, SchemaVersion::V5)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        6 => validate_canonical_schema(connection, SchemaVersion::V6)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -910,7 +1026,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 5 {
+    if version > 6 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -953,7 +1069,12 @@ fn startup_schema(
         }
         5 => validate_canonical_schema(&transaction, SchemaVersion::V5)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        6 => validate_canonical_schema(&transaction, SchemaVersion::V6)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
+    }
+    if version != 6 {
+        migrate_v5(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -972,7 +1093,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V5)
+    validate_canonical_schema(&transaction, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -1118,6 +1239,218 @@ fn migrate_v4(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
 }
 // album-language-legacy:end migrate-v4
 
+// independent-photos-legacy:start migrate-v5
+fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    // Issue #304: one independently managed Original File per Photo. A legacy
+    // RAW/JPEG pair keeps its Photo identity, decisions, Album references,
+    // and saved position on the RAW Original; its JPEG Original receives a new
+    // independent Photo with default decisions. Content fingerprints start
+    // empty and are enrolled in the background after migration.
+    transaction
+        .execute_batch(
+            "CREATE TABLE original_fingerprints(
+               original_id TEXT PRIMARY KEY REFERENCES original_files(id) ON DELETE CASCADE,
+               digest TEXT NOT NULL CHECK(length(digest) = 64),
+               size INTEGER NOT NULL CHECK(size >= 0),
+               mtime_ms REAL NOT NULL CHECK(mtime_ms >= 0));
+             CREATE INDEX original_fingerprints_digest ON original_fingerprints(digest);
+             CREATE TABLE photos_v6(
+               id TEXT PRIMARY KEY,
+               original_id TEXT NOT NULL UNIQUE REFERENCES original_files(id) ON DELETE RESTRICT,
+               available INTEGER NOT NULL CHECK(available IN (0,1)),
+               preview_state TEXT NOT NULL CHECK(preview_state IN ('inspection-pending','ready','failed','unavailable')),
+               preview_source_revision TEXT,
+               preview_width INTEGER CHECK(preview_width IS NULL OR preview_width > 0),
+               preview_height INTEGER CHECK(preview_height IS NULL OR preview_height > 0),
+               cache_revision TEXT,
+               sort_path TEXT NOT NULL,
+               selection_state TEXT NOT NULL DEFAULT 'undecided' CHECK(selection_state IN ('undecided','selected','rejected')),
+               rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5));",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+
+    let originals = original_facts_by_id(transaction)?;
+    let photos = transaction
+        .prepare(
+            "SELECT id,raw_original_id,jpeg_original_id,preview_state,preview_source,
+                    preview_source_revision,preview_width,preview_height,cache_revision,
+                    sort_path,selection_state,rating
+             FROM photos ORDER BY id",
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok(LegacyPhotoRow {
+                id: row.get(0)?,
+                raw_original_id: row.get(1)?,
+                jpeg_original_id: row.get(2)?,
+                preview_state: row.get(3)?,
+                preview_source: row.get(4)?,
+                preview_source_revision: row.get(5)?,
+                preview_width: row.get(6)?,
+                preview_height: row.get(7)?,
+                cache_revision: row.get(8)?,
+                sort_path: row.get(9)?,
+                selection_state: row.get(10)?,
+                rating: row.get(11)?,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::InvalidLegacyData)?;
+    let mut insert = transaction
+        .prepare(
+            "INSERT INTO photos_v6(id,original_id,available,preview_state,preview_source_revision,
+               preview_width,preview_height,cache_revision,sort_path,selection_state,rating)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    let mut reserved_ids = HashSet::new();
+    for photo in photos {
+        let kept = photo
+            .raw_original_id
+            .clone()
+            .or_else(|| photo.jpeg_original_id.clone());
+        let Some(kept) = kept else {
+            // A Photo with no Original is unusable; album references, if any,
+            // fail closed through the RESTRICT foreign key.
+            transaction
+                .execute("DELETE FROM photos WHERE id=?", [&photo.id])
+                .map_err(|_| PersistenceError::InvalidLegacyData)?;
+            continue;
+        };
+        let Some((kept_available, kept_path, kept_size, kept_mtime, kept_kind)) =
+            originals.get(&kept).cloned()
+        else {
+            return Err(PersistenceError::InvalidLegacyData);
+        };
+        let preserved = Some(kept_kind.preview_source().legacy_database_name())
+            == photo.preview_source.as_deref()
+            && revision_matches(
+                photo.preview_source_revision.as_deref(),
+                &kept_path,
+                kept_size,
+                kept_mtime,
+            );
+        let preview_state = if preserved {
+            photo.preview_state
+        } else {
+            "inspection-pending".to_owned()
+        };
+        insert
+            .execute(params![
+                photo.id,
+                kept,
+                i64::from(kept_available),
+                preview_state,
+                preserved.then_some(photo.preview_source_revision).flatten(),
+                preserved.then_some(photo.preview_width).flatten(),
+                preserved.then_some(photo.preview_height).flatten(),
+                preserved.then_some(photo.cache_revision).flatten(),
+                photo.sort_path,
+                photo.selection_state,
+                photo.rating,
+            ])
+            .map_err(|_| PersistenceError::InvalidLegacyData)?;
+        if let Some(jpeg_id) = photo.jpeg_original_id {
+            if photo.raw_original_id.is_none() {
+                continue;
+            }
+            let Some((jpeg_available, jpeg_path, _size, _mtime, _kind)) =
+                originals.get(&jpeg_id).cloned()
+            else {
+                return Err(PersistenceError::InvalidLegacyData);
+            };
+            let new_id = allocate_library_id(transaction, &mut reserved_ids)?;
+            insert
+                .execute(params![
+                    new_id,
+                    jpeg_id,
+                    i64::from(jpeg_available),
+                    "inspection-pending",
+                    Option::<String>::None,
+                    Option::<i64>::None,
+                    Option::<i64>::None,
+                    Option::<String>::None,
+                    jpeg_path,
+                    "undecided",
+                    0,
+                ])
+                .map_err(|_| PersistenceError::InvalidLegacyData)?;
+        }
+    }
+    transaction
+        .execute_batch(
+            "DROP TABLE photos;
+             ALTER TABLE photos_v6 RENAME TO photos;
+             CREATE INDEX photos_original ON photos(original_id);
+             PRAGMA user_version = 6;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V6)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
+struct LegacyPhotoRow {
+    id: String,
+    raw_original_id: Option<String>,
+    jpeg_original_id: Option<String>,
+    preview_state: String,
+    preview_source: Option<String>,
+    preview_source_revision: Option<String>,
+    preview_width: Option<i64>,
+    preview_height: Option<i64>,
+    cache_revision: Option<String>,
+    sort_path: String,
+    selection_state: String,
+    rating: i64,
+}
+
+type LegacyOriginalFacts = (bool, String, u64, f64, crate::OriginalKind);
+
+fn original_facts_by_id(
+    transaction: &Transaction<'_>,
+) -> Result<HashMap<String, LegacyOriginalFacts>, PersistenceError> {
+    transaction
+        .prepare("SELECT id,available,relative_path,size,mtime_ms,kind FROM original_files")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, String>(5)?,
+                ),
+            ))
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|_| PersistenceError::Storage)?
+        .into_iter()
+        .map(|(id, (available, path, size, mtime_ms, kind))| {
+            let kind = match kind.as_str() {
+                "raw" => crate::OriginalKind::Raw,
+                "jpeg" => crate::OriginalKind::Jpeg,
+                _ => return Err(PersistenceError::InvalidLegacyData),
+            };
+            Ok((id, (available, path, size, mtime_ms, kind)))
+        })
+        .collect()
+}
+
+fn revision_matches(
+    stored: Option<&str>,
+    path: &str,
+    size: u64,
+    mtime_ms: f64,
+) -> bool {
+    let Some(stored) = stored else { return false };
+    crate::source_revision(path, size, mtime_ms).is_ok_and(|current| current == stored)
+}
+// independent-photos-legacy:end migrate-v5
+
 fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
     let tables = names(connection, "table")?;
     if tables != ["library_metadata", "original_files", "photos"] {
@@ -1183,6 +1516,123 @@ fn validate_legacy_v0(connection: &Connection) -> Result<(), PersistenceError> {
     Ok(())
 }
 
+fn recovery_facts(
+    connection: &Connection,
+    original_ids: &[String],
+) -> Result<Vec<OriginalFingerprint>, PersistenceError> {
+    let mut facts = Vec::with_capacity(original_ids.len());
+    for original_id in original_ids {
+        let row = connection
+            .query_row(
+                "SELECT digest,size,mtime_ms FROM original_fingerprints WHERE original_id=?",
+                [original_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| PersistenceError::Storage)?;
+        if let Some((digest, size, mtime_ms)) = row {
+            facts.push(OriginalFingerprint {
+                original_id: original_id.clone(),
+                digest,
+                size: size.try_into().map_err(|_| PersistenceError::Storage)?,
+                mtime_ms,
+            });
+        }
+    }
+    Ok(facts)
+}
+
+fn next_fingerprint_target(
+    connection: &Connection,
+) -> Result<Option<FingerprintTarget>, PersistenceError> {
+    let row = connection
+        .query_row(
+            "SELECT o.id,o.relative_path,o.kind,o.size,o.mtime_ms
+             FROM original_files o
+             LEFT JOIN original_fingerprints f ON f.original_id=o.id
+             WHERE o.available=1 AND o.error_category IS NULL
+               AND (f.original_id IS NULL OR f.size != o.size OR f.mtime_ms != o.mtime_ms)
+             ORDER BY o.relative_path COLLATE BINARY
+             LIMIT 1",
+            [],
+            |row| {
+                Ok(FingerprintTarget {
+                    original_id: row.get(0)?,
+                    relative_path: row.get(1)?,
+                    kind: match row.get::<_, String>(2)?.as_str() {
+                        "raw" => crate::OriginalKind::Raw,
+                        "jpeg" => crate::OriginalKind::Jpeg,
+                        _ => return Err(rusqlite::Error::InvalidQuery),
+                    },
+                    size: row.get::<_, i64>(3)?.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    mtime_ms: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(row)
+}
+
+fn store_fingerprint(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    fingerprint: OriginalFingerprint,
+) -> Result<(), PersistenceError> {
+    write_transaction(state, database_name, connection, |transaction| {
+        // A fingerprint is stored only for the revision the hasher observed;
+        // an Original that moved on meanwhile keeps its stale row dropped by
+        // the next scan and is re-targeted by enrollment.
+        let stored = transaction
+            .execute(
+                "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms)
+                 SELECT ?,?,?,? FROM original_files
+                 WHERE id=? AND available=1 AND error_category IS NULL
+                   AND size=? AND mtime_ms=?",
+                params![
+                    fingerprint.original_id,
+                    fingerprint.digest,
+                    i64::try_from(fingerprint.size).map_err(|_| PersistenceError::Storage)?,
+                    fingerprint.mtime_ms,
+                    fingerprint.original_id,
+                    i64::try_from(fingerprint.size).map_err(|_| PersistenceError::Storage)?,
+                    fingerprint.mtime_ms,
+                ],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        if stored != 1 {
+            return Err(PersistenceError::InvalidRecovery);
+        }
+        Ok(())
+    })
+}
+
+fn fingerprint_counts(connection: &Connection) -> Result<FingerprintCounts, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT
+               SUM(CASE WHEN f.original_id IS NOT NULL AND f.size=o.size AND f.mtime_ms=o.mtime_ms THEN 1 ELSE 0 END),
+               SUM(CASE WHEN o.available=1 AND o.error_category IS NULL AND (f.original_id IS NULL OR f.size != o.size OR f.mtime_ms != o.mtime_ms) THEN 1 ELSE 0 END)
+             FROM original_files o
+             LEFT JOIN original_fingerprints f ON f.original_id=o.id",
+            [],
+            |row| {
+                Ok(FingerprintCounts {
+                    enrolled: row.get::<_, Option<i64>>(0)?.unwrap_or(0).try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    pending: row.get::<_, Option<i64>>(1)?.unwrap_or(0).try_into().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                })
+            },
+        )
+        .map_err(|_| PersistenceError::Storage)
+}
+
 fn validate_database(connection: &Connection) -> Result<(), PersistenceError> {
     if connection
         .prepare("PRAGMA foreign_key_check")
@@ -1209,15 +1659,7 @@ type PreservedOriginal = (
     Option<String>,
     Option<String>,
 );
-type PreservedPhoto = (
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-    i64,
-    String,
-    i64,
-);
+type PreservedPhoto = (String, String, i64, String, i64);
 
 #[derive(Debug, PartialEq)]
 struct ExpansionProjection {
@@ -1249,7 +1691,7 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&readonly, SchemaVersion::V5)
+    validate_canonical_schema(&readonly, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     let stored_root = required_root_binding(&readonly)?;
     drop(readonly);
@@ -1300,7 +1742,7 @@ pub(crate) fn expand_library_binding(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&connection, SchemaVersion::V5)
+    validate_canonical_schema(&connection, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
@@ -1313,7 +1755,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V5)
+    validate_canonical_schema(&transaction, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -1337,7 +1779,7 @@ pub(crate) fn expand_library_binding(
     for (id, sort_path) in &plan.photo_sort_paths {
         let changed = transaction
             .execute(
-                "UPDATE photos SET sort_path=?,preview_state='inspection-pending',preview_candidate=NULL,preview_source=NULL,preview_source_revision=NULL,preview_width=NULL,preview_height=NULL,cache_revision=NULL WHERE id=?",
+                "UPDATE photos SET sort_path=?,preview_state='inspection-pending',preview_source_revision=NULL,preview_width=NULL,preview_height=NULL,cache_revision=NULL WHERE id=?",
                 params![sort_path, id],
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -1363,7 +1805,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V5)
+    validate_canonical_schema(&transaction, SchemaVersion::V6)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -1438,26 +1880,16 @@ fn expansion_plan(
         mapped.push((id, old_path, new_path));
     }
     let photos = connection
-        .prepare("SELECT id,raw_original_id,jpeg_original_id FROM photos ORDER BY id")
+        .prepare("SELECT id,original_id FROM photos ORDER BY id")
         .map_err(|_| PersistenceError::Storage)?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
     let mut photo_sort_paths = Vec::with_capacity(photos.len());
-    for (id, raw, jpeg) in photos {
-        let source = raw
-            .as_ref()
-            .or(jpeg.as_ref())
-            .ok_or(PersistenceError::InvalidExpansion)?;
+    for (id, original) in photos {
         let sort_path = paths_by_id
-            .get(source)
+            .get(&original)
             .ok_or(PersistenceError::InvalidExpansion)?
             .clone();
         photo_sort_paths.push((id, sort_path));
@@ -1494,16 +1926,8 @@ fn expansion_projection(connection: &Connection) -> Result<ExpansionProjection, 
             ))
         ),
         photos: rows!(
-            "SELECT id,raw_original_id,jpeg_original_id,ambiguous,available,selection_state,rating FROM photos ORDER BY id",
-            |row| Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?
-            ))
+            "SELECT id,original_id,available,selection_state,rating FROM photos ORDER BY id",
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
         ),
         albums: rows!("SELECT id,name,created_at FROM albums ORDER BY id", |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -1560,35 +1984,30 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
         .map_err(|_| PersistenceError::Storage)?;
     let photos = connection
         .prepare(
-            "SELECT p.id,p.raw_original_id,p.jpeg_original_id,p.ambiguous,p.available,p.preview_state,
-                    p.preview_candidate,p.preview_source,p.preview_source_revision,p.preview_width,
-                    p.preview_height,p.cache_revision,p.sort_path,p.selection_state,p.rating
+            "SELECT p.id,p.original_id,p.available,p.preview_state,
+                    p.preview_source_revision,p.preview_width,p.preview_height,p.cache_revision,
+                    p.sort_path,p.selection_state,p.rating
              FROM photos p
-             LEFT JOIN original_files raw ON raw.id=p.raw_original_id
-             LEFT JOIN original_files jpeg ON jpeg.id=p.jpeg_original_id
-             ORDER BY CASE WHEN COALESCE(raw.capture_order_key,jpeg.capture_order_key) IS NULL THEN 1 ELSE 0 END,
-                      COALESCE(raw.capture_order_key,jpeg.capture_order_key) COLLATE BINARY,
+             LEFT JOIN original_files o ON o.id=p.original_id
+             ORDER BY CASE WHEN o.capture_order_key IS NULL THEN 1 ELSE 0 END,
+                      o.capture_order_key COLLATE BINARY,
                       p.sort_path COLLATE BINARY,p.id",
         )
         .map_err(|_| PersistenceError::Storage)?
         .query_map([], |row| {
             Ok(PhotoRecord {
                 id: row.get(0)?,
-                raw_original_id: row.get(1)?,
-                jpeg_original_id: row.get(2)?,
-                ambiguous: row.get::<_, i64>(3)? != 0,
-                available: row.get::<_, i64>(4)? != 0,
-                preview_state: parse_preview_state(&row.get::<_, String>(5)?)?,
-                preview_candidate: parse_preview_candidate(row.get(6)?)?,
-                preview_source: parse_preview_candidate(row.get(7)?)?,
-                preview_source_revision: row.get(8)?,
-                preview_width: parse_dimension(row.get(9)?)?,
-                preview_height: parse_dimension(row.get(10)?)?,
-                cache_revision: row.get(11)?,
-                sort_path: row.get(12)?,
-                selection_state: parse_selection_state(&row.get::<_, String>(13)?)?,
+                original_id: row.get(1)?,
+                available: row.get::<_, i64>(2)? != 0,
+                preview_state: parse_preview_state(&row.get::<_, String>(3)?)?,
+                preview_source_revision: row.get(4)?,
+                preview_width: parse_dimension(row.get(5)?)?,
+                preview_height: parse_dimension(row.get(6)?)?,
+                cache_revision: row.get(7)?,
+                sort_path: row.get(8)?,
+                selection_state: parse_selection_state(&row.get::<_, String>(9)?)?,
                 rating: row
-                    .get::<_, i64>(14)?
+                    .get::<_, i64>(10)?
                     .try_into()
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
             })
@@ -1714,16 +2133,6 @@ fn validate_capture_fact(fact: &CaptureFact) -> Result<(), ()> {
     .ok_or(())
 }
 
-fn parse_preview_candidate(value: Option<String>) -> rusqlite::Result<Option<PreviewCandidate>> {
-    value
-        .map(|value| match value.as_str() {
-            "matching-jpeg" => Ok(PreviewCandidate::MatchingJpeg),
-            "embedded-raw-jpeg" => Ok(PreviewCandidate::EmbeddedRawJpeg),
-            _ => Err(rusqlite::Error::InvalidQuery),
-        })
-        .transpose()
-}
-
 fn parse_preview_state(value: &str) -> rusqlite::Result<PreviewState> {
     match value {
         "inspection-pending" => Ok(PreviewState::InspectionPending),
@@ -1749,13 +2158,6 @@ fn parse_dimension(value: Option<i64>) -> rusqlite::Result<Option<u32>> {
         .transpose()
 }
 
-fn candidate_name(candidate: PreviewCandidate) -> &'static str {
-    match candidate {
-        PreviewCandidate::MatchingJpeg => "matching-jpeg",
-        PreviewCandidate::EmbeddedRawJpeg => "embedded-raw-jpeg",
-    }
-}
-
 fn preview_state_name(state: PreviewState) -> &'static str {
     match state {
         PreviewState::InspectionPending => "inspection-pending",
@@ -1765,14 +2167,60 @@ fn preview_state_name(state: PreviewState) -> &'static str {
     }
 }
 
+/// The recovery decisions proven outside the state store and applied inside
+/// one scan transaction. Relocations map a discovered Location to the
+/// persisted Original File identity whose exact content was found there.
+/// Fingerprints are keyed by the discovered Location they were computed at;
+/// the transaction resolves each to the Original that Location was assigned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScanRecoveryPlan {
+    pub relocations: HashMap<String, String>,
+    pub fingerprints: Vec<DiscoveredFingerprint>,
+}
+
+/// One complete-content digest computed for the file observed at one
+/// discovered Location during this scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveredFingerprint {
+    pub path: String,
+    pub digest: String,
+}
+
+/// The committed result of one scan application.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanApplication {
+    pub snapshot: ScanSnapshot,
+    pub relocated_originals: usize,
+    pub fingerprinted_originals: usize,
+}
+
+/// One enrollment work item: the persisted Original whose current observed
+/// revision still needs a content fingerprint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FingerprintTarget {
+    pub original_id: String,
+    pub relative_path: String,
+    pub kind: crate::OriginalKind,
+    pub size: u64,
+    pub mtime_ms: f64,
+}
+
+/// Truthful enrollment counters for status reporting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FingerprintCounts {
+    pub enrolled: usize,
+    pub pending: usize,
+}
+
 fn apply_scan(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
     discovered: &[DiscoveredOriginal],
     errors: &[OriginalScanError],
+    recovery: &ScanRecoveryPlan,
     failure_after_first: bool,
-) -> Result<ScanSnapshot, PersistenceError> {
+) -> Result<ScanApplication, PersistenceError> {
     let before = snapshot(connection)?;
     let previous_originals = before
         .originals
@@ -1780,22 +2228,85 @@ fn apply_scan(
         .map(|original| (original.relative_path.as_str().to_owned(), original.clone()))
         .collect::<std::collections::HashMap<_, _>>();
     write_transaction(state, database_name, connection, |transaction| {
-        let existing_ids = before
-            .originals
-            .iter()
-            .map(|original| {
-                (
-                    original.relative_path.as_str().to_owned(),
-                    original.id.clone(),
+        // Validate every proposed relocation against the persisted state and
+        // the complete discovered set before any write.
+        let mut persisted_by_id = HashMap::with_capacity(before.originals.len());
+        let mut persisted_by_path = HashMap::with_capacity(before.originals.len());
+        for original in &before.originals {
+            persisted_by_id.insert(original.id.clone(), original.clone());
+            persisted_by_path.insert(original.relative_path.as_str().to_owned(), original.id.clone());
+        }
+        let mut discovered_by_path = HashMap::with_capacity(discovered.len());
+        for original in discovered {
+            discovered_by_path.insert(original.path.as_str().to_owned(), original);
+        }
+        let mut relocation_by_id = HashMap::with_capacity(recovery.relocations.len());
+        for (new_path, original_id) in &recovery.relocations {
+            let Some(persisted) = persisted_by_id.get(original_id) else {
+                return Err(PersistenceError::InvalidRecovery);
+            };
+            let Some(discovered_original) = discovered_by_path.get(new_path.as_str()) else {
+                return Err(PersistenceError::InvalidRecovery);
+            };
+            if discovered_original.kind != persisted.kind {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+            if relocation_by_id
+                .insert(original_id.clone(), new_path.clone())
+                .is_some()
+            {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+        }
+        // The final Location assignment must stay injective: a relocated
+        // Original may land on a Location vacated by another relocation, but
+        // never on one still owned by a non-relocating Original.
+        let mut final_locations = std::collections::BTreeSet::new();
+        for original in &before.originals {
+            let final_path = relocation_by_id
+                .get(&original.id)
+                .map_or_else(|| original.relative_path.as_str().to_owned(), Clone::clone);
+            if !final_locations.insert(final_path) {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+        }
+
+        // Move every relocated Original to a temporary unique Location first
+        // so direct swaps cannot violate the UNIQUE(relative_path) constraint.
+        for original_id in relocation_by_id.keys() {
+            transaction
+                .execute(
+                    "UPDATE original_files SET relative_path=? WHERE id=?",
+                    params![format!("\u{0}reloc/{original_id}"), original_id],
                 )
-            })
-            .collect::<HashMap<_, _>>();
+                .map_err(|_| PersistenceError::Storage)?;
+        }
+        for (original_id, new_path) in &relocation_by_id {
+            let changed = transaction
+                .execute(
+                    "UPDATE original_files SET relative_path=?,
+                       capture_metadata_state='pending',capture_order_key=NULL,
+                       capture_time_field=NULL,capture_offset_minutes=NULL,
+                       capture_source_revision=NULL
+                     WHERE id=?",
+                    params![new_path, original_id],
+                )
+                .map_err(|_| PersistenceError::Storage)?;
+            if changed != 1 {
+                return Err(PersistenceError::InvalidRecovery);
+            }
+        }
+
+        let existing_ids = persisted_by_path;
         let mut reserved_ids = HashSet::new();
         let mut original_ids = HashMap::with_capacity(discovered.len());
         for original in discovered {
-            let id = match existing_ids.get(original.path.as_str()) {
-                Some(id) => id.clone(),
-                None => allocate_library_id(transaction, &mut reserved_ids)?,
+            let id = if let Some(id) = recovery.relocations.get(original.path.as_str()) {
+                id.clone()
+            } else if let Some(id) = existing_ids.get(original.path.as_str()) {
+                id.clone()
+            } else {
+                allocate_library_id(transaction, &mut reserved_ids)?
             };
             original_ids.insert(original.path.as_str().to_owned(), id);
         }
@@ -1862,25 +2373,23 @@ fn apply_scan(
         }
         let mut upsert_photo = transaction
             .prepare(
-                "INSERT INTO photos(id,raw_original_id,jpeg_original_id,ambiguous,available,
-                    preview_state,preview_candidate,preview_source,preview_source_revision,
+                "INSERT INTO photos(id,original_id,available,
+                    preview_state,preview_source_revision,
                     preview_width,preview_height,cache_revision,sort_path)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 VALUES(?,?,?,?,?,?,?,?,?)
                  ON CONFLICT(id) DO UPDATE SET
-                    raw_original_id=excluded.raw_original_id,jpeg_original_id=excluded.jpeg_original_id,
-                    ambiguous=excluded.ambiguous,available=excluded.available,
-                    preview_state=excluded.preview_state,preview_candidate=excluded.preview_candidate,
-                    preview_source=excluded.preview_source,preview_source_revision=excluded.preview_source_revision,
+                    original_id=excluded.original_id,available=excluded.available,
+                    preview_state=excluded.preview_state,
+                    preview_source_revision=excluded.preview_source_revision,
                     preview_width=excluded.preview_width,preview_height=excluded.preview_height,
                     cache_revision=excluded.cache_revision,sort_path=excluded.sort_path",
             )
             .map_err(|_| PersistenceError::Storage)?;
         for photo in &reconciled {
             let selected = selected_source(photo);
-            let candidate = selected.map(|(_, candidate)| candidate);
             let selected_path = selected.map(|(original, _)| original.path.as_str().to_owned());
             let preserve = photo.prior.as_ref().is_some_and(|prior| {
-                preview_should_preserve(prior, photo, selected, &previous_originals)
+                preview_should_preserve(prior, selected, &previous_originals)
             });
             let source_revision = if preserve {
                 photo
@@ -1897,40 +2406,26 @@ fn apply_scan(
             } else {
                 PreviewState::Unavailable
             };
-            let prior = photo.prior.as_ref();
             upsert_photo
                 .execute(params![
                     photo.id,
-                    photo.raw_id,
-                    photo.jpeg_id,
-                    i64::from(photo.ambiguous),
-                    i64::from(
-                        photo
-                            .raw
-                            .as_ref()
-                            .is_some_and(|original| original.error_category.is_none())
-                            || photo
-                                .jpeg
-                                .as_ref()
-                                .is_some_and(|original| original.error_category.is_none()),
-                    ),
+                    photo.original_id,
+                    i64::from(photo
+                        .original
+                        .as_ref()
+                        .is_some_and(|original| original.error_category.is_none())),
                     preview_state_name(preview_state),
-                    candidate.map(candidate_name),
-                    preserve
-                        .then(|| prior.unwrap().preview_source)
-                        .flatten()
-                        .map(candidate_name),
                     source_revision,
                     preserve
-                        .then(|| prior.unwrap().preview_width)
+                        .then(|| photo.prior.as_ref().unwrap().preview_width)
                         .flatten()
                         .map(i64::from),
                     preserve
-                        .then(|| prior.unwrap().preview_height)
+                        .then(|| photo.prior.as_ref().unwrap().preview_height)
                         .flatten()
                         .map(i64::from),
                     preserve
-                        .then(|| prior.unwrap().cache_revision.clone())
+                        .then(|| photo.prior.as_ref().unwrap().cache_revision.clone())
                         .flatten(),
                     if photo.sort_path.is_empty() {
                         selected_path.unwrap_or_default()
@@ -1939,6 +2434,38 @@ fn apply_scan(
                     },
                 ])
                 .map_err(|_| PersistenceError::Storage)?;
+        }
+        // Fingerprints always describe the current persisted revision: drop
+        // rows whose observed facts no longer match, then record every digest
+        // freshly computed for this scan.
+        transaction
+            .execute(
+                "DELETE FROM original_fingerprints WHERE original_id IN (
+                     SELECT f.original_id FROM original_fingerprints f
+                     JOIN original_files o ON o.id=f.original_id
+                     WHERE f.size != o.size OR f.mtime_ms != o.mtime_ms)",
+                [],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        let mut upsert_fingerprint = transaction
+            .prepare(
+                "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms)
+                 SELECT o.id,?,o.size,o.mtime_ms FROM original_files o WHERE o.relative_path=?
+                 ON CONFLICT(original_id) DO UPDATE SET
+                   digest=excluded.digest,size=excluded.size,mtime_ms=excluded.mtime_ms",
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        for fingerprint in &recovery.fingerprints {
+            let changed = upsert_fingerprint
+                .execute(params![
+                    fingerprint.digest,
+                    fingerprint.path,
+                    fingerprint.path,
+                ])
+                .map_err(|_| PersistenceError::Storage)?;
+            if changed != 1 {
+                return Err(PersistenceError::InvalidRecovery);
+            }
         }
         transaction
             .execute(
@@ -1951,46 +2478,13 @@ fn apply_scan(
     })?;
     let mut result = snapshot(connection)?;
     result.errors = errors.to_vec();
-    Ok(result)
+    Ok(ScanApplication {
+        snapshot: result,
+        relocated_originals: recovery.relocations.len(),
+        fingerprinted_originals: recovery.fingerprints.len(),
+    })
 }
 
-fn source_revision_for_id(
-    transaction: &Transaction<'_>,
-    id: Option<&str>,
-) -> Result<Option<String>, PersistenceError> {
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    let row = transaction
-        .query_row(
-            "SELECT relative_path,size,mtime_ms,available,error_category FROM original_files WHERE id=?",
-            [id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, i64>(3)? != 0,
-                    row.get::<_, Option<String>>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| PersistenceError::Storage)?;
-    let Some((path, size, mtime_ms, available, error_category)) = row else {
-        return Ok(None);
-    };
-    if !available || error_category.is_some() {
-        return Ok(None);
-    }
-    source_revision(
-        &path,
-        size.try_into().map_err(|_| PersistenceError::Storage)?,
-        mtime_ms,
-    )
-    .map(Some)
-    .map_err(|_| PersistenceError::Storage)
-}
 
 fn seed_preview(
     state: &StateDirectory,
@@ -1999,59 +2493,63 @@ fn seed_preview(
     preview: PreviewSeed,
 ) -> Result<PreviewSeedResult, PersistenceError> {
     write_transaction(state, database_name, connection, |transaction| {
+        // The compare-and-set anchor is the persisted Original's current
+        // revision: any scan that changed the Original between inspection and
+        // this seed makes the computed revision differ and the seed stale.
         let row = transaction
             .query_row(
-                "SELECT preview_candidate,raw_original_id,jpeg_original_id FROM photos WHERE id=?",
+                "SELECT o.relative_path,o.size,o.mtime_ms,o.kind,p.original_id
+                 FROM photos p JOIN original_files o ON o.id=p.original_id
+                 WHERE p.id=?",
                 [&preview.photo_id],
                 |row| {
                     Ok((
-                        row.get::<_, Option<String>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(|_| PersistenceError::Storage)?;
-        let Some((candidate, raw_id, jpeg_id)) = row else {
+        let Some((path, size, mtime_ms, kind, original_id)) = row else {
             return Ok(PreviewSeedResult::StaleIgnored);
         };
-        if candidate.as_deref() != Some(candidate_name(preview.expected_candidate)) {
+        let Ok(size) = u64::try_from(size) else {
             return Ok(PreviewSeedResult::StaleIgnored);
-        }
-        let expected_id = match preview.expected_candidate {
-            PreviewCandidate::MatchingJpeg => jpeg_id.as_deref(),
-            PreviewCandidate::EmbeddedRawJpeg => raw_id.as_deref(),
         };
-        let expected_revision = source_revision_for_id(transaction, expected_id)?;
-        if expected_revision.as_deref() != Some(preview.expected_source_revision.as_str()) {
-            return Ok(PreviewSeedResult::StaleIgnored);
-        }
-
-        let actual_source = preview.actual_source.unwrap_or(preview.expected_candidate);
-        if actual_source != preview.expected_candidate
-            && (preview.expected_candidate != PreviewCandidate::MatchingJpeg
-                || actual_source != PreviewCandidate::EmbeddedRawJpeg)
-        {
-            return Ok(PreviewSeedResult::StaleIgnored);
-        }
-        let actual_revision = if actual_source == preview.expected_candidate {
-            expected_revision.clone()
-        } else {
-            source_revision_for_id(transaction, raw_id.as_deref())?
+        let parsed_kind = match kind.as_str() {
+            "raw" => crate::OriginalKind::Raw,
+            "jpeg" => crate::OriginalKind::Jpeg,
+            _ => return Ok(PreviewSeedResult::StaleIgnored),
         };
-        let expected_actual_revision = if actual_source == preview.expected_candidate {
-            Some(preview.expected_source_revision.as_str())
-        } else {
-            preview.actual_source_revision.as_deref()
-        };
-        if actual_revision.is_none() || actual_revision.as_deref() != expected_actual_revision {
+        if parsed_kind.preview_source() != preview.source {
             return Ok(PreviewSeedResult::StaleIgnored);
         }
-        let changed = transaction.execute(
-            "UPDATE photos SET preview_state=?,preview_source=?,preview_source_revision=?,preview_width=?,preview_height=?,cache_revision=? WHERE id=? AND preview_candidate=?",
-            params![preview_state_name(preview.state), candidate_name(actual_source), actual_revision, preview.width.map(i64::from), preview.height.map(i64::from), preview.cache_revision, preview.photo_id, candidate_name(preview.expected_candidate)],
-        ).map_err(|_| PersistenceError::Storage)?;
+        let Some(current_revision) = crate::source_revision(&path, size, mtime_ms).ok() else {
+            return Ok(PreviewSeedResult::StaleIgnored);
+        };
+        if current_revision != preview.expected_source_revision {
+            return Ok(PreviewSeedResult::StaleIgnored);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE photos SET preview_state=?,preview_source_revision=?,
+                        preview_width=?,preview_height=?,cache_revision=?
+                 WHERE id=? AND original_id=?",
+                params![
+                    preview_state_name(preview.state),
+                    current_revision,
+                    preview.width.map(i64::from),
+                    preview.height.map(i64::from),
+                    preview.cache_revision,
+                    preview.photo_id,
+                    original_id,
+                ],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
         Ok(if changed == 1 {
             PreviewSeedResult::Applied
         } else {

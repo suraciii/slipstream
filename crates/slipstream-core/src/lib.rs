@@ -17,6 +17,7 @@ mod native;
 pub mod persistence;
 pub mod preview;
 pub mod reconcile;
+mod recovery;
 
 #[cfg(test)]
 mod test_support;
@@ -44,14 +45,14 @@ pub use domain::{
     PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoRecord, PhotoStateBatchApplied,
     PhotoStateBatchChangedElsewhere, PhotoStateBatchItem, PhotoStateBatchMissing,
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewCandidate, PreviewSeed,
-    PreviewSeedResult, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, OriginalFingerprint, PreviewSeed,
+    PreviewSeedResult, PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
     SelectionState,
 };
 pub use identity::{
     InvalidModificationTime, original_id, paired_photo_id, source_revision, standalone_photo_id,
 };
-pub use library::{Library, LibraryConfig, LibraryError, ScanPhase, ScanProgress, expand_library};
+pub use library::{Library, LibraryConfig, LibraryError, ScanOutcome, ScanPhase, ScanProgress, expand_library};
 pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
@@ -63,4 +64,5 @@ pub use preview::{
     PreviewService, PreviewServiceError, PreviewServiceOptions, PreviewUnavailable,
     PreviewUnavailableReason,
 };
+pub use recovery::{RecoveryProgress, digest_bytes, evidence_original_ids, plan_recovery};
 pub use reconcile::{ReconciledPhoto, preview_should_preserve, reconcile, selected_source};

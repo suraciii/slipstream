@@ -7,10 +7,47 @@ pub enum OriginalKind {
     Jpeg,
 }
 
+impl OriginalKind {
+    /// The Preview Source this Original kind always uses. A JPEG Original is
+    /// its own Preview; a RAW Original uses its largest usable embedded JPEG.
+    pub fn preview_source(self) -> PreviewSource {
+        match self {
+            Self::Raw => PreviewSource::RawEmbeddedJpeg,
+            Self::Jpeg => PreviewSource::JpegOriginal,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PreviewCandidate {
-    MatchingJpeg,
-    EmbeddedRawJpeg,
+pub enum PreviewSource {
+    JpegOriginal,
+    RawEmbeddedJpeg,
+}
+
+impl PreviewSource {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::JpegOriginal => "jpeg-original",
+            Self::RawEmbeddedJpeg => "raw-embedded-jpeg",
+        }
+    }
+
+    pub fn parse_wire_name(value: &str) -> Option<Self> {
+        match value {
+            "jpeg-original" => Some(Self::JpegOriginal),
+            "raw-embedded-jpeg" => Some(Self::RawEmbeddedJpeg),
+            _ => None,
+        }
+    }
+
+    /// The historical v5 persistence name for this source, used only when
+    /// reading legacy rows during the v5-to-v6 migration.
+    pub fn legacy_database_name(self) -> &'static str {
+        match self {
+            Self::JpegOriginal => "matching-jpeg",
+            Self::RawEmbeddedJpeg => "embedded-raw-jpeg",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,13 +156,9 @@ pub struct OriginalRecord {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhotoRecord {
     pub id: String,
-    pub raw_original_id: Option<String>,
-    pub jpeg_original_id: Option<String>,
-    pub ambiguous: bool,
+    pub original_id: String,
     pub available: bool,
     pub preview_state: PreviewState,
-    pub preview_candidate: Option<PreviewCandidate>,
-    pub preview_source: Option<PreviewCandidate>,
     pub preview_source_revision: Option<String>,
     pub preview_width: Option<u32>,
     pub preview_height: Option<u32>,
@@ -133,6 +166,18 @@ pub struct PhotoRecord {
     pub sort_path: String,
     pub selection_state: SelectionState,
     pub rating: u8,
+}
+
+/// One persisted content fingerprint for an Original File at one observed
+/// revision. A fingerprint is evidence for Location recovery; it is not
+/// Original File or Photo identity, and equal digests at multiple Locations
+/// remain independent Originals.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OriginalFingerprint {
+    pub original_id: String,
+    pub digest: String,
+    pub size: u64,
+    pub mtime_ms: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -356,13 +401,11 @@ pub struct PhotoStateBatchResult {
 pub struct PreviewSeed {
     pub photo_id: String,
     pub state: PreviewState,
-    pub expected_candidate: PreviewCandidate,
+    pub source: PreviewSource,
     pub expected_source_revision: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub cache_revision: Option<String>,
-    pub actual_source: Option<PreviewCandidate>,
-    pub actual_source_revision: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

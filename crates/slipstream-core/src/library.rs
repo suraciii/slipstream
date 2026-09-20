@@ -36,6 +36,8 @@ pub enum ScanPhase {
     Discovering,
     /// Inspecting Capture Time facts for discovered files.
     Inspecting,
+    /// Proving relocated Original identities through content fingerprints.
+    Recovering,
     /// Applying one completed scan result to the state store.
     Applying,
 }
@@ -51,6 +53,19 @@ pub struct ScanProgress {
     pub inspected: u64,
     /// Total originals to inspect once the walk has completed.
     pub inspect_total: Option<u64>,
+    /// Fingerprint hashes completed during the recovering phase.
+    pub hashed: u64,
+    /// Total fingerprint hashes required by the recovering phase.
+    pub hash_total: Option<u64>,
+}
+
+/// The committed outcome of the most recent completed scan, for truthful
+/// status reporting. Counts are Photo counts from the committed snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub relocated_originals: usize,
+    pub fingerprinted_originals: usize,
+    pub unavailable_photos: usize,
 }
 
 #[cfg(test)]
@@ -209,9 +224,18 @@ pub struct Library {
     native_work: NativeWorkBudget,
     persistence: Persistence,
     scanner: Scanner,
+    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
+    enrollment_join: Mutex<Option<JoinHandle<()>>>,
     progress: Arc<Mutex<ScanProgress>>,
+    outcome: Arc<Mutex<Option<ScanOutcome>>>,
     lifecycle: Mutex<Lifecycle>,
     shutdown: Mutex<Option<Result<(), LibraryError>>>,
+}
+
+#[derive(Default)]
+struct EnrollmentState {
+    stopped: bool,
+    scan_running: bool,
 }
 
 pub fn expand_library(config: LibraryConfig) -> Result<(), LibraryError> {
@@ -265,11 +289,15 @@ impl Library {
         ));
         let native_work = NativeWorkBudget::new();
         let progress = Arc::new(Mutex::new(ScanProgress::default()));
+        let outcome = Arc::new(Mutex::new(None::<ScanOutcome>));
+        let enrollment = Arc::new((Mutex::new(EnrollmentState::default()), Condvar::new()));
         let worker_root = root.clone();
         let worker_native_work = native_work.clone();
         let worker_persistence = persistence.clone();
         let worker_state = state.clone();
         let worker_progress = Arc::clone(&progress);
+        let worker_outcome = Arc::clone(&outcome);
+        let worker_enrollment = Arc::clone(&enrollment);
         let join = thread::Builder::new()
             .name("slipstream-scanner".to_owned())
             .spawn(move || {
@@ -281,6 +309,23 @@ impl Library {
                     receiver,
                     worker_state,
                     worker_progress,
+                    worker_outcome,
+                    worker_enrollment,
+                )
+            })
+            .map_err(|_| LibraryError::ScannerStopped)?;
+        let enrollment_root = root.clone();
+        let enrollment_native_work = native_work.clone();
+        let enrollment_persistence = persistence.clone();
+        let enrollment_shared = Arc::clone(&enrollment);
+        let enrollment_join = thread::Builder::new()
+            .name("slipstream-fingerprints".to_owned())
+            .spawn(move || {
+                enrollment_main(
+                    enrollment_root,
+                    enrollment_native_work,
+                    enrollment_persistence,
+                    enrollment_shared,
                 )
             })
             .map_err(|_| LibraryError::ScannerStopped)?;
@@ -293,7 +338,10 @@ impl Library {
                 state,
                 join: Mutex::new(Some(join)),
             },
+            enrollment,
+            enrollment_join: Mutex::new(Some(enrollment_join)),
             progress,
+            outcome,
             lifecycle: Mutex::new(Lifecycle { open: true }),
             shutdown: Mutex::new(None),
         })
@@ -306,6 +354,20 @@ impl Library {
     /// Current observable progress of the scan owned by the scanner thread.
     pub fn scan_progress(&self) -> ScanProgress {
         *self.progress.lock().unwrap()
+    }
+
+    /// The committed outcome of the most recent completed scan, if one has
+    /// completed since this Library opened.
+    pub fn scan_outcome(&self) -> Option<ScanOutcome> {
+        *self.outcome.lock().unwrap()
+    }
+
+    /// Truthful fingerprint enrollment counters for status reporting.
+    pub fn fingerprint_counts(&self) -> Result<crate::persistence::FingerprintCounts, LibraryError> {
+        let _admission = self.admit()?;
+        self.persistence
+            .fingerprint_counts_blocking()
+            .map_err(LibraryError::from)
     }
 
     pub(crate) fn native_work_budget(&self) -> NativeWorkBudget {
@@ -568,6 +630,14 @@ impl Library {
                 }
             }
         }
+        {
+            let mut enrollment_state = self.enrollment.0.lock().unwrap();
+            enrollment_state.stopped = true;
+        }
+        self.enrollment.1.notify_all();
+        if let Some(join) = self.enrollment_join.lock().unwrap().take() {
+            let _ = join.join();
+        }
         self.root.close();
         if let Err(error) = self.persistence.shutdown() {
             first_error.get_or_insert(error.into());
@@ -631,12 +701,15 @@ fn scanner_main(
     receiver: std::sync::mpsc::Receiver<ScanCommand>,
     state: Arc<(Mutex<ScanState>, Condvar)>,
     progress: Arc<Mutex<ScanProgress>>,
+    outcome: Arc<Mutex<Option<ScanOutcome>>>,
+    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
             ScanCommand::Stop => break,
             ScanCommand::Scan => {
                 {
+                    enrollment.0.lock().unwrap().scan_running = true;
                     let mut progress = progress.lock().unwrap();
                     *progress = ScanProgress {
                         phase: ScanPhase::Discovering,
@@ -669,12 +742,58 @@ fn scanner_main(
                             &previous.originals,
                             &progress,
                         );
+                        let evidence_ids = crate::recovery::evidence_original_ids(
+                            &result.originals,
+                            &previous,
+                        );
+                        let fingerprints = persistence
+                            .recovery_facts_blocking(evidence_ids)
+                            .map_err(LibraryError::from)?;
+                        let mut recovery_progress = crate::recovery::RecoveryProgress::default();
+                        {
+                            let mut progress = progress.lock().unwrap();
+                            progress.phase = ScanPhase::Recovering;
+                        }
+                        let recovery = crate::recovery::plan_recovery(
+                            &root,
+                            &native_work,
+                            &result.originals,
+                            &previous,
+                            &fingerprints,
+                            &mut recovery_progress,
+                        );
+                        {
+                            let mut progress = progress.lock().unwrap();
+                            progress.hashed = recovery_progress.hashed;
+                            progress.hash_total = Some(recovery_progress.hash_total);
+                        }
                         progress.lock().unwrap().phase = ScanPhase::Applying;
-                        persistence
-                            .apply_scan_blocking(result.originals, result.errors)
-                            .map_err(LibraryError::from)
+                        let applied = persistence
+                            .apply_scan_recovered_blocking(
+                                result.originals,
+                                result.errors,
+                                recovery,
+                            )
+                            .map_err(LibraryError::from)?;
+                        let unavailable = applied
+                            .snapshot
+                            .photos
+                            .iter()
+                            .filter(|photo| !photo.available)
+                            .count();
+                        *outcome.lock().unwrap() = Some(ScanOutcome {
+                            relocated_originals: applied.relocated_originals,
+                            fingerprinted_originals: applied.fingerprinted_originals,
+                            unavailable_photos: unavailable,
+                        });
+                        Ok(applied.snapshot)
                     })
                     .map(Arc::new);
+                {
+                    let mut enrollment_state = enrollment.0.lock().unwrap();
+                    enrollment_state.scan_running = false;
+                }
+                enrollment.1.notify_all();
                 progress.lock().unwrap().phase = ScanPhase::Idle;
                 let (lock, signal) = &*state;
                 let mut guard = lock.lock().unwrap();
@@ -695,6 +814,97 @@ fn scanner_main(
         }
     }
     signal.notify_all();
+}
+
+/// Background enrollment of content fingerprints for available Originals.
+/// One bounded worker reads each Original once; scans pause it so candidate
+/// hashing and enrollment never compete for storage.
+fn enrollment_main(
+    root: LibraryRoot,
+    native_work: NativeWorkBudget,
+    persistence: Persistence,
+    enrollment: Arc<(Mutex<EnrollmentState>, Condvar)>,
+) {
+    let mut deferred: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
+    loop {
+        {
+            let mut state = enrollment.0.lock().unwrap();
+            if state.stopped {
+                return;
+            }
+            while state.scan_running && !state.stopped {
+                state = enrollment
+                    .1
+                    .wait_timeout(state, std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .0;
+            }
+            if state.stopped {
+                return;
+            }
+        }
+        let target = match persistence.next_fingerprint_target_blocking() {
+            Ok(target) => target,
+            Err(_) => {
+                thread::sleep(std::time::Duration::from_secs(1));
+                continue;
+            }
+        };
+        let Some(target) = target else {
+            let state = enrollment.0.lock().unwrap();
+            if state.stopped {
+                return;
+            }
+            drop(state);
+            let (lock, signal) = &*enrollment;
+            let state = lock.lock().unwrap();
+            if state.stopped {
+                return;
+            }
+            let _unused = signal.wait_timeout(state, std::time::Duration::from_secs(5)).unwrap().0;
+            continue;
+        };
+        if let Some(deferred_at) = deferred.get(&target.original_id) {
+            if deferred_at.elapsed() < std::time::Duration::from_secs(60) {
+                thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
+        }
+        let relative = match crate::RelativeOriginalPath::parse(target.relative_path.clone()) {
+            Ok(relative) => relative,
+            Err(_) => {
+                deferred.insert(target.original_id.clone(), std::time::Instant::now());
+                continue;
+            }
+        };
+        let permit = native_work.acquire();
+        let digest = root
+            .original(relative)
+            .and_then(|capability| capability.digest_file());
+        drop(permit);
+        match digest {
+            Ok(checked)
+                if checked.facts.size == target.size
+                    && checked.facts.mtime_ms == target.mtime_ms =>
+            {
+                let fingerprint = crate::OriginalFingerprint {
+                    original_id: target.original_id.clone(),
+                    digest: checked.digest,
+                    size: checked.facts.size,
+                    mtime_ms: checked.facts.mtime_ms,
+                };
+                if persistence.store_fingerprint_blocking(fingerprint).is_ok() {
+                    deferred.remove(&target.original_id);
+                } else {
+                    deferred.insert(target.original_id.clone(), std::time::Instant::now());
+                }
+            }
+            _ => {
+                deferred.insert(target.original_id.clone(), std::time::Instant::now());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

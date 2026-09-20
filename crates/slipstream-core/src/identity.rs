@@ -38,6 +38,9 @@ pub(crate) fn classify_extension(extension: &[u8]) -> Option<OriginalKind> {
     }
 }
 
+/// The base name without its final extension. Historical pairing grouped
+/// same-stem RAW/JPEG files; with independent Photos this remains only as a
+/// compatibility reference for legacy fixtures.
 pub fn pairing_stem(name: &str) -> &str {
     name.rfind('.')
         .map_or(name, |dot| if dot > 0 { &name[..dot] } else { name })

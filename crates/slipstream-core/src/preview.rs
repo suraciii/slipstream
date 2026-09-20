@@ -7,9 +7,9 @@
 use crate::{
     CacheDirectory, CacheError, CachedDerivative, DerivativeFailureKind, DerivativeIdentity,
     DerivativePriority, DerivativeResult, DerivativeScheduler, DerivativeTarget, Library,
-    LibraryError, OriginalCapability, OriginalRecord, PhotoRecord, PreviewCandidate, PreviewSeed,
-    PreviewSeedResult, PreviewState, ScanSnapshot, extract_embedded_jpeg, inspect_matching_jpeg,
-    source_revision,
+    LibraryError, OriginalCapability, OriginalRecord, PhotoRecord, PreviewSeed,
+    PreviewSeedResult, PreviewSource, PreviewState, ScanSnapshot, extract_embedded_jpeg,
+    inspect_matching_jpeg, source_revision,
 };
 use std::{
     collections::HashMap,
@@ -27,8 +27,8 @@ pub const DEFAULT_PREVIEW_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_PREVIEW_WAITER_CAPACITY: usize = 64;
 
 /// The bounded, immutable facts a server request received from its published
-/// Library. It contains one Photo and at most its two Original records; it
-/// never contains an Original capability or an opened file.
+/// Library. It contains one Photo and its single Original record; it never
+/// contains an Original capability or an opened file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewFacts {
     pub photo: PhotoRecord,
@@ -42,39 +42,23 @@ impl PreviewFacts {
 
     pub fn from_snapshot(snapshot: &ScanSnapshot, photo_id: &str) -> Option<Self> {
         let photo = snapshot.photos.iter().find(|photo| photo.id == photo_id)?;
-        let originals = [
-            photo.jpeg_original_id.as_ref(),
-            photo.raw_original_id.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(|id| {
-            snapshot
-                .originals
-                .iter()
-                .find(|original| &original.id == id)
-        })
-        .cloned()
-        .collect();
+        let originals = snapshot
+            .originals
+            .iter()
+            .find(|original| original.id == photo.original_id)
+            .cloned()
+            .into_iter()
+            .collect();
         Some(Self::from_records(photo.clone(), originals))
     }
 
-    fn selected_source(&self) -> Option<(PreviewCandidate, &OriginalRecord)> {
-        let find = |id: &Option<String>| {
-            id.as_ref().and_then(|id| {
-                self.originals.iter().find(|original| {
-                    &original.id == id && original.available && original.error_category.is_none()
-                })
-            })
-        };
-        find(&self.photo.jpeg_original_id)
-            .filter(|original| original.kind == crate::OriginalKind::Jpeg)
-            .map(|original| (PreviewCandidate::MatchingJpeg, original))
-            .or_else(|| {
-                find(&self.photo.raw_original_id)
-                    .filter(|original| original.kind == crate::OriginalKind::Raw)
-                    .map(|original| (PreviewCandidate::EmbeddedRawJpeg, original))
-            })
+    fn selected_source(&self) -> Option<(PreviewSource, &OriginalRecord)> {
+        self.originals.iter().find_map(|original| {
+            (original.id == self.photo.original_id
+                && original.available
+                && original.error_category.is_none())
+                .then_some((original.kind.preview_source(), original))
+        })
     }
 
     pub fn source_matches(&self, photo: &PhotoRecord, originals: &[OriginalRecord]) -> bool {
@@ -89,14 +73,9 @@ impl PreviewFacts {
         if self.photo.preview_state != PreviewState::Unavailable {
             return false;
         }
-        let Some((candidate, original)) = self.selected_source() else {
+        let Some((_source, original)) = self.selected_source() else {
             return true;
         };
-        if self.photo.preview_candidate != Some(candidate)
-            || self.photo.preview_source != Some(candidate)
-        {
-            return false;
-        }
         let Some(stored_revision) = self.photo.preview_source_revision.as_deref() else {
             return false;
         };
@@ -110,11 +89,8 @@ impl PreviewFacts {
 }
 
 fn source_bundle_key(photo: &PhotoRecord, originals: &[OriginalRecord]) -> String {
-    let original_key = |id: &Option<String>| {
-        let Some(id) = id else {
-            return "none".to_owned();
-        };
-        let Some(original) = originals.iter().find(|original| &original.id == id) else {
+    let original_key = |id: &str| {
+        let Some(original) = originals.iter().find(|original| original.id == id) else {
             return format!("missing:{id}");
         };
         let kind = match original.kind {
@@ -135,14 +111,11 @@ fn source_bundle_key(photo: &PhotoRecord, originals: &[OriginalRecord]) -> Strin
         )
     };
     format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}",
         photo.id,
-        photo.raw_original_id.as_deref().unwrap_or("none"),
-        photo.jpeg_original_id.as_deref().unwrap_or("none"),
+        photo.original_id,
         photo.available,
-        photo.ambiguous,
-        original_key(&photo.jpeg_original_id),
-        original_key(&photo.raw_original_id),
+        original_key(&photo.original_id),
     )
 }
 
@@ -150,7 +123,7 @@ fn source_bundle_key(photo: &PhotoRecord, originals: &[OriginalRecord]) -> Strin
 pub struct PreviewReady {
     pub cache_key: String,
     pub target: DerivativeTarget,
-    pub source: PreviewCandidate,
+    pub source: PreviewSource,
     pub source_size: u64,
     pub source_mtime_ms: f64,
     pub embedded_candidate_identity: Option<String>,
@@ -796,9 +769,9 @@ fn process_invalid_source(
 ) -> Result<PreviewRequestResult, PreviewServiceError> {
     let identity = DerivativeIdentity {
         photo_identity: context.photo.id.clone(),
-        source: match invalid.actual_source {
-            PreviewCandidate::MatchingJpeg => crate::cache::DerivativeSource::MatchingJpeg,
-            PreviewCandidate::EmbeddedRawJpeg => crate::cache::DerivativeSource::EmbeddedRawJpeg,
+        source: match invalid.source {
+            PreviewSource::JpegOriginal => crate::cache::DerivativeSource::MatchingJpeg,
+            PreviewSource::RawEmbeddedJpeg => crate::cache::DerivativeSource::EmbeddedRawJpeg,
         },
         source_relative_path: invalid.actual.relative_path.as_str().to_owned(),
         source_size: invalid.actual.facts.size,
@@ -832,13 +805,11 @@ fn process_invalid_source(
             let seed = inner.library.seed_preview_blocking(PreviewSeed {
                 photo_id: context.photo.id.clone(),
                 state: PreviewState::Unavailable,
-                expected_candidate: invalid.expected_candidate,
-                expected_source_revision: invalid.expected_revision,
+                source: invalid.source,
+                expected_source_revision: invalid.revision,
                 width: None,
                 height: None,
                 cache_revision: None,
-                actual_source: Some(invalid.actual_source),
-                actual_source_revision: Some(invalid.actual_revision),
             })?;
             Ok(match seed {
                 PreviewSeedResult::Applied => {
@@ -900,13 +871,11 @@ fn process_job(
             let seed = inner.library.seed_preview_blocking(PreviewSeed {
                 photo_id: context.photo.id,
                 state: PreviewState::Unavailable,
-                expected_candidate: unavailable.expected_candidate,
-                expected_source_revision: unavailable.expected_revision.clone(),
+                source: unavailable.source,
+                expected_source_revision: unavailable.revision,
                 width: None,
                 height: None,
                 cache_revision: None,
-                actual_source: Some(unavailable.expected_candidate),
-                actual_source_revision: Some(unavailable.expected_revision),
             })?;
             return Ok(match seed {
                 PreviewSeedResult::Applied => {
@@ -929,9 +898,9 @@ fn process_job(
     };
     let identity = DerivativeIdentity {
         photo_identity: context.photo.id.clone(),
-        source: match inspected.actual_source {
-            PreviewCandidate::MatchingJpeg => crate::cache::DerivativeSource::MatchingJpeg,
-            PreviewCandidate::EmbeddedRawJpeg => crate::cache::DerivativeSource::EmbeddedRawJpeg,
+        source: match inspected.source {
+            PreviewSource::JpegOriginal => crate::cache::DerivativeSource::MatchingJpeg,
+            PreviewSource::RawEmbeddedJpeg => crate::cache::DerivativeSource::EmbeddedRawJpeg,
         },
         source_relative_path: inspected.actual.relative_path.as_str().to_owned(),
         source_size: inspected.actual.facts.size,
@@ -956,7 +925,7 @@ fn process_job(
             ready_result(&ready, job.target),
         )),
         DerivativeResult::Ready(ready) => {
-            context.verify_source(inspected.actual_source)?;
+            context.verify_source(inspected.source)?;
             let ready = ready_result(&ready, job.target);
             // Thumbnail targets stay derivative cache/manifest state only; they
             // never publish persisted Review Preview facts.
@@ -973,13 +942,11 @@ fn process_job(
             match inner.library.seed_preview_blocking(PreviewSeed {
                 photo_id: context.photo.id,
                 state: PreviewState::Ready,
-                expected_candidate: inspected.expected_candidate,
-                expected_source_revision: inspected.expected_revision,
+                source: inspected.source,
+                expected_source_revision: inspected.revision,
                 width: Some(ready.width),
                 height: Some(ready.height),
                 cache_revision: Some(ready.cache_key.clone()),
-                actual_source: Some(inspected.actual_source),
-                actual_source_revision: Some(inspected.actual_revision),
             })? {
                 PreviewSeedResult::Applied => Ok(PreviewRequestResult::Current(ready)),
                 PreviewSeedResult::StaleIgnored => Ok(PreviewRequestResult::StaleIgnored),
@@ -997,13 +964,11 @@ fn process_job(
                     let _ = inner.library.seed_preview_blocking(PreviewSeed {
                         photo_id: context.photo.id,
                         state: PreviewState::Failed,
-                        expected_candidate: inspected.expected_candidate,
-                        expected_source_revision: inspected.expected_revision,
+                        source: inspected.source,
+                        expected_source_revision: inspected.revision,
                         width: None,
                         height: None,
                         cache_revision: None,
-                        actual_source: None,
-                        actual_source_revision: None,
                     });
                 }
             }
@@ -1023,8 +988,8 @@ fn ready_result(ready: &CachedDerivative, target: DerivativeTarget) -> PreviewRe
         cache_key: ready.cache_key.clone(),
         target,
         source: match ready.source {
-            crate::cache::DerivativeSource::MatchingJpeg => PreviewCandidate::MatchingJpeg,
-            crate::cache::DerivativeSource::EmbeddedRawJpeg => PreviewCandidate::EmbeddedRawJpeg,
+            crate::cache::DerivativeSource::MatchingJpeg => PreviewSource::JpegOriginal,
+            crate::cache::DerivativeSource::EmbeddedRawJpeg => PreviewSource::RawEmbeddedJpeg,
         },
         source_size: ready.source_size,
         source_mtime_ms: ready.source_mtime_ms,
@@ -1075,29 +1040,24 @@ fn map_preview_error(error: crate::PreviewError) -> PreviewServiceError {
 
 struct PreviewContext {
     photo: PhotoRecord,
-    matching: Option<(OriginalRecord, OriginalCapability)>,
-    raw: Option<(OriginalRecord, OriginalCapability)>,
+    original: Option<(OriginalRecord, OriginalCapability)>,
 }
 
 struct InspectedSource {
-    expected_candidate: PreviewCandidate,
-    expected_revision: String,
-    actual_source: PreviewCandidate,
-    actual_revision: String,
+    source: PreviewSource,
+    revision: String,
     actual: OriginalRecord,
     preview: crate::NativePreview,
 }
 
 struct UnavailableSource {
-    expected_candidate: PreviewCandidate,
-    expected_revision: String,
+    source: PreviewSource,
+    revision: String,
 }
 
 struct InvalidSource {
-    expected_candidate: PreviewCandidate,
-    expected_revision: String,
-    actual_source: PreviewCandidate,
-    actual_revision: String,
+    source: PreviewSource,
+    revision: String,
     actual: OriginalRecord,
     jpeg: Vec<u8>,
 }
@@ -1137,142 +1097,100 @@ impl PreviewContext {
         photo: PhotoRecord,
         originals: Vec<OriginalRecord>,
     ) -> Result<Option<Self>, PreviewServiceError> {
-        let lookup = |id: Option<String>| -> Result<
-            Option<(OriginalRecord, OriginalCapability)>,
-            PreviewServiceError,
-        > {
-            let Some(id) = id else { return Ok(None) };
-            let Some(original) = originals.iter().find(|item| item.id == id).cloned() else {
-                return Ok(None);
-            };
-            if !original.available || original.error_category.is_some() {
-                return Ok(None);
+        let original = originals
+            .iter()
+            .find(|item| item.id == photo.original_id)
+            .cloned();
+        let original = match original {
+            Some(original) => {
+                if !original.available || original.error_category.is_some() {
+                    None
+                } else {
+                    Some((
+                        original.clone(),
+                        library.original(original.relative_path.clone())?,
+                    ))
+                }
             }
-            Ok(Some((
-                original.clone(),
-                library.original(original.relative_path.clone())?,
-            )))
+            None => None,
         };
-        Ok(Some(Self {
-            matching: lookup(photo.jpeg_original_id.clone())?,
-            raw: lookup(photo.raw_original_id.clone())?,
-            photo,
-        }))
+        Ok(Some(Self { original, photo }))
     }
 
     fn inspect(&self) -> Result<Option<Inspection>, PreviewServiceError> {
-        if let Some((jpeg, capability)) = &self.matching {
-            match inspect_matching_jpeg(capability) {
+        let Some((original, capability)) = &self.original else {
+            return Ok(None);
+        };
+        match original.kind {
+            crate::OriginalKind::Jpeg => match inspect_matching_jpeg(capability) {
                 Ok(preview) => {
-                    self.verify_current(jpeg, capability)?;
-                    let revision = revision_of(jpeg)?;
-                    return Ok(Some(Inspection::Source(InspectedSource {
-                        expected_candidate: PreviewCandidate::MatchingJpeg,
-                        expected_revision: revision.clone(),
-                        actual_source: PreviewCandidate::MatchingJpeg,
-                        actual_revision: revision,
-                        actual: jpeg.clone(),
+                    self.verify_current(original, capability)?;
+                    let revision = revision_of(original)?;
+                    Ok(Some(Inspection::Source(InspectedSource {
+                        source: PreviewSource::JpegOriginal,
+                        revision,
+                        actual: original.clone(),
                         preview,
-                    })));
+                    })))
                 }
                 Err(crate::PreviewError::Native(
                     crate::NativePreviewError::Malformed
                     | crate::NativePreviewError::Unsupported
                     | crate::NativePreviewError::NoUsablePreview,
                 )) => {
-                    let revision = revision_of(jpeg)?;
-                    if self.raw.is_none() {
-                        let checked = capability
-                            .read_whole(128 * 1024 * 1024)
-                            .map_err(map_confinement_error)?;
-                        if checked.facts.size != jpeg.facts.size
-                            || checked.facts.mtime_ms != jpeg.facts.mtime_ms
-                        {
-                            return Err(PreviewServiceError::Changed);
-                        }
-                        return Ok(Some(Inspection::InvalidSource(InvalidSource {
-                            expected_candidate: PreviewCandidate::MatchingJpeg,
-                            expected_revision: revision.clone(),
-                            actual_source: PreviewCandidate::MatchingJpeg,
-                            actual_revision: revision,
-                            actual: jpeg.clone(),
-                            jpeg: checked.bytes,
+                    let revision = revision_of(original)?;
+                    let checked = capability
+                        .read_whole(128 * 1024 * 1024)
+                        .map_err(map_confinement_error)?;
+                    if checked.facts.size != original.facts.size
+                        || checked.facts.mtime_ms != original.facts.mtime_ms
+                    {
+                        return Err(PreviewServiceError::Changed);
+                    }
+                    Ok(Some(Inspection::InvalidSource(InvalidSource {
+                        source: PreviewSource::JpegOriginal,
+                        revision,
+                        actual: original.clone(),
+                        jpeg: checked.bytes,
+                    })))
+                }
+                Err(error) => Err(map_preview_error(error)),
+            },
+            crate::OriginalKind::Raw => {
+                let preview = match extract_embedded_jpeg(capability) {
+                    Ok(preview) => preview,
+                    Err(crate::PreviewError::Native(
+                        crate::NativePreviewError::Malformed
+                        | crate::NativePreviewError::Unsupported
+                        | crate::NativePreviewError::NoUsablePreview,
+                    )) => {
+                        self.verify_current(original, capability)?;
+                        return Ok(Some(Inspection::Unavailable(UnavailableSource {
+                            source: PreviewSource::RawEmbeddedJpeg,
+                            revision: revision_of(original)?,
                         })));
                     }
-                    self.verify_current(jpeg, capability)?;
-                }
-                Err(error) => return Err(map_preview_error(error)),
+                    Err(error) => return Err(map_preview_error(error)),
+                };
+                self.verify_current(original, capability)?;
+                let revision = revision_of(original)?;
+                Ok(Some(Inspection::Source(InspectedSource {
+                    source: PreviewSource::RawEmbeddedJpeg,
+                    revision,
+                    actual: original.clone(),
+                    preview,
+                })))
             }
         }
-        let Some((raw, capability)) = &self.raw else {
-            if let Some((jpeg, capability)) = &self.matching {
-                self.verify_current(jpeg, capability)?;
-                return Ok(Some(Inspection::Unavailable(UnavailableSource {
-                    expected_candidate: PreviewCandidate::MatchingJpeg,
-                    expected_revision: revision_of(jpeg)?,
-                })));
-            }
-            return Ok(None);
-        };
-        let preview = match extract_embedded_jpeg(capability) {
-            Ok(preview) => preview,
-            Err(crate::PreviewError::Native(
-                crate::NativePreviewError::Malformed
-                | crate::NativePreviewError::Unsupported
-                | crate::NativePreviewError::NoUsablePreview,
-            )) => {
-                self.verify_current(raw, capability)?;
-                let (expected_candidate, expected_revision) = self.matching.as_ref().map_or_else(
-                    || {
-                        Ok::<_, PreviewServiceError>((
-                            PreviewCandidate::EmbeddedRawJpeg,
-                            revision_of(raw)?,
-                        ))
-                    },
-                    |(jpeg, jpeg_capability)| {
-                        self.verify_current(jpeg, jpeg_capability)?;
-                        Ok((PreviewCandidate::MatchingJpeg, revision_of(jpeg)?))
-                    },
-                )?;
-                return Ok(Some(Inspection::Unavailable(UnavailableSource {
-                    expected_candidate,
-                    expected_revision,
-                })));
-            }
-            Err(error) => return Err(map_preview_error(error)),
-        };
-        self.verify_current(raw, capability)?;
-        let revision = revision_of(raw)?;
-        Ok(Some(Inspection::Source(InspectedSource {
-            expected_candidate: self
-                .matching
-                .as_ref()
-                .map_or(PreviewCandidate::EmbeddedRawJpeg, |_| {
-                    PreviewCandidate::MatchingJpeg
-                }),
-            expected_revision: self
-                .matching
-                .as_ref()
-                .map_or(Ok(revision.clone()), |(jpeg, _)| revision_of(jpeg))?,
-            actual_source: PreviewCandidate::EmbeddedRawJpeg,
-            actual_revision: revision,
-            actual: raw.clone(),
-            preview,
-        })))
     }
 
     fn durable_unavailable_current(&self) -> Result<bool, PreviewServiceError> {
         if self.photo.preview_state != PreviewState::Unavailable {
             return Ok(false);
         }
-        let Some((candidate, original, capability)) = self.current_candidate() else {
+        let Some((_source, original, capability)) = self.current_source() else {
             return Ok(true);
         };
-        if self.photo.preview_candidate != Some(candidate)
-            || self.photo.preview_source != Some(candidate)
-        {
-            return Ok(false);
-        }
         let Some(stored_revision) = self.photo.preview_source_revision.as_deref() else {
             return Ok(false);
         };
@@ -1289,17 +1207,12 @@ impl PreviewContext {
             == stored_revision)
     }
 
-    fn current_candidate(
+    fn current_source(
         &self,
-    ) -> Option<(PreviewCandidate, &OriginalRecord, &OriginalCapability)> {
-        self.matching
-            .as_ref()
-            .map(|(original, capability)| (PreviewCandidate::MatchingJpeg, original, capability))
-            .or_else(|| {
-                self.raw.as_ref().map(|(original, capability)| {
-                    (PreviewCandidate::EmbeddedRawJpeg, original, capability)
-                })
-            })
+    ) -> Option<(PreviewSource, &OriginalRecord, &OriginalCapability)> {
+        self.original.as_ref().map(|(original, capability)| {
+            (original.kind.preview_source(), original, capability)
+        })
     }
 
     fn verify_current(
@@ -1314,22 +1227,12 @@ impl PreviewContext {
         Ok(())
     }
 
-    fn verify_source(&self, source: PreviewCandidate) -> Result<(), PreviewServiceError> {
-        match source {
-            PreviewCandidate::MatchingJpeg => {
-                if let Some((original, capability)) = &self.matching {
-                    self.verify_current(original, capability)
-                } else {
-                    Err(PreviewServiceError::Changed)
-                }
+    fn verify_source(&self, source: PreviewSource) -> Result<(), PreviewServiceError> {
+        match self.original.as_ref() {
+            Some((original, capability)) if original.kind.preview_source() == source => {
+                self.verify_current(original, capability)
             }
-            PreviewCandidate::EmbeddedRawJpeg => {
-                if let Some((original, capability)) = &self.raw {
-                    self.verify_current(original, capability)
-                } else {
-                    Err(PreviewServiceError::Changed)
-                }
-            }
+            _ => Err(PreviewServiceError::Changed),
         }
     }
 }
@@ -1492,7 +1395,6 @@ mod tests {
         fs::remove_file(original).unwrap();
         let mut pending_facts = facts.clone();
         pending_facts.photo.preview_state = PreviewState::InspectionPending;
-        pending_facts.photo.preview_source = None;
         pending_facts.photo.cache_revision = None;
 
         let review = runtime
@@ -1628,7 +1530,6 @@ mod tests {
                 .unwrap();
             (
                 photo.preview_state,
-                photo.preview_source,
                 photo.preview_width,
                 photo.preview_height,
                 photo.cache_revision,

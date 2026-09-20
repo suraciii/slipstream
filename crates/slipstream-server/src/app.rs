@@ -85,20 +85,17 @@ fn published_photo<'a>(
 }
 
 /// The authoritative Capture Time order key for one Photo: the RAW
-/// Original's key when present, otherwise the paired JPEG's, matching the
-/// persisted deterministic order's COALESCE.
+/// The Photo's single Original's Capture Time order key in the Published
+/// Library, matching the persisted deterministic order.
 fn published_capture_key<'a>(
     published: &'a Published,
     photo: &slipstream_core::PhotoRecord,
 ) -> Option<&'a str> {
-    let original_key = |id: &Option<String>| -> Option<&'a str> {
-        published
-            .originals_by_id
-            .get(id.as_deref()?)
-            .and_then(|position| published.snapshot.originals.get(*position))
-            .and_then(|original| original.capture.order_key.as_deref())
-    };
-    original_key(&photo.raw_original_id).or_else(|| original_key(&photo.jpeg_original_id))
+    published
+        .originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| published.snapshot.originals.get(*position))
+        .and_then(|original| original.capture.order_key.as_deref())
 }
 
 /// The authoritative Capture Time order key for one Photo ID in the
@@ -303,6 +300,8 @@ pub(crate) struct SharedLibrary {
     pub(crate) snapshot: RwLock<Option<Published>>,
     pub(crate) published: AtomicBool,
     pub(crate) failed: AtomicBool,
+    pub(crate) fingerprint_counts:
+        Mutex<Option<(std::time::Instant, slipstream_core::persistence::FingerprintCounts)>>,
     pub(crate) awaiting_scan: AtomicUsize,
     pub(crate) runs_started: AtomicU64,
     pub(crate) runs_completed: AtomicU64,
@@ -367,10 +366,7 @@ impl SharedLibrary {
             let Some(photo) = published.snapshot.photos.get(position) else {
                 return false;
             };
-            [
-                photo.jpeg_original_id.as_ref(),
-                photo.raw_original_id.as_ref(),
-            ]
+            [Some(&photo.original_id)]
             .into_iter()
             .flatten()
             .filter_map(|id| published.originals_by_id.get(id))
@@ -543,6 +539,7 @@ impl Application {
             snapshot: RwLock::new(published_initial.then(|| Published::new(persisted))),
             published: AtomicBool::new(published_initial),
             failed: AtomicBool::new(false),
+            fingerprint_counts: Mutex::new(None),
             awaiting_scan: AtomicUsize::new(0),
             runs_started: AtomicU64::new(0),
             runs_completed: AtomicU64::new(0),
@@ -614,10 +611,7 @@ impl Application {
                 .get(position)
                 .ok_or(ServerError::PhotoNotFound)?;
             let mut candidates = Vec::new();
-            for id in [
-                photo.raw_original_id.as_ref(),
-                photo.jpeg_original_id.as_ref(),
-            ]
+            for id in [Some(&photo.original_id)]
             .into_iter()
             .flatten()
             {
@@ -666,12 +660,25 @@ impl Application {
     pub(crate) fn scan_status(&self) -> ScanStatusWire {
         let progress = self.library.scan_progress();
         let publication = self.current_publication();
+        let last_recovery = self.library.scan_outcome().map(|outcome| ScanRecoveryWire {
+            relocated_photos: outcome.relocated_originals,
+            fingerprinted_originals: outcome.fingerprinted_originals,
+            unavailable_photos: outcome.unavailable_photos,
+        });
+        let fingerprints = self
+            .cached_fingerprint_counts()
+            .map(|counts| FingerprintProgressWire {
+                enrolled: counts.enrolled,
+                pending: counts.pending,
+            });
         match progress.phase {
             ScanPhase::Discovering => ScanStatusWire {
                 state: "discovering",
                 publication: publication.clone(),
                 completed: Some(usize::try_from(progress.discovered).unwrap_or(usize::MAX)),
                 total: None,
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Inspecting => ScanStatusWire {
                 state: "inspecting",
@@ -680,12 +687,26 @@ impl Application {
                 total: progress
                     .inspect_total
                     .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                last_recovery,
+                fingerprints,
+            },
+            ScanPhase::Recovering => ScanStatusWire {
+                state: "recovering",
+                publication: publication.clone(),
+                completed: Some(usize::try_from(progress.hashed).unwrap_or(usize::MAX)),
+                total: progress
+                    .hash_total
+                    .map(|total| usize::try_from(total).unwrap_or(usize::MAX)),
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Applying => ScanStatusWire {
                 state: "applying",
                 publication: publication.clone(),
                 completed: None,
                 total: None,
+                last_recovery,
+                fingerprints,
             },
             ScanPhase::Idle => {
                 if self.shared.awaiting_scan.load(Ordering::Relaxed) > 0 {
@@ -695,6 +716,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 } else if self.shared.failed.load(Ordering::Relaxed) {
                     ScanStatusWire {
@@ -702,6 +725,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 } else if self.shared.published.load(Ordering::Relaxed) {
                     let photo_count = self.published_photo_count();
@@ -710,6 +735,8 @@ impl Application {
                         publication: publication.clone(),
                         completed: Some(photo_count),
                         total: Some(photo_count),
+                        last_recovery,
+                        fingerprints,
                     }
                 } else {
                     ScanStatusWire {
@@ -717,10 +744,29 @@ impl Application {
                         publication,
                         completed: None,
                         total: None,
+                        last_recovery,
+                        fingerprints,
                     }
                 }
             }
         }
+    }
+
+    /// Fingerprint enrollment counters, refreshed at most once every five
+    /// seconds so status polling never turns into per-request SQLite work.
+    fn cached_fingerprint_counts(&self) -> Option<slipstream_core::persistence::FingerprintCounts> {
+        {
+            let cache = self.shared.fingerprint_counts.lock().unwrap();
+            if cache
+                .as_ref()
+                .is_some_and(|(at, _)| at.elapsed() < std::time::Duration::from_secs(5))
+            {
+                return cache.map(|(_, counts)| counts);
+            }
+        }
+        let counts = self.library.fingerprint_counts().ok()?;
+        *self.shared.fingerprint_counts.lock().unwrap() = Some((std::time::Instant::now(), counts));
+        Some(counts)
     }
 
     pub(crate) fn current_publication(&self) -> Option<String> {
@@ -1035,10 +1081,7 @@ impl Application {
                 .filter_map(|id| source.photos_by_id.get(id).copied())
                 .filter_map(|position| source.snapshot.photos.get(position))
                 .map(|photo| {
-                    let originals = [
-                        photo.jpeg_original_id.as_ref(),
-                        photo.raw_original_id.as_ref(),
-                    ]
+                    let originals = [Some(&photo.original_id)]
                     .into_iter()
                     .flatten()
                     .filter_map(|id| source.originals_by_id.get(id))
@@ -1334,10 +1377,7 @@ impl Application {
         let published = guard.as_ref()?;
         let position = published.photos_by_id.get(photo_id).copied()?;
         let photo = published.snapshot.photos.get(position)?;
-        let originals = [
-            photo.jpeg_original_id.as_ref(),
-            photo.raw_original_id.as_ref(),
-        ]
+        let originals = [Some(&photo.original_id)]
         .into_iter()
         .flatten()
         .filter_map(|id| published.originals_by_id.get(id))
@@ -1399,7 +1439,6 @@ impl Application {
                         self.shared
                             .patch_photo_if_source_matches(facts, |photo| {
                                 photo.preview_state = PreviewState::Ready;
-                                photo.preview_source = Some(ready.source);
                                 photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
@@ -1410,7 +1449,6 @@ impl Application {
                         self.shared
                             .patch_photo(photo_id, |photo| {
                                 photo.preview_state = PreviewState::Ready;
-                                photo.preview_source = Some(ready.source);
                                 photo.preview_source_revision = source_revision.clone();
                                 photo.preview_width = Some(ready.width);
                                 photo.preview_height = Some(ready.height);
@@ -1478,7 +1516,6 @@ impl Application {
         self.shared
             .patch_photo(photo_id, |photo| {
                 photo.preview_state = state;
-                photo.preview_source = None;
                 photo.preview_width = None;
                 photo.preview_height = None;
                 photo.cache_revision = None;
@@ -1494,7 +1531,6 @@ impl Application {
         self.shared
             .patch_photo_if_source_matches(facts, |photo| {
                 photo.preview_state = state;
-                photo.preview_source = None;
                 photo.preview_width = None;
                 photo.preview_height = None;
                 photo.cache_revision = None;
@@ -1518,8 +1554,6 @@ impl Application {
         self.shared
             .patch_photo_if_source_matches(facts, |photo| {
                 photo.preview_state = persisted.photo.preview_state;
-                photo.preview_candidate = persisted.photo.preview_candidate;
-                photo.preview_source = persisted.photo.preview_source;
                 photo.preview_source_revision = persisted.photo.preview_source_revision.clone();
                 photo.preview_width = persisted.photo.preview_width;
                 photo.preview_height = persisted.photo.preview_height;
@@ -1598,13 +1632,11 @@ impl Application {
     }
 }
 
-fn preview_source_revision(facts: &PreviewFacts, source: PreviewCandidate) -> Option<String> {
-    let original_id = match source {
-        PreviewCandidate::MatchingJpeg => facts.photo.jpeg_original_id.as_ref(),
-        PreviewCandidate::EmbeddedRawJpeg => facts.photo.raw_original_id.as_ref(),
-    }?;
+fn preview_source_revision(facts: &PreviewFacts, _source: PreviewSource) -> Option<String> {
     let original = facts.originals.iter().find(|original| {
-        &original.id == original_id && original.available && original.error_category.is_none()
+        original.id == facts.photo.original_id
+            && original.available
+            && original.error_category.is_none()
     })?;
     source_revision(
         original.relative_path.as_str(),

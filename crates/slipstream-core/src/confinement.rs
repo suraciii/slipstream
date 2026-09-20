@@ -27,6 +27,10 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 const MAXIMUM_RANGE_BYTES: usize = 16 * 1024 * 1024;
 const MAXIMUM_WHOLE_BYTES: u64 = 128 * 1024 * 1024;
+/// Largest Original File the streaming fingerprint reader accepts. Bounded
+/// memory use is independent of this limit: hashing streams fixed-size chunks.
+const MAXIMUM_DIGEST_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const DIGEST_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -341,6 +345,60 @@ impl OriginalCapability {
         })
     }
 
+    /// Streams one complete, revision-checked SHA-256 digest of the Original
+    /// File with bounded memory. The digest is computed between two stats of
+    /// the same descriptor; a file that changes while being read yields
+    /// `Changed` instead of an unusable digest.
+    pub fn digest_file(&self) -> Result<RevisionCheckedDigest, ConfinementError> {
+        use sha2::{Digest as _, Sha256};
+        let file = self.root.open_confined(&self.path, false)?;
+        let before = stat_regular(file.as_raw_fd())?;
+        let size = validated_size(&before)?;
+        if size > MAXIMUM_DIGEST_BYTES {
+            return Err(ConfinementError::ResourceLimit(
+                "Original File exceeds fingerprint read limit",
+            ));
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; DIGEST_CHUNK_BYTES];
+        let mut consumed = 0_u64;
+        while consumed < size {
+            let length = buffer.len().min(usize::try_from(size - consumed).map_err(|_| {
+                ConfinementError::ResourceLimit("Original File exceeds fingerprint read limit")
+            })?);
+            let chunk = &mut buffer[..length];
+            let count = match sys::pread(file.as_raw_fd(), chunk, consumed) {
+                Ok(count) => count,
+                Err(_) => {
+                    return Err(read_failure_after_revision_check(
+                        file.as_raw_fd(),
+                        &before,
+                        "Original File could not be read completely",
+                    ));
+                }
+            };
+            if count == 0 {
+                return Err(read_failure_after_revision_check(
+                    file.as_raw_fd(),
+                    &before,
+                    "Original File could not be read completely",
+                ));
+            }
+            hasher.update(&chunk[..count]);
+            consumed += u64::try_from(count).map_err(|_| ConfinementError::Io(
+                "Original File could not be read completely",
+            ))?;
+        }
+        let after = stat_regular(file.as_raw_fd())?;
+        if !same_revision(&before, &after) {
+            return Err(ConfinementError::Changed);
+        }
+        Ok(RevisionCheckedDigest {
+            digest: format!("{:x}", hasher.finalize()),
+            facts: facts_from_stat(&before)?,
+        })
+    }
+
     pub(crate) fn open_revision_checked(&self) -> Result<OpenedOriginal, ConfinementError> {
         let file = self.root.open_confined(&self.path, false)?;
         let revision = stat_regular(file.as_raw_fd())?;
@@ -402,6 +460,14 @@ impl OpenedOriginal {
 #[derive(Debug)]
 pub struct RevisionCheckedBytes {
     pub bytes: Vec<u8>,
+    pub facts: OriginalFacts,
+}
+
+/// A complete-content SHA-256 digest together with the file facts observed
+/// while hashing. Equal digests prove equal bytes at the hashed revision.
+#[derive(Debug, PartialEq)]
+pub struct RevisionCheckedDigest {
+    pub digest: String,
     pub facts: OriginalFacts,
 }
 

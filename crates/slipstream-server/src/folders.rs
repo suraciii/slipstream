@@ -45,13 +45,8 @@ impl FolderIndex {
     ) -> Self {
         let mut direct_counts: HashMap<String, usize> = HashMap::new();
         for photo in photos {
-            let ordering_id = photo
-                .raw_original_id
-                .as_deref()
-                .or(photo.jpeg_original_id.as_deref());
-            let Some(ordering_id) = ordering_id else {
-                continue;
-            };
+            let ordering_id = photo.original_id.as_str();
+            let ordering_id: &str = ordering_id;
             let Some(&position) = originals_by_id.get(ordering_id) else {
                 continue;
             };
@@ -165,13 +160,8 @@ impl FolderIndex {
         };
         let mut ids = Vec::new();
         for photo in photos {
-            let ordering_id = photo
-                .raw_original_id
-                .as_deref()
-                .or(photo.jpeg_original_id.as_deref());
-            let Some(ordering_id) = ordering_id else {
-                continue;
-            };
+            let ordering_id = photo.original_id.as_str();
+            let ordering_id: &str = ordering_id;
             let Some(&position) = originals_by_id.get(ordering_id) else {
                 continue;
             };

@@ -20,6 +20,30 @@ pub struct ScanStatusWire {
     pub completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// The committed recovery result of the most recent completed scan, once
+    /// one has completed since the server started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recovery: Option<ScanRecoveryWire>,
+    /// Truthful background fingerprint enrollment counters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprints: Option<FingerprintProgressWire>,
+}
+
+/// Recovery facts from the most recent committed scan.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRecoveryWire {
+    pub relocated_photos: usize,
+    pub fingerprinted_originals: usize,
+    pub unavailable_photos: usize,
+}
+
+/// Background fingerprint enrollment counters.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintProgressWire {
+    pub enrolled: usize,
+    pub pending: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -209,8 +233,7 @@ pub struct FolderAlbumMutationResponse {
 pub struct PhotoSummary {
     pub id: String,
     pub available: bool,
-    pub ambiguous: bool,
-    pub originals: Vec<OriginalWire>,
+    pub original: OriginalWire,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
     pub selection_state: &'static str,
@@ -279,32 +302,30 @@ pub(crate) fn photo_summary_indexed_with_url(
     preview_url: Option<String>,
     thumbnail_url: Option<String>,
 ) -> PhotoSummary {
-    let original = |id: &Option<String>, kind: &'static str| {
-        id.as_ref().and_then(|id| {
-            originals_by_id
-                .get(id)
-                .and_then(|position| originals.get(*position))
-                .map(|original| OriginalWire {
-                    kind,
-                    available: original.available,
-                })
-        })
+    let single = originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| originals.get(*position));
+    let original = single.map(|original| OriginalWire {
+        kind: match original.kind {
+            slipstream_core::OriginalKind::Raw => "raw",
+            slipstream_core::OriginalKind::Jpeg => "jpeg",
+        },
+        available: original.available,
+    });
+    let Some(original) = original else {
+        // A Photo without its Original record cannot be summarized; callers
+        // resolve unknown Photos before reaching this point.
+        unreachable!("summarized Photo has no Original record")
     };
     let original_filename = ordering_original_filename(photo, originals, originals_by_id);
-    let originals = [
-        original(&photo.raw_original_id, "raw"),
-        original(&photo.jpeg_original_id, "jpeg"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let source = photo.preview_source.map(preview_candidate);
+    let source = single
+        .filter(|original| original.available && original.error_category.is_none())
+        .map(|original| preview_source(original.kind.preview_source()));
     let state = preview_state(photo.preview_state);
     PhotoSummary {
         id: photo.id.clone(),
         available: photo.available,
-        ambiguous: photo.ambiguous,
-        originals,
+        original,
         original_filename,
         selection_state: selection_state(photo.selection_state),
         rating: photo.rating,
@@ -333,12 +354,10 @@ fn ordering_original_filename(
     originals: &[slipstream_core::OriginalRecord],
     originals_by_id: &std::collections::HashMap<String, usize>,
 ) -> Option<String> {
-    [&photo.raw_original_id, &photo.jpeg_original_id]
-        .into_iter()
-        .flatten()
-        .filter_map(|id| originals_by_id.get(id))
-        .filter_map(|position| originals.get(*position))
-        .find_map(|original| {
+    originals_by_id
+        .get(&photo.original_id)
+        .and_then(|position| originals.get(*position))
+        .and_then(|original| {
             let path = original.relative_path.as_str();
             let filename = path.rsplit('/').next().unwrap_or(path);
             (!filename.is_empty()).then(|| filename.to_owned())
@@ -371,11 +390,8 @@ pub(crate) fn preview_state(state: PreviewState) -> &'static str {
     }
 }
 
-pub(crate) fn preview_candidate(candidate: PreviewCandidate) -> &'static str {
-    match candidate {
-        PreviewCandidate::MatchingJpeg => "matching-jpeg",
-        PreviewCandidate::EmbeddedRawJpeg => "embedded-raw-jpeg",
-    }
+pub(crate) fn preview_source(source: PreviewSource) -> &'static str {
+    source.wire_name()
 }
 
 pub(crate) fn derivative_target_name(target: DerivativeTarget) -> &'static str {
@@ -413,7 +429,7 @@ impl PreviewResponse {
     ) -> Self {
         Self {
             state: "ready",
-            source: Some(preview_candidate(ready.source)),
+            source: Some(ready.source.wire_name()),
             stale: Some(stale),
             width: Some(ready.width),
             height: Some(ready.height),
