@@ -49,9 +49,7 @@ pub use domain::{
     PreviewSeedResult, PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
     SelectionState,
 };
-pub use identity::{
-    InvalidModificationTime, original_id, source_revision, standalone_photo_id,
-};
+pub use identity::{InvalidModificationTime, original_id, source_revision, standalone_photo_id};
 pub use library::{
     Library, LibraryConfig, LibraryError, ScanOutcome, ScanPhase, ScanProgress, expand_library,
 };

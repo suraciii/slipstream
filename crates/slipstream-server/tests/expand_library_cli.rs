@@ -54,7 +54,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
     let database = state.join("library.sqlite");
     let connection = Connection::open(&database).unwrap();
     connection
-        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v5.sql"))
+        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
         .unwrap();
     connection
         .execute(
@@ -70,7 +70,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO photos(id,raw_original_id,ambiguous,available,preview_state,sort_path,selection_state,rating) VALUES('legacy-photo','legacy-original',0,1,'inspection-pending','a.ARW','selected',4)",
+            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('legacy-photo','legacy-original',1,'inspection-pending','a.ARW','selected',4)",
             [],
         )
         .unwrap();
@@ -100,7 +100,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        5
+        6
     );
     assert_eq!(
         connection

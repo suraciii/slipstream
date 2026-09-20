@@ -88,7 +88,6 @@ struct IdentityVector {
     historical_manifest_identity: String,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
