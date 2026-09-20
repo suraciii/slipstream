@@ -1,5 +1,9 @@
 import "./library-browser.css";
 
+import {
+  addressFor,
+  type NavigationGridRestoration,
+} from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
 
@@ -121,6 +125,13 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
   | Readonly<{ kind: "filter-change"; selection: ViewSelectionFilter }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
+  /// Resolves an Album's saved position under the existing saved-position
+  /// rules and opens Photo View. Its destination requires resolution, so it
+  /// stays a button rather than a destination anchor.
+  | Readonly<{ kind: "album-resume"; albumId: string }>
+  /// The one explicit action an explained Grid state offers, such as opening
+  /// the current Folder after its publication changed.
+  | Readonly<{ kind: "explained-action" }>
   | Readonly<{ kind: "file-location-retry"; key: string }>
   | Readonly<{ kind: "folder-toggle"; location: string; expanded: boolean }>
   | Readonly<{ kind: "folder-page"; location: string; direction: -1 | 1 }>
@@ -466,6 +477,13 @@ export interface LibraryBrowserView {
   setSourceTitle(name: string): void;
   setGridStatus(text: string): void;
   setGridEmpty(text?: string, libraryCheck?: boolean): void;
+  /// Presents an explained state that is not a source Grid: the Photographer
+  /// is told why the requested destination is not shown and given the one
+  /// explicit action that establishes it. It never claims a source loaded.
+  setGridExplanation(
+    message: string,
+    action?: Readonly<{ label: string }>,
+  ): void;
   renderSources(model: SourceListViewModel): void;
   renderFolderAlbum(model: FolderAlbumViewModel): void;
   renderSort(model: GridSortViewModel): void;
@@ -499,6 +517,25 @@ export interface LibraryBrowserView {
   ): void;
   gridVisible(): boolean;
   scrollToGridIndex(index: number): void;
+  /// The Grid's current restoration facts: the top visible Photo, its index,
+  /// its CSS-pixel offset inside its row, and what the Grid keyboard owns.
+  /// Undefined while the Grid presents no Photo.
+  captureGridRestoration(): NavigationGridRestoration | undefined;
+  /// Restores one captured Grid anchor after the current size step has
+  /// determined the column count, then returns cell focus to `focusIndex`, or
+  /// focuses the Grid when no cell is named. The offset is applied once, so the
+  /// restore never fights later user scrolling.
+  restoreGridAnchor(
+    model: Readonly<{
+      index: number;
+      offset: number;
+      focusIndex?: number;
+    }>,
+  ): void;
+  /// Closes the transient surfaces a destination change supersedes: the
+  /// supporting sheets, the Sources drawer, the Album form, and the recovery
+  /// review. It adds no history entry.
+  closeTransientSurfaces(): void;
   /// Moves the Grid keyboard to one Photo. Used when Undo restores a Grid
   /// decision and must return the Photographer to the affected Photo.
   focusGridIndex(index: number): void;
@@ -1052,6 +1089,9 @@ export function createLibraryBrowserView(
   let membershipManageOpen = false;
   let membershipFocusAlbumId: string | undefined;
   let folderAlbumSelection = "";
+  /// True while the empty-state action belongs to an explained destination
+  /// state rather than to an empty source's Library check.
+  let gridEmptyExplanation = false;
   let batchAlbumSelection = "";
   // The Grid's multi-selection presentation: the page model owns which Photos
   // are multi-selected, and these mirror the last rendered model so a cell
@@ -1063,6 +1103,11 @@ export function createLibraryBrowserView(
   let gridMultiEnabled = false;
   let gridMultiResult: GridBatchResultViewModel | undefined;
   let gridMultiSelected: (index: number) => boolean = () => false;
+  /// The Grid's Photo facts for the current render. Restoration asks this for
+  /// the stable identity of the top visible Photo, so the view never keeps
+  /// Photo facts of its own.
+  let gridPhotoLookup: (index: number) => GridPhotoViewModel | undefined = () =>
+    undefined;
   /// Presents the multi-selection the page model has just emptied, or one
   /// whose bound the page model reports. A hidden bar clears the markers too,
   /// so a cell never keeps a marker the bar no longer names, and a hidden Grid
@@ -1664,26 +1709,65 @@ export function createLibraryBrowserView(
     if (pointer?.ratingPending || ratingWheelOpen) event.preventDefault();
   };
 
+  /// The address one source destination resolves to. A source selection
+  /// always uses that source's default order and the All filter, so the
+  /// address is fully known before any request is made.
+  const sourceAddress = (source: SourceReference): string =>
+    addressFor(
+      source.kind === "library"
+        ? { source: "library", selection: "all" }
+        : source.kind === "album"
+          ? { source: "album", albumId: source.id, selection: "all" }
+          : { source: "folder", folderPath: source.location, selection: "all" },
+    );
+
+  /// Intercepts only an unmodified primary activation of a destination
+  /// anchor. A modified activation, a middle click, or a non-primary button
+  /// keeps its native new-tab, copy-link, and download behavior.
+  const interceptDestination = (
+    link: HTMLAnchorElement,
+    activate: () => void,
+  ) => {
+    link.addEventListener("click", (event) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        link.getAttribute("aria-disabled") === "true"
+      )
+        return;
+      event.preventDefault();
+      activate();
+    });
+  };
+
   const createSourceButton = (
     name: string,
     count: number,
     active: boolean,
-    saved = false,
     disableWhenEmpty = true,
+    href?: string,
   ) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `source-card${active ? " active" : ""}`;
-    if (active) button.setAttribute("aria-current", "true");
-    button.disabled = disableWhenEmpty && count === 0;
+    const element = (
+      href ? document.createElement("a") : document.createElement("button")
+    ) as HTMLAnchorElement;
+    if (href) element.href = href;
+    else element.type = "button";
+    element.className = `source-card${active ? " active" : ""}`;
+    if (active) element.setAttribute("aria-current", "true");
+    if (disableWhenEmpty && count === 0)
+      element.setAttribute("aria-disabled", "true");
     // The name may be visually truncated; the title keeps the full name
     // available on hover without changing the accessible name.
-    button.title = name;
-    button.innerHTML = "<strong></strong><span></span>";
-    required<HTMLElement>(button, "strong").textContent = name;
-    required<HTMLElement>(button, "span").textContent =
-      `${formatPhotoCount(count)}${saved ? " · Resume" : ""}`;
-    return button;
+    element.title = name;
+    element.innerHTML = "<strong></strong><span></span>";
+    required<HTMLElement>(element, "strong").textContent = name;
+    required<HTMLElement>(element, "span").textContent =
+      formatPhotoCount(count);
+    return element;
   };
 
   const createFolderPager = (
@@ -1746,10 +1830,14 @@ export function createLibraryBrowserView(
       folder.photoCount,
       folder.active,
       false,
-      false,
+      sourceAddress({
+        kind: "folder",
+        location: folder.location,
+        name: folder.name,
+      }),
     );
-    button.disabled = !folder.enabled;
-    button.addEventListener("click", () =>
+    if (!folder.enabled) button.setAttribute("aria-disabled", "true");
+    interceptDestination(button, () =>
       send({
         kind: "source-open",
         source: {
@@ -1907,6 +1995,20 @@ export function createLibraryBrowserView(
       openAlbumForm("delete", album.id, album.name),
     );
     tools.append(rename, remove);
+    // Resume resolves the saved position under the existing saved-position
+    // rules and opens Photo View, so its destination is not an address: it
+    // stays an explicit button beside the Album's Grid destination.
+    if (album.hasSavedPosition) {
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "album-tool album-resume";
+      resume.textContent = "Resume";
+      resume.setAttribute("aria-label", `Resume ${album.name}`);
+      resume.addEventListener("click", () =>
+        send({ kind: "album-resume", albumId: album.id }),
+      );
+      tools.append(resume);
+    }
     return tools;
   };
 
@@ -1928,10 +2030,10 @@ export function createLibraryBrowserView(
       model.libraryCount,
       model.libraryActive,
       false,
-      false,
+      sourceAddress({ kind: "library" }),
     );
     library.dataset.focusKey = "source:library";
-    library.addEventListener("click", () =>
+    interceptDestination(library, () =>
       send({ kind: "source-open", source: { kind: "library" } }),
     );
     sourceList.append(library);
@@ -1953,11 +2055,12 @@ export function createLibraryBrowserView(
       model.libraryCount,
       model.rootActive,
       false,
-      false,
+      sourceAddress({ kind: "folder", location: "", name: "Library Folder" }),
     );
     rootCard.dataset.focusKey = "source:folder:";
-    rootCard.disabled = !model.fileLocationsEnabled;
-    rootCard.addEventListener("click", () =>
+    if (!model.fileLocationsEnabled)
+      rootCard.setAttribute("aria-disabled", "true");
+    interceptDestination(rootCard, () =>
       send({
         kind: "source-open",
         source: { kind: "folder", location: "", name: "Library Folder" },
@@ -2008,11 +2111,11 @@ export function createLibraryBrowserView(
         album.name,
         album.photoCount,
         album.active,
-        album.hasSavedPosition,
         false,
+        sourceAddress({ kind: "album", id: album.id }),
       );
       button.dataset.focusKey = `source:album:${album.id}`;
-      button.addEventListener("click", () =>
+      interceptDestination(button, () =>
         send({ kind: "source-open", source: { kind: "album", id: album.id } }),
       );
       const row = document.createElement("div");
@@ -2650,7 +2753,9 @@ export function createLibraryBrowserView(
       `[data-photo-index="${index}"]`,
     );
     if (cell && !cell.disabled) {
-      if (active !== cell) cell.focus();
+      // preventScroll keeps a focus move from scrolling the Grid the restore
+      // has just positioned, so the restored geometry survives it.
+      if (active !== cell) cell.focus({ preventScroll: true });
       return;
     }
     // The bounded window that contains the cell is still loading. The Grid
@@ -2732,6 +2837,7 @@ export function createLibraryBrowserView(
     gridMultiEnabled = model.multi.enabled;
     gridMultiResult = model.multi.result;
     gridMultiSelected = model.multi.selected;
+    gridPhotoLookup = model.photoAt;
     if (!alive || gridView.hidden) return;
     renderBatch();
     const count = columns();
@@ -3471,8 +3577,15 @@ export function createLibraryBrowserView(
     if (items.length === 0) return;
     send({ kind: "recovery-apply", items });
   });
+  // The empty-state action is explained by the state that shows it: the
+  // Library check for an empty source, and the one explicit action an
+  // explained destination state offers.
   gridEmptyAction.addEventListener("click", () =>
-    send({ kind: "library-check" }),
+    send(
+      gridEmptyExplanation
+        ? { kind: "explained-action" }
+        : { kind: "library-check" },
+    ),
   );
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
@@ -3714,6 +3827,19 @@ export function createLibraryBrowserView(
       gridEmptyMessage.textContent = text ?? "";
       gridEmptyAction.hidden = !text || !libraryCheck;
       gridEmpty.hidden = !text;
+      gridEmptyExplanation = false;
+    },
+    setGridExplanation(message, action) {
+      if (!alive) return;
+      cancelGridRender();
+      clearGridCells();
+      clearFilmstripCells();
+      gridEmpty.hidden = false;
+      gridEmptyMessage.textContent = message;
+      gridEmptyAction.hidden = !action;
+      if (action) gridEmptyAction.textContent = action.label;
+      gridStatus.textContent = message;
+      gridEmptyExplanation = Boolean(action);
     },
     renderSources,
     renderFolderAlbum,
@@ -3862,6 +3988,7 @@ export function createLibraryBrowserView(
       gridEmpty.hidden = true;
       gridEmptyMessage.textContent = "";
       gridEmptyAction.hidden = true;
+      gridEmptyExplanation = false;
       currentPhotoId = undefined;
       photoSurface = {};
       gridKeyboardIndex = undefined;
@@ -3879,6 +4006,69 @@ export function createLibraryBrowserView(
     scrollToGridIndex(index) {
       if (alive)
         gridViewport.scrollTop = Math.floor(index / columns()) * rowPitch();
+    },
+    captureGridRestoration() {
+      if (!alive || gridView.hidden || gridTotal === 0) return undefined;
+      const count = columns();
+      const index = firstVisibleGridIndex(count);
+      const photo = gridPhotoLookup(index);
+      if (!photo) return undefined;
+      const offset = gridViewport.scrollTop % rowPitch();
+      const active = document.activeElement;
+      const holdsKeyboard =
+        active === gridViewport ||
+        (active instanceof HTMLElement && gridLayer.contains(active));
+      // The cell the keyboard owns, or the cell a pointer activation focused.
+      const activeCellIndex =
+        active instanceof HTMLElement && active.dataset.photoIndex !== undefined
+          ? Number(active.dataset.photoIndex)
+          : gridKeyboardIndex;
+      const focusedId =
+        activeCellIndex !== undefined &&
+        Number.isInteger(activeCellIndex) &&
+        activeCellIndex >= 0 &&
+        activeCellIndex < gridTotal
+          ? gridPhotoLookup(activeCellIndex)?.id
+          : undefined;
+      return {
+        anchor: { photoId: photo.id, indexHint: index, offset },
+        focus:
+          holdsKeyboard && focusedId
+            ? { kind: "photo", photoId: focusedId }
+            : { kind: "grid" },
+      };
+    },
+    restoreGridAnchor(model) {
+      if (!alive || gridView.hidden || gridTotal === 0) return;
+      const count = columns();
+      const target = Math.max(0, Math.min(gridTotal - 1, model.index));
+      gridViewport.scrollTop =
+        Math.floor(target / count) * rowPitch() + model.offset;
+      // The Grid itself owns focus when the restoration names no cell, and a
+      // cell that no longer exists leaves the Grid focused.
+      gridKeyboardIndex =
+        model.focusIndex === undefined
+          ? undefined
+          : Math.max(0, Math.min(gridTotal - 1, model.focusIndex));
+      scheduleGridRender();
+    },
+    closeTransientSurfaces() {
+      if (!alive) return;
+      resetGestures();
+      secondarySheetOpen = false;
+      syncSecondarySurface();
+      closeSources(false);
+      recoveryPanel.hidden = true;
+      // A destination change supersedes the Album form: its draft is discarded
+      // and focus returns to the initiating action.
+      if (albumForm) {
+        albumFocusRequest = {
+          kind: "return",
+          focusKey: albumForm.returnFocusKey,
+        };
+        albumForm = undefined;
+        if (sourceModel) renderSources(sourceModel);
+      }
     },
     focusGridIndex(index) {
       if (!alive) return;

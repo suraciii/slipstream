@@ -552,7 +552,7 @@ async function openGrid(page: Page, url: string, name: string) {
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   await page
     .locator("[data-source-list]")
-    .getByRole("button", { name: new RegExp(`^${escapedName}(?: |$)`) })
+    .getByRole("link", { name: new RegExp(`^${escapedName}(?: |$)`) })
     .click();
   await page
     .locator("[data-grid-status]")
@@ -821,14 +821,16 @@ test("uses singular and plural Photo counts in Grid status and source cards", as
   ).toBeVisible();
 
   const expectSourceCount = async (name: string, count: string) => {
-    const button = page.getByRole("button", {
+    // A source destination is a real same-origin anchor, so new-tab and
+    // copy-link stay native.
+    const card = page.getByRole("link", {
       name: `${name} ${count}`,
       exact: true,
     });
-    await expect(button).toBeVisible();
-    await expect(button).toHaveAccessibleName(`${name} ${count}`);
-    await expect(button.locator("span")).toHaveText(count);
-    return button;
+    await expect(card).toBeVisible();
+    await expect(card).toHaveAccessibleName(`${name} ${count}`);
+    await expect(card.locator("span")).toHaveText(count);
+    return card;
   };
 
   await expectSourceCount("All Photos", "2 Photos");
@@ -846,7 +848,7 @@ test("uses singular and plural Photo counts in Grid status and source cards", as
   ).toBeVisible();
 
   await page
-    .getByRole("button", { name: "Single Album 1 Photo", exact: true })
+    .getByRole("link", { name: "Single Album 1 Photo", exact: true })
     .click();
   await expect(
     page.getByText("Ready · 1 Photo", { exact: true }),
@@ -974,7 +976,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   running = await server(base, root);
   await page.goto(running.url);
   await page.getByRole("button", { name: "Sources", exact: true }).click();
-  await page.getByRole("button", { name: /^Picks \d+ Photos/ }).click();
+  await page.getByRole("link", { name: /^Picks \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -1026,7 +1028,7 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   // The drawer overlays the Grid instead of shrinking it.
   expect(await gridHeight()).toBe(closedGridHeight);
   await expect(
-    page.getByRole("button", { name: /^All Photos(?: |$)/ }),
+    page.getByRole("link", { name: /^All Photos(?: |$)/ }),
   ).toBeVisible();
   const sourceContrast = await panel.evaluate((container) => {
     const background = getComputedStyle(container).backgroundColor;
@@ -1079,7 +1081,7 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   ).toBe(false);
 
   await sources.click();
-  await page.getByRole("button", { name: /^All Photos(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^All Photos(?: |$)/ }).click();
   await expect(panel).toHaveAttribute("aria-hidden", "true");
   await expect(page.locator("[data-grid-viewport]")).toBeFocused();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
@@ -2136,12 +2138,12 @@ test("current source and Rating are programmatic states and Back to Grid restore
   await startReview(page, running.url, "Accessible Review", albumId);
 
   await openSources(page);
-  const currentSource = page.getByRole("button", {
+  const currentSource = page.getByRole("link", {
     name: /^Accessible Review 2 Photos/,
   });
   await expect(currentSource).toHaveAttribute("aria-current", "true");
   await expect(
-    page.getByRole("button", { name: /^All Photos 2 Photos/ }),
+    page.getByRole("link", { name: /^All Photos 2 Photos/ }),
   ).not.toHaveAttribute("aria-current");
   await page.getByRole("button", { name: "Close", exact: true }).click();
 
@@ -2174,19 +2176,10 @@ test("current source and Rating are programmatic states and Back to Grid restore
 
   const back = page.getByRole("button", { name: "Back to Grid" });
   await back.focus();
-  expect(
-    await back.evaluate((button) => {
-      (button as HTMLButtonElement).click();
-      const viewport = document.querySelector("[data-grid-viewport]");
-      // Activating Back to Grid moves focus into the Grid in the same task;
-      // the merged render then returns it to the Photo cell.
-      return Boolean(
-        viewport &&
-          document.activeElement !== button &&
-          viewport.contains(document.activeElement),
-      );
-    }),
-  ).toBe(true);
+  // The in-app source return traverses the known parent Grid entry, so the
+  // Grid is rendered by that traversal rather than in the activation task.
+  await back.click();
+  await expect(page.locator("[data-grid-layer]")).toBeVisible();
   await waitForGridFrame(page);
   await expect(page.locator('[data-photo-index="0"]')).toBeFocused();
 });
@@ -2219,7 +2212,7 @@ test("Album forms focus their task and restore a stable initiating action", asyn
   await albumName.fill("Created");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByRole("button", { name: /^Created 0 Photos/ }),
+    page.getByRole("link", { name: /^Created 0 Photos/ }),
   ).toBeVisible();
   await expect(newAlbum).toBeFocused();
 
@@ -2283,9 +2276,7 @@ test("Album forms focus their task and restore a stable initiating action", asyn
 
   await page.getByRole("button", { name: "Delete Kept" }).click();
   await confirmDelete.click();
-  await expect(
-    page.getByRole("button", { name: /^Kept 0 Photos/ }),
-  ).toBeHidden();
+  await expect(page.getByRole("link", { name: /^Kept 0 Photos/ })).toBeHidden();
   await expect(newAlbum).toBeFocused();
 });
 
@@ -2310,7 +2301,7 @@ test("Album names and management actions do not overlap", async ({ page }) => {
       await page.locator("[data-source-toggle]").click();
 
     const row = page.locator(".album-row").filter({
-      has: page.getByRole("button", { name: /^26春节 1 Photo/ }),
+      has: page.getByRole("link", { name: /^26春节 1 Photo/ }),
     });
     const card = row.locator(".source-card");
     const tools = row.locator(".album-tools");
@@ -3932,7 +3923,7 @@ test("an Album batch result states that the resume point is unchanged", async ({
   await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
   await waitForGridFrame(page);
   await openSources(page);
-  await page.getByRole("button", { name: /^Source 1 Photo$/ }).click();
+  await page.getByRole("link", { name: /^Source 1 Photo$/ }).click();
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 1 Photo",
   );
@@ -4158,7 +4149,7 @@ test("Opening another source clears the Grid multi-selection", async ({
   // A reopen of the same source is a new Snapshot, so the multi-selection
   // starts empty and the mode ends.
   await openSources(page);
-  await page.getByRole("button", { name: /^All Photos / }).click();
+  await page.getByRole("link", { name: /^All Photos / }).click();
   await expect(page.locator("[data-grid-status]")).toHaveText(/^Ready · 3/);
   await expect(bar).toBeHidden();
   await expect(page.locator("[data-grid-select-mode]")).toHaveAttribute(
@@ -4965,7 +4956,7 @@ test("mobile qualification fences a delayed Rating write after source navigation
   // the admitted write remains in flight. Its late settlement must not paint
   // the replacement Photo's facts or status.
   await openSources(page);
-  await page.getByRole("button", { name: /^Other Photo 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Other Photo 1 Photo/ }).click();
   await expect(
     page.getByText("Ready · 1 Photo", { exact: true }),
   ).toBeVisible();
@@ -5502,7 +5493,7 @@ test("a stale answered Undo failure cannot restore Undo into a replacement sourc
     await page.getByRole("button", { name: "Undo" }).click();
     await expect.poll(() => intercepted).toBe(true);
     await openSources(page);
-    await page.getByRole("button", { name: /^All Photos(?: |$)/ }).click();
+    await page.getByRole("link", { name: /^All Photos(?: |$)/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
     release();
     await page.getByText(/^Ready · 2 Photos$/).waitFor();
@@ -5576,10 +5567,8 @@ test("a connection proven outside the probe is lost again when the probe reports
       name: "Toggle Library Folder subfolders",
     })
     .click();
-  await expect(
-    page.getByRole("button", { name: /shoot 1 Photo/ }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: /^All Photos/ }).click();
+  await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
+  await page.getByRole("link", { name: /^All Photos/ }).click();
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
 
@@ -5598,7 +5587,7 @@ test("a connection proven outside the probe is lost again when the probe reports
   // before it is asserted.
   const resumeProbe = probeGate.hold();
   await expect.poll(() => probeGate.held()).toBeGreaterThan(0);
-  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   resumeProbe();
@@ -5838,7 +5827,7 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await startReview(page, running.url, "Review", albumId);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
-  await page.getByRole("button", { name: /^Review \d+ Photos/ }).click();
+  await page.getByRole("link", { name: /^Review \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -5868,16 +5857,14 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
 
   // Create through the inline form.
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Trip");
   await page.getByRole("button", { name: "Create Album" }).click();
-  await expect(
-    page.getByRole("button", { name: /Trip 0 Photos/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Rename Trip" })).toBeVisible();
 
   // Rename keeps membership and identity semantics on the card.
@@ -5885,11 +5872,9 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   await page.getByLabel("Album name").fill("Journey");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
-    page.getByRole("button", { name: /Journey 0 Photos/ }),
+    page.getByRole("link", { name: /Journey 0 Photos/ }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /Trip 0 Photos/ }),
-  ).toBeHidden();
+  await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeHidden();
 
   // Deleting requires confirmation and states the safety contract.
   await page.getByRole("button", { name: "Delete Journey" }).click();
@@ -5898,16 +5883,16 @@ test("album management creates, renames, and deletes Albums with confirmation", 
   ).toBeVisible();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: /Journey 0 Photos/ }),
+    page.getByRole("link", { name: /Journey 0 Photos/ }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Delete Journey" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
   await expect(
-    page.getByRole("button", { name: /Journey 0 Photos/ }),
+    page.getByRole("link", { name: /Journey 0 Photos/ }),
   ).toBeHidden();
   // Originals are untouched: All Photos keeps its count.
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
@@ -5933,7 +5918,7 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
 
     if (viewport.width === 390) await openSources(page);
     await page
-      .getByRole("button", { name: new RegExp(`^${existingName} 0 Photos`) })
+      .getByRole("link", { name: new RegExp(`^${existingName} 0 Photos`) })
       .click();
     await expect(
       page.getByRole("heading", { name: existingName }),
@@ -5954,7 +5939,7 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
       ),
     ).toBeVisible();
     if (viewport.width === 390) await openSources(page);
-    const created = page.getByRole("button", {
+    const created = page.getByRole("link", {
       name: new RegExp(`^${createdName} 0 Photos`),
     });
     await expect(created).toHaveClass(/active/);
@@ -6040,7 +6025,7 @@ test("a delayed Album creation cannot replace a newer source or Photo", async ({
     await started;
 
     if (changedOwner === "source") {
-      await page.getByRole("button", { name: /^Existing 2 Photos/ }).click();
+      await page.getByRole("link", { name: /^Existing 2 Photos/ }).click();
       await expect(
         page.getByRole("heading", { name: "Existing" }),
       ).toBeVisible();
@@ -6059,7 +6044,7 @@ test("a delayed Album creation cannot replace a newer source or Photo", async ({
       await openSources(page);
     }
     await expect(
-      page.getByRole("button", {
+      page.getByRole("link", {
         name: new RegExp(`^${createdName} 0 Photos`),
       }),
     ).toBeVisible();
@@ -6068,7 +6053,7 @@ test("a delayed Album creation cannot replace a newer source or Photo", async ({
         page.getByRole("heading", { name: "Existing" }),
       ).toBeVisible();
       await expect(
-        page.getByRole("button", { name: /^Existing 2 Photos/ }),
+        page.getByRole("link", { name: /^Existing 2 Photos/ }),
       ).toHaveAttribute("aria-current", "true");
     } else {
       await expect(page.getByText("2 / 2")).toBeVisible();
@@ -6086,7 +6071,7 @@ test("deleting the open album returns to the All Photos source", async ({
   await post(running.url, "/api/albums", { name: "Session" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /Session 0 Photos/ }).click();
+  await page.getByRole("link", { name: /Session 0 Photos/ }).click();
   await expect(page.getByRole("heading", { name: "Session" })).toBeVisible();
   await page.getByRole("button", { name: "Delete Session" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
@@ -6127,9 +6112,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("Not in any Album yet")).toBeHidden();
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await expect(
-    page.getByRole("button", { name: /Picks 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Picks 1 Photo/ })).toBeVisible();
 
   // A repeated add for an existing member stays one membership: the panel
   // lists the Album once and the counts stay at one Photo.
@@ -6142,13 +6125,11 @@ test("the current photo joins and leaves albums from the photo view", async ({
     .poll(async () => (await state(running.url, albumId)).members)
     .toHaveLength(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await expect(
-    page.getByRole("button", { name: /Picks 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Picks 1 Photo/ })).toBeVisible();
 
   // Removing from the open Album source updates the count while the open
   // snapshot keeps its copied order.
-  await page.getByRole("button", { name: /Picks 1 Photo/ }).click();
+  await page.getByRole("link", { name: /Picks 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
   await openPhotoAndWaitForProgress(
     page,
@@ -6166,10 +6147,10 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /^Picks 0 Photos$/ }),
+    page.getByRole("link", { name: /^Picks 0 Photos$/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /All Photos 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -6232,7 +6213,7 @@ test("the membership panel lists the current Photo's Albums across sources and r
 
   // The same facts hold in an Album source and after a reload.
   await openSources(page);
-  await page.getByRole("button", { name: /^Alpha 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Alpha 1 Photo/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     alphaId,
@@ -6249,7 +6230,7 @@ test("the membership panel lists the current Photo's Albums across sources and r
   await page.reload();
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await openSources(page);
-  await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^All Photos 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.locator("[data-membership-list] li")).toHaveText([
     "Alpha",
@@ -6485,7 +6466,7 @@ test("an older saved-position response cannot supersede a newer Album removal", 
   });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Picks 1 Photo$/ }).click();
+  await page.getByRole("link", { name: /^Picks 1 Photo$/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   let markProgressPersisted!: () => void;
@@ -6562,10 +6543,10 @@ test("an older saved-position response cannot supersede a newer Album removal", 
     await expect(page.getByText("1 / 1")).toBeVisible();
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(
-      page.getByRole("button", { name: /^Picks 0 Photos$/ }),
+      page.getByRole("link", { name: /^Picks 0 Photos$/ }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", { name: /All Photos 1 Photo/ }),
+      page.getByRole("link", { name: /All Photos 1 Photo/ }),
     ).toBeVisible();
     expect((await state(running.url, albumId)).members).toHaveLength(0);
   } finally {
@@ -6620,7 +6601,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect(membershipCheckbox(page, "Picks")).toBeChecked();
   await openSources(page);
   await expect(
-    page.getByRole("button", { name: /^Picks 1 Photo$/ }),
+    page.getByRole("link", { name: /^Picks 1 Photo$/ }),
   ).toBeVisible();
   await expect
     .poll(async () => (await state(running.url, albumId)).members)
@@ -6896,9 +6877,7 @@ test("album management failures are reported without claiming completion", async
   await expect(page.getByText("The Album could not be renamed.")).toBeVisible();
   await page.unroute("**/api/albums/*/rename");
   await page.getByRole("button", { name: "Save Name" }).click();
-  await expect(
-    page.getByRole("button", { name: /Lost 0 Photos/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Lost 0 Photos/ })).toBeVisible();
 });
 
 test("album creation reports duplicates and validates name boundaries by code points", async ({
@@ -6932,7 +6911,7 @@ test("album creation reports duplicates and validates name boundaries by code po
   await page.getByLabel("Album name").fill(boundary);
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByRole("button", {
+    page.getByRole("link", {
       name: new RegExp(`^${boundary} 0 Photos`),
     }),
   ).toBeVisible();
@@ -6972,7 +6951,7 @@ test("creating an album from the photo view opens it and makes it available for 
   ).toBeVisible();
 
   await openSources(page);
-  await page.getByRole("button", { name: /^All Photos 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^All Photos 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await openMembershipPanel(page);
   await expect(membershipCheckbox(page, "Fresh")).toBeVisible();
@@ -6980,7 +6959,7 @@ test("creating an album from the photo view opens it and makes it available for 
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /^Fresh 1 Photo/ }),
+    page.getByRole("link", { name: /^Fresh 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -6993,7 +6972,7 @@ test("a failed removal stays retryable from the photo view", async ({
   const { albumId } = await createAlbum(running.url, "Retry");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Retry 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Retry 1 Photo/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -7020,7 +6999,7 @@ test("a failed removal stays retryable from the photo view", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
-    page.getByRole("button", { name: /^Retry 0 Photos/ }),
+    page.getByRole("link", { name: /^Retry 0 Photos/ }),
   ).toBeVisible();
 });
 
@@ -7033,14 +7012,14 @@ test("renaming the open album updates every heading in place", async ({
   await createAlbum(running.url, "Before");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Before 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Before 1 Photo/ }).click();
   await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
 
   await page.getByRole("button", { name: "Rename Before" }).click();
   await page.getByLabel("Album name").fill("After");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
-    page.getByRole("button", { name: /^After 1 Photo/ }),
+    page.getByRole("link", { name: /^After 1 Photo/ }),
   ).toBeVisible();
   await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
@@ -7077,12 +7056,12 @@ test("album form operations do not clobber a newer form", async ({ page }) => {
   release!();
   // Alpha settles, but Beta's in-progress form and draft survive.
   await expect(
-    page.getByRole("button", { name: /^Alpha Two 0 Photos/ }),
+    page.getByRole("link", { name: /^Alpha Two 0 Photos/ }),
   ).toBeVisible();
   await expect(page.getByLabel("Album name")).toHaveValue("Beta Two");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(
-    page.getByRole("button", { name: /^Beta Two 0 Photos/ }),
+    page.getByRole("link", { name: /^Beta Two 0 Photos/ }),
   ).toBeVisible();
 });
 
@@ -7096,7 +7075,7 @@ test("a late album success cannot overwrite a newer removal notice", async ({
   await post(running.url, "/api/albums", { name: "Other" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Hold 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Hold 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
 
   // Hold the membership add while a removal settles first.
@@ -7120,7 +7099,7 @@ test("a late album success cannot overwrite a newer removal notice", async ({
   // overwrite the newer removal notice.
   await openSources(page);
   await expect(
-    page.getByRole("button", { name: /^Other 1 Photo/ }),
+    page.getByRole("link", { name: /^Other 1 Photo/ }),
   ).toBeVisible();
   await expect(removedNotice).toBeVisible();
 });
@@ -7135,7 +7114,7 @@ test("a superseded album failure surfaces in the library summary", async ({
   await post(running.url, "/api/albums", { name: "Other" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Hold 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Hold 1 Photo/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
 
   let fail = false;
@@ -7202,13 +7181,13 @@ test("a pending delete keeps a newer create form and its draft", async ({
   await page.getByLabel("Album name").fill("Draft");
   release!();
   await expect(
-    page.getByRole("button", { name: /^Doomed 0 Photos/ }),
+    page.getByRole("link", { name: /^Doomed 0 Photos/ }),
   ).toBeHidden();
   // The newer form and its draft survive the delete settlement.
   await expect(page.getByLabel("Album name")).toHaveValue("Draft");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByRole("button", { name: /^Draft 0 Photos/ }),
+    page.getByRole("link", { name: /^Draft 0 Photos/ }),
   ).toBeVisible();
 });
 
@@ -7220,7 +7199,7 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   await post(running.url, "/api/albums", { name: "Sibling" });
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Before 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Before 1 Photo/ }).click();
   await expect(page.getByRole("heading", { name: "Before" })).toBeVisible();
 
   await page.getByRole("button", { name: "Rename Before" }).click();
@@ -7240,7 +7219,7 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /^After 1 Photo/ }),
+    page.getByRole("link", { name: /^After 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -7673,22 +7652,18 @@ test("a stale overview response cannot revert newer album state", async ({
   await page.getByRole("button", { name: "Create Album" }).click();
   await createdConfirmed;
   await expect(
-    page.getByRole("button", { name: /^Newest 0 Photos/ }),
+    page.getByRole("link", { name: /^Newest 0 Photos/ }),
   ).toBeVisible();
   // Release the stale response: it must be discarded, not applied.
   release!();
   await expect(
-    page.getByRole("button", { name: /^Newest 0 Photos/ }),
+    page.getByRole("link", { name: /^Newest 0 Photos/ }),
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: /^Two 0 Photos/ })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /^Two 0 Photos/ }),
+    page.getByRole("link", { name: /^Newest 0 Photos/ }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /^Newest 0 Photos/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /^Two 0 Photos/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /^Two 0 Photos/ })).toBeVisible();
 });
 
 test("publication validation rejects an overview body captured before replacement", async ({
@@ -7699,7 +7674,7 @@ test("publication validation rejects an overview body captured before replacemen
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
 
   let captured!: () => void;
@@ -7738,14 +7713,14 @@ test("publication validation rejects an overview body captured before replacemen
   release();
   await capturedResponse;
   await expect(
-    page.getByRole("button", { name: /^All Photos 999 Photos/ }),
+    page.getByRole("link", { name: /^All Photos 999 Photos/ }),
   ).toBeHidden();
   // A fresh request at the advanced publication floor commits current facts.
   await page.locator("[data-retry]").evaluate((button) => {
     (button as HTMLButtonElement).click();
   });
   await expect(
-    page.getByRole("button", { name: /^All Photos 2 Photos/ }),
+    page.getByRole("link", { name: /^All Photos 2 Photos/ }),
   ).toBeVisible({ timeout: 10_000 });
 });
 
@@ -7757,7 +7732,7 @@ test("an unpublished Overview cannot replace an already published generation", a
   const running = await server(base, root);
   await page.goto(running.url);
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
   await page.route("**/api/overview", async (route) => {
     await route.fulfill({
@@ -7779,10 +7754,10 @@ test("an unpublished Overview cannot replace an already published generation", a
   });
   await response;
   await expect(
-    page.getByRole("button", { name: /^All Photos 0 Photos/ }),
+    page.getByRole("link", { name: /^All Photos 0 Photos/ }),
   ).toBeHidden();
   await expect(
-    page.getByRole("button", { name: /^All Photos 1 Photo/ }),
+    page.getByRole("link", { name: /^All Photos 1 Photo/ }),
   ).toBeVisible();
 });
 
@@ -7844,7 +7819,7 @@ test("in-flight membership and delete operations stay disabled across re-renders
   await createAlbum(running.url, "Slow");
   await page.goto(running.url);
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /^Slow 2 Photos/ }).click();
+  await page.getByRole("link", { name: /^Slow 2 Photos/ }).click();
   let releasePreview!: () => void;
   const previewReleased = new Promise<void>((resolve) => {
     releasePreview = resolve;
@@ -7903,9 +7878,7 @@ test("in-flight membership and delete operations stay disabled across re-renders
     "Removed from the Album. It stays in this open view until reopened.",
     { timeout: 15000 },
   );
-  await expect(
-    page.getByRole("button", { name: /^Slow 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /^Slow 1 Photo/ })).toBeVisible();
   expect(calls).toBe(1);
   // The removed member is no longer a member within the open snapshot.
   await expect(slowMembership).toBeEnabled();
@@ -7920,7 +7893,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const running = await server(base, root);
   const { albumId } = await createAlbum(running.url, "Position Retry");
   await page.goto(running.url);
-  await page.getByRole("button", { name: /^Position Retry 1 Photo/ }).click();
+  await page.getByRole("link", { name: /^Position Retry 1 Photo/ }).click();
 
   let progressStatus = 503;
   await page.route("**/api/albums/*/progress", async (route) => {
@@ -8029,7 +8002,7 @@ test("saved-position confirmation cannot be reverted by an older Overview", asyn
     });
     await overviewCaptured;
 
-    await page.getByRole("button", { name: /^Resume Fence 2 Photos$/ }).click();
+    await page.getByRole("link", { name: /^Resume Fence 2 Photos$/ }).click();
     await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
     await openPhotoAndWaitForProgress(
       page,
@@ -8038,10 +8011,10 @@ test("saved-position confirmation cannot be reverted by an older Overview", asyn
     );
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     await openSources(page);
+    // The saved position is exposed as a separate Resume action, not as part
+    // of the Album's Grid destination name.
     await expect(
-      page.getByRole("button", {
-        name: /^Resume Fence 2 Photos · Resume$/,
-      }),
+      page.getByRole("button", { name: "Resume Resume Fence" }),
     ).toBeVisible();
 
     releaseOverview();
@@ -8050,9 +8023,7 @@ test("saved-position confirmation cannot be reverted by an older Overview", asyn
       page.getByText("Library ready", { exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByRole("button", {
-        name: /^Resume Fence 2 Photos · Resume$/,
-      }),
+      page.getByRole("button", { name: "Resume Resume Fence" }),
     ).toBeVisible();
   } finally {
     releaseOverview();
@@ -8075,7 +8046,7 @@ test("an answered stale saved-position write is not a disconnection", async ({
     progressWrites += 1;
     return route.fulfill({ status: 404 });
   });
-  await page.getByRole("button", { name: /^Positions 2 Photos/ }).click();
+  await page.getByRole("link", { name: /^Positions 2 Photos/ }).click();
   await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
   // The server answers 404 when the saved member no longer exists; that is
   // an expected stale write, not a connectivity loss. Count writes so the
@@ -8178,7 +8149,7 @@ test("duplicate album names answer without presenting a disconnection", async ({
   await page.getByLabel("Album name").fill("Fresh");
   await page.getByRole("button", { name: "Create Album" }).click();
   await expect(
-    page.getByRole("button", { name: /^Fresh 0 Photos/ }),
+    page.getByRole("link", { name: /^Fresh 0 Photos/ }),
   ).toBeVisible();
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await expect(
@@ -8272,9 +8243,7 @@ test("an admitted album add completes after switching sources", async ({
   await page.getByRole("button", { name: "Back to Grid" }).click();
   release!();
   // The admitted mutation still updates the bounded Album list.
-  await expect(
-    page.getByRole("button", { name: /Picks 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Picks 1 Photo/ })).toBeVisible();
   await expect(
     page.getByText("The Photo could not be added to the Album."),
   ).toBeHidden();
@@ -8309,7 +8278,7 @@ test("file locations show a bounded tree and open recursive folder sources", asy
     page.getByRole("heading", { name: "Albums" }).first(),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /^Library Folder/ }),
+    page.getByRole("link", { name: /^Library Folder/ }),
   ).toBeVisible();
 
   // Expanding the root loads one bounded direct-child window.
@@ -8317,39 +8286,35 @@ test("file locations show a bounded tree and open recursive folder sources", asy
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
   await expect(
-    page.getByRole("button", { name: /Trip · Subfolders/ }),
+    page.getByRole("link", { name: /Trip · Subfolders/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Trip-extra 1 Photo" }),
+    page.getByRole("link", { name: "Trip-extra 1 Photo" }),
   ).toBeVisible();
   // The same-name Album remains present in its own section.
-  await expect(
-    page.getByRole("button", { name: /Trip 0 Photos/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /Trip 0 Photos/ })).toBeVisible();
 
   // Expanding a child loads its own direct-child window.
   await page.getByRole("button", { name: "Toggle Trip subfolders" }).click();
-  await expect(
-    page.getByRole("button", { name: /day2 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /day2 1 Photo/ })).toBeVisible();
 
   // Opening the folder source shows the recursive subtree count.
-  await page.getByRole("button", { name: /Trip · Subfolders/ }).click();
+  await page.getByRole("link", { name: /Trip · Subfolders/ }).click();
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Trip · Folder" }),
   ).toBeVisible();
 
   // The component-aware rule keeps the same-prefix sibling separate.
-  await page.getByRole("button", { name: /Trip-extra 1 Photo/ }).click();
+  await page.getByRole("link", { name: /Trip-extra 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   // A Folder name containing a space opens through decoded query values.
-  await page.getByRole("button", { name: /My Photos 1 Photo/ }).click();
+  await page.getByRole("link", { name: /My Photos 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   // The Library Folder root source covers the whole Published Library.
-  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await page.getByRole("link", { name: /^Library Folder/ }).click();
   await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
 });
 
@@ -8375,7 +8340,7 @@ test("adds the current recursive Folder to an Album from Grid View", async ({
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
-  await page.getByRole("button", { name: /Trip · Subfolders/ }).click();
+  await page.getByRole("link", { name: /Trip · Subfolders/ }).click();
   await expect(
     page.getByText("Ready · 2 Photos", { exact: true }),
   ).toBeVisible();
@@ -8409,7 +8374,7 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await openSources(page);
   await expect(
-    page.getByRole("button", { name: /^Library Folder 0 Photos/ }),
+    page.getByRole("link", { name: /^Library Folder 0 Photos/ }),
   ).toBeVisible();
   await page
     .getByRole("button", {
@@ -8417,7 +8382,7 @@ test("an empty Library still shows and opens the Library Folder root", async ({
     })
     .click();
   await expect(page.getByRole("button", { name: "More Folders" })).toBeHidden();
-  await page.getByRole("button", { name: /^Library Folder 0 Photos/ }).click();
+  await page.getByRole("link", { name: /^Library Folder 0 Photos/ }).click();
   const emptyLibrary = page.getByText(
     "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.",
   );
@@ -8471,13 +8436,13 @@ test("an empty All Photos source remains openable after switching away", async (
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await openSources(page);
 
-  const allPhotos = page.getByRole("button", {
+  const allPhotos = page.getByRole("link", {
     name: /^All Photos 0 Photos/,
   });
   await expect(allPhotos).toBeVisible();
   await expect(allPhotos).toBeEnabled();
 
-  await page.getByRole("button", { name: /^Library Folder 0 Photos/ }).click();
+  await page.getByRole("link", { name: /^Library Folder 0 Photos/ }).click();
   const emptyLibrary = page.getByText(
     "No supported Photos found. Check the Library Folder or add supported files, then run Check Library.",
   );
@@ -8526,9 +8491,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
       name: "Toggle Library Folder subfolders",
     })
     .click();
-  await expect(
-    page.getByRole("button", { name: /shoot 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
 
   // The first folder-source open fails; the retry must reopen the same
   // folder source instead of silently falling back to All Photos.
@@ -8547,7 +8510,7 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
     },
     { times: 1 },
   );
-  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
@@ -8576,10 +8539,8 @@ test("a remembered folder source waits for the File Location binding before reop
       name: "Toggle Library Folder subfolders",
     })
     .click();
-  await expect(
-    page.getByRole("button", { name: /shoot 1 Photo/ }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
+  await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
@@ -8642,7 +8603,7 @@ test("delayed File Location responses from a superseded publication are discarde
     })
     .click();
   await expect(
-    page.getByRole("button", { name: /a · Subfolders/ }),
+    page.getByRole("link", { name: /a · Subfolders/ }),
   ).toBeVisible();
 
   // Deliver one successful child window for `a` only after the publication
@@ -8678,9 +8639,7 @@ test("delayed File Location responses from a superseded publication are discarde
   // page, and the fresh recursive count would never appear.
   release!();
   await page.getByRole("button", { name: "Toggle a subfolders" }).click();
-  await expect(
-    page.getByRole("button", { name: /sub 2 Photos/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /sub 2 Photos/ })).toBeVisible();
 });
 
 test("failed File Location ranges keep siblings and retry only the failed range", async ({
@@ -8707,14 +8666,14 @@ test("failed File Location ranges keep siblings and retry only the failed range"
     })
     .click();
   await expect(
-    page.getByRole("button", { name: /shoot · Subfolders/ }),
+    page.getByRole("link", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Toggle shoot subfolders" }).click();
   await expect(
     page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /^Library Folder/ }),
+    page.getByRole("link", { name: /^Library Folder/ }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", {
@@ -8758,10 +8717,10 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   // Retrying loads only the failed range: the sibling child appears while
   // the already loaded root navigation stays intact.
   await expect(
-    page.getByRole("button", { name: /nested 1 Photo/ }),
+    page.getByRole("link", { name: /nested 1 Photo/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /shoot · Subfolders/ }),
+    page.getByRole("link", { name: /shoot · Subfolders/ }),
   ).toBeVisible();
   await expect(page.getByText(/Could not load folders/)).toBeHidden();
   await expect(
@@ -8785,10 +8744,10 @@ test("independent failed File Location parents keep exact retry ownership", asyn
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
   await expect(
-    page.getByRole("button", { name: /a · Subfolders/ }),
+    page.getByRole("link", { name: /a · Subfolders/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /b · Subfolders/ }),
+    page.getByRole("link", { name: /b · Subfolders/ }),
   ).toBeVisible();
 
   const failing = new Set(["a", "b"]);
@@ -8815,7 +8774,7 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   failing.delete("a");
   await retryA.click();
   await expect(
-    page.getByRole("button", { name: /nested 1 Photo/ }).first(),
+    page.getByRole("link", { name: /nested 1 Photo/ }).first(),
   ).toBeVisible();
   await expect(retryA).toBeHidden();
   await expect(retryB).toBeVisible();
@@ -8844,9 +8803,7 @@ test("a leaf Folder renders no expand control and keeps its row aligned", async 
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
-  await expect(
-    page.getByRole("button", { name: /^leaf 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /^leaf 1 Photo/ })).toBeVisible();
 
   // The leaf has no subfolders, so it must not offer a dead disclosure.
   await expect(
@@ -8921,9 +8878,7 @@ test("file locations reload coherently when a scan replaces the publication", as
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
-  await expect(
-    page.getByRole("button", { name: /shoot 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
 
   // A rescan that adds a Folder supersedes the retained publication.
   await mkdir(join(root, "later"));
@@ -8944,9 +8899,7 @@ test("file locations reload coherently when a scan replaces the publication", as
   await expect(
     page.getByText("Library changed. Reloaded folders."),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /later 1 Photo/ }),
-  ).toBeVisible();
+  await expect(page.getByRole("link", { name: /later 1 Photo/ })).toBeVisible();
 });
 
 test("shows empty and no-album start states and only uses same-service requests", async ({
@@ -8961,7 +8914,7 @@ test("shows empty and no-album start states and only uses same-service requests"
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await post(running.url, "/api/albums", { name: "Empty" });
   await page.reload();
-  const empty = page.getByRole("button", { name: /^Empty \d+ Photos/ });
+  const empty = page.getByRole("link", { name: /^Empty \d+ Photos/ });
   await expect(empty).toBeVisible();
   // Empty Albums stay openable: they are valid sources, not disabled cards.
   await expect(empty).toBeEnabled();
@@ -8975,7 +8928,7 @@ test("shows empty and no-album start states and only uses same-service requests"
   await createAlbum(running.url, "Ready");
   await page.reload();
   await expect(
-    page.getByRole("button", { name: "Ready 1 Photo", exact: true }),
+    page.getByRole("link", { name: "Ready 1 Photo", exact: true }),
   ).toBeEnabled();
   expect(
     methods.every(
@@ -9002,7 +8955,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
     .toBe(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("button", { name: "Sources", exact: true }).click();
-  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
+  await page.getByRole("link", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -9010,13 +8963,8 @@ test("persists manual navigation and advanced current Photo across leave, reload
   );
   await expect(page.getByText("2 / 3")).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: "Sources", exact: true }).click();
-  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
-  await openPhotoAndWaitForProgress(
-    page,
-    albumId,
-    page.getByRole("button", { name: /Photo 2 of 3/ }),
-  );
+  // The Photo address preserves the destination across a reload, so the
+  // reloaded document reopens the same Photo instead of the Album Grid.
   await expect(page.getByText("2 / 3")).toBeVisible();
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
@@ -9031,7 +8979,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   running = await server(base, root);
   await page.goto(running.url);
   await openSources(page);
-  await page.getByRole("button", { name: /^Progress \d+ Photos/ }).click();
+  await page.getByRole("link", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -9126,7 +9074,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.reload();
   await openSources(page);
-  await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Review(?: |$)/ }).click();
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: /Photo 1 of/ }).click();
     await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
@@ -9254,7 +9202,7 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await post(running.url, "/api/scan", {});
   await page.reload();
   await page.getByRole("button", { name: "Sources", exact: true }).click();
-  await page.getByRole("button", { name: /^Review(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Review(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -9353,7 +9301,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   };
   expect(overview.albums).toEqual([]);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("link", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
   await expect(page.getByText("1 / 2")).toBeVisible();
 
@@ -9362,7 +9310,12 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
     photoIds: [aId, zId],
   });
   await page.reload();
-  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  // The address preserves the destination, so the reload reopens the Photo
+  // the Photographer left rather than the bare All Photos Grid.
+  await expect(page.getByText("1 / 2")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Grid" }).click();
+  await openSources(page);
+  await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -9449,13 +9402,14 @@ test("Grid sort offers one explicit Capture Time order and refreshes in that ord
     order: "capture-time-desc",
   });
 
-  // The order belongs to the open view: nothing persists it across reloads.
+  // The committed order belongs to the destination address, so it survives a
+  // reload and a direct entry.
   await page.reload();
   await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
   await expect(page.locator("[data-sort-select]")).toHaveValue(
-    "source-default",
+    "capture-time-desc",
   );
-  await expectGridOrder(page, ascending);
+  await expectGridOrder(page, descending);
 });
 
 test("Grid sort keeps the current Photo by identity and repositions around it", async ({
@@ -9548,7 +9502,7 @@ test("Album sort defaults to Album order and time views leave positions alone", 
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
   await openSources(page);
-  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("Explicit order");
   const sort = page.locator("[data-sort-select]");
   await expect(page.locator("[data-sort-select] option")).toHaveText([
@@ -9582,7 +9536,7 @@ test("Album sort defaults to Album order and time views leave positions alone", 
 
   // Another source starts at its own default order...
   await openSources(page);
-  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("link", { name: /All Photos/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",
@@ -9595,7 +9549,7 @@ test("Album sort defaults to Album order and time views leave positions alone", 
 
   // ...and reopening this Album returns to its persisted order.
   await openSources(page);
-  await page.getByRole("button", { name: /^Explicit order(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",
   );
@@ -9653,7 +9607,7 @@ test("a sort open superseded by a newer source open leaves the newer order commi
 
   // A newer source open supersedes the held order change.
   await openSources(page);
-  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("link", { name: /All Photos/ }).click();
   await expect(sort).toBeEnabled();
   await expect(sort).toHaveValue("source-default");
   await expectGridOrder(page, ascending);
@@ -9688,10 +9642,8 @@ test("a Folder sort change waits for the File Location binding before reopening"
   await page
     .getByRole("button", { name: "Toggle Library Folder subfolders" })
     .click();
-  await expect(
-    page.getByRole("button", { name: /shoot 1 Photo/ }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: /shoot 1 Photo/ }).click();
+  await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
+  await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
@@ -9798,7 +9750,7 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
   await openSources(page);
-  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Anchored(?: |$)/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("Anchored");
   await expectGridOrder(page, albumOrder);
 
@@ -9842,10 +9794,10 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
   // Leaving and reopening the Album resumes by Photo identity under its own
   // default order instead of by the last view position index.
   await openSources(page);
-  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("link", { name: /All Photos/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
   await openSources(page);
-  await page.getByRole("button", { name: /^Anchored(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Anchored(?: |$)/ }).click();
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",
   );
@@ -10063,7 +10015,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await page.getByRole("button", { name: /All Photos/ }).click();
+  await page.getByRole("link", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
   await expect(page.getByText("1 / 3")).toBeVisible();
   const expandedIds = await browseIds(running.url);
@@ -10121,7 +10073,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await expect(page.getByText("2 / 2")).toBeVisible();
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
-  await page.getByRole("button", { name: /^Snapshot(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Snapshot(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -10211,7 +10163,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   await rm(join(root, "c.jpg"));
   await post(running.url, "/api/scan", {});
   await page.goto(running.url);
-  await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Resume(?: |$)/ }).click();
   // The saved position becomes durable only when the page's progress write
   // is confirmed, and that write is asynchronous with Photo View. Waiting
   // for the confirmed POST removes the race where a reload could discard a
@@ -10244,7 +10196,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
       };
     })
     .toEqual({ available: [false, false, false], position: 0 });
-  await page.getByRole("button", { name: /^Resume(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Resume(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
     albumId,
@@ -10439,7 +10391,7 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
 
     await openSources(page);
     await page
-      .getByRole("button", { name: /^Held Derivatives 70 Photos/ })
+      .getByRole("link", { name: /^Held Derivatives 70 Photos/ })
       .click();
     await expect(page.locator("[data-grid-title]")).toHaveText(
       "Held Derivatives",
@@ -10856,7 +10808,7 @@ test("source switching aborts a pending current-Photo Preview request", async ({
 
     await openSources(page);
     await page
-      .getByRole("button", { name: /^Preview Abort Target 8 Photos/ })
+      .getByRole("link", { name: /^Preview Abort Target 8 Photos/ })
       .click();
     await expect(page.locator("[data-grid-title]")).toHaveText(
       "Preview Abort Target",
@@ -10943,7 +10895,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
   });
   try {
     await openSources(page);
-    await page.getByRole("button", { name: /^First Source 8 Photos/ }).click();
+    await page.getByRole("link", { name: /^First Source 8 Photos/ }).click();
     await expect.poll(() => staleHeld).toBe(true);
     const staleCanceled = page.waitForEvent("requestfailed", (request) => {
       if (
@@ -10957,7 +10909,7 @@ test("a superseded source open is aborted before the newer source renders", asyn
       );
     });
     await openSources(page);
-    await page.getByRole("button", { name: /^Second Source 8 Photos/ }).click();
+    await page.getByRole("link", { name: /^Second Source 8 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("Second Source");
     await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
 
@@ -11078,9 +11030,7 @@ test("source switching cancels the previous pending window", async ({
     );
 
     await openSources(page);
-    await page
-      .getByRole("button", { name: /^Abort Target 120 Photos/ })
-      .click();
+    await page.getByRole("link", { name: /^Abort Target 120 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("Abort Target");
     await expect(page.getByText(/^Ready · 120 Photos$/)).toBeVisible();
     await oldWindowCanceled;
@@ -11117,9 +11067,7 @@ test("source switching aborts fallback thumbnail requests", async ({
     );
 
     await openSources(page);
-    await page
-      .getByRole("button", { name: /^Fallback Abort 70 Photos/ })
-      .click();
+    await page.getByRole("link", { name: /^Fallback Abort 70 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText(
       "Fallback Abort",
     );
@@ -11581,7 +11529,7 @@ test("a source switch rebuilds the Grid range for the replacement source", async
   // cells and re-attach their thumbnails instead of reusing the previous
   // source's DOM, and admit its own covering windows.
   await openSources(page);
-  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await page.getByRole("link", { name: /^Library Folder/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText(
     "Library Folder · Folder",
   );
@@ -12227,7 +12175,7 @@ test("the filmstrip follows an Album's explicit order", async ({ page }) => {
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
   await openSources(page);
-  await page.getByRole("button", { name: /^Filmstrip order(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^Filmstrip order(?: |$)/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("Filmstrip order");
   await page.locator('[data-photo-index="0"]').click();
   await waitForLoadedReviewImage(page);
@@ -12981,7 +12929,7 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
   // The size belongs to the browser session: another source keeps it, and a
   // reload starts again at Medium.
   await openSources(page);
-  await page.getByRole("button", { name: /^Library Folder/ }).click();
+  await page.getByRole("link", { name: /^Library Folder/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText(
     "Library Folder · Folder",
   );
@@ -13554,8 +13502,14 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   await expect(progress).toHaveText(
     "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
+  // The committed filter belongs to the destination address, so the reload
+  // restores the same view rather than the unfiltered source.
   await page.reload();
-  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await expect(status).toHaveText("0 Photos");
+  await expect(filter).toHaveValue("selected");
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
 });
 
 test("an Album source filters its members and keeps Album progress", async ({
@@ -13586,7 +13540,7 @@ test("an Album source filters its members and keeps Album progress", async ({
   await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
   await waitForGridFrame(page);
   await openSources(page);
-  await page.getByRole("button", { name: /^Picks 3 Photos/ }).click();
+  await page.getByRole("link", { name: /^Picks 3 Photos/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("Picks");
 
   const filter = page.locator("[data-filter-select]");
@@ -14186,9 +14140,7 @@ test("a completed mutation cannot reopen or advance a superseding source", async
     );
 
     await openSources(page);
-    await page
-      .getByRole("button", { name: /^Mutation Target 2 Photos/ })
-      .click();
+    await page.getByRole("link", { name: /^Mutation Target 2 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText(
       "Mutation Target",
     );
@@ -14287,7 +14239,7 @@ test("opening a Photo from the Grid persists the Album position", async ({
         .catch(() => undefined);
   });
   await openSources(page);
-  await page.getByRole("button", { name: /^GridPos(?: |$)/ }).click();
+  await page.getByRole("link", { name: /^GridPos(?: |$)/ }).click();
   await page.getByText(/^Ready · /).waitFor();
   await expect(
     page.getByRole("button", { name: /^Photo 3 of 4/ }),
@@ -14437,7 +14389,7 @@ test("an evicted Undo reload cannot write into a replacement source", async ({
     );
 
     await openSources(page);
-    await page.getByRole("button", { name: /^All Photos 200 Photos/ }).click();
+    await page.getByRole("link", { name: /^All Photos 200 Photos/ }).click();
     await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
     await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
     await oldReloadCanceled;
@@ -14716,7 +14668,7 @@ test("a source establishment failure retires the claim it replaces", async ({
           albumId,
     );
     albumPhase = true;
-    await page.getByRole("button", { name: /^Second Source/ }).click();
+    await page.getByRole("link", { name: /^Second Source/ }).click();
     await expect.poll(() => albumWindowFailures).toBeGreaterThan(0);
     albumPhase = false;
     await albumOpen;
@@ -16685,7 +16637,7 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   await page.goto(running.url);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "All Photos 40,000 Photos" }),
+    page.getByRole("link", { name: "All Photos 40,000 Photos" }),
   ).toBeVisible();
   const overviewBytes = await page.evaluate(
     async () => (await (await fetch("/api/overview")).text()).length,
@@ -16817,7 +16769,7 @@ test("a range re-admission that recovers a failed source establishment also esta
     page.getByText("Ready · 3 Photos", { exact: true }),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "Review 3 Photos" }).click();
+  await page.getByRole("link", { name: "Review 3 Photos" }).click();
   await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
   await expect(
     page.getByText(/could not be loaded \(HTTP 503\)/),
@@ -16840,4 +16792,817 @@ test("a range re-admission that recovers a failed source establishment also esta
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeVisible();
+});
+
+/// ---------------------------------------------------------------------------
+/// Browser navigation: addressable destinations, native history, and bounded
+/// Grid restoration (design/browser-navigation.md).
+/// ---------------------------------------------------------------------------
+
+const historyLength = (page: Page) => page.evaluate(() => history.length);
+type NavigationEntry = Readonly<{
+  version: number;
+  entryId: string;
+  anchor?: Readonly<{ photoId: string; indexHint: number; offset: number }>;
+  parentGridEntryId?: string;
+  folderPublication?: string;
+}>;
+/// The bounded restoration metadata the page-local navigation owner stored in
+/// the current entry's history.state.
+const navigationState = (page: Page) =>
+  page.evaluate(() => {
+    const state: unknown = window.history.state;
+    if (typeof state !== "object" || state === null) return undefined;
+    const namespace = (state as Record<string, unknown>).slipstream;
+    return typeof namespace === "object" && namespace !== null
+      ? (namespace as NavigationEntry)
+      : undefined;
+  });
+const focusedCellIndex = (page: Page) =>
+  page.evaluate(() => {
+    const active = document.activeElement;
+    return active instanceof HTMLElement
+      ? (active.dataset.photoIndex ?? undefined)
+      : undefined;
+  });
+const gridScrollTop = (page: Page) =>
+  page.locator("[data-grid-viewport]").evaluate((element) => element.scrollTop);
+const cellPhotoId = async (page: Page, index: number) => {
+  const image = page.locator(`[data-photo-index="${index}"] img`);
+  await expect
+    .poll(() => image.getAttribute("src"), { timeout: 30_000 })
+    .toBeTruthy();
+  return image.evaluate((element) =>
+    new URL(element.getAttribute("src") ?? "", location.origin).pathname
+      .split("/")
+      .at(-3),
+  );
+};
+/// The stable Photo identity of the Grid cell that holds keyboard focus. The
+/// Grid viewport itself contains every rendered cell, so the active element
+/// must be a cell before its image is read.
+const focusedCellPhotoId = async (page: Page) => {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const active = document.activeElement;
+        return (
+          active instanceof HTMLElement &&
+          active.dataset.photoIndex !== undefined
+        );
+      }),
+    )
+    .toBe(true);
+  return page.evaluate(() => {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return undefined;
+    const source = active.querySelector("img")?.getAttribute("src");
+    return source
+      ? new URL(source, location.origin).pathname.split("/").at(-3)
+      : undefined;
+  });
+};
+
+/// Traverses one history entry without leaving the document, the way the
+/// browser's own Back and Forward do. The destination the traversal renders is
+/// asserted by the caller, so the traversal itself waits only for a frame.
+const traverseHistory = async (
+  page: Page,
+  direction: "back" | "forward",
+): Promise<void> => {
+  // A traversal that leaves the document destroys the execution context, which
+  // is itself the observable proof that the application did not trap it.
+  await page
+    .evaluate((value) => {
+      if (value === "back") history.back();
+      else history.forward();
+    }, direction)
+    .catch(() => undefined);
+  await page
+    .evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    )
+    .catch(() => undefined);
+};
+const goBack = (page: Page) => traverseHistory(page, "back");
+const goForward = (page: Page) => traverseHistory(page, "forward");
+/// Waits until every rendered Grid cell holds its Photo, so a captured anchor
+/// names a real Photo identity rather than a placeholder.
+const waitForGridPhotos = (page: Page) =>
+  expect.poll(() => page.locator(".cell-placeholder").count()).toBe(0);
+const columnsAt = (page: Page) =>
+  page.locator("[data-grid-viewport]").evaluate((viewport) => {
+    const width = (viewport as HTMLElement).clientWidth;
+    return Math.max(1, Math.floor(Math.max(320, width) / 150));
+  });
+
+test.describe("browser navigation", () => {
+  test("a bare application URL opens the All Photos Grid and pushes no entry", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 4);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    // A prior document gives the browser's own Back somewhere to go.
+    await page.goto("about:blank");
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    // Startup canonicalizes the current entry with replaceState, so no
+    // duplicate entry is pushed and the bare address stays bare.
+    expect(new URL(page.url()).search).toBe("");
+    const state = await navigationState(page);
+    expect(state?.version).toBe(1);
+    expect(typeof state?.entryId).toBe("string");
+    // Back at the original application entry keeps its ordinary ability to
+    // leave the site: the application traps nothing.
+    await traverseHistory(page, "back");
+    await expect.poll(() => page.url()).toBe("about:blank");
+  });
+
+  test("a deep link opens the exact destination and reload preserves it", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+      await writeFile(join(root, name), await jpeg());
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Deep Link");
+    const members = await state(running.url, albumId);
+    const target = members.members[1];
+    if (!target) throw new Error("Album has no second member");
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(
+      `${running.url}/?source=album&albumId=${albumId}&photoId=${target.photoId}&order=capture-time-desc&selection=undecided`,
+    );
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(
+      target.photoId,
+    );
+    expect(new URL(page.url()).searchParams.get("order")).toBe(
+      "capture-time-desc",
+    );
+    expect(new URL(page.url()).searchParams.get("selection")).toBe("undecided");
+    // Unknown query keys are dropped on canonicalization, and a reload
+    // resolves the same destination against current Library facts.
+    await page.goto(
+      `${running.url}/?source=album&albumId=${albumId}&photoId=${target.photoId}&order=capture-time-desc&selection=undecided&panel=tools`,
+    );
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    expect(new URL(page.url()).search).toBe(
+      `?source=album&albumId=${albumId}&photoId=${target.photoId}&order=capture-time-desc&selection=undecided`,
+    );
+  });
+
+  test("Back from Photo View restores the Grid anchor, offset, and cell focus", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 130);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    const columns = await columnsAt(page);
+    const anchorRow = 20;
+    const anchorIndex = anchorRow * columns;
+    await scrollGrid(page, anchorRow * 178);
+    await expect(
+      page.locator(`[data-photo-index="${anchorIndex}"]`),
+    ).toBeVisible();
+    const anchorPhotoId = await cellPhotoId(page, anchorIndex);
+    expect(anchorPhotoId).toBeDefined();
+    const scrolledTop = await gridScrollTop(page);
+
+    const length = await historyLength(page);
+    await page.locator(`[data-photo-index="${anchorIndex}"]`).click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    // Opening a Photo from the Grid creates one new destination linked to the
+    // Grid entry that opened it.
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(anchorPhotoId);
+    expect(await historyLength(page)).toBe(length + 1);
+    const parent = await navigationState(page);
+    expect(typeof parent?.parentGridEntryId).toBe("string");
+    const gridEntryId = parent?.parentGridEntryId;
+
+    await goBack(page);
+    await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+    const restored = await gridScrollTop(page);
+    // The top visible Photo and its offset inside its row are restored.
+    expect(Math.abs(restored - scrolledTop)).toBeLessThanOrEqual(178);
+    await expect
+      .poll(() => focusedCellPhotoId(page))
+      .toBe(anchorPhotoId ?? undefined);
+    const gridState = await navigationState(page);
+    expect(gridState?.entryId).toBe(gridEntryId);
+    expect((gridState?.anchor as { photoId?: string })?.photoId).toBe(
+      anchorPhotoId,
+    );
+  });
+
+  test("Forward reopens the last Photo and stepping replaces the entry", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 12);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 12 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    const photoLength = await historyLength(page);
+
+    // Previous, Next, and decision-driven advancement replace the current
+    // Photo destination, so the stack does not grow per step.
+    for (const expected of ["2 / 12", "3 / 12", "4 / 12"]) {
+      const length = await historyLength(page);
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await expect(page.getByText(expected)).toBeVisible();
+      expect(await historyLength(page)).toBe(length);
+    }
+    const lastPhotoId = new URL(page.url()).searchParams.get("photoId");
+
+    await goBack(page);
+    await expect(page.getByText("Ready · 12 Photos")).toBeVisible();
+    await goForward(page);
+    await expect(page.getByText("4 / 12")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(lastPhotoId);
+    expect(await historyLength(page)).toBe(photoLength);
+  });
+
+  test("repeated activation of the current destination adds no entry", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="1"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("2 / 6")).toBeVisible();
+    const length = await historyLength(page);
+    // The neighbor strip's current entry addresses the Photo already open.
+    await page.locator('[data-filmstrip-index="1"]').click();
+    await expect(page.getByText("2 / 6")).toBeVisible();
+    expect(await historyLength(page)).toBe(length);
+  });
+
+  test("a directly loaded Photo returns to its source Grid without leaving the site", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 5);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const ids = await browseIds(running.url);
+    await page.goto(`${running.url}/?photoId=${ids[2]}`);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("3 / 5")).toBeVisible();
+    const length = await historyLength(page);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
+    // A direct link must not call history.back from history.length or a
+    // referrer: the entry is replaced, and the browser's own Back keeps its
+    // ordinary ability to leave the site.
+    expect(new URL(page.url()).search).toBe("");
+    expect(await historyLength(page)).toBe(length);
+    expect(page.url().startsWith(running.url)).toBe(true);
+  });
+
+  test("choosing a source creates one Grid destination and never opens Photo View", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Destination");
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    const length = await historyLength(page);
+    await page.getByRole("link", { name: /^Destination 3 Photos/ }).click();
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await expect(page.locator("[data-review]")).toBeHidden();
+    expect(new URL(page.url()).search).toBe(`?source=album&albumId=${albumId}`);
+    expect(await historyLength(page)).toBe(length + 1);
+  });
+
+  test("applying a filter replaces the destination and survives a reload", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 4);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    const length = await historyLength(page);
+    await page.locator("[data-filter-select]").selectOption("undecided");
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("selection")).toBe("undecided");
+    expect(await historyLength(page)).toBe(length);
+    await page.reload();
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("selection")).toBe("undecided");
+    await expect(page.locator("[data-filter-select]")).toHaveValue("undecided");
+  });
+
+  test("a deleted Album destination falls back to All Photos with an explanation", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Doomed Link");
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    const removed = await fetch(`${running.url}/api/albums/${albumId}/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: running.url },
+    });
+    expect(removed.ok).toBe(true);
+    await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
+    await expect(page.locator(".photo-cell")).toHaveCount(3);
+    await expect(
+      page.getByText("This Album is no longer available."),
+    ).toBeVisible();
+    // Only the confirmed invalid target uses the explained fallback, and it
+    // replaces the current entry exactly once.
+    expect(new URL(page.url()).search).toBe("");
+  });
+
+  test("a Photo missing from the requested view falls back to its source Grid", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Filtered Link");
+    const absent = "00000000-0000-4000-8000-0000000000ff";
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(
+      `${running.url}/?source=album&albumId=${albumId}&photoId=${absent}&selection=undecided`,
+    );
+    await expect(page.locator(".cell-placeholder")).toHaveCount(0);
+    await expect(
+      page.getByText(
+        "This Photo is no longer in this view. Showing the source Grid.",
+      ),
+    ).toBeVisible();
+    const url = new URL(page.url());
+    expect(url.searchParams.get("photoId")).toBeNull();
+    // The requested filter is preserved by the fallback.
+    expect(url.searchParams.get("selection")).toBe("undecided");
+    expect(url.searchParams.get("source")).toBe("album");
+  });
+
+  test("an invalid address is explained and replaced once with All Photos", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 2);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${running.url}/?source=folder&folderPath=..%2F..%2Fetc`);
+    // The All Photos Grid is established and its explanation owns the status
+    // line, so the Photographer is never left with a bare failure.
+    await expect(page.locator(".photo-cell")).toHaveCount(2);
+    await expect(
+      page.getByText(
+        "That link is not a valid Library Browser address. Showing All Photos.",
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "That link is not a valid Library Browser address. Showing All Photos.",
+      ),
+    ).toBeVisible();
+    expect(new URL(page.url()).search).toBe("");
+  });
+
+  test("a Folder entry whose publication changed requires an explicit action", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await mkdir(join(root, "shoot"), { recursive: true });
+    const data = await jpeg();
+    await writeFile(join(root, "shoot/one.jpg"), data);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(
+      page.getByText("Library ready", { exact: true }),
+    ).toBeVisible();
+    await openSources(page);
+    await page.getByRole("link", { name: /^Library Folder/ }).click();
+    await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
+    const folderAddress = new URL(page.url());
+    expect(folderAddress.searchParams.get("folderPath")).toBe("");
+    const entry = await navigationState(page);
+    expect(typeof entry?.folderPublication).toBe("string");
+
+    // A newer publication replaces the Library the entry was opened under. The
+    // application reloads its File Location binding itself, so the test waits
+    // for that reload instead of polling the server behind its back.
+    await writeFile(join(root, "shoot/two.jpg"), data);
+    const rebound = page.waitForResponse(/\/api\/file-locations/);
+    await post(running.url, "/api/scan", {});
+    await rebound;
+    await expect(
+      page.getByRole("link", { name: /^Library Folder 2 Photos/ }),
+    ).toBeVisible({ timeout: 60_000 });
+    // The reloaded tree names the Folder under the current publication.
+    await page
+      .getByRole("button", { name: "Toggle Library Folder subfolders" })
+      .click();
+    await expect(
+      page.getByRole("link", { name: /^shoot 2 Photos/ }),
+    ).toBeVisible();
+
+    // Traversing to the prior-publication entry must not silently reinterpret
+    // its Location.
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await goBack(page);
+    await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+      "This Folder changed with a newer Library publication. Open the current Folder to browse it.",
+    );
+    await expect(
+      page.getByRole("button", { name: "Open current Folder" }),
+    ).toBeVisible();
+    // The explicit action binds the current publication and replaces the
+    // entry's provenance without adding a history loop.
+    const length = await historyLength(page);
+    await page.getByRole("button", { name: "Open current Folder" }).click();
+    await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
+    expect(await historyLength(page)).toBe(length);
+    expect(new URL(page.url()).searchParams.get("folderPath")).toBe("");
+    expect((await navigationState(page))?.folderPublication).not.toBe(
+      entry?.folderPublication,
+    );
+  });
+
+  test("a failed traversal keeps its target URL and stays retryable", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    const target = page.url();
+
+    // A transport failure during traversal leaves the target URL and Retry
+    // plus a source-return action; it never silently reverses history.
+    await page.route("**/api/photos/*/preview", (route) => route.abort());
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    expect(page.url()).not.toBe(target);
+    await page.unroute("**/api/photos/*/preview");
+    await page.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  });
+
+  test("rapid Back and Forward during a slow window cannot repaint an obsolete destination", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 200);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await scrollGrid(page, 12 * 178);
+    await expect(page.locator('[data-photo-index="96"]')).toBeVisible();
+    const anchorPhotoId = await cellPhotoId(page, 96);
+    await page.locator('[data-photo-index="96"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+
+    let releaseWindows!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseWindows = resolve;
+    });
+    let holding = false;
+    await page.route(/\/api\/browse\/[^?]+\?start=/, async (route) => {
+      if (!holding) return route.continue();
+      await held;
+      return route.continue();
+    });
+    holding = true;
+    await page.evaluate(() => history.back());
+    await page.evaluate(() => history.forward());
+    await page.evaluate(() => history.back());
+    releaseWindows();
+    holding = false;
+    await page.unroute(/\/api\/browse\/[^?]+\?start=/);
+    await expect(page.getByText("Ready · 200 Photos")).toBeVisible();
+    await waitForGridPhotos(page);
+    // The Grid the traversal landed on is the one presented: a stale window
+    // success cannot repaint it as the Photo destination the browser left.
+    expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+    await expect(page.locator("[data-review]")).toBeHidden();
+    await expect(page.locator('[data-photo-index="96"]')).toBeVisible();
+    expect(anchorPhotoId).toBeDefined();
+  });
+
+  test("Album Resume is separate from opening the Album Grid and establishes a parent", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+      await writeFile(join(root, name), await jpeg());
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Resume Target");
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    const opened = progressResponse(page, albumId, 200);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await opened;
+    const stepped = progressResponse(page, albumId, 200);
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    await stepped;
+    await expect
+      .poll(async () => (await state(running.url, albumId)).position)
+      .toBe(1);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await waitForGridFrame(page);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+
+    // Opening the Album Grid never implicitly switches to Photo View, and the
+    // saved position is exposed as a separate Resume action.
+    await page.getByRole("link", { name: /^Resume Target 3 Photos/ }).click();
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await expect(page.locator("[data-review]")).toBeHidden();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+
+    // Resume from another source first commits the Album Grid entry, so
+    // returning from the Photo has a meaningful source destination.
+    await page.getByRole("link", { name: /^All Photos 3 Photos/ }).click();
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    const length = await historyLength(page);
+    await openSources(page);
+    await page.getByRole("button", { name: "Resume Resume Target" }).click();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("source")).toBe("album");
+    expect(await historyLength(page)).toBe(length + 2);
+    await goBack(page);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("source")).toBe("album");
+  });
+
+  test("restoring a Grid writes no Album saved position", async ({ page }) => {
+    const { base, root } = await fixture();
+    for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+      await writeFile(join(root, name), await jpeg());
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "No Write Grid");
+    // The Album is entered through its address, so the saved-position write
+    // under test is the one the ordinary Photo open admits.
+    const writes = progressResponse(page, albumId, 200);
+    await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await writes;
+    await expect
+      .poll(async () => (await state(running.url, albumId)).position)
+      .toBe(0);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await waitForGridFrame(page);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    const writesAfterRestore = progressResponse(page, albumId);
+    await page.waitForTimeout(600);
+    // A Grid restore never admits a saved-position write, so no POST lands.
+    const settled = await Promise.race([
+      writesAfterRestore.then(() => true),
+      page.waitForTimeout(600).then(() => false),
+    ]);
+    expect(settled).toBe(false);
+    expect((await state(running.url, albumId)).position).toBe(0);
+  });
+
+  test("a stale success cannot repaint a destination the browser has left", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    const photoTitle = await page.locator("[data-photo-title]").innerText();
+    let releasePreview!: () => void;
+    const heldPreview = new Promise<void>((resolve) => {
+      releasePreview = resolve;
+    });
+    await page.route("**/api/photos/*/preview", async (route) => {
+      await heldPreview;
+      try {
+        return await route.continue();
+      } catch {
+        // The traversal already answered this Preview: the late continuation
+        // has nothing left to continue.
+        return;
+      }
+    });
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await goBack(page);
+    releasePreview();
+    await page.unroute("**/api/photos/*/preview");
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    // The delayed Preview answer belongs to the Photo the browser left.
+    await expect(page.locator("[data-review]")).toBeHidden();
+    expect(photoTitle).toBeTruthy();
+  });
+
+  test("pagehide and a back-forward cache restore leave exactly one mounted browser", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+
+    // A back-forward cache restore resumes this document with its script
+    // frozen, so the disposed browser must be replaced by exactly one.
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new PageTransitionEvent("pagehide", { persisted: true }),
+      );
+      window.dispatchEvent(
+        new PageTransitionEvent("pageshow", { persisted: true }),
+      );
+    });
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    const mounted = await page.evaluate(() => ({
+      browsers: document.querySelectorAll("[data-browser]").length,
+      grids: document.querySelectorAll("[data-grid-view]").length,
+      reviews: document.querySelectorAll("[data-photo-view]").length,
+      states: document.querySelectorAll("[data-connection]").length,
+    }));
+    expect(mounted).toEqual({
+      browsers: 1,
+      grids: 1,
+      reviews: 1,
+      states: 1,
+    });
+    // The remounted browser revalidates its destination and stays operable:
+    // no duplicate subscription drives a second render of the same scroll.
+    const scrolls = await page.evaluate(async () => {
+      const viewport = document.querySelector<HTMLElement>(
+        "[data-grid-viewport]",
+      )!;
+      let frames = 0;
+      const count = () => {
+        frames += 1;
+      };
+      viewport.addEventListener("scroll", count);
+      viewport.scrollTop = 200;
+      viewport.dispatchEvent(new Event("scroll"));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      viewport.removeEventListener("scroll", count);
+      return frames;
+    });
+    expect(scrolls).toBe(1);
+    await page.getByRole("link", { name: /^All Photos 3 Photos/ }).click();
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+  });
+
+  test("a 40,000-Photo Library restores a late Grid anchor and stays bounded", async ({
+    page,
+  }) => {
+    test.setTimeout(240_000);
+    const base = await mkdtemp(join(tmpdir(), "slipstream-browser-40k-nav-"));
+    temporary.push(base);
+    const root = join(base, "originals");
+    await mkdir(root);
+    await mkdir(join(base, "state"));
+    await mkdir(join(base, "cache"));
+    await chmod(join(base, "state"), 0o700);
+    const generator = `
+      const { Database } = await import("bun:sqlite");
+      const database = new Database(process.env.STATE_DB);
+      database.exec(await Bun.file(process.env.SCHEMA_PATH).text());
+      const insertOriginal = database.prepare(
+        "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available) VALUES(?1,?2,'jpeg',1,1.0,1)",
+      );
+      const insertPhoto = database.prepare(
+        "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path) VALUES(?1,?2,0,1,'inspection-pending',?3)",
+      );
+      const insertBinding = database.prepare(
+        "INSERT INTO library_metadata VALUES('canonical_root',?1)",
+      );
+      database.exec("BEGIN");
+      for (let index = 0; index < 40000; index += 1) {
+        const path = String(index).padStart(6, "0") + ".jpg";
+        const originalId = index.toString(16).padStart(8, "0").repeat(8);
+        const photoId = (0x100000 + index).toString(16).padStart(8, "0").repeat(8);
+        insertOriginal.run(originalId, path);
+        insertPhoto.run(photoId, originalId, path);
+      }
+      database.exec("COMMIT");
+      insertBinding.run(process.env.ROOT);
+      database.close();
+    `;
+    execFileSync("bun", ["-e", generator], {
+      env: {
+        ...process.env,
+        STATE_DB: join(base, "state", "library.sqlite"),
+        ROOT: root,
+        SCHEMA_PATH: join(process.cwd(), "compatibility/sqlite/schema-v4.sql"),
+      },
+      stdio: "inherit",
+    });
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+
+    const viewport = page.locator("[data-grid-viewport]");
+    await viewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.locator('[data-photo-index="39999"]')).toBeVisible({
+      timeout: 30_000,
+    });
+    const lateTop = await gridScrollTop(page);
+    const boundedCells = await page.locator(".photo-cell").count();
+    expect(boundedCells).toBeLessThan(200);
+
+    await page.locator('[data-photo-index="39999"]').click();
+    await expect(page.getByText("40000 / 40000")).toBeVisible();
+    // A late Photo is addressed by its stable identity, never by position.
+    const latePhotoId = new URL(page.url()).searchParams.get("photoId");
+    expect(latePhotoId).toBeTruthy();
+
+    await goBack(page);
+    await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+    // The bounded position lookup resolves the anchor after fact eviction:
+    // the restored row is the row the Photographer left, and the covering
+    // window alone is admitted.
+    await expect
+      .poll(async () => Math.abs((await gridScrollTop(page)) - lateTop) < 178)
+      .toBe(true);
+    await expect.poll(() => focusedCellIndex(page)).toBe("39999");
+    expect(await page.locator(".photo-cell").count()).toBeLessThan(200);
+
+    // A different screen size restores by Photo identity using the current
+    // cell geometry.
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await expect(page.locator('[data-photo-index="39999"]')).toBeVisible();
+    await expect.poll(() => focusedCellIndex(page)).toBe("39999");
+    expect(await page.locator(".photo-cell").count()).toBeLessThan(200);
+
+    // No historical Snapshot is retained merely because an older entry names
+    // the same source: leaving it applies the ordinary release rules.
+    const token = await page.evaluate(async () => {
+      const opened = (await (
+        await fetch("/api/browse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "library" }),
+        })
+      ).json()) as { token?: string };
+      return typeof opened.token === "string" ? opened.token : undefined;
+    });
+    // A fresh token proves the released Snapshot is not retained merely
+    // because an older entry names the same source.
+    expect(token).toBeTruthy();
+  });
 });

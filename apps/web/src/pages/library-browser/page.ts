@@ -50,6 +50,15 @@ import {
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import { createSavedPositionOwner } from "./model/saved-position-owner.js";
 import {
+  allPhotosDestination,
+  createNavigationOwner,
+  gridDestination,
+  sameSourceView,
+  type NavigationDestination,
+  type NavigationGridRestoration,
+  type NavigationTraversal,
+} from "./model/browser-navigation.js";
+import {
   createLibraryBrowserView,
   type AlbumFormReference,
   type FolderViewModel,
@@ -79,6 +88,33 @@ type AlbumRecoveryRecord = Readonly<{
   claim: RecoveryClaim;
   sourceAuthority: SourceAuthority;
 }>;
+/// How establishing a source destination reports back to its caller.
+type SourceEstablishment =
+  /// The destination is committed and its first window is admitted.
+  | Readonly<{ kind: "established" }>
+  /// A newer destination superseded this one, so nothing was committed.
+  | Readonly<{ kind: "superseded" }>
+  /// The request failed; the destination stays retryable.
+  | Readonly<{ kind: "failed" }>
+  /// The server confirmed the requested Album or Folder is gone.
+  | Readonly<{ kind: "missing" }>;
+
+/// What a destination supplies to the source establishment it asks for.
+type SourceEstablishmentOptions = Readonly<{
+  /// The Grid anchor and focus to restore once the source is established.
+  restoration?: NavigationGridRestoration;
+  /// The Folder publication the requesting entry was established under.
+  folderPublication?: string;
+  /// An explained note presented after the destination commits.
+  explanation?: string;
+  /// How the committed destination is recorded in browser history.
+  address?: "push" | "replace" | "none";
+}>;
+
+const SOURCE_ESTABLISHED: SourceEstablishment = { kind: "established" };
+const SOURCE_SUPERSEDED: SourceEstablishment = { kind: "superseded" };
+const SOURCE_FAILED: SourceEstablishment = { kind: "failed" };
+const SOURCE_MISSING: SourceEstablishment = { kind: "missing" };
 export function mountLibraryBrowser(
   root: HTMLElement,
   fetcher: typeof fetch = fetch,
@@ -87,6 +123,37 @@ export function mountLibraryBrowser(
   const recoveryGate = new RecoveryGate();
   const sourceGrid = createSourceGridOwner(fetcher);
   let photoMetadataAbort: AbortController | undefined;
+  // The page-local navigation owner. Its traversal callback is bound once the
+  // page controller's coordination functions exist, so the owner can be
+  // created before them and still report every popstate.
+  let applyNavigationTraversal: (
+    traversal: NavigationTraversal,
+  ) => void = () => {};
+  // The Grid anchor is captured before Photo View takes the layout over, so a
+  // Photo entry can replace the Grid entry it came from with the position the
+  // Photographer left.
+  let pendingGridRestoration: NavigationGridRestoration | undefined;
+  const navigation = createNavigationOwner(
+    { captureGridRestoration: () => pendingGridRestoration },
+    (traversal) => applyNavigationTraversal(traversal),
+  );
+  // Startup elects exactly one source bootstrap from the committed Overview:
+  // the address this document was loaded with. It replaces the unconditional
+  // All Photos bootstrap and never races a second source open.
+  const startup = navigation.start();
+  // An invalid address is explained and replaced once with All Photos before
+  // any request for the invalid source is made.
+  /// The destination whose establishment is in flight. A traversal that
+  /// arrives while a newer intent is establishing a different destination is
+  /// superseded, so it cannot repaint the destination the page has left.
+  let pendingDestination: NavigationDestination | undefined;
+  let startupDestination: NavigationDestination =
+    startup.kind === "destination" ? startup.destination : allPhotosDestination;
+  let startupConsumed = false;
+  let startupExplanation: string | undefined =
+    startup.kind === "invalid"
+      ? "That link is not a valid Library Browser address. Showing All Photos."
+      : undefined;
   const view: LibraryBrowserView = createLibraryBrowserView(
     root,
     handleViewIntent,
@@ -260,6 +327,21 @@ export function mountLibraryBrowser(
     }
     if (!coordination.isCurrent()) return;
     if (!sourceGrid.token && coordination.overview.published) {
+      if (!startupConsumed) {
+        // Startup elects exactly one source bootstrap: the destination this
+        // document was loaded with. It replaces the unconditional All Photos
+        // bootstrap and never races a second source open.
+        startupConsumed = true;
+        const destination = startupDestination;
+        const explanation = startupExplanation;
+        startupDestination = allPhotosDestination;
+        startupExplanation = undefined;
+        await establishDestination(destination, {
+          addressed: true,
+          ...(explanation ? { explanation } : {}),
+        });
+        return;
+      }
       const remembered =
         sourceGrid.lastSource ?? ({ kind: "library" } as const);
       const bindable =
@@ -1299,6 +1381,7 @@ export function mountLibraryBrowser(
     folder?: { location: string; name: string },
     order: SourceViewOrder = "source-default",
     selection: SelectionFilter = "all",
+    establishment: SourceEstablishmentOptions = {},
   ) => {
     const descriptor: SourceGridSource =
       kind === "library"
@@ -1313,7 +1396,13 @@ export function mountLibraryBrowser(
               folder: folder!,
               publication: fileLocations.publication!,
             };
-    return openSourceDescriptor(descriptor, preferredPhotoId, order, selection);
+    return openSourceDescriptor(
+      descriptor,
+      preferredPhotoId,
+      order,
+      selection,
+      establishment,
+    );
   };
 
   async function openSourceDescriptor(
@@ -1321,7 +1410,8 @@ export function mountLibraryBrowser(
     preferredPhotoId?: string,
     order: SourceViewOrder = "source-default",
     selection: SelectionFilter = "all",
-  ): Promise<void> {
+    establishment: SourceEstablishmentOptions = {},
+  ): Promise<SourceEstablishment> {
     const descriptor: SourceGridSource =
       requested.kind === "folder" && fileLocations.publication
         ? { ...requested, publication: fileLocations.publication }
@@ -1331,6 +1421,15 @@ export function mountLibraryBrowser(
     cancelScheduledGridRender();
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
+    pendingDestination = {
+      source: requested.kind,
+      ...(requested.kind === "folder"
+        ? { folderPath: requested.folder.location }
+        : {}),
+      ...(requested.kind === "album" ? { albumId: requested.album.id } : {}),
+      ...(order !== "source-default" ? { order } : {}),
+      selection,
+    };
     const pendingOpen = sourceGrid.open(descriptor, {
       ...(preferredPhotoId ? { preferredPhotoId } : {}),
       order,
@@ -1363,14 +1462,14 @@ export function mountLibraryBrowser(
     renderSortControl();
     try {
       const opened = await pendingOpen;
-      if (opened.kind === "detached") return;
+      if (opened.kind === "detached") return SOURCE_SUPERSEDED;
       if (opened.kind === "publication-conflict") {
         // Only the current source's handler may reset and reload File
         // Locations: a superseded open doing the same would discard the
         // newer recovery and leave the tree unbound.
-        if (!sourceGrid.isCurrent(authority)) return;
+        if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
         const reboundAuthority = await rebindFileLocations();
-        if (!sourceGrid.isCurrent(authority)) return;
+        if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
         if (
           fileLocations.isCurrent(reboundAuthority) &&
           fileLocations.publication
@@ -1381,9 +1480,15 @@ export function mountLibraryBrowser(
           );
         throw new Error("source open failed");
       }
-      if (opened.kind === "failed") throw new Error("source open failed");
+      if (opened.kind === "failed") {
+        // A 404 is the server confirming that the requested Album or Folder
+        // is gone, which is the only answer that licenses an explained
+        // fallback. Every other answer keeps its retryable failure.
+        if (opened.status === 404) return SOURCE_MISSING;
+        throw new Error("source open failed");
+      }
       const gridPosition = sourceGrid.readGridPosition(authority);
-      if (gridPosition === undefined) return;
+      if (gridPosition === undefined) return SOURCE_SUPERSEDED;
       photoOwner.updateSource({
         sourceAuthority: authority,
         total: sourceGrid.total,
@@ -1393,14 +1498,23 @@ export function mountLibraryBrowser(
       });
       view.scrollToGridIndex(gridPosition);
       renderSources();
+      // A restoration resolves its anchor against the established Snapshot
+      // before the covering window is admitted, so the restored row is the
+      // row that is loaded.
+      const restoration = establishment.restoration;
+      const restoreIndex = restoration
+        ? await resolveRestorationIndex(authority, gridPosition, restoration)
+        : gridPosition;
+      if (restoreIndex === undefined) return SOURCE_SUPERSEDED;
       const windowReady = await loadWindow(
-        gridPosition,
+        restoreIndex,
         { kind: "source", authority },
         false,
         "high",
         sourceTransition,
       );
-      if (!sourceGrid.isCurrent(authority) || !windowReady) return;
+      if (!sourceGrid.isCurrent(authority) || !windowReady)
+        return SOURCE_SUPERSEDED;
       if (sourceGrid.kind === "folder") releasePublicationLocationRecovery();
       recoveryGate.succeedTransition(sourceTransition);
       sourceGrid.establish(authority);
@@ -1409,9 +1523,15 @@ export function mountLibraryBrowser(
       // flight, and any render during that window clamps the Grid to the
       // top. Position the reopened Grid through the render that restores the
       // scroll height, so a clamped scroll cannot survive it.
-      renderGrid(gridPosition);
+      renderGrid(restoreIndex);
+      if (restoration)
+        view.restoreGridAnchor(restorationGeometry(restoreIndex, restoration));
       if (sourceGrid.total) {
         presentRangeStatus();
+        // An explained fallback names the confirmed invalid or missing target
+        // after the ordinary status has been presented.
+        if (establishment.explanation)
+          setGridStatusText(establishment.explanation);
       } else if (sourceGrid.selection === "all") {
         setGridStatusText(formatPhotoCount(0));
         view.setGridEmpty(emptySourceStatus(), sourceGrid.kind !== "album");
@@ -1421,8 +1541,19 @@ export function mountLibraryBrowser(
         setGridStatusText(formatPhotoCount(0));
         view.setGridEmpty("No Photos match this filter.");
       }
+      // The committed destination is recorded once, so the navigation owner's
+      // current entry always names the source the page presents.
+      if (establishment.address === "push")
+        navigation.openGrid(liveDestination(), fileLocations.publication);
+      else if (establishment.address === "replace")
+        navigation.replaceGrid(
+          liveDestination(),
+          undefined,
+          fileLocations.publication,
+        );
+      return SOURCE_ESTABLISHED;
     } catch {
-      if (!sourceGrid.isCurrent(authority)) return;
+      if (!sourceGrid.isCurrent(authority)) return SOURCE_SUPERSEDED;
       setGridStatusText("Could not load this source. Retry to continue.");
       const claim = recoveryGate.issue("source-open", String(generation), {
         owner: { scope: "source", generation: String(generation) },
@@ -1432,7 +1563,9 @@ export function mountLibraryBrowser(
         transportLost: true,
       });
       syncConnection();
+      return SOURCE_FAILED;
     } finally {
+      pendingDestination = undefined;
       if (sourceGrid.isCurrent(authority)) {
         pageBusy = false;
         updateControls();
@@ -1462,6 +1595,7 @@ export function mountLibraryBrowser(
       photoOwner.lastCurrentPhotoId,
       order,
       sourceGrid.selection,
+      { address: "replace" },
     );
   };
 
@@ -1487,6 +1621,7 @@ export function mountLibraryBrowser(
       photoOwner.lastCurrentPhotoId,
       sourceGrid.order,
       selection,
+      { address: "replace" },
     );
   };
 
@@ -1978,10 +2113,16 @@ export function mountLibraryBrowser(
     renderGrid();
   };
 
-  const openPhoto = async (index: number) => {
-    if (!canOpenGridPhoto()) return;
+  const openPhoto = async (
+    index: number,
+    address: "push" | "replace" | "none" = "push",
+  ): Promise<boolean> => {
+    if (!canOpenGridPhoto()) return false;
+    // The anchor is read from the Grid before anything re-keys its focus or
+    // hides its layout, so the Grid entry records where the Photographer left.
+    pendingGridRestoration = view.captureGridRestoration();
     const navigation = photoOwner.beginOpen(index);
-    if (!navigation) return;
+    if (!navigation) return false;
     const photoTransition = recoveryGate.beginTransition(
       "photo",
       photoRecoveryKey(navigation.authority),
@@ -2003,16 +2144,21 @@ export function mountLibraryBrowser(
           photoTransition,
           navigation.authority,
         );
-      if (!photoOwner.isCurrent(navigation.authority) || !windowReady) return;
+      if (!photoOwner.isCurrent(navigation.authority) || !windowReady)
+        return false;
       const current = photoOwner.commitOpen(navigation);
-      if (!current) return;
+      if (!current) return false;
+      // The Photo address is committed only after the Photo owner commits its
+      // bounded facts, so a failed step creates no new Photo address and keeps
+      // the existing Photo Retry target.
+      recordPhotoAddress(current.id, address);
       const hasKnownPreview = renderPhotoShell(navigation.authority);
       updateControls();
       const previewRequest = showPreview(navigation.authority, photoTransition);
       const previewReady = hasKnownPreview || (await previewRequest);
       // A superseded open must not persist or touch controls afterwards: the
       // newer navigation persists its own position.
-      if (!photoOwner.isCurrent(navigation.authority)) return;
+      if (!photoOwner.isCurrent(navigation.authority)) return false;
       const positionReady = await persistPosition(navigation.authority);
       if (
         previewReady &&
@@ -2027,8 +2173,10 @@ export function mountLibraryBrowser(
       // unloaded boundary window is still loading. A committed navigation has
       // already cleared this gate; every other path abandons its pending target.
       photoOwner.cancelOpen(navigation.authority);
+      pendingGridRestoration = undefined;
       updateControls();
     }
+    return true;
   };
   const renderPhotoFacts = () => {
     const photo = currentPhoto();
@@ -2392,7 +2540,10 @@ export function mountLibraryBrowser(
     if (!photo || !photo.available) return;
     await photoOwner.prefetchAdjacent(authority, index);
   };
-  const showGrid = () => {
+  /// Releases Photo View's ownership of the current Photo and re-keys the
+  /// recovery gate exactly as returning to the Grid does, so a pending
+  /// transfer cannot paint a Photo the page has left.
+  const leavePhotoView = () => {
     photoMetadataAbort?.abort();
     photoMetadataAbort = undefined;
     const authority = photoOwner.leave();
@@ -2402,6 +2553,9 @@ export function mountLibraryBrowser(
     );
     recoveryGate.succeedTransition(photoTransition);
     setConnected(true);
+  };
+  const showGrid = () => {
+    leavePhotoView();
     cancelScheduledGridRender();
     const gridAuthority = sourceGrid.authority;
     const gridPosition = sourceGrid.readGridPosition(gridAuthority);
@@ -2466,7 +2620,7 @@ export function mountLibraryBrowser(
       target >= sourceGrid.total
     )
       return;
-    await openPhoto(target);
+    await openPhoto(target, "replace");
   };
   const mutate = async (
     field: "selectionState" | "rating",
@@ -3187,6 +3341,9 @@ export function mountLibraryBrowser(
     );
     syncConnection();
     renderPhotoShell(outcome.authority);
+    // Undo-driven Photo return replaces the current Photo destination, keeping
+    // its parent Grid relationship.
+    if (outcome.photoId) recordPhotoAddress(outcome.photoId, "replace");
     updateControls();
     const refreshed = await showPreview(outcome.authority, photoTransition);
     if (
@@ -3230,6 +3387,7 @@ export function mountLibraryBrowser(
           undefined,
           sourceGrid.order,
           sourceGrid.selection,
+          { address: "replace" },
         );
       return;
     }
@@ -3238,6 +3396,7 @@ export function mountLibraryBrowser(
       undefined,
       sourceGrid.order,
       sourceGrid.selection,
+      { address: "replace" },
     );
   };
 
@@ -3337,6 +3496,7 @@ export function mountLibraryBrowser(
         undefined,
         sourceGrid.order,
         sourceGrid.selection,
+        { address: "replace" },
       );
     })();
   };
@@ -3590,19 +3750,59 @@ export function mountLibraryBrowser(
         void changeFilter(intent.selection);
         return;
       case "source-open": {
+        // Choosing a source creates one Grid destination with that source's
+        // default order and All filter. It never implicitly replaces the Grid
+        // with Photo View.
         const source = intent.source;
         if (source.kind === "library") {
-          void openSource("library");
+          void openSource(
+            "library",
+            undefined,
+            undefined,
+            undefined,
+            "source-default",
+            "all",
+            {
+              address: "push",
+            },
+          );
         } else if (source.kind === "album") {
           const album = application.albums.find(
             (candidate) => candidate.id === source.id,
           );
-          if (album) void openSource("album", album);
+          if (album)
+            void openSource(
+              "album",
+              album,
+              undefined,
+              undefined,
+              "source-default",
+              "all",
+              {
+                address: "push",
+              },
+            );
         } else if (fileLocations.publication) {
-          void openSource("folder", undefined, undefined, source);
+          void openSource(
+            "folder",
+            undefined,
+            undefined,
+            source,
+            "source-default",
+            "all",
+            {
+              address: "push",
+            },
+          );
         }
         return;
       }
+      case "album-resume":
+        void resumeAlbum(intent.albumId);
+        return;
+      case "explained-action":
+        void openCurrentFolder();
+        return;
       case "file-location-retry": {
         const failure = fileLocationFailuresByKey.get(intent.key);
         if (failure)
@@ -3709,7 +3909,7 @@ export function mountLibraryBrowser(
         void reviewChangedPhotos();
         return;
       case "show-grid":
-        showGrid();
+        returnToSourceGrid();
         return;
       case "library-check":
         application.requestLibraryCheck();
@@ -3761,6 +3961,455 @@ export function mountLibraryBrowser(
     }
   }
 
+  /// The destination the live Snapshot presents, derived from the committed
+  /// source, order, and filter. An address is never derived from a retained
+  /// projection of Photo facts.
+  const liveDestination = (photoId?: string): NavigationDestination => {
+    const source = sourceGrid.source;
+    const order =
+      sourceGrid.order === "source-default" ? undefined : sourceGrid.order;
+    return {
+      source: source.kind,
+      ...(source.kind === "folder"
+        ? { folderPath: source.folder.location }
+        : {}),
+      ...(source.kind === "album" ? { albumId: source.album.id } : {}),
+      ...(photoId ? { photoId } : {}),
+      ...(order ? { order } : {}),
+      selection: sourceGrid.selection,
+    };
+  };
+
+  /// The wire order one address requests. An omitted order and the Album's own
+  /// order both leave the order to the server.
+  const destinationOrder = (
+    destination: NavigationDestination,
+  ): SourceViewOrder =>
+    destination.order === undefined || destination.order === "album-order"
+      ? "source-default"
+      : destination.order;
+
+  /// The display name of a Folder Location. The File Location tree names the
+  /// Folders it has loaded; a Location outside a loaded window falls back to
+  /// its last component, and the server answers authoritatively.
+  const folderNameFor = (location: string): string => {
+    if (location === "") return "Library Folder";
+    const separator = location.lastIndexOf("/");
+    const parent = separator === -1 ? "" : location.slice(0, separator);
+    const known = fileLocations
+      .window(parent)
+      ?.children.find((child) => child.location === location);
+    return known?.name ?? location.slice(separator + 1);
+  };
+
+  /// True when the live Snapshot can serve a destination without reopening the
+  /// source: the same source, order, and filter, and a Folder whose
+  /// publication still matches the entry's provenance.
+  const reusableForTraversal = (
+    destination: NavigationDestination,
+    folderPublication?: string,
+  ): boolean => {
+    if (!sourceGrid.token || !sourceGrid.isReady(sourceGrid.authority))
+      return false;
+    if (!sameSourceView(liveDestination(), destination)) return false;
+    return !(
+      destination.source === "folder" &&
+      folderPublication !== undefined &&
+      folderPublication !== fileLocations.publication
+    );
+  };
+
+  /// Resolves one captured Grid anchor against the established Snapshot. The
+  /// stable identity is confirmed before the index hint is trusted; an absent
+  /// anchor clamps the prior index hint to the current source. Undefined means
+  /// a newer destination superseded this one.
+  const resolveRestorationIndex = async (
+    authority: SourceAuthority,
+    fallbackIndex: number,
+    restoration: NavigationGridRestoration,
+  ): Promise<number | undefined> => {
+    if (!sourceGrid.isCurrent(authority)) return undefined;
+    const anchor = restoration.anchor;
+    const retained = sourceGrid.findPhotoIndex(anchor.photoId);
+    if (
+      retained !== undefined &&
+      sourceGrid.photoAt(retained)?.id === anchor.photoId
+    )
+      return retained;
+    const resolved = await sourceGrid.resolvePhotoPosition(
+      authority,
+      anchor.photoId,
+    );
+    if (!sourceGrid.isCurrent(authority)) return undefined;
+    if (resolved.kind === "resolved") return resolved.position;
+    if (resolved.kind === "missing")
+      return Math.min(anchor.indexHint, Math.max(0, sourceGrid.total - 1));
+    // A failed lookup is retryable, not evidence that the Photo disappeared,
+    // so the bounded position the open already resolved stays usable.
+    return fallbackIndex;
+  };
+
+  /// The geometry one restoration applies at a resolved index: the anchor's
+  /// row and offset, and the cell the focus target names when the Snapshot
+  /// still holds that Photo identity. An anchor the Snapshot no longer holds
+  /// falls back to the clamped position, which restores geometry but leaves
+  /// the Grid itself as the focus target.
+  const restorationGeometry = (
+    index: number,
+    restoration: NavigationGridRestoration,
+  ): Readonly<{ index: number; offset: number; focusIndex?: number }> => {
+    const anchorHeld =
+      sourceGrid.photoAt(index)?.id === restoration.anchor.photoId;
+    const focusIndex =
+      anchorHeld && restoration.focus.kind === "photo"
+        ? sourceGrid.findPhotoIndex(restoration.focus.photoId)
+        : undefined;
+    return {
+      index,
+      offset: restoration.anchor.offset,
+      ...(focusIndex !== undefined ? { focusIndex } : {}),
+    };
+  };
+
+  /// An explained fallback: the confirmed invalid or missing target is named,
+  /// the current entry is replaced once with All Photos, and no request is
+  /// made for the invalid source.
+  const fallbackToAllPhotos = async (message: string): Promise<boolean> => {
+    navigation.replaceGrid(allPhotosDestination);
+    const outcome = await openSource(
+      "library",
+      undefined,
+      undefined,
+      undefined,
+      "source-default",
+      "all",
+      {
+        explanation: message,
+      },
+    );
+    return outcome.kind === "established";
+  };
+
+  /// A Photo no longer in the requested source or current filter returns to
+  /// that source's Grid, preserving the requested filter, with an explanation.
+  const fallbackToSourceGrid = async (
+    destination: NavigationDestination,
+    message: string,
+  ): Promise<boolean> => {
+    const grid = gridDestination(destination);
+    navigation.replaceGrid(
+      grid,
+      undefined,
+      destination.source === "folder" ? fileLocations.publication : undefined,
+    );
+    return establishDestination(grid, { explanation: message });
+  };
+
+  /// A Folder entry whose publication changed keeps its Location but must not
+  /// silently reinterpret it: the Photographer is told the Folder changed and
+  /// must explicitly open the current Folder.
+  const presentFolderPublicationChange = (
+    destination: NavigationDestination,
+  ): void => {
+    pendingCurrentFolder = destination.folderPath ?? "";
+    // The destination shell is the Grid: Photo View must not keep presenting
+    // the Photo the traversal left.
+    leavePhotoView();
+    view.prepareSourceOpen(sourceGrid.name);
+    view.setGridExplanation(
+      "This Folder changed with a newer Library publication. Open the current Folder to browse it.",
+      { label: "Open current Folder" },
+    );
+  };
+
+  let pendingCurrentFolder: string | undefined;
+
+  /// Opens the Photo a destination names against the live Snapshot. Undefined
+  /// means a newer destination superseded this one.
+  const openTraversedPhoto = async (
+    destination: NavigationDestination,
+    photoId: string,
+  ): Promise<boolean | undefined> => {
+    const retained = sourceGrid.findPhotoIndex(photoId);
+    if (retained !== undefined && sourceGrid.photoAt(retained)?.id === photoId)
+      return openPhoto(retained, "none");
+    const resolved = await sourceGrid.resolvePhotoPosition(
+      sourceGrid.authority,
+      photoId,
+    );
+    if (!sourceGrid.isCurrent(sourceGrid.authority)) return undefined;
+    if (resolved.kind !== "resolved")
+      // A null position is the server confirming the Photo is absent from
+      // this source and filter, which is the explained source-Grid fallback.
+      return resolved.kind === "missing" || resolved.kind === "expired"
+        ? fallbackToSourceGrid(
+            destination,
+            "This Photo is no longer in this view. Showing the source Grid.",
+          )
+        : false;
+    return openPhoto(resolved.position, "none");
+  };
+
+  /// Renders a Grid destination the live Snapshot already serves and restores
+  /// its anchor. No source is reopened, so frozen membership survives.
+  const showTraversedGrid = async (
+    restoration?: NavigationGridRestoration,
+    explanation?: string,
+  ): Promise<boolean> => {
+    const authority = sourceGrid.authority;
+    const gridPosition = sourceGrid.readGridPosition(authority);
+    if (gridPosition === undefined) return false;
+    const restoreIndex = restoration
+      ? await resolveRestorationIndex(authority, gridPosition, restoration)
+      : gridPosition;
+    if (restoreIndex === undefined) return false;
+    leavePhotoView();
+    view.showGrid();
+    if (restoration) {
+      // Only the bounded window covering the restored row is admitted, and the
+      // anchor's stable identity is confirmed against the live Snapshot before
+      // its index hint is trusted.
+      const windowReady = await loadWindow(
+        restoreIndex,
+        { kind: "source", authority },
+        false,
+        "high",
+      );
+      if (!sourceGrid.isCurrent(authority) || !windowReady) return false;
+    }
+    renderGrid(restoreIndex);
+    if (restoration)
+      view.restoreGridAnchor(restorationGeometry(restoreIndex, restoration));
+    presentRangeStatus();
+    // An explained fallback names the confirmed missing target after the
+    // ordinary status has been presented.
+    if (explanation) setGridStatusText(explanation);
+    updateControls();
+    return true;
+  };
+
+  /// Establishes one destination: reusing the live Snapshot when its source,
+  /// order, and filter match, and otherwise opening the requested source.
+  const establishDestination = async (
+    destination: NavigationDestination,
+    options: SourceEstablishmentOptions &
+      Readonly<{
+        addressed?: boolean;
+        /// Bind the current Published Library instead of reusing a Snapshot
+        /// opened under a superseded publication.
+        reopen?: boolean;
+      }> = {},
+  ): Promise<boolean> => {
+    if (!applicationAlive) return false;
+    // A newer intent is already establishing a different destination, so this
+    // traversal is superseded rather than repainting what the page left.
+    if (pendingDestination && !sameSourceView(pendingDestination, destination))
+      return false;
+    const photoId = destination.photoId;
+    if (
+      !options.reopen &&
+      reusableForTraversal(destination, options.folderPublication)
+    ) {
+      if (photoId)
+        return Boolean(await openTraversedPhoto(destination, photoId));
+      return showTraversedGrid(options.restoration, options.explanation);
+    }
+    if (
+      destination.source === "folder" &&
+      options.folderPublication !== undefined &&
+      fileLocations.publication !== undefined &&
+      options.folderPublication !== fileLocations.publication
+    ) {
+      presentFolderPublicationChange(destination);
+      return false;
+    }
+    if (destination.source === "library") {
+      const outcome = await openSource(
+        "library",
+        undefined,
+        photoId,
+        undefined,
+        destinationOrder(destination),
+        destination.selection,
+        options,
+      );
+      return commitDestinationPhoto(destination, photoId, outcome, () =>
+        fallbackToAllPhotos("This source is no longer available."),
+      );
+    }
+    if (destination.source === "album") {
+      const album = application.albums.find(
+        (candidate) => candidate.id === destination.albumId,
+      );
+      if (!album)
+        return fallbackToAllPhotos("This Album is no longer available.");
+      const outcome = await openSource(
+        "album",
+        album,
+        photoId,
+        undefined,
+        destinationOrder(destination),
+        destination.selection,
+        options,
+      );
+      return commitDestinationPhoto(destination, photoId, outcome, () =>
+        fallbackToAllPhotos("This Album is no longer available."),
+      );
+    }
+    // A Folder destination binds to the current Published Library and opens
+    // only a valid current relative Location.
+    if (!fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive) return false;
+      if (!bound) {
+        setGridStatusText("Could not load this source. Retry to continue.");
+        return false;
+      }
+    }
+    const outcome = await openSource(
+      "folder",
+      undefined,
+      photoId,
+      {
+        location: destination.folderPath ?? "",
+        name: folderNameFor(destination.folderPath ?? ""),
+      },
+      destinationOrder(destination),
+      destination.selection,
+      options,
+    );
+    return commitDestinationPhoto(destination, photoId, outcome, () =>
+      fallbackToAllPhotos(
+        "This Folder is no longer part of the Library. Showing All Photos.",
+      ),
+    );
+  };
+
+  /// Finishes a destination whose source has just been established: a Grid
+  /// destination is committed, and a Photo destination confirms the stable
+  /// identity before presenting it. A preferred Photo is only a hint to source
+  /// opening, so a fallback position is never proof that the Photo exists.
+  const commitDestinationPhoto = async (
+    destination: NavigationDestination,
+    photoId: string | undefined,
+    outcome: SourceEstablishment,
+    missing: () => Promise<boolean>,
+  ): Promise<boolean> => {
+    if (outcome.kind === "missing") return missing();
+    if (outcome.kind !== "established") return false;
+    if (!photoId) return true;
+    return Boolean(await openTraversedPhoto(destination, photoId));
+  };
+
+  /// Applies one browser traversal. The address has already been chosen by the
+  /// browser, so the page renders a destination shell while resolving it and
+  /// never undoes the traversal.
+  applyNavigationTraversal = (traversal: NavigationTraversal) => {
+    void applyTraversal(traversal);
+  };
+
+  const applyTraversal = async (traversal: NavigationTraversal) => {
+    if (!applicationAlive) return;
+    view.closeTransientSurfaces();
+    const entry = traversal.entry;
+    await establishDestination(traversal.destination, {
+      addressed: true,
+      ...(entry?.anchor && entry.focus
+        ? { restoration: { anchor: entry.anchor, focus: entry.focus } }
+        : {}),
+      ...(entry?.folderPublication
+        ? { folderPublication: entry.folderPublication }
+        : {}),
+    });
+  };
+
+  /// Records the Photo destination this navigation committed. A repeated
+  /// activation of the current destination records nothing, so duplicate
+  /// activation creates no duplicate history entry.
+  const recordPhotoAddress = (
+    photoId: string,
+    mode: "push" | "replace" | "none",
+  ): void => {
+    if (mode === "none") return;
+    const destination = liveDestination(photoId);
+    if (mode === "replace") {
+      navigation.replacePhoto(destination);
+      return;
+    }
+    if (
+      navigation.destination.photoId === photoId &&
+      sameSourceView(navigation.destination, destination)
+    )
+      return;
+    navigation.openPhoto(destination);
+  };
+
+  /// Album Resume resolves the saved position under the existing
+  /// saved-position rules and opens Photo View. From another source the Album
+  /// Grid entry is committed first, so returning from the Photo has a
+  /// meaningful source destination; from the current Grid only the Photo entry
+  /// is added.
+  const resumeAlbum = async (albumId: string): Promise<void> => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    const album = application.albums.find(
+      (candidate) => candidate.id === albumId,
+    );
+    if (!album) return;
+    const alreadyCurrent =
+      sourceGrid.kind === "album" &&
+      sourceGrid.albumId === albumId &&
+      sourceGrid.isReady(sourceGrid.authority);
+    // The Album is opened without a preferred Photo, so the server resumes at
+    // the durable saved position in its Browse response.
+    const outcome = await openSource(
+      "album",
+      album,
+      undefined,
+      undefined,
+      "source-default",
+      "all",
+      { address: alreadyCurrent ? "replace" : "push" },
+    );
+    if (outcome.kind !== "established") return;
+    const authority = sourceGrid.authority;
+    const position = sourceGrid.readGridPosition(authority);
+    const savedPhoto =
+      position === undefined ? undefined : sourceGrid.photoAt(position);
+    if (position === undefined || !savedPhoto) {
+      setGridStatusText(
+        "Resume is unavailable: this Album has no saved position.",
+      );
+      return;
+    }
+    await openPhoto(position, "push");
+  };
+
+  /// The in-app source return from Photo View. It traverses one entry only
+  /// when the current Photo has a known parent Grid entry; a directly loaded
+  /// Photo replaces its entry with its source Grid instead of risking
+  /// navigation to another site.
+  const returnToSourceGrid = () => {
+    if (navigation.returnToSourceGrid(liveDestination()) === "traversed")
+      return;
+    showGrid();
+  };
+
+  /// Opens the current Folder after an entry's publication changed. The action
+  /// replaces the entry's provenance and adds no history loop.
+  const openCurrentFolder = async (): Promise<void> => {
+    const location = pendingCurrentFolder ?? "";
+    pendingCurrentFolder = undefined;
+    const destination: NavigationDestination = {
+      source: "folder",
+      folderPath: location,
+      selection: "all",
+    };
+    navigation.replaceGrid(destination, undefined, fileLocations.publication);
+    // The action replaces the entry's provenance with the current publication,
+    // so the Folder is opened against it rather than reusing a stale Snapshot.
+    await establishDestination(destination, { addressed: true, reopen: true });
+  };
+
   void application.loadOverview();
   return () => {
     if (!applicationAlive) return;
@@ -3770,6 +4419,7 @@ export function mountLibraryBrowser(
     view.dispose();
     cancelScheduledGridRender();
     unsubscribeWindowSettled();
+    navigation.dispose();
     albumRecovery = undefined;
     batchAlbumCompensation = undefined;
     albumActions.dispose();
