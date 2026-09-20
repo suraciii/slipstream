@@ -74,6 +74,14 @@ _Avoid_: sync error, overwrite conflict
 **Library Browser**:
 The primary interface for viewing Photos from `All Photos`, one Original Folder, or one Album. It provides a progressively loaded Grid View and a focused Photo View.
 
+**Destination**:
+One addressable Library Browser view: a source with its view order and Selection State filter, showing either its Grid or one Photo. A Destination resolves against current Library facts when opened; it is not an archival snapshot. It is unrelated to the destination Location used by Retire and Bind.
+_Avoid_: page route, permalink
+
+**Resume**:
+The explicit action that opens an Album's saved Photo from that Album's Grid. Resume is separate from opening the Album's Grid and is available only while a durable saved position exists.
+_Avoid_: auto-reopen, restore position
+
 **Grid View**:
 The progressively loaded thumbnail view of the current `All Photos`, Original Folder, or Album source.
 
