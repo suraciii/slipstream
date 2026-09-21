@@ -149,10 +149,18 @@ export function createModalSurfaces(): ModalSurfaces {
       },
       { signal: controller.signal },
     );
-    // A close this controller did not start still clears its bookkeeping.
-    dialog.addEventListener("close", () => cleanup(kind, true, activeInvoker), {
-      signal: controller.signal,
-    });
+    // A close this controller did not start still clears its bookkeeping. A
+    // close event that was already queued when this dialog was reopened is
+    // stale: the dialog is open again, so the surface that is active now keeps
+    // its bookkeeping rather than being cleared by an event from before it.
+    dialog.addEventListener(
+      "close",
+      () => {
+        if (dialog.open) return;
+        cleanup(kind, true, activeInvoker);
+      },
+      { signal: controller.signal },
+    );
     // A click that lands on the dialog itself rather than its content is a
     // scrim activation for a surface that spans the viewport.
     dialog.addEventListener(

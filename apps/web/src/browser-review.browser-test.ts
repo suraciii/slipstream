@@ -19117,12 +19117,17 @@ test.describe("Photo View disclosure bookkeeping", () => {
     await expect(
       page.locator("[data-photo-tools-view='nearby']"),
     ).toBeVisible();
-    const insideSurface = await page.evaluate(() =>
-      document
-        .querySelector("[data-photo-tools]")!
-        .contains(document.activeElement),
-    );
-    expect(insideSurface).toBe(true);
+    // Focus settles inside the surface that holds the strip: the disclosure
+    // survives the navigation and the keyboard never escapes to the document.
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document
+            .querySelector("[data-photo-tools]")!
+            .contains(document.activeElement),
+        ),
+      )
+      .toBe(true);
 
     // When interactivity resumes, the entry the Photographer had focused takes
     // focus back instead of leaving it on the dialog element.
