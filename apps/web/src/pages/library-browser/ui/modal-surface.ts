@@ -40,8 +40,10 @@ const canTakeFocus = (element: HTMLElement): boolean =>
 /// The nearest valid control for a close whose invoker is gone or cannot take
 /// focus, as the close-restoration contract requires. The search starts at the
 /// invoker and widens through its enclosing regions, so it stops at the closest
-/// control the Photographer can still use; a region that is itself focusable
-/// takes the focus when no control inside it can.
+/// control the Photographer can still use; every candidate in a region is
+/// examined, because the first a region contains is not necessarily one that
+/// can take focus. A region that is itself focusable takes the focus when no
+/// control inside it can.
 const nearestValidControl = (
   from: HTMLElement | undefined,
 ): HTMLElement | undefined => {
@@ -50,9 +52,11 @@ const nearestValidControl = (
     scope;
     scope = scope.parentElement
   ) {
-    const control =
-      scope.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? undefined;
-    if (control && canTakeFocus(control)) return control;
+    for (const candidate of Array.from(
+      scope.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+    )) {
+      if (canTakeFocus(candidate)) return candidate;
+    }
     if (scope.tabIndex < 0 && canTakeFocus(scope)) return scope;
   }
   return undefined;

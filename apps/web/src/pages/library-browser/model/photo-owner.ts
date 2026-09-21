@@ -506,17 +506,23 @@ export function createPhotoOwner(
         if (busyAuthority === record.authority) busyAuthority = undefined;
       }
       if (!exact(record, photo.id, index)) {
-        // The write committed, but the Photo it addresses is no longer the
-        // one this View holds, so patching the retained window would repaint
-        // the destination the browser moved to. The committed decision is
-        // recorded instead: the source presents it when that Photo is
-        // resolved again.
-        source.noteCommittedDecision(
-          record.sourceAuthority,
-          photo.id,
-          field,
-          value,
-        );
+        // Only a write the server committed may be recorded: an answered
+        // failure that lands in the window the browser left the Photo is a
+        // decision the Library never held, and recording it would fabricate
+        // a fact on the next resolution.
+        if (result.kind === "persisted") {
+          // The write committed, but the Photo it addresses is no longer the
+          // one this View holds, so patching the retained window would
+          // repaint the destination the browser moved to. The committed
+          // decision is recorded instead: the source presents it when that
+          // Photo is resolved again.
+          source.noteCommittedDecision(
+            record.sourceAuthority,
+            photo.id,
+            field,
+            value,
+          );
+        }
         return Object.freeze({
           ...captured,
           kind: "detached",

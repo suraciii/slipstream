@@ -20025,6 +20025,29 @@ test.describe("Issue #310 integrated qualification", () => {
           page.locator("[data-grid-view-options]"),
         ).toHaveAccessibleName(/^View options, /);
       }
+
+      // A blocking connection notice is the one exceptional state the layout
+      // may present, and it joins an active choice: the count, the flag, and
+      // the controls they qualify keep the width they paint and stay inside
+      // the narrow budget rather than widening the screen.
+      await page.route("**/api/status", async (route) => {
+        await route.abort();
+      });
+      await expect(page.locator("[data-grid-connection]")).toHaveText(
+        "Disconnected",
+      );
+      const offline = await narrowHeaderGeometry(page);
+      expect(offline.status.paintedWidth).toBeLessThanOrEqual(
+        offline.status.boxWidth + 0.5,
+      );
+      expect(offline.flag.paintedWidth).toBeLessThanOrEqual(
+        offline.flag.boxWidth + 0.5,
+      );
+      expect(offline.header).toBeLessThanOrEqual(88);
+      expect(offline.overflow).toBe(0);
+      expect(offline.smallest).toBeGreaterThanOrEqual(44);
+      await page.unroute("**/api/status");
+      await expect(page.locator("[data-grid-connection]")).toBeHidden();
     }
   });
 
@@ -20558,7 +20581,8 @@ test.describe("Issue #310 integrated qualification", () => {
     await expect(page.locator("[data-review]")).toBeHidden();
     expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
     // The Library holds the write that committed, read once the held write the
-    // traversal released is observable: the server applies it at its own pace.
+    // traversal released is observable: the response can land after the
+    // navigation that cancelled it, so the state is read rather than assumed.
     await expect
       .poll(async () => (await libraryPhoto(running.url, 0)).selectionState)
       .toBe("selected");

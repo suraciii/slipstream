@@ -808,10 +808,11 @@ describe("PhotoOwner", () => {
     const write = owner.mutate("selectionState", "selected", false)!;
     owner.dispose();
     held.resolve(
-      Response.json({
-        applied: [{ photoId: "photo-0", priorValue: "undecided" }],
-        changedElsewhere: [],
-        missing: [],
+      mutationBody({
+        photoId: "photo-0",
+        field: "selectionState",
+        priorValue: "undecided",
+        expectedCurrent: "selected",
       }),
     );
     expect((await write.settlement).kind).toBe("detached");
@@ -821,6 +822,23 @@ describe("PhotoOwner", () => {
       field: "selectionState",
       value: "selected",
     });
+    expect(source.facts.get(0)?.selectionState).toBe("undecided");
+  });
+
+  test("records nothing for an answered failure the browser left behind", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const held = deferred<Response>();
+    const { owner } = bind(source, () => held.promise);
+    // The browser leaves the Photo while the write is in flight, and the answer
+    // that lands afterwards is a failure: the server never committed it.
+    const write = owner.mutate("selectionState", "selected", false)!;
+    owner.dispose();
+    held.resolve(new Response(null, { status: 404 }));
+    expect((await write.settlement).kind).toBe("detached");
+    // Nothing the Library never held is recorded, so the next resolution of
+    // that Photo's fact presents what the server actually committed.
+    expect(source.decisions.size).toBe(0);
     expect(source.facts.get(0)?.selectionState).toBe("undecided");
   });
 
