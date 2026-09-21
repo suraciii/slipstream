@@ -562,9 +562,9 @@ async function openGrid(page: Page, url: string, name: string) {
 }
 /// Opens the Sources surface from the current-source disclosure. Its accessible
 /// name identifies both Sources and the current source.
-/// Waits until exactly one of the two views owns the screen, so a disclosure
-/// choice never races the Grid shell a destination render presents before the
-/// Photo it resolves opens.
+/// Waits until exactly one of the two views owns the screen. Both surfaces this
+/// file drives — Sources and View options — are reachable while a source open
+/// is still pending, so this only settles which view is showing.
 async function settledView(page: Page) {
   await expect
     .poll(() =>
@@ -578,6 +578,35 @@ async function settledView(page: Page) {
       ),
     )
     .toBe(1);
+}
+
+/// Waits until the view the current address names is the one showing, so a
+/// Sources disclosure never races the Grid shell a Photo destination renders
+/// before the Photo it resolves opens. A Grid destination has no shell to wait
+/// out — its Grid may stay pending for as long as the test holds its open — so
+/// the guard reads the address rather than the status text. View options
+/// deliberately does not wait for this, because it is reachable while an open
+/// is pending.
+async function settledDestination(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const namesPhoto = new URL(window.location.href).searchParams.has(
+          "photoId",
+        );
+        const grid = document.querySelector<HTMLElement>("[data-grid-view]");
+        const photo = document.querySelector<HTMLElement>("[data-photo-view]");
+        if (photo && !photo.hidden) {
+          const position =
+            document.querySelector("[data-position]")?.textContent ?? "";
+          return /^[1-9]\d* \/ [1-9]\d*$/.test(position.trim());
+        }
+        // A Grid that is not standing in for a Photo destination has settled,
+        // whether or not its source open is still pending.
+        return Boolean(grid && !grid.hidden && !namesPhoto);
+      }),
+    )
+    .toBe(true);
 }
 
 /// The indicators that carry the connection state: the application header on a
@@ -605,7 +634,7 @@ async function expectConnection(
 }
 
 async function openSources(page: Page) {
-  await settledView(page);
+  await settledDestination(page);
   // Exactly one disclosure is visible: the Grid's on a narrow Grid, the Photo
   // View's while a Photo is open. Resolving it by visibility keeps a
   // destination render that briefly presents the Grid shell from racing the
@@ -798,6 +827,14 @@ async function touchRateWithClock(
 ) {
   const preview = page.locator("[data-preview]");
   const wheel = page.locator("[data-rating-wheel]");
+  // An installed clock keeps ticking in real time, so a fastForward measured
+  // from "now" overshoots the hold threshold by however long the gesture's
+  // round trips took — a margin of about a millisecond that a loaded machine
+  // routinely exceeds. Freezing the clock before the gesture makes the
+  // threshold exact: the hold timer starts at the paused time and only
+  // fastForward advances it. The clock resumes once the threshold is proven, so
+  // the application's own timers run again for the rest of the test.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
   const center = await preview.evaluate((surface) => {
     const box = surface.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
@@ -813,6 +850,8 @@ async function touchRateWithClock(
   await expect(wheel).toBeHidden();
   await page.clock.fastForward(1);
   await expect(wheel).toBeVisible();
+  // The threshold is proven, so the application's own timers run again.
+  await page.clock.resume();
   const option = page.locator(`[data-rating-wheel-value="${value}"]`);
   const target = await option.boundingBox();
   expect(target).not.toBeNull();
@@ -13235,7 +13274,17 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
   const retainedThumbnail = await page
     .locator('[data-photo-index="0"] img')
     .elementHandle();
+  // The thumbnail URL is bound asynchronously when the Browse response did not
+  // hydrate it, so the settled state this assertion is about is a cell that
+  // already presents its Photo. Capturing before the URL lands would compare
+  // null with null and prove nothing.
+  await expect
+    .poll(async () => (await retainedThumbnail!.getAttribute("src")) !== null)
+    .toBe(true);
   const retainedSource = await retainedThumbnail!.getAttribute("src");
+  // The captured identity is a real derivative URL, so the comparison below
+  // cannot pass vacuously.
+  expect(retainedSource).toContain("/thumbnail/");
   await selectGridThumbnailSize(page, { value: "small", height: 130 });
   await expectGridConverged(page, windows);
   // A size change re-lays out the cells the Grid still shows without
