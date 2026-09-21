@@ -3579,30 +3579,20 @@ export function createLibraryBrowserView(
         (target as HTMLInputElement).type !== "range")
     )
       return;
-    const sourcesOpen = surfaces.isActive("sources");
     // A modal surface owns the keyboard: background shortcuts, Grid movement,
-    // and Photo decisions must not act behind it.
+    // and Photo decisions must not act behind it. Escape on such a surface is
+    // the native dialog's own close request, handled by the modal-surface
+    // cancel listener, so no branch here re-implements it.
     if (surfaces.blocking()) return;
     if (
       event.key === "Escape" &&
       compactSources.matches &&
-      secondarySheetOpen &&
-      !sourcesOpen
+      secondarySheetOpen
     ) {
       event.preventDefault();
       closeSecondary();
       return;
     }
-    if (
-      event.key === "Escape" &&
-      (compactSources.matches || !photoView.hidden) &&
-      sourcesOpen
-    ) {
-      event.preventDefault();
-      closeSources();
-      return;
-    }
-    if (sourcesOpen) return;
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
       event.preventDefault();

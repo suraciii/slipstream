@@ -4175,8 +4175,6 @@ test("Grid Select mode and the batch actions are reachable from the keyboard", a
   // Select mode replaces the normal header tools with the count and Done, and
   // the tray is the bottom action region: the Grid entry sits between them, so
   // a keyboard user reaches every action in both directions.
-  // Select mode replaces the normal header tools with the count and Done, so
-  // the Grid entry's previous control is the visible clear exit.
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Shift+Tab");
   await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
