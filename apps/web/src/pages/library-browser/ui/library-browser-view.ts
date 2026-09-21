@@ -1,5 +1,6 @@
 import "./library-browser.css";
 
+import { createModalSurfaces } from "./modal-surface.js";
 import {
   addressFor,
   type NavigationGridRestoration,
@@ -122,6 +123,14 @@ export type GridProgressViewModel = Readonly<{
 
 export type LibraryBrowserIntent =
   | Readonly<{ kind: "summary-action"; presentationId: number }>
+  /// Commits the View options draft once. A size-only change never reaches the
+  /// page model: it is Grid presentation and keeps the open Snapshot and its
+  /// anchor.
+  | Readonly<{
+      kind: "view-options-apply";
+      order: ViewSourceOrder;
+      selection: ViewSelectionFilter;
+    }>
   | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
   | Readonly<{ kind: "filter-change"; selection: ViewSelectionFilter }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
@@ -342,7 +351,6 @@ type GridViewModel = Readonly<{
     mode: boolean;
     count: number;
     limit: number;
-    sourceName: string;
     enabled: boolean;
     result?: GridBatchResultViewModel | undefined;
     selected(index: number): boolean;
@@ -449,8 +457,8 @@ type ControlsViewModel = Readonly<{
   undoEnabled: boolean;
 }>;
 
-/// The batch bar's Album choices. `pending` covers one Add to Album settling
-/// and `status` reports its outcome beside the control.
+/// The batch tray's Album choices. `pending` covers one Add to Album settling
+/// and the outcome is reported beside the control.
 export type BatchAlbumsViewModel = Readonly<{
   albums: ReadonlyArray<Readonly<{ id: string; name: string }>>;
   pending: boolean;
@@ -485,21 +493,29 @@ export interface LibraryBrowserView {
     action?: Readonly<{ label: string }>,
   ): void;
   renderSources(model: SourceListViewModel): void;
+  /// Presents the Folder source's Add-to-Album action, which View options
+  /// holds for the open Original Folder.
   renderFolderAlbum(model: FolderAlbumViewModel): void;
+  /// Presents the committed source order. View options holds the draft until
+  /// an explicit Apply commits it.
   renderSort(model: GridSortViewModel): void;
+  /// Presents the committed Selection State filter. View options holds the
+  /// draft until an explicit Apply commits it.
   renderFilter(model: GridFilterViewModel): void;
+  /// Presents the complete source decision counts and the filtered result
+  /// count, which View options names separately.
   renderProgress(model: GridProgressViewModel): void;
   setControls(model: ControlsViewModel): void;
   renderMembership(model: MembershipViewModel): void;
   prepareSourceOpen(name: string): void;
   renderGrid(model: GridViewModel, position?: number): void;
   /// Presents the multi-selection the page model has just emptied: the batch
-  /// bar hides and the retained cells drop their markers. A failed source open
-  /// or reopen calls it instead of a render, so a bar can never name Photos
+  /// tray hides and the retained cells drop their markers. A failed source open
+  /// or reopen calls it instead of a render, so a tray can never name Photos
   /// the Grid no longer holds.
   resetGridMultiSelection(): void;
-  /// Presents the batch bar's Album list and its pending state. The list is
-  /// the bounded Album summary the Sources panel already presents.
+  /// Presents the batch tray's Album list and its pending state. The list is
+  /// the bounded Album summary the Sources surface already presents.
   renderBatchAlbums(model: BatchAlbumsViewModel): void;
   scheduleGridRender(): void;
   cancelGridRender(): void;
@@ -533,7 +549,7 @@ export interface LibraryBrowserView {
     }>,
   ): void;
   /// Closes the transient surfaces a destination change supersedes: the
-  /// supporting sheets, the Sources drawer, the Album form, and the recovery
+  /// supporting sheets, the Sources surface, the Album form, and the recovery
   /// review. It adds no history entry.
   closeTransientSurfaces(): void;
   /// Moves the Grid keyboard to one Photo. Used when Undo restores a Grid
@@ -611,21 +627,23 @@ export function createLibraryBrowserView(
     <div class="app-shell">
       <header class="app-header"><h1>Slipstream</h1><p data-connection role="status">Connecting…</p></header>
       <section class="browser" data-browser aria-labelledby="browser-title">
-        <div class="source-scrim" data-source-scrim aria-hidden="true"></div>
-        <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
-          <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
-          <p data-summary-status role="status">Loading Library…</p>
-          <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
-          <div class="source-list" data-source-list></div>
-          <footer class="source-footer"><button type="button" data-refresh>Refresh Source</button><button type="button" data-retry hidden>Retry connection</button></footer>
-        </nav>
+        <dialog class="source-dialog" data-source-dialog>
+          <nav class="source-panel" id="source-panel" data-library-screen aria-label="Library sources">
+            <header class="source-header"><h2 id="browser-title">Sources</h2><button type="button" class="quiet source-close" data-source-close>Close</button></header>
+            <p data-summary-status role="status">Loading Library…</p>
+            <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
+            <div class="source-list" data-source-list></div>
+            <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button></footer>
+          </nav>
+        </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-progress" data-grid-progress hidden><span data-grid-visible-results></span><span data-grid-source-progress></span></p><div class="grid-filter" data-grid-filter hidden><label for="grid-filter-select">Show</label><select id="grid-filter-select" data-filter-select></select></div><div class="grid-size" data-grid-size><label for="grid-size-select">Size</label><select id="grid-size-select" data-size-select></select></div><div class="grid-sort" data-grid-sort hidden><label for="grid-sort-select">Sort</label><select id="grid-sort-select" data-sort-select></select></div><div class="grid-select-mode"><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p><div class="grid-batch" data-grid-batch hidden><div class="grid-batch-overview"><p class="grid-batch-count" data-batch-count></p><p class="grid-batch-source" data-batch-source></p><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p></div><div class="grid-batch-result" data-grid-batch-result hidden><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button><button type="button" class="quiet" data-batch-clear>Clear</button></div></div></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">Options<span class="options-flag" data-view-options-flag hidden></span></button><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count role="status"></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
+          <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
+          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
             <div class="zoom-controls" data-zoom-controls role="group" aria-label="Preview zoom">
               <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
@@ -676,8 +694,27 @@ export function createLibraryBrowserView(
             <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
           </section>
         </section>
-        <section class="recovery-panel" data-recovery-panel hidden aria-labelledby="recovery-title">
-          <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
+        <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
+          <div class="options-sheet">
+            <header class="options-header"><h2 id="view-options-title">View options</h2><button type="button" class="quiet" data-view-options-close>Close</button></header>
+            <div class="options-body">
+              <p class="options-progress" data-grid-source-progress role="status"></p>
+              <p class="options-progress" data-grid-visible-results role="status"></p>
+              <div class="options-field"><label for="view-filter-select">Selection State</label><select id="view-filter-select" data-filter-select></select></div>
+              <div class="options-field"><label for="view-sort-select">Source order</label><select id="view-sort-select" data-sort-select></select></div>
+              <div class="options-field"><label for="view-size-select">Thumbnail size</label><select id="view-size-select" data-size-select></select></div>
+              <div class="folder-album-controls" data-folder-album-controls hidden><label for="folder-album-select">Add Folder to</label><select id="folder-album-select" data-folder-album-select></select><button type="button" data-add-folder-to-album>Add Folder</button><p data-folder-album-status role="status" aria-live="polite"></p></div>
+              <div class="options-source-actions" data-options-source-actions><button type="button" data-album-resume hidden>Resume</button><button type="button" data-refresh>Refresh Current Source</button></div>
+            </div>
+            <footer class="options-footer"><button type="button" data-view-options-apply>Apply</button><button type="button" class="quiet" data-view-options-cancel>Cancel</button></footer>
+          </div>
+        </dialog>
+        <dialog class="album-dialog" data-album-form-dialog aria-labelledby="album-form-title">
+          <div class="album-dialog-sheet" data-album-form-body></div>
+        </dialog>
+        <dialog class="recovery-dialog" data-recovery-panel aria-labelledby="recovery-title">
+          <div class="recovery-sheet">
+            <header class="recovery-header"><h3 id="recovery-title">Review unavailable originals</h3><button type="button" class="quiet" data-recovery-close>Close</button></header>
           <p class="recovery-summary" data-recovery-summary role="status"></p>
           <ul class="recovery-list" data-recovery-list></ul>
           <div class="recovery-forms">
@@ -696,12 +733,17 @@ export function createLibraryBrowserView(
           <ul class="recovery-proposals" data-recovery-proposals hidden></ul>
           <div class="recovery-actions"><button type="button" data-recovery-apply hidden>Apply mappings</button></div>
           <p class="recovery-message" data-recovery-message role="alert" hidden></p>
-        </section>
+          </div>
+        </dialog>
       </section>
     </div>`;
 
   const browser = required<HTMLElement>(root, "[data-browser]");
-  const sourcePanel = required<HTMLElement>(root, "#source-panel");
+  const connection = required<HTMLElement>(root, "[data-connection]");
+  const sourceDialog = required<HTMLDialogElement>(
+    root,
+    "[data-source-dialog]",
+  );
   const sourceResizer = required<HTMLElement>(root, "[data-source-resizer]");
   const sourceToggle = required<HTMLButtonElement>(
     root,
@@ -712,11 +754,48 @@ export function createLibraryBrowserView(
     "[data-photo-source-toggle]",
   );
   const sourceClose = required<HTMLButtonElement>(root, "[data-source-close]");
-  const sourceScrim = required<HTMLElement>(root, "[data-source-scrim]");
-  const connection = required<HTMLElement>(root, "[data-connection]");
+  const gridConnection = required<HTMLElement>(root, "[data-grid-connection]");
+  const photoConnection = required<HTMLElement>(
+    root,
+    "[data-photo-connection]",
+  );
+  const compactTitle = required<HTMLElement>(root, "[data-grid-compact-title]");
+  const viewOptionsDialog = required<HTMLDialogElement>(
+    root,
+    "[data-view-options]",
+  );
+  const viewOptionsOpen = required<HTMLButtonElement>(
+    root,
+    "[data-grid-view-options]",
+  );
+  const viewOptionsFlag = required<HTMLElement>(
+    root,
+    "[data-view-options-flag]",
+  );
+  const viewOptionsClose = required<HTMLButtonElement>(
+    root,
+    "[data-view-options-close]",
+  );
+  const viewOptionsApply = required<HTMLButtonElement>(
+    root,
+    "[data-view-options-apply]",
+  );
+  const viewOptionsCancel = required<HTMLButtonElement>(
+    root,
+    "[data-view-options-cancel]",
+  );
+  const albumFormDialog = required<HTMLDialogElement>(
+    root,
+    "[data-album-form-dialog]",
+  );
+  const albumFormBody = required<HTMLElement>(root, "[data-album-form-body]");
+  const albumResume = required<HTMLButtonElement>(root, "[data-album-resume]");
   const summaryStatus = required<HTMLElement>(root, "[data-summary-status]");
   const recoveryNotice = required<HTMLElement>(root, "[data-recovery-notice]");
-  const recoveryPanel = required<HTMLElement>(root, "[data-recovery-panel]");
+  const recoveryPanel = required<HTMLDialogElement>(
+    root,
+    "[data-recovery-panel]",
+  );
   const recoverySummary = required<HTMLElement>(
     root,
     "[data-recovery-summary]",
@@ -801,9 +880,46 @@ export function createLibraryBrowserView(
     root,
     "[data-grid-select-mode]",
   );
+  const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
+  /// Presents the current source in both views. The narrow disclosure's
+  /// accessible name identifies both Sources and the current source, so a
+  /// screen reader names the destination the control opens, while the visible
+  /// label stays the truncated source name.
+  /// Presents the connection state. A wide layout keeps it in the application
+  /// header; a narrow layout has no dedicated brand or connected-status row, so
+  /// the open view's own header carries it beside its primary actions. Exactly
+  /// one indicator holds the text at a time.
+  let connectionState = true;
+  const presentConnection = () => {
+    const state = connectionState ? "Connected" : "Disconnected";
+    gridConnection.classList.toggle("offline", !connectionState);
+    photoConnection.classList.toggle("offline", !connectionState);
+    if (!compactSources.matches) {
+      connection.textContent = state;
+      connection.classList.toggle("offline", !connectionState);
+      gridConnection.textContent = "";
+      gridConnection.hidden = true;
+      photoConnection.textContent = "";
+      photoConnection.hidden = true;
+      return;
+    }
+    connection.textContent = "";
+    const inPhoto = !photoView.hidden;
+    gridConnection.textContent = inPhoto ? "" : state;
+    gridConnection.hidden = inPhoto;
+    photoConnection.textContent = inPhoto ? state : "";
+    photoConnection.hidden = !inPhoto;
+  };
+  const presentSourceTitle = (name: string) => {
+    gridTitle.textContent = name;
+    photoTitle.textContent = name;
+    compactTitle.textContent = name;
+    sourceToggle.setAttribute("aria-label", `Sources — ${name}`);
+  };
+  const gridSelection = required<HTMLElement>(root, "[data-grid-selection]");
+  const multiDone = required<HTMLButtonElement>(root, "[data-grid-multi-done]");
   const gridBatch = required<HTMLElement>(root, "[data-grid-batch]");
   const batchCount = required<HTMLElement>(root, "[data-batch-count]");
-  const batchSource = required<HTMLElement>(root, "[data-batch-source]");
   const batchRetained = required<HTMLElement>(root, "[data-batch-retained]");
   const batchResult = required<HTMLElement>(root, "[data-grid-batch-result]");
   const batchResultText = required<HTMLElement>(
@@ -814,7 +930,6 @@ export function createLibraryBrowserView(
     root,
     "[data-grid-batch-compensate]",
   );
-  const batchActions = required<HTMLElement>(root, "[data-batch-actions]");
   const batchSelect = required<HTMLButtonElement>(root, "[data-batch-select]");
   const batchReject = required<HTMLButtonElement>(root, "[data-batch-reject]");
   const batchAlbumSelect = required<HTMLSelectElement>(
@@ -825,7 +940,6 @@ export function createLibraryBrowserView(
     root,
     "[data-batch-album-add]",
   );
-  const batchClear = required<HTMLButtonElement>(root, "[data-batch-clear]");
   const folderAlbumControls = required<HTMLElement>(
     root,
     "[data-folder-album-controls]",
@@ -843,18 +957,15 @@ export function createLibraryBrowserView(
     "[data-folder-album-status]",
   );
   const gridSummary = required<HTMLElement>(root, "[data-grid-summary]");
-  const gridSort = required<HTMLElement>(root, "[data-grid-sort]");
   const sortSelect = required<HTMLSelectElement>(root, "[data-sort-select]");
-  const gridProgress = required<HTMLElement>(root, "[data-grid-progress]");
-  const gridVisibleResults = required<HTMLElement>(
-    root,
-    "[data-grid-visible-results]",
-  );
-  const gridSourceProgress = required<HTMLElement>(
+  const optionsProgress = required<HTMLElement>(
     root,
     "[data-grid-source-progress]",
   );
-  const gridFilter = required<HTMLElement>(root, "[data-grid-filter]");
+  const optionsVisibleResults = required<HTMLElement>(
+    root,
+    "[data-grid-visible-results]",
+  );
   const filterSelect = required<HTMLSelectElement>(
     root,
     "[data-filter-select]",
@@ -1030,6 +1141,30 @@ export function createLibraryBrowserView(
     if (alive) emit(intent);
   };
 
+  /// The one page-UI controller for the shared native-modal lifecycle. Every
+  /// supporting surface registers its dialog here, so at most one is active
+  /// and every dismissal converges on one cleanup path.
+  const surfaces = createModalSurfaces();
+  /// True while the Sources surface presents as a modal rather than the wide
+  /// resizable sidebar: a narrow Grid, or any Photo View.
+  const sourcesAreModal = () => compactSources.matches || !photoView.hidden;
+  surfaces.register("sources", {
+    dialog: sourceDialog,
+    modal: sourcesAreModal,
+  });
+  surfaces.register("view-options", {
+    dialog: viewOptionsDialog,
+    modal: () => true,
+  });
+  surfaces.register("album-form", {
+    dialog: albumFormDialog,
+    modal: () => true,
+  });
+  surfaces.register("recovery", {
+    dialog: recoveryPanel,
+    modal: () => true,
+  });
+
   for (let value = 0; value <= 5; value += 1) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1065,7 +1200,6 @@ export function createLibraryBrowserView(
   }
 
   let photoStatusSurface: object = {};
-  let sourceReturn: "grid" | "photo" = "grid";
   let sourceModel: SourceListViewModel | undefined;
   let membershipModel: MembershipViewModel | undefined;
   let albumFormCounter = 0;
@@ -1074,6 +1208,14 @@ export function createLibraryBrowserView(
   let gridKeyboardIndex: number | undefined;
   let gridTotal = 0;
   let thumbnailSize: GridThumbnailSize = DEFAULT_GRID_THUMBNAIL_SIZE;
+  /// The committed order and filter the page model reports, and the draft
+  /// View options holds until an explicit Apply commits it. Closing without
+  /// Apply discards the draft, so the committed pair is the only source of
+  /// what the Grid presents.
+  let committedOrder: ViewSourceOrder = "source-default";
+  let committedFilter: ViewSelectionFilter = "all";
+  let draftOrder: ViewSourceOrder = "source-default";
+  let draftFilter: ViewSelectionFilter = "all";
   // The Photo whose row a pending size change keeps as the first visible row;
   // the render that applies the new pitch consumes it.
   let pendingGridAnchor: number | undefined;
@@ -1099,7 +1241,6 @@ export function createLibraryBrowserView(
   let gridMultiMode = false;
   let gridMultiCount = 0;
   let gridMultiLimit = 0;
-  let gridMultiSourceName = "";
   let gridMultiEnabled = false;
   let gridMultiResult: GridBatchResultViewModel | undefined;
   let gridMultiSelected: (index: number) => boolean = () => false;
@@ -1109,14 +1250,13 @@ export function createLibraryBrowserView(
   let gridPhotoLookup: (index: number) => GridPhotoViewModel | undefined = () =>
     undefined;
   /// Presents the multi-selection the page model has just emptied, or one
-  /// whose bound the page model reports. A hidden bar clears the markers too,
-  /// so a cell never keeps a marker the bar no longer names, and a hidden Grid
+  /// whose bound the page model reports. A hidden tray clears the markers too,
+  /// so a cell never keeps a marker the tray no longer names, and a hidden Grid
   /// keeps its retained DOM: only the visible Grid touches it.
   const resetGridMultiSelection = () => {
     if (!alive) return;
     gridMultiMode = false;
     gridMultiCount = 0;
-    gridMultiSourceName = "";
     gridMultiEnabled = false;
     gridMultiResult = undefined;
     gridMultiSelected = () => false;
@@ -1127,10 +1267,10 @@ export function createLibraryBrowserView(
   // Whether one batch Add to Album is settling: its control stays disabled
   // until the outcome is presented.
   let batchAlbumsPending = false;
-  /// The batch-bar control that held keyboard focus when a settling batch
-  /// disabled the bar; parked and returned by renderBatch.
+  /// The batch-tray control that held keyboard focus when a settling batch
+  /// disabled the tray; parked and returned by renderBatch.
   let heldBatchControl: HTMLButtonElement | HTMLSelectElement | null = null;
-  // The Album choices the batch bar presents. A hidden bar binds no options,
+  // The Album choices the batch tray presents. A hidden tray binds no options,
   // so an option list never answers a query for a surface the Grid is not
   // presenting.
   let batchAlbums: ReadonlyArray<Readonly<{ id: string; name: string }>> = [];
@@ -1166,6 +1306,7 @@ export function createLibraryBrowserView(
   let currentSelection: ViewSelectionState = "undecided";
   let filterRendered = false;
   let renderedProgressText = "";
+  let renderedSourceProgressText = "";
   let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
   let currentRating = 0;
@@ -1232,14 +1373,15 @@ export function createLibraryBrowserView(
   // decision controls keep their space; the view mirrors that condition so a
   // hidden strip binds no thumbnails and rebuilds when the space returns.
   const shortViewport = window.matchMedia("(max-height: 480px)");
-  const syncSourcePanel = () => {
-    const drawerMode = compactSources.matches || !photoView.hidden;
-    const drawerOpen = drawerMode && browser.classList.contains("sources-open");
-    const concealed = drawerMode && !drawerOpen;
-    sourcePanel.inert = concealed;
-    sourcePanel.setAttribute("aria-hidden", String(concealed));
-    gridView.inert = drawerOpen;
-    photoView.inert = drawerOpen;
+  /// Reflects which layout the Sources surface uses: the wide resizable
+  /// sidebar keeps it in the Grid, and a narrow or Photo View layout opens it
+  /// as one native modal surface.
+  const syncSourceLayout = () => {
+    const modal = sourcesAreModal();
+    browser.classList.toggle("sources-drawer", modal);
+    sourceToggle.hidden = !modal;
+    photoSourceToggle.hidden = !modal;
+    if (!modal) closeSources(false);
   };
   const syncSecondarySurface = () => {
     secondarySheet.dataset.secondaryOpen = String(
@@ -1297,32 +1439,45 @@ export function createLibraryBrowserView(
       else secondaryToggle.focus();
     }
   };
-  const setSourcesExpanded = (expanded: boolean) => {
+  /// The disclosure's expanded state always mirrors the surface itself, so a
+  /// native close request and an explicit Close leave it in the same state.
+  const syncSourcesExpanded = () => {
+    const expanded = sourceDialog.open;
     sourceToggle.setAttribute("aria-expanded", String(expanded));
     photoSourceToggle.setAttribute("aria-expanded", String(expanded));
   };
-  const openSources = (returnTo: "grid" | "photo") => {
-    if (!alive) return;
-    sourceReturn = returnTo;
-    browser.classList.add("sources-open");
-    setSourcesExpanded(true);
-    syncSourcePanel();
+  /// Opens the Sources surface. A wide Grid already shows it as the resizable
+  /// sidebar, so only a narrow Grid or a Photo View opens it as a modal.
+  const openSources = () => {
+    if (!alive || !sourcesAreModal()) return;
+    // A pending gesture must never compete with the surface that takes over
+    // the pointer and the keyboard.
+    resetGestures();
+    secondarySheetOpen = false;
+    syncSecondarySurface();
+    surfaces.open(
+      "sources",
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined,
+    );
+    syncSourceLayout();
+    syncSourcesExpanded();
     sourceClose.focus();
   };
+  /// Closes the Sources surface, returning focus to the disclosure that opened
+  /// it unless the caller names a different owner.
   const closeSources = (restoreFocus = true) => {
     if (!alive) return;
-    browser.classList.remove("sources-open");
-    setSourcesExpanded(false);
-    syncSourcePanel();
-    if (restoreFocus)
-      (sourceReturn === "grid" ? sourceToggle : photoSourceToggle).focus();
+    surfaces.close("sources", restoreFocus);
+    syncSourcesExpanded();
   };
   const onSourceViewportChange = () => {
     if (!alive) return;
-    browser.classList.remove("sources-open");
-    setSourcesExpanded(false);
+    syncSourcesExpanded();
     if (!mobileActionHierarchy.matches) secondarySheetOpen = false;
-    syncSourcePanel();
+    syncSourceLayout();
+    presentConnection();
     syncSecondarySurface();
   };
   const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
@@ -1368,6 +1523,71 @@ export function createLibraryBrowserView(
     compactSources.matches ? gridViewport.clientWidth / count : columnPitch();
   const effectiveViewportHeight = () =>
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
+  /// The normal header's nondefault indication. It names the active filter
+  /// and order in text, so the state never depends on color alone and is
+  /// never inferred from the loaded cells.
+  const presentViewOptionsFlag = () => {
+    const parts: string[] = [];
+    if (committedFilter !== "all")
+      parts.push(
+        FILTER_OPTIONS.find((option) => option.value === committedFilter)
+          ?.label ?? "",
+      );
+    if (committedOrder !== "source-default")
+      parts.push(
+        SORT_OPTIONS[renderedSortKind ?? "library"].find(
+          (option) => option.value === committedOrder,
+        )?.label ?? "",
+      );
+    const text = parts.filter(Boolean).join(" · ");
+    viewOptionsFlag.textContent = text ? ` · ${text}` : "";
+    viewOptionsFlag.hidden = text === "";
+  };
+  /// Opens View options with the committed choices as its draft, so an
+  /// unapplied change can be discarded without touching the open Grid.
+  const openViewOptions = () => {
+    if (!alive) return;
+    draftOrder = committedOrder;
+    draftFilter = committedFilter;
+    sortSelect.value = draftOrder;
+    filterSelect.value = draftFilter;
+    resetGestures();
+    secondarySheetOpen = false;
+    syncSecondarySurface();
+    surfaces.open(
+      "view-options",
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined,
+    );
+    viewOptionsClose.focus();
+  };
+  const closeViewOptions = (restoreFocus = true) => {
+    if (!alive) return;
+    // Closing without Apply discards the draft: the selects return to the
+    // committed choices the open Grid presents.
+    draftOrder = committedOrder;
+    draftFilter = committedFilter;
+    sortSelect.value = committedOrder;
+    filterSelect.value = committedFilter;
+    surfaces.close("view-options", restoreFocus);
+  };
+  /// Commits the draft once. A size-only change keeps the Snapshot and its
+  /// anchor, because it changes cell geometry alone; a combined order and
+  /// filter opens one view with both choices.
+  const applyViewOptions = () => {
+    if (!alive) return;
+    const order = draftOrder;
+    const filter = draftFilter;
+    const viewChanged = order !== committedOrder || filter !== committedFilter;
+    draftOrder = committedOrder = order;
+    draftFilter = committedFilter = filter;
+    surfaces.close("view-options", false);
+    if (viewChanged) {
+      presentViewOptionsFlag();
+      send({ kind: "view-options-apply", order, selection: filter });
+    }
+  };
 
   const ratingLabel = (value: number) =>
     value === 0 ? "Clear Rating" : `${value} ${value === 1 ? "star" : "stars"}`;
@@ -1868,34 +2088,16 @@ export function createLibraryBrowserView(
   const nextAlbumFormId = () => `album-form-${++albumFormCounter}`;
   const albumActionFocusKey = (kind: AlbumFormState["kind"], albumId = "") =>
     kind === "create" ? "album:create" : `album:${kind}:${albumId}`;
-  const openAlbumForm = (
-    kind: AlbumFormState["kind"],
-    albumId = "",
-    name = "",
-  ) => {
-    if (!alive) return;
-    albumForm = {
-      kind,
-      formId: nextAlbumFormId(),
-      ...(albumId ? { albumId } : {}),
-      name,
-      returnFocusKey: albumActionFocusKey(kind, albumId),
-      pending: false,
-    };
-    albumFocusRequest = { kind: "form", formId: albumForm.formId };
-    send({ kind: "album-form-open", form: { ...albumForm } });
-    if (sourceModel) renderSources(sourceModel);
-  };
-  const closeAlbumForm = (form: AlbumFormState) => {
-    if (!alive || albumForm !== form) return;
-    albumFocusRequest = {
-      kind: "return",
-      focusKey: form.returnFocusKey,
-    };
-    albumForm = undefined;
-    send({ kind: "album-form-close", formId: form.formId });
-    if (sourceModel) renderSources(sourceModel);
-  };
+  /// The action that opened the Album form. Closing the form returns focus
+  /// here, reopening the surface that holds it when that surface presents as
+  /// a modal and had to close for the form.
+  let albumFormInvoker: HTMLElement | undefined;
+  const albumFormTitle = (form: AlbumFormState): string =>
+    form.kind === "create"
+      ? "Create Album"
+      : form.kind === "rename"
+        ? "Rename Album"
+        : "Delete Album";
   const albumFormMessage = () => {
     const message = document.createElement("p");
     message.className = "album-form-message";
@@ -1910,62 +2112,56 @@ export function createLibraryBrowserView(
     input.dataset.focusKey = `album:form:${form.formId}:name`;
     input.setAttribute("aria-label", "Album name");
     input.value = form.name;
-    input.addEventListener("input", () => {
-      if (alive && albumForm === form) {
-        form.name = input.value;
-        delete form.message;
-      }
-    });
     return input;
   };
-  const createAlbumEditForm = (
+  /// The control the Album form owns: the name field, the delete confirmation,
+  /// or Cancel while the write settles and the committing control is disabled.
+  const albumFormControl = (
     form: AlbumFormState,
-    label: string,
-    saveText: string,
-  ) => {
-    const element = document.createElement("form");
-    element.className = "album-form";
-    element.setAttribute("aria-label", label);
-    const input = albumNameInput(form);
-    const message = albumFormMessage();
-    message.textContent = form.message ?? "";
-    const save = document.createElement("button");
-    save.type = "submit";
-    save.dataset.albumFormId = form.formId;
-    save.dataset.focusKey = `album:form:${form.formId}:submit`;
-    save.textContent = saveText;
-    save.disabled = form.pending;
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.dataset.albumFormId = form.formId;
-    cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => closeAlbumForm(form));
-    element.append(input, save, cancel, message);
-    element.addEventListener("submit", (event) => {
-      event.preventDefault();
-      if (albumForm !== form || form.pending) return;
-      send({
-        kind: "album-form-submit",
-        formId: form.formId,
-        name: input.value,
-      });
-    });
-    return element;
-  };
-  const createAlbumTools = (album: SourceListViewModel["albums"][number]) => {
-    const tools = document.createElement("div");
-    tools.className = "album-tools";
-    if (albumForm?.kind === "rename" && albumForm.albumId === album.id) {
-      tools.append(createAlbumEditForm(albumForm, "Rename Album", "Save Name"));
-      return tools;
+  ): HTMLInputElement | HTMLButtonElement | undefined => {
+    const selector =
+      form.kind === "delete"
+        ? `[data-album-form-id="${form.formId}"][data-focus-key$=":confirm"]`
+        : `input[data-album-form-id="${form.formId}"]`;
+    const target = albumFormBody.querySelector<HTMLElement>(selector);
+    if (target && !target.matches(":disabled")) {
+      return target as HTMLInputElement | HTMLButtonElement;
     }
-    if (albumForm?.kind === "delete" && albumForm.albumId === album.id) {
-      const form = albumForm;
+    return albumFormBody.querySelector<HTMLElement>(
+      `[data-album-form-id="${form.formId}"][data-focus-key$=":cancel"]`,
+    ) as HTMLButtonElement | undefined;
+  };
+  /// Rebuilds the Album form surface from its own state. Only a change to the
+  /// form reaches it, so a background source-list re-render never touches the
+  /// draft, and the caret and validation message survive their own rebuilds.
+  const renderAlbumForm = () => {
+    const form = albumForm;
+    if (!form) {
+      albumFormBody.replaceChildren();
+      return;
+    }
+    const active = document.activeElement;
+    const heldForm =
+      active instanceof HTMLElement &&
+      active.dataset.albumFormId === form.formId;
+    const heldSelection =
+      active instanceof HTMLInputElement
+        ? [active.selectionStart, active.selectionEnd]
+        : undefined;
+    const header = document.createElement("header");
+    header.className = "album-dialog-header";
+    const title = document.createElement("h2");
+    title.id = "album-form-title";
+    title.textContent = albumFormTitle(form);
+    header.append(title);
+    albumFormBody.replaceChildren(header);
+    if (form.kind === "delete") {
       const confirmBox = document.createElement("div");
       confirmBox.className = "album-confirm";
       confirmBox.setAttribute("role", "alert");
-      const text = paragraph("Photos and Original Files remain unchanged.");
+      confirmBox.append(
+        paragraph("Photos and Original Files remain unchanged."),
+      );
       const confirm = document.createElement("button");
       confirm.type = "button";
       confirm.dataset.albumFormId = form.formId;
@@ -1982,10 +2178,126 @@ export function createLibraryBrowserView(
       cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
       cancel.textContent = "Cancel";
       cancel.addEventListener("click", () => closeAlbumForm(form));
-      confirmBox.append(text, confirm, cancel);
-      tools.append(confirmBox);
-      return tools;
+      confirmBox.append(confirm, cancel);
+      albumFormBody.append(confirmBox);
+    } else {
+      const element = document.createElement("form");
+      element.className = "album-form";
+      element.setAttribute("aria-label", albumFormTitle(form));
+      const input = albumNameInput(form);
+      const message = albumFormMessage();
+      message.textContent = form.message ?? "";
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.dataset.albumFormId = form.formId;
+      save.dataset.focusKey = `album:form:${form.formId}:submit`;
+      save.textContent = form.kind === "create" ? "Create Album" : "Save Name";
+      save.disabled = form.pending;
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.dataset.albumFormId = form.formId;
+      cancel.dataset.focusKey = `album:form:${form.formId}:cancel`;
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => closeAlbumForm(form));
+      input.addEventListener("input", () => {
+        if (alive && albumForm === form) {
+          form.name = input.value;
+          delete form.message;
+          // Editing clears the validation message where it is presented, so a
+          // background refresh never restores a stale one.
+          message.textContent = "";
+        }
+      });
+      element.append(input, save, cancel, message);
+      element.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (albumForm !== form || form.pending) return;
+        send({
+          kind: "album-form-submit",
+          formId: form.formId,
+          name: input.value,
+        });
+      });
+      albumFormBody.append(element);
     }
+    // A rebuild keeps the control the Photographer was using, including the
+    // caret, so a validation message or a pending write never moves focus.
+    const request = albumFocusRequest;
+    const control = albumFormControl(form);
+    if (!control) return;
+    if (request?.kind === "form" && request.formId === form.formId) {
+      albumFocusRequest = undefined;
+      control.focus();
+      if (control instanceof HTMLInputElement) control.select();
+      return;
+    }
+    if (heldForm) {
+      control.focus();
+      if (control instanceof HTMLInputElement && heldSelection) {
+        const end = control.value.length;
+        control.setSelectionRange(
+          Math.min(heldSelection[0] ?? end, end),
+          Math.min(heldSelection[1] ?? end, end),
+        );
+      }
+      return;
+    }
+    // Opening a modal moves focus into the surface.
+    control.focus();
+    if (control instanceof HTMLInputElement && form.name === "")
+      control.select();
+  };
+  const openAlbumForm = (
+    kind: AlbumFormState["kind"],
+    albumId = "",
+    name = "",
+  ) => {
+    if (!alive) return;
+    albumFormInvoker =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
+    albumForm = {
+      kind,
+      formId: nextAlbumFormId(),
+      ...(albumId ? { albumId } : {}),
+      name,
+      returnFocusKey: albumActionFocusKey(kind, albumId),
+      pending: false,
+    };
+    albumFocusRequest = { kind: "form", formId: albumForm.formId };
+    send({ kind: "album-form-open", form: { ...albumForm } });
+    resetGestures();
+    surfaces.open("album-form", albumFormInvoker);
+    renderAlbumForm();
+  };
+  /// Closes the Album form and returns focus to the action that opened it, or
+  /// to the nearest valid Album action when that row is gone.
+  const dismissAlbumFormSurface = (form: AlbumFormState) => {
+    const invoker = albumFormInvoker;
+    albumFormInvoker = undefined;
+    surfaces.close("album-form", false);
+    if (invoker?.isConnected && !("disabled" in invoker && invoker.disabled)) {
+      surfaces.focus(invoker);
+      return;
+    }
+    const target =
+      albumFocusTarget(form.returnFocusKey) ?? albumFocusTarget("album:create");
+    if (target) surfaces.focus(target);
+  };
+  const closeAlbumForm = (form: AlbumFormState) => {
+    if (!alive || albumForm !== form) return;
+    albumFocusRequest = {
+      kind: "return",
+      focusKey: form.returnFocusKey,
+    };
+    albumForm = undefined;
+    send({ kind: "album-form-close", formId: form.formId });
+    dismissAlbumFormSurface(form);
+  };
+  const createAlbumTools = (album: SourceListViewModel["albums"][number]) => {
+    const tools = document.createElement("div");
+    tools.className = "album-tools";
     const rename = document.createElement("button");
     rename.type = "button";
     rename.className = "album-tool";
@@ -2007,7 +2319,9 @@ export function createLibraryBrowserView(
     tools.append(rename, remove);
     // Resume resolves the saved position under the existing saved-position
     // rules and opens Photo View, so its destination is not an address: it
-    // stays an explicit button beside the Album's Grid destination.
+    // stays an explicit button beside the Album's Grid destination, reachable
+    // from any source. View options carries the same action for the open
+    // Album.
     if (album.hasSavedPosition) {
       const resume = document.createElement("button");
       resume.type = "button";
@@ -2026,14 +2340,8 @@ export function createLibraryBrowserView(
     if (!alive) return;
     sourceModel = model;
     const focused = document.activeElement;
-    const focusedFormId =
-      focused instanceof HTMLElement ? focused.dataset.albumFormId : undefined;
     const focusedKey =
       focused instanceof HTMLElement ? focused.dataset.focusKey : undefined;
-    const focusedSelection =
-      focused instanceof HTMLInputElement
-        ? [focused.selectionStart, focused.selectionEnd]
-        : undefined;
     sourceList.replaceChildren();
     const library = createSourceButton(
       "All Photos",
@@ -2111,10 +2419,12 @@ export function createLibraryBrowserView(
     newAlbum.addEventListener("click", () => openAlbumForm("create"));
     albumHeadingRow.append(albumHeading, newAlbum);
     sourceList.append(albumHeadingRow);
-    if (albumForm?.kind === "create")
-      sourceList.append(
-        createAlbumEditForm(albumForm, "Create Album", "Create Album"),
-      );
+    // An Album with a saved position exposes Resume separately from opening
+    // its Grid: it resolves that position under the existing saved-position
+    // rules and opens Photo View, so it lives with the other source-specific
+    // actions in View options rather than beside the destination anchor.
+    const activeAlbum = model.albums.find((album) => album.active);
+    albumResume.hidden = activeAlbum?.hasSavedPosition !== true;
     for (const album of model.albums) {
       const button = createSourceButton(
         album.name,
@@ -2136,25 +2446,9 @@ export function createLibraryBrowserView(
       Array.from(
         sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
       ).find((candidate) => candidate.dataset.focusKey === focusKey);
-    const focusForm = (form: AlbumFormState, selectName: boolean) => {
-      const selector =
-        form.kind === "delete"
-          ? `[data-album-form-id="${form.formId}"][data-focus-key$=":confirm"]`
-          : `input[data-album-form-id="${form.formId}"]`;
-      let target = sourceList.querySelector<HTMLElement>(selector);
-      if (target?.matches(":disabled"))
-        target = sourceList.querySelector<HTMLElement>(
-          `[data-album-form-id="${form.formId}"][data-focus-key$=":cancel"]`,
-        );
-      if (!target) return false;
-      target.focus();
-      if (selectName && target instanceof HTMLInputElement) target.select();
-      return document.activeElement === target;
-    };
     const request = albumFocusRequest;
     if (request?.kind === "form" && albumForm?.formId === request.formId) {
       albumFocusRequest = undefined;
-      focusForm(albumForm, true);
       return;
     }
     if (request?.kind === "return") {
@@ -2168,18 +2462,15 @@ export function createLibraryBrowserView(
     const restored = focusedKey ? focusTarget(focusedKey) : undefined;
     if (restored && !restored.matches(":disabled")) {
       restored.focus();
-      if (restored instanceof HTMLInputElement) {
-        const end = restored.value.length;
-        restored.setSelectionRange(
-          Math.min(focusedSelection?.[0] ?? end, end),
-          Math.min(focusedSelection?.[1] ?? end, end),
-        );
-      }
       return;
     }
-    if (focusedFormId && albumForm?.formId === focusedFormId)
-      focusForm(albumForm, false);
   };
+  /// The Album action a focus return names, searched in the current source
+  /// list. Used when the action that opened a form no longer exists.
+  const albumFocusTarget = (focusKey: string): HTMLElement | undefined =>
+    Array.from(
+      sourceList.querySelectorAll<HTMLElement>("[data-focus-key]"),
+    ).find((candidate) => candidate.dataset.focusKey === focusKey);
 
   const scheduleGridRender = () => {
     if (!alive || gridRenderFrame !== undefined) return;
@@ -2454,31 +2745,35 @@ export function createLibraryBrowserView(
     const count = gridMultiCount;
     const visible = gridMultiMode || count > 0;
     gridBatch.hidden = !visible;
+    // Select mode, and a desktop modifier selection, replace the normal
+    // header tools with the source, the count, and Done. A tool the
+    // Photographer was using leaves the layout, so focus moves to the control
+    // that replaced it rather than to the body.
     gridSelectMode.setAttribute("aria-pressed", String(gridMultiMode));
+    const heldToolsFocus = gridTools.contains(document.activeElement);
+    const heldSelectionFocus = gridSelection.contains(document.activeElement);
+    gridTools.hidden = visible;
+    gridSelection.hidden = !visible;
+    if (heldToolsFocus && visible) multiDone.focus();
+    else if (heldSelectionFocus && !visible) gridSelectMode.focus();
     if (!visible) {
       batchCount.textContent = "";
-      batchSource.textContent = "";
       batchRetained.hidden = true;
       batchResult.hidden = true;
       batchResultText.textContent = "";
       batchCompensate.hidden = true;
       batchCompensate.disabled = true;
-      batchActions.hidden = true;
       batchAlbumSelect.replaceChildren();
       renderedBatchAlbumSignature = "";
       batchAlbumSelection = "";
-      // A hidden bar names no Photo, so no cell keeps a multi-selection
+      // A hidden tray names no Photo, so no cell keeps a multi-selection
       // marker beside it.
       applyGridMultiSelection();
       return;
     }
 
     const countText = `${count.toLocaleString()} / ${gridMultiLimit.toLocaleString()} Photos`;
-    const sourceText = gridMultiSourceName
-      ? `Source: ${gridMultiSourceName}`
-      : "";
     const retainedHidden = count === 0 || gridMultiResult === undefined;
-    const actionsHidden = count === 0;
     const resultHidden = gridMultiResult === undefined;
     const resultText = gridMultiResult?.message ?? "";
     const compensation = gridMultiResult?.compensation;
@@ -2487,12 +2782,8 @@ export function createLibraryBrowserView(
     const compensationHidden = resultHidden || resultAction === undefined;
     if (batchCount.textContent !== countText)
       batchCount.textContent = countText;
-    if (batchSource.textContent !== sourceText)
-      batchSource.textContent = sourceText;
     if (batchRetained.hidden !== retainedHidden)
       batchRetained.hidden = retainedHidden;
-    if (batchActions.hidden !== actionsHidden)
-      batchActions.hidden = actionsHidden;
     if (batchResult.hidden !== resultHidden) batchResult.hidden = resultHidden;
     if (batchResultText.textContent !== resultText)
       batchResultText.textContent = resultText;
@@ -2503,34 +2794,33 @@ export function createLibraryBrowserView(
     if (gridMultiResult) batchResult.dataset.tone = gridMultiResult.tone;
     else batchResult.removeAttribute("data-tone");
 
+    const enabled = gridMultiEnabled && !batchAlbumsPending && count > 0;
     if (count === 0) {
       batchAlbumSelect.replaceChildren();
       renderedBatchAlbumSignature = "";
       batchAlbumSelection = "";
       batchCompensate.hidden = true;
-      batchCompensate.disabled = true;
       applyGridMultiSelection();
-      return;
+    } else {
+      const signature = batchAlbums.map((album) => album.id).join(",");
+      if (signature !== renderedBatchAlbumSignature) {
+        renderedBatchAlbumSignature = signature;
+        if (!batchAlbums.some((album) => album.id === batchAlbumSelection))
+          batchAlbumSelection = batchAlbums[0]?.id ?? "";
+        batchAlbumSelect.replaceChildren(
+          ...batchAlbums.map((album) => {
+            const option = document.createElement("option");
+            option.value = album.id;
+            option.textContent = album.name;
+            option.selected = album.id === batchAlbumSelection;
+            return option;
+          }),
+        );
+      }
     }
-    const signature = batchAlbums.map((album) => album.id).join(",");
-    if (signature !== renderedBatchAlbumSignature) {
-      renderedBatchAlbumSignature = signature;
-      if (!batchAlbums.some((album) => album.id === batchAlbumSelection))
-        batchAlbumSelection = batchAlbums[0]?.id ?? "";
-      batchAlbumSelect.replaceChildren(
-        ...batchAlbums.map((album) => {
-          const option = document.createElement("option");
-          option.value = album.id;
-          option.textContent = album.name;
-          option.selected = album.id === batchAlbumSelection;
-          return option;
-        }),
-      );
-    }
-    const enabled = gridMultiEnabled && !batchAlbumsPending;
     // Disabling a focused batch control would drop keyboard focus to the
-    // body, so the bar parks focus on the Select mode toggle while a batch
-    // settles and returns it when interactivity resumes, mirroring the
+    // body, so the tray parks focus on the selection header's Done while a
+    // batch settles and returns it when interactivity resumes, mirroring the
     // Grid's held-cell hand-off.
     if (!enabled && heldBatchControl === null) {
       const active = document.activeElement;
@@ -2542,12 +2832,11 @@ export function createLibraryBrowserView(
         active === batchCompensate
       ) {
         heldBatchControl = active as HTMLButtonElement | HTMLSelectElement;
-        gridSelectMode.focus();
+        multiDone.focus();
       }
     }
     batchSelect.disabled = !enabled;
     batchReject.disabled = !enabled;
-    batchClear.disabled = false;
     const albums = batchAlbumSelect.options.length > 0;
     batchAlbumSelect.disabled = !enabled || !albums;
     batchAlbumAdd.disabled = !enabled || !albums || !batchAlbumSelection;
@@ -2559,7 +2848,7 @@ export function createLibraryBrowserView(
         control.isConnected &&
         !control.disabled &&
         (document.activeElement === document.body ||
-          document.activeElement === gridSelectMode)
+          document.activeElement === multiDone)
       )
         control.focus();
     }
@@ -2712,7 +3001,7 @@ export function createLibraryBrowserView(
       entry.focus();
   };
   /// True while the Grid owns keyboard focus, so Grid keys never act while
-  /// another surface (the Sources drawer, an Album form, the Photo View) has
+  /// another surface (the Sources surface, the Album form, the Photo View) has
   /// it.
   const gridHoldsKeyboard = (): boolean => {
     const active = document.activeElement;
@@ -2753,10 +3042,11 @@ export function createLibraryBrowserView(
     for (const [position, rendered] of renderedCells)
       rendered.cell.tabIndex = position === index ? 0 : -1;
     const active = document.activeElement;
+    // Grid View owns its whole surface: the header, the Grid, and the batch
+    // tray. A control the Photographer just used in any of them keeps the
+    // Grid's keyboard position restorable.
     const owns =
-      active === null ||
-      active === document.body ||
-      gridViewport.contains(active);
+      active === null || active === document.body || gridView.contains(active);
     if (!owns || index === undefined) return;
     const cell = gridLayer.querySelector<HTMLButtonElement>(
       `[data-photo-index="${index}"]`,
@@ -2776,7 +3066,7 @@ export function createLibraryBrowserView(
   /// through the page model exactly like the Photo View shortcuts.
   const applyGridKey = (event: KeyboardEvent): void => {
     if (event.key === "Escape" && (gridMultiCount > 0 || gridMultiMode)) {
-      // Escape takes the same exit as the bar's Clear control: the
+      // Escape takes the same exit as the tray's Done control: the
       // multi-selection empties and Select mode ends.
       event.preventDefault();
       send({ kind: "grid-multi-clear" });
@@ -2842,7 +3132,6 @@ export function createLibraryBrowserView(
     gridMultiMode = model.multi.mode;
     gridMultiCount = model.multi.count;
     gridMultiLimit = model.multi.limit;
-    gridMultiSourceName = model.multi.sourceName;
     gridMultiEnabled = model.multi.enabled;
     gridMultiResult = model.multi.result;
     gridMultiSelected = model.multi.selected;
@@ -3264,7 +3553,10 @@ export function createLibraryBrowserView(
         (target as HTMLInputElement).type !== "range")
     )
       return;
-    const sourcesOpen = browser.classList.contains("sources-open");
+    const sourcesOpen = surfaces.isActive("sources");
+    // A modal surface owns the keyboard: background shortcuts, Grid movement,
+    // and Photo decisions must not act behind it.
+    if (surfaces.blocking()) return;
     if (
       event.key === "Escape" &&
       compactSources.matches &&
@@ -3534,11 +3826,14 @@ export function createLibraryBrowserView(
     }
     send({ kind: "filmstrip-resize" });
   };
+  // A native close request reaches the surface before the controller's
+  // cleanup, so the disclosure state is synced from both events.
+  sourceDialog.addEventListener("cancel", syncSourcesExpanded);
+  sourceDialog.addEventListener("close", syncSourcesExpanded);
   shortViewport.addEventListener("change", onShortViewportChange);
-  sourceToggle.addEventListener("click", () => openSources("grid"));
-  photoSourceToggle.addEventListener("click", () => openSources("photo"));
+  sourceToggle.addEventListener("click", () => openSources());
+  photoSourceToggle.addEventListener("click", () => openSources());
   sourceClose.addEventListener("click", () => closeSources());
-  sourceScrim.addEventListener("click", () => closeSources());
   gridViewport.addEventListener("scroll", onScroll);
   window.addEventListener("resize", onResize);
   window.addEventListener("keydown", keydown);
@@ -3716,6 +4011,9 @@ export function createLibraryBrowserView(
     if (!alive) return;
     send({ kind: "grid-select-mode", mode: !gridMultiMode });
   });
+  // Done is the visible clear exit: it empties the multi-selection and leaves
+  // Select mode without changing a Photo decision, exactly like Escape.
+  multiDone.addEventListener("click", () => send({ kind: "grid-multi-clear" }));
   batchSelect.addEventListener("click", () => {
     if (!alive || batchSelect.disabled) return;
     send({ kind: "grid-batch-mutation", value: "selected" });
@@ -3724,9 +4022,6 @@ export function createLibraryBrowserView(
     if (!alive || batchReject.disabled) return;
     send({ kind: "grid-batch-mutation", value: "rejected" });
   });
-  batchClear.addEventListener("click", () =>
-    send({ kind: "grid-multi-clear" }),
-  );
   batchAlbumSelect.addEventListener("change", () => {
     if (!alive) return;
     batchAlbumSelection = batchAlbumSelect.value;
@@ -3744,16 +4039,28 @@ export function createLibraryBrowserView(
         : { kind: "grid-batch-album-remove" },
     );
   });
+  viewOptionsOpen.addEventListener("click", () => {
+    if (!alive || viewOptionsOpen.hidden) return;
+    openViewOptions();
+  });
+  viewOptionsClose.addEventListener("click", () => closeViewOptions());
+  viewOptionsCancel.addEventListener("click", () => closeViewOptions());
+  viewOptionsApply.addEventListener("click", () => applyViewOptions());
+  albumResume.addEventListener("click", () => {
+    if (!alive || albumResume.hidden) return;
+    // Resume resolves the saved position under the existing saved-position
+    // rules and opens Photo View, so its destination is not an address.
+    const album = sourceModel?.albums.find((candidate) => candidate.active);
+    if (album) send({ kind: "album-resume", albumId: album.id });
+  });
   sortSelect.addEventListener("change", () => {
-    if (!alive || sortSelect.disabled) return;
-    send({ kind: "sort-change", order: sortSelect.value as ViewSourceOrder });
+    if (!alive) return;
+    // View options holds a draft until Apply commits it.
+    draftOrder = sortSelect.value as ViewSourceOrder;
   });
   filterSelect.addEventListener("change", () => {
-    if (!alive || filterSelect.disabled) return;
-    send({
-      kind: "filter-change",
-      selection: filterSelect.value as ViewSelectionFilter,
-    });
+    if (!alive) return;
+    draftFilter = filterSelect.value as ViewSelectionFilter;
   });
   sizeSelect.addEventListener("change", () => {
     if (!alive) return;
@@ -3768,8 +4075,10 @@ export function createLibraryBrowserView(
   preview.addEventListener("lostpointercapture", (event) =>
     finishPointer(event, true),
   );
-  syncSourcePanel();
+  syncSourceLayout();
+  syncSourcesExpanded();
   syncSecondarySurface();
+  presentViewOptionsFlag();
 
   return {
     get photoStatusSurface() {
@@ -3814,15 +4123,14 @@ export function createLibraryBrowserView(
         secondarySheetOpen = false;
         syncSecondarySurface();
       }
-      connection.textContent = isConnected ? "Connected" : "Disconnected";
-      connection.classList.toggle("offline", !isConnected);
+      connectionState = isConnected;
+      presentConnection();
       retry.hidden = !sourceRetryVisible;
       retryPhoto.hidden = !photoRetryVisible;
     },
     setSourceTitle(name) {
       if (!alive) return;
-      gridTitle.textContent = name;
-      photoTitle.textContent = name;
+      presentSourceTitle(name);
     },
     setGridStatus(text) {
       if (!alive) return;
@@ -3872,11 +4180,12 @@ export function createLibraryBrowserView(
         );
       }
       const options = SORT_OPTIONS[model.kind];
-      sortSelect.value = options.some((option) => option.value === model.value)
+      committedOrder = options.some((option) => option.value === model.value)
         ? model.value
         : options[0]!.value;
+      sortSelect.value = committedOrder;
       sortSelect.disabled = !model.enabled;
-      gridSort.hidden = false;
+      presentViewOptionsFlag();
     },
     renderFilter(model) {
       if (!alive) return;
@@ -3891,22 +4200,33 @@ export function createLibraryBrowserView(
           }),
         );
       }
+      committedFilter = model.value;
       filterSelect.value = model.value;
       filterSelect.disabled = !model.enabled;
-      gridFilter.hidden = false;
+      presentViewOptionsFlag();
     },
     renderProgress(model) {
       if (!alive) return;
-      const text =
+      // The complete source decision counts and the filtered result count are
+      // two different facts, so View options names them separately and never
+      // derives either from the loaded cells.
+      const visibleText =
         model.visible && model.sourceTotal > 0
-          ? `Visible results: ${model.visibleTotal.toLocaleString()} of ${model.sourceTotal.toLocaleString()} Photos|Source progress: ${model.selected.toLocaleString()} selected · ${model.rejected.toLocaleString()} rejected · ${model.undecided.toLocaleString()} undecided`
+          ? `Visible results: ${model.visibleTotal.toLocaleString()} of ${model.sourceTotal.toLocaleString()} Photos`
           : "";
-      if (text === renderedProgressText) return;
-      renderedProgressText = text;
-      const [visibleText, sourceText] = text.split("|");
-      gridVisibleResults.textContent = visibleText ?? "";
-      gridSourceProgress.textContent = sourceText ?? "";
-      gridProgress.hidden = text === "";
+      const sourceText =
+        model.visible && model.sourceTotal > 0
+          ? `Source progress: ${model.selected.toLocaleString()} selected · ${model.rejected.toLocaleString()} rejected · ${model.undecided.toLocaleString()} undecided`
+          : "";
+      if (
+        visibleText === renderedProgressText &&
+        sourceText === renderedSourceProgressText
+      )
+        return;
+      renderedProgressText = visibleText;
+      renderedSourceProgressText = sourceText;
+      optionsVisibleResults.textContent = visibleText;
+      optionsProgress.textContent = sourceText;
     },
     setControls(model) {
       if (!alive) return;
@@ -3976,7 +4296,7 @@ export function createLibraryBrowserView(
     renderMembership,
     prepareSourceOpen(name) {
       if (!alive) return;
-      const returnFocus = browser.classList.contains("sources-open");
+      const returnFocus = surfaces.isActive("sources");
       cancelGridRender();
       resetGestures();
       secondarySheetOpen = false;
@@ -3988,8 +4308,9 @@ export function createLibraryBrowserView(
       clearGridCells();
       clearFilmstripCells();
       closeSources(false);
+      syncSourceLayout();
       if (returnFocus) gridViewport.focus();
-      gridTitle.textContent = name;
+      presentSourceTitle(name);
       folderAlbumControls.hidden = true;
       folderAlbumSelect.replaceChildren();
       folderAlbumStatus.textContent = "";
@@ -4001,7 +4322,7 @@ export function createLibraryBrowserView(
       currentPhotoId = undefined;
       photoSurface = {};
       gridKeyboardIndex = undefined;
-      // A new source starts with no multi-selection: the bar presents nothing
+      // A new source starts with no multi-selection: the tray presents nothing
       // until the page model marks Photos again.
       resetGridMultiSelection();
     },
@@ -4075,18 +4396,21 @@ export function createLibraryBrowserView(
       resetGestures();
       secondarySheetOpen = false;
       syncSecondarySurface();
-      closeSources(false);
-      recoveryPanel.hidden = true;
-      // A destination change supersedes the Album form: its draft is discarded
-      // and focus returns to the initiating action.
+      // A destination change supersedes every supporting surface: the Album
+      // form's draft is discarded and the surfaces close without returning
+      // focus, because the destination render owns focus next.
       if (albumForm) {
-        albumFocusRequest = {
-          kind: "return",
-          focusKey: albumForm.returnFocusKey,
-        };
         albumForm = undefined;
-        if (sourceModel) renderSources(sourceModel);
+        albumFormInvoker = undefined;
+        albumFormBody.replaceChildren();
+        if (albumFormDialog.contains(document.activeElement)) {
+          surfaces.closeAll();
+          if (!gridView.hidden) gridViewport.focus();
+          else photoView.focus();
+          return;
+        }
       }
+      surfaces.closeAll();
     },
     focusGridIndex(index) {
       if (!alive) return;
@@ -4109,6 +4433,8 @@ export function createLibraryBrowserView(
       clearGridCells();
       clearFilmstripCells();
       closeSources(false);
+      syncSourceLayout();
+      presentConnection();
       gridViewport.focus();
       // Returning from Photo View returns the Grid keyboard to that Photo
       // cell; the merged render focuses it once it is rendered.
@@ -4125,7 +4451,8 @@ export function createLibraryBrowserView(
       gridView.hidden = true;
       photoView.hidden = false;
       photoView.scrollTop = 0;
-      syncSourcePanel();
+      syncSourceLayout();
+      presentConnection();
       photoView.focus();
       resetZoomForImage();
       photoSurface = {};
@@ -4156,23 +4483,25 @@ export function createLibraryBrowserView(
       if (!alive || !albumForm || albumForm.formId !== formId) return;
       albumForm.message = message;
       albumForm.pending = false;
-      if (sourceModel) renderSources(sourceModel);
+      renderAlbumForm();
     },
     setAlbumFormPending(formId, pending, name) {
       if (!alive || !albumForm || albumForm.formId !== formId) return;
       albumForm.pending = pending;
       if (name !== undefined) albumForm.name = name;
       delete albumForm.message;
-      if (sourceModel) renderSources(sourceModel);
+      renderAlbumForm();
     },
     dismissAlbumForm(formId) {
       if (!alive || !albumForm || albumForm.formId !== formId) return;
+      const form = albumForm;
       albumFocusRequest = {
         kind: "return",
-        focusKey: albumForm.returnFocusKey,
+        focusKey: form.returnFocusKey,
       };
       albumForm = undefined;
-      if (sourceModel) renderSources(sourceModel);
+      send({ kind: "album-form-close", formId: form.formId });
+      dismissAlbumFormSurface(form);
     },
     setRecoveryNotice(model) {
       if (!alive) return;
@@ -4245,7 +4574,8 @@ export function createLibraryBrowserView(
       recoveryApply.hidden = true;
       recoveryMessage.hidden = true;
       recoverySingleLocation.value = "";
-      recoveryPanel.hidden = false;
+      surfaces.open("recovery");
+      recoveryClose.focus();
     },
     renderRecoveryProposals(proposals) {
       if (!alive) return;
@@ -4304,7 +4634,7 @@ export function createLibraryBrowserView(
     },
     closeRecoveryPanel() {
       if (!alive) return;
-      recoveryPanel.hidden = true;
+      surfaces.close("recovery");
     },
     dispose() {
       if (!alive) return;
@@ -4324,6 +4654,7 @@ export function createLibraryBrowserView(
       gridViewport.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("keydown", keydown);
+      surfaces.dispose();
     },
   };
 }

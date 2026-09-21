@@ -1505,7 +1505,7 @@ export function mountLibraryBrowser(
     syncConnection();
     view.prepareSourceOpen(sourceGrid.name);
     // The multi-selection names Photos of the source that was open: a new
-    // source starts empty, and its bar presents nothing until the
+    // source starts empty, and its tray presents nothing until the
     // Photographer marks Photos again.
     clearMultiSelection();
     renderSortControl();
@@ -1669,6 +1669,38 @@ export function mountLibraryBrowser(
       sourceGrid.source,
       photoOwner.lastCurrentPhotoId,
       sourceGrid.order,
+      selection,
+      { address: "replace" },
+    );
+  };
+
+  /// Commits one View options draft. A thumbnail-size-only change never
+  /// reaches here: it is Grid presentation and keeps the open Snapshot and its
+  /// anchor. Order and filter commit together, so a combined change opens one
+  /// view with both choices and the existing identity-anchor rules.
+  const applyViewOptions = async (
+    order: SourceViewOrder,
+    selection: SelectionFilter,
+  ): Promise<void> => {
+    if (!applicationAlive || pageBusy || photoOwner.busy) return;
+    const orderChanged = order !== sourceGrid.order;
+    const filterChanged = selection !== sourceGrid.selection;
+    if (!orderChanged && !filterChanged) return;
+    // A Folder reopen needs the current File Location binding: without it a
+    // committed change can only send a stale publication and fail as a false
+    // disconnection. Match the refresh/reopen precondition.
+    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
+      const bound = await awaitRootBinding();
+      if (!applicationAlive || !bound) {
+        if (applicationAlive)
+          setGridStatusText("Could not load this source. Retry to continue.");
+        return;
+      }
+    }
+    await openSourceDescriptor(
+      sourceGrid.source,
+      photoOwner.lastCurrentPhotoId,
+      order,
       selection,
       { address: "replace" },
     );
@@ -2020,7 +2052,6 @@ export function mountLibraryBrowser(
           mode: selectMode,
           count: multiSelection.size,
           limit: MULTI_SELECTION_LIMIT,
-          sourceName: sourceGrid.name,
           // A batch action is presented only while it would be admitted: the
           // same source readiness, connection, and idle owner a Grid decision
           // needs, so an activation is never refused silently.
@@ -2038,7 +2069,7 @@ export function mountLibraryBrowser(
     updateControls();
   };
 
-  /// Presents the batch bar's Album choices from the bounded Album summary.
+  /// Presents the batch tray's Album choices from the bounded Album summary.
   const renderBatchAlbums = () => {
     if (!applicationAlive) return;
     view.renderBatchAlbums({
@@ -2065,7 +2096,7 @@ export function mountLibraryBrowser(
   /// Empties the Grid's multi-selection and leaves Select mode. The caller
   /// owns the render, so a source open that clears it presents the cleared
   /// Grid in its own render; the view is told here as well, because an open
-  /// that fails leaves the Grid its retained cells and must never keep a bar
+  /// that fails leaves the Grid its retained cells and must never keep a tray
   /// or a marker for Photos that open no longer presents.
   const clearMultiSelection = () => {
     multiSelection = new Set();
@@ -2799,7 +2830,7 @@ export function mountLibraryBrowser(
     setDecisionStatus(`Saving ${photoCountText(photoIds.length)}…`);
     const outcome = await admission.settlement;
     // The write settled, so the Grid is interactive again whatever the
-    // outcome; the merged render re-enables the bar and rebuilds the decided
+    // outcome; the merged render re-enables the tray and rebuilds the decided
     // cells in place. A detached write stays silent.
     renderGrid();
     if (outcome.kind === "detached") return;
@@ -3805,6 +3836,9 @@ export function mountLibraryBrowser(
         if (outcome?.kind === "refresh-current-source") void refreshSource();
         return;
       }
+      case "view-options-apply":
+        void applyViewOptions(intent.order, intent.selection);
+        return;
       case "sort-change":
         void changeSort(intent.order);
         return;
