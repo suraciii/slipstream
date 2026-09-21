@@ -514,6 +514,21 @@ export function createSourceGridOwner(
     };
   };
 
+  /// Drops the recorded decisions whose Photo no longer has a retained
+  /// fact. A decision is presented only through a fact the source still
+  /// holds, so it follows those facts: a decision whose Photo is gone is one
+  /// no reader can present, and holding it would let a later window resurrect
+  /// a state the browser already moved past. The check is by Photo identity,
+  /// never by the index a decision was recorded at, so a Photo whose fact is
+  /// still retained keeps its decision until that fact is read again.
+  const evictCommittedDecisions = () => {
+    if (committedDecisions.size === 0) return;
+    const retained = new Set<string>();
+    for (const photo of facts.values()) retained.add(photo.id);
+    for (const photoId of [...committedDecisions.keys()])
+      if (!retained.has(photoId)) committedDecisions.delete(photoId);
+  };
+
   const trimFacts = (anchor?: number) => {
     if (visibleRange) {
       // The protected span is the largest range the Grid presents at a
@@ -571,16 +586,18 @@ export function createSourceGridOwner(
           if (facts.size <= bound) break;
           if (!isAnchorFact(index)) facts.delete(index);
         }
-      return;
+    } else {
+      const fallback = anchor ?? latestSettledWindowStart;
+      if (fallback !== undefined && facts.size > MAX_RETAINED_FACTS)
+        for (const index of [...facts.keys()])
+          if (
+            Math.abs(index - fallback) > WINDOW_SIZE &&
+            facts.size > MAX_RETAINED_FACTS
+          )
+            facts.delete(index);
     }
-    const fallback = anchor ?? latestSettledWindowStart;
-    if (fallback === undefined || facts.size <= MAX_RETAINED_FACTS) return;
-    for (const index of [...facts.keys()])
-      if (
-        Math.abs(index - fallback) > WINDOW_SIZE &&
-        facts.size > MAX_RETAINED_FACTS
-      )
-        facts.delete(index);
+    // Recorded decisions follow the facts they are presented against.
+    evictCommittedDecisions();
   };
 
   const detachedOpen = (

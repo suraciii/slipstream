@@ -176,9 +176,10 @@ Opening a modal must cancel a pending Rating Wheel and move focus into the
 surface. Background content must not receive pointer input, keyboard focus,
 or Photo shortcuts. Tab and Shift+Tab remain within the modal. Close, Escape,
 a scrim activation, or a supported platform close request dismisses it and
-returns focus to its invoker, or the nearest valid control if that invoker no
-longer exists. An already admitted operation must not be cancelled by closing
-its form. A consequential failure must remain recoverable after closing.
+returns focus to its invoker, or the nearest valid control when that invoker is
+gone or cannot take focus. An already admitted operation must not be cancelled
+by closing its form. A consequential failure must remain recoverable after
+closing.
 
 Temporary panels must not add browser history entries. Android system Back
 may issue a platform close request; browser toolbar Back and browser history

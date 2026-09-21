@@ -569,9 +569,10 @@ describe("SourceGridOwner", () => {
       rejected: 0,
       undecided: 1,
     });
-    // The decision is consumed exactly once, and a later read of the same fact
-    // is the fact that was committed.
+    // The decision is consumed exactly once: the second read is the fact that
+    // was committed, and no count moves a second time.
     expect(owner.photoAt(0)!.selectionState).toBe("selected");
+    expect(owner.photoAt(1)!.rating).toBe(4);
     expect(owner.selectionCounts).toEqual({
       selected: 1,
       rejected: 0,
@@ -582,10 +583,18 @@ describe("SourceGridOwner", () => {
     // decision recorded for the one it replaced.
     const stale = owner.authority;
     await owner.open({ kind: "library" });
+    await owner.loadWindow(0, { kind: "source", authority: owner.authority });
     owner.noteCommittedDecision(stale, "photo-0", "selectionState", "rejected");
     owner.noteCommittedDecision(stale, "photo-0", "rating", 5);
+    // The two guarded calls recorded nothing, so the replacement source
+    // presents the Library's own facts rather than a decision it cannot hold.
+    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+    expect(owner.photoAt(0)!.rating).toBe(0);
     owner.dispose();
     owner.noteCommittedDecision(owner.authority, "photo-0", "rating", 5);
+    // A disposed owner records nothing either: the fact it last presented is
+    // what a read still returns.
+    expect(owner.photoAt(0)!.rating).toBe(0);
   });
 
   test("keeps the attempted source and retry state after an open failure", async () => {
@@ -642,6 +651,60 @@ describe("SourceGridOwner", () => {
     }
     expect(owner.photoAt(0)).toBeUndefined();
     expect(owner.photoAt(240)?.id).toBe("photo-240");
+  });
+
+  test("drops a recorded decision once its Photo's fact is evicted", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(opened("browse-1", 300));
+      if (url.pathname === "/api/browse/browse-1") {
+        const start = Number(url.searchParams.get("start"));
+        return Promise.resolve(windowResponse(start, 300));
+      }
+      if (init?.method === "DELETE")
+        return Promise.resolve(new Response(null, { status: 204 }));
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+
+    const authority = await openLibrary(owner);
+    for (const index of [0, 60, 120]) {
+      expect(
+        await owner.loadWindow(index, { kind: "source", authority }),
+      ).toMatchObject({ kind: "loaded" });
+    }
+    // Two decisions are recorded for Photos whose facts the source still
+    // retains, as a write that settles after the browser left its Photo
+    // records them.
+    owner.noteCommittedDecision(
+      authority,
+      "photo-0",
+      "selectionState",
+      "selected",
+    );
+    owner.noteCommittedDecision(
+      authority,
+      "photo-170",
+      "selectionState",
+      "selected",
+    );
+    // The next window settles three windows away from index 0, which evicts
+    // that Photo's fact and keeps the one at 170.
+    expect(
+      await owner.loadWindow(180, { kind: "source", authority }),
+    ).toMatchObject({ kind: "loaded" });
+    expect(owner.photoAt(0)).toBeUndefined();
+    expect(owner.photoAt(170)?.id).toBe("photo-170");
+
+    // The evicted Photo's decision is gone: the window that returns its fact
+    // presents the Library's own state, so the decision is not resurrected.
+    expect(
+      await owner.loadWindow(0, { kind: "source", authority }),
+    ).toMatchObject({ kind: "loaded" });
+    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+    // The decision whose Photo's fact survived the trim is still held and is
+    // presented when that fact is read.
+    expect(owner.photoAt(170)!.selectionState).toBe("selected");
   });
 
   test("retains Photo, Original kind, and Preview facts in a bounded window", async () => {
