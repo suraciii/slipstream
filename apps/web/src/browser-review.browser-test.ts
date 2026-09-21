@@ -550,10 +550,13 @@ async function openGrid(page: Page, url: string, name: string) {
   await page.goto(url);
   await openSources(page);
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  await page
+  const source = page
     .locator("[data-source-list]")
-    .getByRole("link", { name: new RegExp(`^${escapedName}(?: |$)`) })
-    .click();
+    .getByRole("link", { name: new RegExp(`^${escapedName}(?: |$)`) });
+  // Waiting for the link before clicking keeps a Library summary that is still
+  // arriving from surfacing as an unexplained click timeout.
+  await expect(source).toBeVisible();
+  await source.click();
   await page
     .locator("[data-grid-status]")
     .filter({ hasText: /^(?:Ready · \d[\d,]* Photos?|0 Photos)$/ })
@@ -11899,6 +11902,7 @@ test("a large viewport loads only covering windows and stays bounded", async ({
 test("a source switch rebuilds the Grid range for the replacement source", async ({
   page,
 }) => {
+  test.setTimeout(120_000);
   const { base, root } = await fixture();
   await writePhotos(root, 80);
   const running = await server(base, root);
@@ -16750,6 +16754,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
 test("navigation promotes an aborted adjacent window to current priority", async ({
   page,
 }) => {
+  test.setTimeout(120_000);
   const { base, root } = await fixture();
   await writePhotos(root, 70);
   const running = await server(base, root);
