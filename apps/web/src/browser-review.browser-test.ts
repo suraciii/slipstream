@@ -651,6 +651,18 @@ async function closePhotoSurfaces(page: Page) {
 async function openSources(page: Page) {
   await settledDestination(page);
   await closePhotoSurfaces(page);
+  // The application establishes its initial destination after it mounts, and
+  // opening that source closes Sources. Waiting for the Grid status or the
+  // Photo position that establishment writes keeps that close out of the click
+  // below, which would otherwise race it on a loaded machine and lose the
+  // surface it just opened.
+  await page.waitForFunction(() => {
+    const status =
+      document.querySelector("[data-grid-status]")?.textContent ?? "";
+    const position =
+      document.querySelector("[data-position]")?.textContent ?? "";
+    return status !== "" || /^[1-9]\d* \/ [1-9]\d*$/.test(position.trim());
+  });
   // Exactly one disclosure is visible: the Grid's on a narrow Grid, the Photo
   // View's while a Photo is open. Resolving it by visibility keeps a
   // destination render that briefly presents the Grid shell from racing the
@@ -13062,19 +13074,30 @@ test("the filmstrip yields on a short viewport and stays inside a narrow one", a
     .evaluate((bar) => bar.getBoundingClientRect().height);
   expect(previewHeight).toBeGreaterThan(barHeight);
 
-  // Short: the strip is not presented, so the Preview and the decisions keep
-  // their space and every control stays reachable. A strip that is not
-  // presented binds nothing, so it presents no entries and no image demand.
+  // Short: the strip is disclosed inside Photo tools, so it costs the Preview
+  // and the decision rows no space of its own and every control stays
+  // reachable. Its home beside the Preview holds nothing.
   await page.setViewportSize({ width: 844, height: 390 });
-  await expect(strip).toBeHidden();
-  await expect(strip.locator(".filmstrip-cell")).toHaveCount(0);
-  await expect(strip.locator("img")).toHaveCount(0);
+  await expect(page.locator("[data-photo-tools-view='nearby']")).toBeVisible();
+  await expect(strip).toBeVisible();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);
   await expect(page.getByRole("button", { name: "Next" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
   await expect(page.locator("[data-preview]")).toBeVisible();
+  const shortPreview = await page
+    .locator("[data-preview]")
+    .evaluate((preview) => preview.getBoundingClientRect().height);
+  expect(shortPreview).toBeGreaterThanOrEqual(240);
 
-  // When the space returns, the strip is presented again and rebuilds from
-  // the loaded facts.
+  // A strip that is not presented binds nothing: closing the disclosure
+  // releases its entries and their image demand.
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-photo-tools]")).toBeHidden();
+  await expect(strip.locator(".filmstrip-cell")).toHaveCount(0);
+  await expect(strip.locator("img")).toHaveCount(0);
+
+  // When the space returns, the strip is presented beside the Preview again
+  // and rebuilds from the loaded facts.
   await page.setViewportSize({ width: 844, height: 700 });
   await expect(strip).toBeVisible();
   await expect(strip.locator(".filmstrip-cell")).toHaveCount(5);

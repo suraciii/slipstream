@@ -1425,20 +1425,26 @@ export function createLibraryBrowserView(
   /// everywhere else: a strip that is not presented binds no thumbnail and
   /// admits no window of its own.
   const syncFilmstripHost = () => {
+    const presented = !stripIsDisclosed() || stripInTools();
     const host = stripInTools() ? filmstripTools : filmstripHost;
     if (filmstrip.parentElement !== host) host.append(filmstrip);
-    if (!stripIsDisclosed() || stripInTools()) {
-      // The remembered facts rebuild the entries, while the live readiness
-      // fact still decides whether an activation would be admitted.
-      if (filmstripModel) {
-        const interactive = filmstripInteractive;
-        renderFilmstrip(filmstripModel);
-        filmstripInteractive = interactive;
-        applyFilmstripInteractivity();
-      }
+    if (!presented) {
+      clearFilmstripCells();
       return;
     }
-    clearFilmstripCells();
+    // The page model owns the strip's facts. A presented strip is rebuilt from
+    // the remembered facts — while the live readiness fact still decides
+    // whether an activation would be admitted — and a remembered model that
+    // holds no neighbors asks that owner to render again instead of claiming
+    // the source has none.
+    if (filmstripModel && filmstripModel.cells.length > 1) {
+      const interactive = filmstripInteractive;
+      renderFilmstrip(filmstripModel);
+      filmstripInteractive = interactive;
+      applyFilmstripInteractivity();
+      return;
+    }
+    send({ kind: "filmstrip-resize" });
   };
   const syncSecondarySurface = () => {
     // The disclosure state mirrors the surface itself, so a native close
@@ -3873,10 +3879,10 @@ export function createLibraryBrowserView(
   mobileActionHierarchy.addEventListener("change", onSourceViewportChange);
   const onShortViewportChange = () => {
     if (!alive) return;
-    if (shortViewport.matches) {
-      clearFilmstripCells();
-      return;
-    }
+    // Entering or leaving a short viewport only changes where the strip is
+    // presented. The page model owns its facts, so it re-renders the strip in
+    // either direction and the view places the single node accordingly.
+    syncFilmstripHost();
     send({ kind: "filmstrip-resize" });
   };
   // A native close request reaches the surface before the controller's
@@ -4121,9 +4127,13 @@ export function createLibraryBrowserView(
   syncSourceLayout();
   syncSourcesExpanded();
   applyPhotoToolsView();
-  syncFilmstripHost();
   syncSecondarySurface();
   presentViewOptionsFlag();
+  // The strip's home is only placed once a Photo can present it: the markup
+  // already holds it beside the Preview, which is where a wide layout shows
+  // it, and a compact layout moves it into Photo tools when that disclosure
+  // opens. Placing it here would emit an intent while the page model that
+  // owns the strip's facts is still being constructed.
 
   return {
     get photoStatusSurface() {
