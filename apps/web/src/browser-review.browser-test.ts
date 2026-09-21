@@ -1161,7 +1161,12 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   );
   await expect(page.locator("[data-detail-limit]")).toBeVisible();
   await openPhotoToolsView(page, "zoom");
-  for (const name of ["Fit Window", "Zoom in", "Zoom out", "Zoom to 100 percent"])
+  for (const name of [
+    "Fit Window",
+    "Zoom in",
+    "Zoom out",
+    "Zoom to 100 percent",
+  ])
     await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
   await returnToPhotoTools(page);
   for (const name of ["Clear", "Undo"])
@@ -1510,6 +1515,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
     await expect(page.getByText("2 / 3")).toBeVisible();
     await page.getByRole("button", { name: "Previous" }).click();
     await expect(page.getByText("1 / 3")).toBeVisible();
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.locator("[data-grid-view]")).toBeVisible();
     const gridTargets = await interactiveGeometry(
@@ -1941,16 +1947,18 @@ test("zoom controls are disabled while no Preview image is measurable", async ({
   await expect(page.locator("[data-zoom-slider]")).toBeDisabled();
   await expect(page.locator("[data-zoom-level]")).toHaveText("—");
 
-  // Keyboard zoom is ignored without measurable pixels.
+  // Keyboard zoom is ignored without measurable pixels. The disclosure owns
+  // the keyboard while it is open, so it closes for the shortcut.
+  await closePhotoTools(page);
   await page.keyboard.press("+");
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
 
   // A healthy Photo restores zoom control.
-  await closePhotoTools(page);
   await page.unroute("**/api/derivatives/*/review/*");
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
   await waitForLoadedReviewImage(page);
+  await openPhotoToolsView(page, "zoom");
   await expect(hundred).toBeEnabled();
   await expect(fit).toBeEnabled();
   const slider = page.locator("[data-zoom-slider]");
@@ -2098,6 +2106,7 @@ test("returning to Grid View resets the zoom state to Fit", async ({
   await expectRenderedZoom(page, 3);
 
   await closePhotoTools(page);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-view]")).toBeVisible();
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
@@ -2240,8 +2249,13 @@ test("Photo View reshapes Capture Time without reinterpreting it", async ({
     await expect(page.locator("[data-metadata-capture-time]")).toHaveText(
       displayed,
     );
-    if (index < cases.length - 1)
+    if (index < cases.length - 1) {
+      // Navigating is a background action, so the disclosure closes for it and
+      // opens again on the Details subview of the Photo it moved to.
+      await closePhotoTools(page);
       await page.getByRole("button", { name: "Next" }).click();
+      await openPhotoToolsView(page, "details");
+    }
   }
 });
 
@@ -2294,25 +2308,27 @@ function touchQualification(viewport: { width: number; height: number }) {
       };
     });
     expect(gesture.bottom - gesture.top).toBeGreaterThan(80);
+    // The consolidated short-landscape layout fits without scrolling, so a
+    // vertical touch drag stays on the Preview instead of moving the view.
     await touchDrag(
       page,
       { x: gesture.x, y: gesture.bottom },
       { x: gesture.x, y: gesture.top },
     );
-    await expect
-      .poll(() => photoView.evaluate((view) => view.scrollTop))
-      .toBeGreaterThan(0);
     await expect(preview).toHaveAttribute(
       "data-observed-pointer",
       "touch:true",
     );
+    await expect
+      .poll(() => photoView.evaluate((view) => view.scrollTop))
+      .toBe(0);
     await expect(page.getByText("1 / 3")).toBeVisible();
     expect(stateRequests).toBe(0);
 
-    // The decision gestures below start on the Preview surface: the zoom
-    // controls cover the Preview's top edge and own their gestures, so a swipe
-    // that begins on one is never admitted. Geometry measured after the touch
-    // pan's momentum has ended is the position those gestures begin from.
+    // The decision gestures start on the Preview surface, which the layout
+    // leaves unobstructed: no zoom control covers its top edge, so a swipe that
+    // begins anywhere on the image is admitted. Geometry measured after the
+    // touch pan's momentum has ended is the position those gestures begin from.
     await restorePhotoViewTop(page);
     const horizontal = await preview.evaluate((surface) => {
       const box = surface.getBoundingClientRect();
@@ -3056,6 +3072,7 @@ test("Grid View moves cell focus with the arrow keys and opens the focused Photo
   await expect(page.locator("[data-position]")).toHaveText(
     `${target + 1} / 300`,
   );
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(cell(target)).toBeFocused();
 });
@@ -3136,6 +3153,7 @@ test("Grid View decision and Rating keys act on the focused cell without opening
   await expect(page.locator("[data-review]")).toBeVisible();
   await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await closePhotoTools(page);
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
@@ -4605,6 +4623,7 @@ test("Undo of a Photo View Rating that did not advance stays in the open Grid", 
   await page.keyboard.press("3");
   await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
   expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 3 });
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-review]")).toBeHidden();
   await page.keyboard.press("Control+z");
@@ -5060,12 +5079,13 @@ test("mobile Photo View presents the Quick Action Dock and reachable secondary t
   expect(closedHeight).toBe(0);
   // Nothing inside a closed surface takes focus, so the closed panels admit no
   // duplicate accessible action.
-  const closedFocusable = await page.evaluate(() =>
-    Array.from(
-      document.querySelectorAll<HTMLElement>(
-        "[data-photo-tools] button, [data-photo-tools] input, [data-rating-choices] button",
-      ),
-    ).filter((element) => element.offsetParent !== null).length,
+  const closedFocusable = await page.evaluate(
+    () =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "[data-photo-tools] button, [data-photo-tools] input, [data-rating-choices] button",
+        ),
+      ).filter((element) => element.offsetParent !== null).length,
   );
   expect(closedFocusable).toBe(0);
 
@@ -5088,6 +5108,17 @@ test("mobile Photo View presents the Quick Action Dock and reachable secondary t
   await returnToPhotoTools(page);
   await page.locator("[data-photo-tools-close]").click();
   await expect(page.locator("[data-photo-tools]")).toBeHidden();
+  await expect(more).toBeFocused();
+
+  // One Escape press closes the same surface and returns focus to the invoker,
+  // exactly like the Close action does.
+  await more.click();
+  await expect(page.locator("[data-photo-tools]")).toBeVisible();
+  await expect(page.locator("[data-photo-tools-close]")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("[data-photo-tools]")).toBeHidden();
+  await expect(page.locator("[data-photo-tools-undo]")).toBeHidden();
+  await expect(page.locator("[data-photo-tools-clear]")).toBeHidden();
   await expect(more).toBeFocused();
 
   // Rating opens only its explicit 0-5 choices.
@@ -5929,6 +5960,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
     "undecided",
   );
   await page.unroute("**/api/photos/*/state");
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
@@ -6383,6 +6415,7 @@ test("keeps unavailable Photos ordered and allows their decisions without a Prev
   await rm(missing);
   await post(running.url, "/api/scan", {});
   await startReview(page, running.url, "Review", albumId);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
   await page.getByRole("link", { name: /^Review \d+ Photos/ }).click();
@@ -6724,6 +6757,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect(page.getByText("Not in any Album yet")).toBeHidden();
   await expect(page.locator("[data-membership-list] li")).toHaveText(["Picks"]);
   await closePhotoTools(page);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.getByRole("link", { name: /Picks 1 Photo/ })).toBeVisible();
 
@@ -6737,6 +6771,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   await expect
     .poll(async () => (await state(running.url, albumId)).members)
     .toHaveLength(1);
+  await closePhotoTools(page);
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.getByRole("link", { name: /Picks 1 Photo/ })).toBeVisible();
@@ -6759,6 +6794,7 @@ test("the current photo joins and leaves albums from the photo view", async ({
   ).toBeVisible();
   await expect(page.getByText("1 / 1")).toBeVisible();
   await expect(page.locator("[data-membership-list] li")).toHaveCount(0);
+  await closePhotoTools(page);
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -7173,6 +7209,7 @@ test("an older saved-position response cannot supersede a newer Album removal", 
       ),
     ).toBeVisible();
     await expect(page.getByText("1 / 1")).toBeVisible();
+    await closePhotoTools(page);
     await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(
@@ -7594,6 +7631,7 @@ test("creating an album from the photo view opens it and makes it available for 
   await membershipCheckbox(page, "Fresh").check();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await closePhotoTools(page);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
     page.getByRole("link", { name: /^Fresh 1 Photo/ }),
@@ -7634,6 +7672,7 @@ test("a failed removal stays retryable from the photo view", async ({
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
+  await closePhotoTools(page);
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(
@@ -8904,6 +8943,7 @@ test("an admitted album add completes after switching sources", async ({
   });
   await membershipCheckbox(page, "Picks").check();
   await closePhotoTools(page);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   release!();
   // The admitted mutation still updates the bounded Album list.
@@ -9631,6 +9671,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
   await page.getByRole("link", { name: /^Progress \d+ Photos/ }).click();
@@ -9818,6 +9859,8 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   expect((await state(running.url, albumId)).members[1]!.selectionState).toBe(
     "selected",
   );
+  // The shortcuts act on the Photo, so the disclosure closes for them.
+  await closePhotoTools(page);
   await page.keyboard.press("f");
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
@@ -9979,6 +10022,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
     albums: unknown[];
   };
   expect(overview.albums).toEqual([]);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("link", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 2/ }).click();
@@ -9992,6 +10036,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   // The address preserves the destination, so the reload reopens the Photo
   // the Photographer left rather than the bare All Photos Grid.
   await expect(page.getByText("1 / 2")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
   await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
@@ -10135,6 +10180,7 @@ test("Grid sort keeps the current Photo by identity and repositions around it", 
   await anchorCell.scrollIntoViewIfNeeded();
   await anchorCell.click();
   await expect(page.getByText("9 / 12")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
 
@@ -10480,6 +10526,7 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
   await expect
     .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
 
@@ -10500,6 +10547,7 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
   // The same Photo stays current at its new position in the changed order.
   await page.locator(`[data-photo-index="${anchorPosition}"]`).click();
   await expect(page.getByText(`${anchorPosition + 1} / 4`)).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
   // A time view never rewrites the persisted Album positions.
@@ -10565,6 +10613,7 @@ test("Previous and Next follow the order selected from the Grid", async ({
   await anchorCell.click();
   await expect(page.getByText("4 / 5")).toBeVisible();
   await expect.poll(currentPreviewId).toBe(anchorId);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
 
@@ -10636,6 +10685,7 @@ test("a Library order switch aligns windows beyond the first Grid window", async
   await expect(anchorCell).toBeVisible();
   await anchorCell.click();
   await expect(page.getByText(`${anchorIndex + 1} / 70`)).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
 
@@ -10737,6 +10787,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await page.getByRole("link", { name: /All Photos/ }).click();
   await page.getByRole("button", { name: /Photo 1 of 3/ }).click();
@@ -10794,6 +10845,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openSources(page);
   await page.getByRole("link", { name: /^Snapshot(?: |$)/ }).click();
@@ -10815,10 +10867,14 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   const { albumId } = await createAlbum(running.url, "Recovery");
   await startReview(page, running.url, "Recovery", albumId);
   await openPhotoTools(page);
+  await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await closePhotoTools(page);
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
@@ -10828,6 +10884,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Undo" }).click(),
@@ -10902,6 +10959,7 @@ test("Album resume wraps past an unavailable saved member and retains it when al
   await expect(page.getByText("1 / 3")).toBeVisible();
   await progressConfirmed;
 
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await rm(join(root, "a.jpg"));
   await rm(join(root, "b.jpg"));
@@ -10939,6 +10997,7 @@ test("ready Preview facts render immediately during revalidation", async ({
   await openGrid(page, running.url, "All Photos");
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await expect(page.locator("[data-stage] img")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
 
@@ -11311,6 +11370,7 @@ test("leaving Photo View cancels a pending review image transfer", async ({
       .elementHandle();
     expect(pendingReviewImage).not.toBeNull();
 
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.getByText(/^Ready · 1 Photo$/)).toBeVisible();
     expect(
@@ -12447,6 +12507,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
 
     await cell.click();
     await expect(page.getByText("1 / 1")).toBeVisible();
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await waitForGridFrame(page);
   }
@@ -12590,6 +12651,7 @@ test("Grid and Photo View identify a Photo by its Original filename", async ({
   );
   await expect(page.locator("[data-position]")).toHaveText("2 / 2");
 
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.getByRole("heading", { name: "All Photos" })).toBeVisible();
 });
@@ -12760,12 +12822,15 @@ test("a Photo View navigation binds again the strip thumbnails it detached mid-t
   await openPhotoToolsView(page, "nearby");
   const strip = page.locator("[data-filmstrip]");
   await expect(strip.locator(".filmstrip-cell")).toHaveCount(3);
+  await closePhotoTools(page);
 
   // One navigation keeps the strip's retained entries while handing their
-  // in-flight transfers back to the owner.
+  // in-flight transfers back to the owner. Navigating is a background action,
+  // so the disclosure closes for it and opens again on the same subview.
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("2 / 8");
   await waitForLoadedReviewImage(page);
+  await openPhotoToolsView(page, "nearby");
   expect(await filmstripIndices(page)).toEqual([0, 1, 2, 3]);
 
   holdImages = false;
@@ -12852,6 +12917,7 @@ test("the filmstrip follows the open source's filtered sequence", async ({
     await expect(page.locator("[data-position]")).toHaveText(
       `${index + 2} / 5`,
     );
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.locator("[data-grid-view]")).toBeVisible();
   }
@@ -13032,15 +13098,17 @@ test("the filmstrip is keyboard operable without owning Photo View shortcuts", a
   await expect(page.locator("[data-position]")).toHaveText("5 / 5");
   await waitForLoadedReviewImage(page);
 
-  // The decision and navigation shortcuts still act while an entry holds
-  // focus: the strip never owns a Photo View key.
-  await entry(3).focus();
+  // The decision and navigation shortcuts act on the Photo, so the disclosure
+  // closes for them: the strip never owns a Photo View key, and it keeps
+  // reporting the decision that entry just recorded.
+  await closePhotoTools(page);
   await page.keyboard.press("p");
-  await expect(entry(4).locator(".cell-state.selected")).toHaveText("✓");
   await expect(page.locator("[data-selection]")).toHaveText("Selected");
   await page.keyboard.press("ArrowLeft");
   await expect(page.locator("[data-position]")).toHaveText("4 / 5");
   await waitForLoadedReviewImage(page);
+  await openPhotoToolsView(page, "nearby");
+  await expect(entry(4).locator(".cell-state.selected")).toHaveText("✓");
   await expect(entry(3)).toHaveAttribute("aria-current", "true");
 });
 
@@ -13313,6 +13381,7 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   // image is detached from the cell that now presents the Photo.
   await currentCell.click();
   await expect(page.getByText("1 / 1")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   expect(await detachedImage!.evaluate((image) => image.isConnected)).toBe(
@@ -13922,6 +13991,7 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
   await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(stateBadge(1)).toHaveText("✓");
   await expect(stateBadge(1)).toHaveClass(/selected/);
@@ -13935,6 +14005,7 @@ test("Grid cells badge only recorded Selection States", async ({ page }) => {
   // The last Photo cannot advance, so it stays and reports its decision.
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
   await expect(page.locator("[data-position]")).toHaveText("3 / 3");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(stateBadge(2)).toHaveText("×");
   await expect(stateBadge(2)).toHaveClass(/rejected/);
@@ -14078,6 +14149,7 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await page.keyboard.press("ArrowRight");
   await expect(page.locator("[data-position]")).toHaveText("2 / 2");
   await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
   await openViewOptions(page);
@@ -14144,6 +14216,7 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   const anchorId = allIds[2]!;
   await cell(2).click();
   await expect(page.locator("[data-position]")).toHaveText("3 / 8");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await openViewOptions(page);
   await filter.selectOption("selected");
@@ -14159,6 +14232,7 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await cell(0).click();
   await expect(page.locator("[data-review]")).toBeVisible();
   await expect(page.locator("[data-position]")).toHaveText("1 / 3");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
   // An order change and an explicit refresh keep the filter and its counts.
@@ -14379,6 +14453,7 @@ test("an Album source filters its members and keeps Album progress", async ({
   await expect(page.locator("[data-position]")).toHaveText("1 / 2");
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.locator("[data-position]")).toHaveText("2 / 2");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(filter).toHaveValue("selected");
 
@@ -14479,6 +14554,7 @@ test("Grid progress follows confirmed decisions, Undo, and a reload", async ({
   await waitForLoadedReviewImage(page);
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.locator("[data-selection]")).toHaveText("Rejected");
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 0 selected · 1 rejected · 3 undecided",
@@ -15012,8 +15088,12 @@ test("an Undo Preview continuation cannot label or persist a newer Photo", async
     }
   });
   try {
+    await openPhotoTools(page);
     await page.getByRole("button", { name: /^Undo/ }).click();
     await expect.poll(() => held).toBe(true);
+    // The Undo write is already admitted, so closing Photo tools does not
+    // cancel it: its continuation belongs to the Photo the browser left.
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText("2 / 2")).toBeVisible();
     release();
@@ -15119,6 +15199,7 @@ test("Undo reloads the affected Photo after its facts leave the loaded window", 
     page.getByRole("button", { name: "Select" }).click(),
   );
   await expect(page.getByText("2 / 200")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   await evictFirstPhotoFact(page);
@@ -15163,6 +15244,7 @@ test("an evicted Undo reload cannot write into a replacement source", async ({
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   await evictFirstPhotoFact(page);
@@ -15224,7 +15306,11 @@ test("an evicted Undo reload cannot write into a replacement source", async ({
     );
 
     expect(stateWrites).toBe(0);
-    await expect(page.locator("[data-undo]")).toBeDisabled();
+    // Undo stays retired in the replacement source: its control carries the
+    // disabled state whether or not the surface that holds it is open.
+    await expect(
+      page.locator("[data-photo-tools] [data-photo-tools-undo]"),
+    ).toBeDisabled();
     expect((await state(running.url, albumId)).members[0]!.selectionState).toBe(
       "selected",
     );
@@ -15856,6 +15942,7 @@ test("an expired Album snapshot replaces retired membership memory", async ({
     photoIds: [firstId],
   });
   expect(readded.status).toBe(200);
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   const viewport = page.locator("[data-grid-viewport]");
@@ -15982,6 +16069,7 @@ for (const failure of replacementFirstWindowFailures) {
       photoIds: [firstId],
     });
     expect(readded.status).toBe(200);
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await waitForGridFrame(page);
 
@@ -16139,6 +16227,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
       "Removed from the Album. It stays in this open view until reopened.",
     ),
   ).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
   let expiredServed = false;
@@ -16181,6 +16270,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: /^Photo 1 of 70/ }).click();
   await expect(page.locator("[data-review]")).toBeVisible();
+  await openMembershipPanel(page);
   await expect(membershipCheckbox(page, "Expiry failure")).not.toBeChecked();
 });
 
@@ -16380,6 +16470,7 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
         url.searchParams.get("start") === "60"
       );
     });
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     const tailRequest = await visibleTailRequest;
     expect(tailRequest.method()).toBe("GET");
@@ -17274,6 +17365,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
   await expect(
     page.getByRole("button", { name: "Back to Grid" }),
   ).toBeEnabled();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
   await expect(currentImage).not.toHaveAttribute("src", retainedPreviewSrc);
@@ -17493,6 +17585,7 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   await expect(firstCell).toBeEnabled();
   await firstCell.click();
   await expect(page.getByText("1 / 40000")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
@@ -17508,6 +17601,7 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   await expectBoundedGrid();
   await lastCell.click();
   await expect(page.getByText("40000 / 40000")).toBeVisible();
+  await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await waitForGridFrame(page);
   await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
@@ -17902,6 +17996,7 @@ test.describe("browser navigation", () => {
     await expect(page.locator("[data-review]")).toBeVisible();
     await expect(page.getByText("3 / 5")).toBeVisible();
     const length = await historyLength(page);
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.getByText("Ready · 5 Photos")).toBeVisible();
     // A direct link must not call history.back from history.length or a
@@ -18310,6 +18405,7 @@ test.describe("browser navigation", () => {
     await expect
       .poll(async () => (await state(running.url, albumId)).position)
       .toBe(1);
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await waitForGridFrame(page);
     await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
@@ -18354,6 +18450,7 @@ test.describe("browser navigation", () => {
     await expect
       .poll(async () => (await state(running.url, albumId)).position)
       .toBe(0);
+    await closePhotoTools(page);
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await waitForGridFrame(page);
     await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
@@ -18743,6 +18840,300 @@ test.describe("narrow Grid space budgets", () => {
       await expect(target).toBeAttached();
       await expect(target).not.toHaveCSS("display", "none");
     }
+  });
+});
+
+/// The Photo View regions the Product Spec bounds, plus the closed-panel
+/// space contract: a supporting surface that is not open holds no layout row
+/// and exposes no control of its own.
+const photoGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const view = document.querySelector("[data-photo-view]") as HTMLElement;
+    const box = (selector: string) => {
+      const element = view.querySelector<HTMLElement>(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { height: rect.height, width: rect.width, top: rect.top };
+    };
+    return {
+      clientHeight: view.clientHeight,
+      scrollHeight: view.scrollHeight,
+      clientWidth: view.clientWidth,
+      scrollWidth: view.scrollWidth,
+      preview: box("[data-preview]"),
+      navigation: box("[data-photo-navigation]"),
+      reviewBar: box(".review-bar"),
+      dock: box("[data-quick-action-dock]"),
+      overflow:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    };
+  });
+
+test.describe("Photo View space budgets", () => {
+  for (const viewport of [
+    { width: 375, height: 667, preview: 480 },
+    { width: 390, height: 844, preview: 650 },
+    { width: 667, height: 375, preview: 240 },
+    { width: 844, height: 390, preview: 240 },
+  ]) {
+    test(`Photo View reserves its Preview region at ${viewport.width} by ${viewport.height}`, async ({
+      page,
+    }) => {
+      const { base, root } = await fixture();
+      await writePhotos(root, 3);
+      const running = await server(base, root);
+      await page.setViewportSize(viewport);
+      await startReview(page, running.url, "All Photos");
+      await waitForLoadedReviewImage(page);
+
+      const layout = await photoGeometry(page);
+      expect(layout.overflow).toBe(0);
+      expect(layout.scrollWidth).toBe(layout.clientWidth);
+      // The Preview is the dominant region and never scrolls the view.
+      expect(layout.scrollHeight).toBe(layout.clientHeight);
+      expect(layout.preview!.height).toBeGreaterThanOrEqual(viewport.preview);
+      // Fit preserves the complete composition: the image is never cropped to
+      // manufacture the measurement, so it fits inside the region on at least
+      // one axis and keeps its aspect ratio.
+      const fitted = await previewImageGeometry(page);
+      const stage = await previewStageGeometry(page);
+      expect(fitted.width).toBeLessThanOrEqual(stage.width + 0.5);
+      expect(fitted.height).toBeLessThanOrEqual(stage.height + 0.5);
+      expect(fitted.width / fitted.naturalWidth).toBeCloseTo(
+        fitted.height / fitted.naturalHeight,
+        2,
+      );
+
+      // Every compact target keeps its 44 by 44 box, and no control is
+      // duplicated for another layout.
+      const targets = await interactiveGeometry(
+        page.locator("[data-photo-view]"),
+      );
+      expect(
+        targets.filter(({ width, height }) => width < 44 || height < 44),
+      ).toEqual([]);
+      expect(targets.filter(({ contained }) => !contained)).toEqual([]);
+      await expect(
+        page.getByRole("button", { name: "Previous", exact: true }),
+      ).toHaveCount(1);
+      await expect(
+        page.getByRole("button", { name: "Next", exact: true }),
+      ).toHaveCount(1);
+      await expect(page.locator("[data-dock-more]")).toHaveCount(1);
+    });
+  }
+
+  test("a closed supporting surface holds no layout space and no control", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 375, height: 667 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const closed = await page.evaluate(() => {
+      const view = document.querySelector("[data-photo-view]") as HTMLElement;
+      const surfaces = ["[data-photo-tools]", "[data-rating-choices]"].flatMap(
+        (selector) =>
+          Array.from(view.querySelectorAll<HTMLElement>(`${selector} *`)),
+      );
+      return {
+        // Nothing inside a closed surface is laid out, so none of its controls
+        // takes focus or input.
+        laidOut: surfaces.filter((element) => element.offsetParent !== null)
+          .length,
+        // A closed panel adds no row: the view needs no scrolling.
+        overflow: view.scrollHeight - view.clientHeight,
+        zoomControls: view.querySelectorAll("[data-zoom-controls]").length,
+        presentedZoom:
+          view.querySelectorAll("[data-zoom-controls] *").length > 0 &&
+          Array.from(
+            view.querySelectorAll<HTMLElement>("[data-zoom-controls] *"),
+          ).some((element) => element.offsetParent !== null),
+      };
+    });
+    expect(closed.laidOut).toBe(0);
+    expect(closed.overflow).toBe(0);
+    // The complete Zoom controls live in Photo tools, so the Preview keeps the
+    // whole region and no zoom control overlays it.
+    expect(closed.presentedZoom).toBe(false);
+    await expect(page.locator("[data-zoom-controls]")).toBeHidden();
+
+    // Opening the surface moves focus into it, and the background receives no
+    // focus: a native modal makes the rest of the document inert.
+    await openPhotoTools(page);
+    await expect(page.locator("[data-photo-tools-close]")).toBeFocused();
+    const backgroundBlocked = await page.evaluate(() => {
+      const select =
+        document.querySelector<HTMLButtonElement>("[data-dock-select]")!;
+      select.focus();
+      return document.activeElement !== select;
+    });
+    expect(backgroundBlocked).toBe(true);
+    // Closing it returns the row it never held.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+    const reopened = await photoGeometry(page);
+    expect(reopened.overflow).toBe(0);
+    expect(reopened.preview!.height).toBeGreaterThanOrEqual(480);
+  });
+
+  test("Photo tools keeps focus, survives a re-render, and adds no history", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 4);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    // Tab and Shift+Tab stay inside the surface.
+    await openPhotoTools(page);
+    for (let step = 0; step < 10; step += 1) await page.keyboard.press("Tab");
+    expect(
+      await page.evaluate(() =>
+        document
+          .querySelector("[data-photo-tools]")!
+          .contains(document.activeElement),
+      ),
+    ).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    expect(
+      await page.evaluate(() =>
+        document
+          .querySelector("[data-photo-tools]")!
+          .contains(document.activeElement),
+      ),
+    ).toBe(true);
+
+    // A subview replaces the content and provides a local return, which adds
+    // no browser history entry.
+    const length = await historyLength(page);
+    await page.locator("[data-photo-tools-entry='zoom']").click();
+    await expect(page.locator("[data-zoom-controls]")).toBeVisible();
+    expect(await historyLength(page)).toBe(length);
+    await returnToPhotoTools(page);
+    expect(await historyLength(page)).toBe(length);
+
+    // Closing a surface returns focus to its invoker, and the focus survives a
+    // re-render of the Photo the tools describe.
+    await page.locator("[data-photo-tools-close]").click();
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+    await openPhotoTools(page);
+    await page.locator("[data-photo-tools-entry='nearby']").click();
+    await expect(
+      page.locator("[data-photo-tools-view='nearby']"),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+
+    // A history traversal closes the surface before it renders its
+    // destination, and no temporary panel created an entry.
+    await openPhotoTools(page);
+    const withTools = await historyLength(page);
+    await goBack(page);
+    await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-photo-view]")).toBeHidden();
+    expect(await historyLength(page)).toBeLessThanOrEqual(withTools);
+  });
+
+  test("200 percent text and reduced motion keep every Photo action reachable", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const overflow = () =>
+      page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+    expect(await overflow()).toBe(0);
+
+    // Enlarged text may reflow vertically and need not meet the pixel budgets,
+    // but every control and required fact stays reachable without page-level
+    // horizontal overflow.
+    await page.addStyleTag({ content: "html { font-size: 200%; }" });
+    expect(await overflow()).toBe(0);
+    for (const selector of [
+      "[data-back]",
+      "[data-photo-source-toggle]",
+      "[data-dock-previous]",
+      "[data-dock-next]",
+      "[data-dock-reject]",
+      "[data-dock-rating]",
+      "[data-dock-select]",
+      "[data-dock-more]",
+      "[data-position]",
+      "[data-selection]",
+      "[data-rating]",
+    ]) {
+      const target = page.locator(selector);
+      await expect(target).toBeAttached();
+      await expect(target).not.toHaveCSS("display", "none");
+    }
+    // Every supporting action is still reachable through its surface.
+    await openPhotoTools(page);
+    await expect(page.locator("[data-photo-tools-entry]")).toHaveCount(5);
+    await page.locator("[data-photo-tools-entry='zoom']").click();
+    await expect(page.locator("[data-zoom-controls]")).toBeVisible();
+  });
+
+  test("rotation preserves the Photo, its decisions, and the disclosed strip", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 4);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+    await page.getByRole("button", { name: "Select" }).click();
+    await expect(page.getByText("2 / 4")).toBeVisible();
+    await page.getByRole("button", { name: "Previous" }).click();
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    await openPhotoToolsView(page, "nearby");
+    await expect(page.locator("[data-filmstrip] .filmstrip-cell")).toHaveCount(
+      3,
+    );
+
+    // Rotating to short landscape keeps the Photo, its committed decision, and
+    // the disclosed strip, while the Preview keeps its budget.
+    await page.setViewportSize({ width: 844, height: 390 });
+    await expect(page.locator("[data-photo-view]")).toBeVisible();
+    await expect(page.getByText("1 / 4")).toBeVisible();
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    await expect(
+      page.locator("[data-photo-tools-view='nearby']"),
+    ).toBeVisible();
+    await expect(page.locator("[data-filmstrip] .filmstrip-cell")).toHaveCount(
+      3,
+    );
+    const layout = await photoGeometry(page);
+    expect(layout.overflow).toBe(0);
+    expect(layout.preview!.height).toBeGreaterThanOrEqual(240);
+
+    // Rotating back to portrait restores the same Photo and the same decision.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByText("1 / 4")).toBeVisible();
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    await expect(page.locator("[data-filmstrip] .filmstrip-cell")).toHaveCount(
+      3,
+    );
   });
 });
 
