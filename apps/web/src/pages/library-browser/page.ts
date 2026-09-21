@@ -209,6 +209,8 @@ export function mountLibraryBrowser(
         ),
       patchRating: (authority, index, photoId, rating) =>
         sourceGrid.setPhotoRating(authority, index, photoId, rating),
+      noteCommittedDecision: (authority, photoId, field, value) =>
+        sourceGrid.noteCommittedDecision(authority, photoId, field, value),
       trimFacts: (authority, anchor) => {
         if (sourceGrid.isCurrent(authority)) sourceGrid.trimFacts(anchor);
       },

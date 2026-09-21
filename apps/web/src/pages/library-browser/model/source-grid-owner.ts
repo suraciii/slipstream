@@ -208,6 +208,17 @@ export interface SourceGridOwner {
     expectedPhotoId: string,
     selectionState: PhotoSummary["selectionState"],
   ): boolean;
+  /// Records one decision the server committed for a Photo the View that
+  /// admitted its write no longer addresses. The retained window takes no
+  /// patch, because a write that settles after the browser left its Photo
+  /// must never repaint the destination the browser is on; the decision is
+  /// presented instead when that Photo's fact is resolved again.
+  noteCommittedDecision(
+    authority: SourceAuthority,
+    photoId: string,
+    field: "selectionState" | "rating",
+    value: PhotoSummary["selectionState"] | number,
+  ): void;
   /// Applies one confirmed batch outcome by stable Photo identity. A loaded
   /// fact is patched and moves the source counts by the state the Grid
   /// believed; a Photo the Grid no longer holds moves the counts by the
@@ -338,6 +349,13 @@ const freezeSource = (source: SourceGridSource): SourceGridSource =>
           publication: source.publication,
         });
 
+/// One decision the server committed for a Photo whose View was left before
+/// its write settled, so the retained window could not take the patch.
+type PhotoDecision = Readonly<{
+  selectionState?: PhotoSummary["selectionState"];
+  rating?: number;
+}>;
+
 export function createSourceGridOwner(
   fetcher: SourceGridFetch,
 ): SourceGridOwner {
@@ -371,6 +389,11 @@ export function createSourceGridOwner(
   let sourceTasks = new TaskScope();
   let gridTasks = new TaskScope();
   let facts = new Map<number, PhotoSummary>();
+  // Decisions the server committed for Photos the browser left before their
+  // writes settled. They are held until the Photo they name is resolved
+  // again, so the source never presents a fact that disagrees with the
+  // committed decision state.
+  const committedDecisions = new Map<string, PhotoDecision>();
   // Latest visible range reported through range admission. Fact eviction
   // anchors here; window requests never anchor eviction to a request-time
   // index.
@@ -491,6 +514,21 @@ export function createSourceGridOwner(
     };
   };
 
+  /// Drops the recorded decisions whose Photo no longer has a retained
+  /// fact. A decision is presented only through a fact the source still
+  /// holds, so it follows those facts: a decision whose Photo is gone is one
+  /// no reader can present, and holding it would let a later window resurrect
+  /// a state the browser already moved past. The check is by Photo identity,
+  /// never by the index a decision was recorded at, so a Photo whose fact is
+  /// still retained keeps its decision until that fact is read again.
+  const evictCommittedDecisions = () => {
+    if (committedDecisions.size === 0) return;
+    const retained = new Set<string>();
+    for (const photo of facts.values()) retained.add(photo.id);
+    for (const photoId of [...committedDecisions.keys()])
+      if (!retained.has(photoId)) committedDecisions.delete(photoId);
+  };
+
   const trimFacts = (anchor?: number) => {
     if (visibleRange) {
       // The protected span is the largest range the Grid presents at a
@@ -548,16 +586,18 @@ export function createSourceGridOwner(
           if (facts.size <= bound) break;
           if (!isAnchorFact(index)) facts.delete(index);
         }
-      return;
+    } else {
+      const fallback = anchor ?? latestSettledWindowStart;
+      if (fallback !== undefined && facts.size > MAX_RETAINED_FACTS)
+        for (const index of [...facts.keys()])
+          if (
+            Math.abs(index - fallback) > WINDOW_SIZE &&
+            facts.size > MAX_RETAINED_FACTS
+          )
+            facts.delete(index);
     }
-    const fallback = anchor ?? latestSettledWindowStart;
-    if (fallback === undefined || facts.size <= MAX_RETAINED_FACTS) return;
-    for (const index of [...facts.keys()])
-      if (
-        Math.abs(index - fallback) > WINDOW_SIZE &&
-        facts.size > MAX_RETAINED_FACTS
-      )
-        facts.delete(index);
+    // Recorded decisions follow the facts they are presented against.
+    evictCommittedDecisions();
   };
 
   const detachedOpen = (
@@ -609,6 +649,9 @@ export function createSourceGridOwner(
       facts = new Map();
       thumbnails = new Map();
       thumbnailDeliveryFailures = new Map();
+      // A new source is described by its own fresh windows, so no decision
+      // recorded for the replaced one can apply to it.
+      committedDecisions.clear();
     }
     const task = sourceTasks.beginLatest("browse-open", {
       abortTransport: true,
@@ -888,6 +931,34 @@ export function createSourceGridOwner(
     if (closed || !photoId) return undefined;
     for (const [index, photo] of facts) if (photo.id === photoId) return index;
     return undefined;
+  };
+
+  /// Presents one retained fact against the decision state the source already
+  /// committed for it. A write whose Photo View was left before it settled
+  /// patches no window — that would repaint the destination the browser moved
+  /// to — so the fact is revalidated when it is read again and the committed
+  /// decision becomes what the browser sees. The decision is consumed
+  /// exactly once, and the source counts move with it.
+  const presentPhotoFact = (
+    index: number,
+    photo: PhotoSummary,
+  ): PhotoSummary => {
+    const decision = committedDecisions.get(photo.id);
+    if (!decision) return photo;
+    const selectionState = decision.selectionState ?? photo.selectionState;
+    const rating = decision.rating ?? photo.rating;
+    committedDecisions.delete(photo.id);
+    if (selectionState === photo.selectionState && rating === photo.rating)
+      return photo;
+    if (selectionState !== photo.selectionState)
+      selectionCounts = adjustedSelectionCounts(
+        selectionCounts,
+        photo.selectionState,
+        selectionState,
+      );
+    const next = Object.freeze({ ...photo, selectionState, rating });
+    facts.set(index, next);
+    return next;
   };
 
   const detachedPosition = (
@@ -1185,7 +1256,8 @@ export function createSourceGridOwner(
         lastSource = freezeSource({ kind: "album", album });
     },
     photoAt(index) {
-      return facts.get(index);
+      const photo = facts.get(index);
+      return photo === undefined ? undefined : presentPhotoFact(index, photo);
     },
     findPhotoIndex,
     resolvePhotoPosition,
@@ -1216,6 +1288,15 @@ export function createSourceGridOwner(
           selectionState,
         );
       return true;
+    },
+    noteCommittedDecision(candidate, photoId, field, value) {
+      if (closed || !isCurrent(candidate) || !photoId) return;
+      committedDecisions.set(photoId, {
+        ...committedDecisions.get(photoId),
+        ...(field === "selectionState"
+          ? { selectionState: value as PhotoSummary["selectionState"] }
+          : { rating: value as number }),
+      });
     },
     applyBatchSelection(candidate, photoId, priorValue, selectionState) {
       if (!isCurrent(candidate)) return false;
@@ -1308,6 +1389,7 @@ export function createSourceGridOwner(
       closed = true;
       generation += 1;
       authority = makeAuthority();
+      committedDecisions.clear();
       windowSettledHandlers.clear();
       detachImages();
       sourceTasks.halt();

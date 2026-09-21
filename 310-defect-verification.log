@@ -1,0 +1,75 @@
+
+Running 3 tests using 1 worker
+
+  ✘  1 apps/web/src/browser-review.browser-test.ts:19931:3 › Issue #310 integrated qualification › a narrow header keeps the result count legible beside an active filter flag (392ms)
+  ✘  2 apps/web/src/browser-review.browser-test.ts:20377:3 › Issue #310 integrated qualification › a Rating write settles after its surface closes without claiming cancellation (553ms)
+  ✘  3 apps/web/src/browser-review.browser-test.ts:20438:3 › Issue #310 integrated qualification › a held Select write cannot repaint or advance a Grid the browser returned to (5.5s)
+
+
+  1) apps/web/src/browser-review.browser-test.ts:19931:3 › Issue #310 integrated qualification › a narrow header keeps the result count legible beside an active filter flag 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32mtrue[39m
+    Received: [31mfalse[39m
+
+      19958 |         return painted.width <= box.width + 0.5;
+      19959 |       });
+    > 19960 |       expect(legible).toBe(true);
+            |                       ^
+      19961 |     },
+      19962 |   );
+      19963 |
+        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:19960:23
+
+    Error Context: test-results/browser-review.browser-tes-54231-eside-an-active-filter-flag/error-context.md
+
+  2) apps/web/src/browser-review.browser-test.ts:20377:3 › Issue #310 integrated qualification › a Rating write settles after its surface closes without claiming cancellation 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBe[2m([22m[32mexpected[39m[2m) // Object.is equality[22m
+
+    Expected: [32mtrue[39m
+    Received: [31mfalse[39m
+
+      20418 |         return active instanceof HTMLElement && active !== document.body;
+      20419 |       });
+    > 20420 |       expect(focused).toBe(true);
+            |                       ^
+      20421 |       await expect(page.locator("[data-status]")).not.toHaveText(/cancel/i);
+      20422 |
+      20423 |       release();
+        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20420:23
+
+    Error Context: test-results/browser-review.browser-tes-b7e17-thout-claiming-cancellation/error-context.md
+
+  3) apps/web/src/browser-review.browser-test.ts:20438:3 › Issue #310 integrated qualification › a held Select write cannot repaint or advance a Grid the browser returned to 
+
+    Error: [2mexpect([22m[31mlocator[39m[2m).[22mtoHaveText[2m([22m[32mexpected[39m[2m)[22m failed
+
+    Locator: locator('[data-selection]')
+    Expected string: [32m"[7mSelect[27med"[39m
+    Received string: [31m"[7mUndecid[27med"[39m
+    Timeout: 5000ms
+
+    Call log:
+    [2m  - Expect "toHaveText" with timeout 5000ms[22m
+    [2m  - waiting for locator('[data-selection]')[22m
+    [2m    9 × locator resolved to <dd data-selection="">Undecided</dd>[22m
+    [2m      - unexpected value "Undecided"[22m
+
+
+      20496 |       await expect(page.getByText("1 / 6")).toBeVisible();
+      20497 |       expect(page.url()).toBe(photoUrl);
+    > 20498 |       await expect(page.locator("[data-selection]")).toHaveText("Selected");
+            |                                                      ^
+      20499 |       expect(await historyLength(page)).toBe(length + 1);
+      20500 |       await page.unroute("**/api/photos/*/state");
+      20501 |     },
+        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20498:54
+
+    Error Context: test-results/browser-review.browser-tes-02b6f-rid-the-browser-returned-to/error-context.md
+
+  3 failed
+    apps/web/src/browser-review.browser-test.ts:19931:3 › Issue #310 integrated qualification › a narrow header keeps the result count legible beside an active filter flag 
+    apps/web/src/browser-review.browser-test.ts:20377:3 › Issue #310 integrated qualification › a Rating write settles after its surface closes without claiming cancellation 
+    apps/web/src/browser-review.browser-test.ts:20438:3 › Issue #310 integrated qualification › a held Select write cannot repaint or advance a Grid the browser returned to 

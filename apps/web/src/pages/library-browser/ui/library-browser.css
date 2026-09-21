@@ -464,10 +464,22 @@
   white-space: nowrap;
 }
 
+/* The entry label is fixed and the active-choice flag truncates, so a long
+   order can never clip the control it qualifies. The flag carries the View
+   options entry's activation, because the entry it names cannot contain it.
+   It is a redundant pointer surface rather than the target of record: the
+   entry's own target meets the 44px floor and performs the identical action
+   as the keyboard and assistive-technology path, while a flag padded to that
+   floor cannot fit the 88px narrow header budget. */
 .options-flag {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--focus);
   font-weight: 650;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .grid-selection-count {
@@ -1864,6 +1876,14 @@
     gap: 0.3rem;
   }
 
+  /* An active-choice flag is a header fact that can outgrow the controls it
+     qualifies, so a row that carries one holds a second line for it instead of
+     widening the screen. A row without one keeps its single line, where a
+     blocking connection notice shrinks the source disclosure instead. */
+  .grid-header-row:has(.options-flag:not([hidden])) {
+    flex-wrap: wrap;
+  }
+
   /* The narrow row carries four controls, so the tools and the compact
      indicators step down a size while every target stays at least 44 pixels
      tall. */
@@ -1882,10 +1902,26 @@
     display: none;
   }
 
+  /* The compact status is a required header fact, so its slot keeps the width
+     its text paints and the source disclosure truncates instead. A blocking
+     notice is one short line ("Disconnected" paints 83px at this size) that
+     the shrinking disclosure absorbs, so every fact the row carries stays
+     visible without widening the screen. */
+  .grid-heading {
+    flex: 0 0 auto;
+  }
+
   .grid-heading p {
     flex: none;
-    max-width: 7.5rem;
+    max-width: 9rem;
     font-size: 0.66rem;
+  }
+
+  /* The source disclosure is the one element that truncates: its 2rem basis
+     gives up width to the fixed facts, and its grow factor takes the space
+     they leave. */
+  .source-toggle {
+    flex: 1 1 2rem;
   }
 
   .source-toggle {
@@ -1898,8 +1934,24 @@
     min-height: 2.75rem;
   }
 
+  /* The View options entry keeps its two controls in the row, while the flag
+     it names becomes a second header line: the flag is the one header fact
+     that can outgrow the controls, and it must not take the count's or a
+     control's width. The group steps out of its flex item so the flag becomes
+     a row item the entry can span, because an entry that carried the flag
+     itself measured 101.8px against the 88px narrow header budget. */
   .grid-tools {
-    flex: none;
+    display: contents;
+  }
+
+  .grid-tools button {
+    flex: 0 0 auto;
+  }
+
+  .options-flag {
+    order: 1;
+    flex: 0 0 100%;
+    font-size: 0.68rem;
   }
 
   .grid-summary:not(:empty) {

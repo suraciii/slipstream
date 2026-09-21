@@ -1,6 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+import {
   copyFile,
   mkdir,
   mkdtemp,
@@ -27,8 +33,10 @@ import { startBrowserServer, type BrowserServer } from "./browser-server.js";
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 const temporary: string[] = [];
 const servers: BrowserServer[] = [];
+const externals: Server[] = [];
 
 test.afterEach(async () => {
+  await Promise.all(externals.splice(0).map((external) => external.close()));
   await Promise.all(servers.splice(0).map((server) => server.close()));
   await Promise.all(
     temporary
@@ -983,6 +991,47 @@ async function restorePhotoViewTop(page: Page) {
     )
     .toBe(true);
 }
+
+/// Measures the two facts a narrow Grid header must present legibly — the
+/// compact status and the Options flag that names an active choice — as the
+/// painted width of each against the box it is laid out in, plus the header's
+/// height, the page-level overflow, and the smallest target of the open view.
+const narrowHeaderGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const measure = (selector: string) => {
+      const node = document.querySelector(selector) as HTMLElement;
+      const box = node.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const painted = range.getBoundingClientRect();
+      return {
+        text: (node.textContent ?? "").trim(),
+        boxWidth: box.width,
+        paintedWidth: painted.width,
+      };
+    };
+    const targets = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "[data-grid-view] button:not([hidden]), [data-grid-view] select:not([hidden]), [data-grid-view] [tabindex='0']",
+      ),
+    ).filter((target) => target.offsetParent !== null);
+    return {
+      status: measure("[data-grid-status]"),
+      flag: measure("[data-view-options-flag]"),
+      header: (
+        document.querySelector(".grid-header") as HTMLElement
+      ).getBoundingClientRect().height,
+      smallest: Math.min(
+        ...targets.flatMap((target) => {
+          const rect = target.getBoundingClientRect();
+          return [rect.width, rect.height];
+        }),
+      ),
+      overflow:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    };
+  });
 
 async function interactiveGeometry(container: Locator) {
   return container.evaluate((root) => {
@@ -18960,6 +19009,36 @@ const photoGeometry = (page: Page) =>
     };
   });
 
+/// Measures the Grid regions, the page-level overflow, and the smallest
+/// interactive target of the open view, at a wide layout.
+const wideGridGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const box = (selector: string) =>
+      (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+    const header = box(".grid-header");
+    const tray = box("[data-grid-batch]");
+    const viewport = box("[data-grid-viewport]");
+    const targets = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "[data-grid-view] button:not([hidden]), [data-grid-view] select:not([hidden]), [data-grid-view] [tabindex='0']",
+      ),
+    )
+      .filter((target) => target.offsetParent !== null)
+      .map((target) => target.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 || rect.height > 0);
+    return {
+      header: header.height,
+      tray: tray.height,
+      grid: viewport.height,
+      overflow:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+      smallest: Math.min(
+        ...targets.flatMap((rect) => [rect.width, rect.height]),
+      ),
+    };
+  });
+
 /// A scrim activation is one of the dismissal paths the Product Spec names for
 /// every supporting surface. The surfaces are bottom sheets that span the
 /// viewport width, so the visible dimmed area is the dialog's backdrop and a
@@ -19658,4 +19737,1244 @@ test("the empty Library, an empty Album, and no filter matches stay distinct", a
     void response;
   });
   await expect(page.locator("[data-grid-empty]")).toBeHidden();
+});
+
+/// Issue #310 integrated qualification. The navigation (#307), Grid (#308),
+/// and Photo View (#309) slices own their focused tests; this block owns the
+/// cross-slice sessions the Epic gate requires, driven against the production
+/// server exactly as a Photographer would drive them.
+test.describe("Issue #310 integrated qualification", () => {
+  /// The current Library facts of one Photo, read through fresh Browse tokens.
+  /// The bounded window walk keeps the read inside the ordinary paging
+  /// contract instead of assuming the Photo sits in the first window.
+  const photoById = async (url: string, photoId: string) => {
+    const opened = (await (
+      await post(url, "/api/browse", { source: "library" })
+    ).json()) as { token: string; total: number };
+    let start = 0;
+    for (;;) {
+      const window = await browseWindow(url, opened.token, start);
+      const found = window.photos.find((photo) => photo.id === photoId);
+      if (found) {
+        await fetch(`${url}/api/browse/${opened.token}`, {
+          method: "DELETE",
+          headers: { Origin: url },
+        });
+        return found;
+      }
+      start += window.photos.length;
+      if (window.photos.length === 0 || start >= opened.total) break;
+    }
+    await fetch(`${url}/api/browse/${opened.token}`, {
+      method: "DELETE",
+      headers: { Origin: url },
+    });
+    throw new Error(`Library has no Photo ${photoId}`);
+  };
+
+  test("a culling session survives filter, order, deep scroll, decisions, Back, and Forward", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const { base, root } = await fixture();
+    const source = await jpeg();
+    // Distinct Capture Times make the committed order exact, so the address
+    // and the presented sequence can be compared against the server's own
+    // answer for that order.
+    for (let index = 0; index < 130; index += 1) {
+      const hour = String(Math.floor(index / 60)).padStart(2, "0");
+      const minute = String(index % 60).padStart(2, "0");
+      await writeFile(
+        join(root, `${String(index).padStart(3, "0")}.jpg`),
+        withCaptureTime(source, `2026:02:01 ${hour}:${minute}:00`),
+      );
+    }
+    const running = await server(base, root);
+    const earliest = await browseOrderedIds(running.url, {
+      source: "library",
+      order: "capture-time-asc",
+    });
+    const descending = await browseOrderedIds(running.url, {
+      source: "library",
+      order: "capture-time-desc",
+    });
+    // Three Photos leave the undecided filter, so the committed filter owns a
+    // persistent result count of its own.
+    const rejected = earliest.slice(0, 3);
+    for (const photoId of rejected)
+      await post(running.url, `/api/photos/${photoId}/state`, {
+        field: "selectionState",
+        value: "rejected",
+      });
+    const undecidedDescending = descending.filter(
+      (id) => !rejected.includes(id),
+    );
+
+    const mutations: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "POST") return;
+      const path = new URL(request.url()).pathname;
+      if (
+        path === "/api/photos/state" ||
+        /^\/api\/photos\/[^/]+\/state$/.test(path) ||
+        /^\/api\/albums\/[^/]+\/(?:progress|members)$/.test(path)
+      )
+        mutations.push(path);
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 130 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+
+    // Apply the filter and the order together: one view with both choices.
+    await openViewOptions(page);
+    await page.locator("[data-filter-select]").selectOption("undecided");
+    await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+    const lengthAfterApply = await historyLength(page);
+    await applyViewOptions(page);
+    await expect(page.locator("[data-view-options-flag]")).toBeVisible();
+    const rendered = await gridPhotoIds(page);
+    expect(rendered).toEqual(undecidedDescending.slice(0, rendered.length));
+    await expect(page.locator("[data-grid-visible-results]")).toHaveText(
+      "Visible results: 127 of 130 Photos",
+    );
+    const url = new URL(page.url());
+    expect(url.searchParams.get("order")).toBe("capture-time-desc");
+    expect(url.searchParams.get("selection")).toBe("undecided");
+    // Applying replaces the current destination instead of growing the stack.
+    expect(await historyLength(page)).toBe(lengthAfterApply);
+
+    // Scroll deep into the filtered view before opening a Photo.
+    const columns = await columnsAt(page);
+    const anchorRow = 20;
+    const anchorIndex = anchorRow * columns;
+    await scrollGrid(page, anchorRow * 178);
+    await expect(
+      page.locator(`[data-photo-index="${anchorIndex}"]`),
+    ).toBeVisible();
+    await waitForGridPhotos(page);
+    const anchorPhotoId = await cellPhotoId(page, anchorIndex);
+    const scrolledTop = await gridScrollTop(page);
+    const anchorPosition = undecidedDescending.indexOf(anchorPhotoId!) + 1;
+
+    // Opening the Photo creates one new destination linked to the Grid entry.
+    const lengthBeforePhoto = await historyLength(page);
+    await page.locator(`[data-photo-index="${anchorIndex}"]`).click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText(`${anchorPosition} / 127`)).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(anchorPhotoId);
+    expect(await historyLength(page)).toBe(lengthBeforePhoto + 1);
+    const parent = await navigationState(page);
+    expect(typeof parent?.parentGridEntryId).toBe("string");
+
+    // Inspect the Photo through a supporting surface that adds no entry.
+    await openPhotoToolsView(page, "details");
+    await expect(page.locator("[data-metadata]")).toBeVisible();
+    await returnToPhotoTools(page);
+    await closePhotoTools(page);
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(anchorPhotoId);
+    expect(await historyLength(page)).toBe(lengthBeforePhoto + 1);
+
+    // Rate the Photo: a Rating saves without advancing and without history.
+    await openRatingChoices(page);
+    await page.locator('[data-rating-value="4"]').click();
+    await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+    await expect(page.locator("[data-rating]")).toHaveText("4 stars");
+    await expect(page.getByText(`${anchorPosition} / 127`)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-rating-choices]")).toBeHidden();
+    await expect(page.locator("[data-dock-rating]")).toBeFocused();
+    expect(await historyLength(page)).toBe(lengthBeforePhoto + 1);
+
+    // Select decides the Photo and advances, replacing the Photo destination.
+    // The decision message is transient for an advancing decision: the next
+    // Photo's shell owns the status surface once it opens.
+    await page.locator("[data-dock-select]").click();
+    const advancedPosition = anchorPosition + 1;
+    await expect(page.getByText(`${advancedPosition} / 127`)).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(
+      undecidedDescending[advancedPosition - 1],
+    );
+    expect(await historyLength(page)).toBe(lengthBeforePhoto + 1);
+
+    // Next steps further without growing the stack.
+    for (const step of [1, 2, 3]) {
+      const position = advancedPosition + step;
+      const length = await historyLength(page);
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await expect(page.getByText(`${position} / 127`)).toBeVisible();
+      expect(await historyLength(page)).toBe(length);
+    }
+    const lastPhotoId = new URL(page.url()).searchParams.get("photoId");
+    expect(lastPhotoId).toBe(undecidedDescending[advancedPosition + 2]);
+    const mutationsBeforeTraversal = mutations.length;
+
+    // Browser Back returns to the prior Grid context with its anchor, offset,
+    // and focus, and the address stays the Grid destination.
+    await goBack(page);
+    // The committed filter and order survive the traversal: the Grid is the
+    // view the address names, and the destination keeps its choices.
+    await expect(page.locator("[data-grid-view]")).toBeVisible();
+    await expect(page.locator("[data-photo-view]")).toBeHidden();
+    await waitForGridFrame(page);
+    await expect
+      .poll(async () => Math.abs((await gridScrollTop(page)) - scrolledTop))
+      .toBeLessThanOrEqual(178);
+    await expect.poll(() => focusedCellPhotoId(page)).toBe(anchorPhotoId!);
+    const gridUrl = new URL(page.url());
+    expect(gridUrl.searchParams.get("photoId")).toBeNull();
+    expect(gridUrl.searchParams.get("order")).toBe("capture-time-desc");
+    expect(gridUrl.searchParams.get("selection")).toBe("undecided");
+    const gridState = await navigationState(page);
+    expect(gridState?.entryId).toBe(parent?.parentGridEntryId);
+    expect(
+      (gridState?.anchor as { photoId?: string } | undefined)?.photoId,
+    ).toBe(anchorPhotoId);
+
+    // The decisions made in Photo View are durable and were not replayed by
+    // the traversal: no further mutation request lands, and the Grid presents
+    // the committed facts on the cell the Photographer left.
+    await page.waitForTimeout(600);
+    expect(mutations.length).toBe(mutationsBeforeTraversal);
+    const anchorCell = page.locator(`[data-photo-index="${anchorIndex}"]`);
+    await expect(anchorCell.locator(".cell-state.selected")).toHaveText("✓");
+    await expect(anchorCell).toContainText("4★");
+    expect(await photoById(running.url, anchorPhotoId!)).toMatchObject({
+      selectionState: "selected",
+      rating: 4,
+    });
+
+    // Forward reopens the last Photo the entry represents, with its decisions
+    // still truthful.
+    await goForward(page);
+    await expect(page.getByText(`${advancedPosition + 3} / 127`)).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(lastPhotoId);
+    for (let step = 0; step < 4; step += 1)
+      await page.getByRole("button", { name: "Previous", exact: true }).click();
+    await expect(page.getByText(`${anchorPosition} / 127`)).toBeVisible();
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    await expect(page.locator("[data-rating]")).toHaveText("4 stars");
+    await page.waitForTimeout(300);
+    expect(mutations.length).toBe(mutationsBeforeTraversal);
+  });
+
+  /// The narrow Grid header carries two required facts: the visible result
+  /// count and the indication of an active nondefault filter or order. The
+  /// active choice widens the Options entry's flag, so neither fact may take
+  /// the other's width: the count used to ellipsize behind the widened flag
+  /// ("Ready · …") and collapse entirely once a filter and an order were
+  /// applied together.
+  test("a narrow header keeps the result count and the active choice legible", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    for (const viewport of [
+      { width: 375, height: 667 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(running.url);
+      await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+      await waitForGridFrame(page);
+      // The default header is one compact row inside the narrow budget.
+      const plain = await narrowHeaderGeometry(page);
+      expect(plain.header).toBeLessThanOrEqual(88);
+      expect(plain.overflow).toBe(0);
+
+      for (const choices of [
+        { filter: "undecided", order: "source-default" },
+        { filter: "undecided", order: "capture-time-desc" },
+        { filter: "selected", order: "capture-time-desc" },
+      ]) {
+        await openViewOptions(page);
+        await expect
+          .poll(() => page.locator("[data-sort-select] option").count())
+          .toBeGreaterThan(1);
+        await page.locator("[data-filter-select]").selectOption(choices.filter);
+        await page.locator("[data-sort-select]").selectOption(choices.order);
+        await applyViewOptions(page);
+        await expect
+          .poll(() => page.locator("[data-grid-status]").textContent())
+          .toMatch(/Photos$/);
+
+        // Both facts keep the width they paint: the count is never ellipsized
+        // and the active-choice flag reads in full, so the header indicates the
+        // committed choices and the visible result count legibly.
+        const header = await narrowHeaderGeometry(page);
+        expect(header.status.text).toBe(
+          choices.filter === "selected" ? "0 Photos" : "Ready · 6 Photos",
+        );
+        expect(header.status.paintedWidth).toBeLessThanOrEqual(
+          header.status.boxWidth + 0.5,
+        );
+        expect(header.flag.paintedWidth).toBeLessThanOrEqual(
+          header.flag.boxWidth + 0.5,
+        );
+        // The facts stay inside the narrow header budget, the controls they
+        // qualify keep their own width, and nothing widens the screen.
+        expect(header.header).toBeLessThanOrEqual(88);
+        expect(header.overflow).toBe(0);
+        expect(header.smallest).toBeGreaterThanOrEqual(44);
+        // The committed choices are still named with the entry that opens them.
+        await expect(
+          page.locator("[data-grid-view-options]"),
+        ).toHaveAccessibleName(/^View options, /);
+      }
+
+      // The flag line names the choices instead of leaving a dead line, so it
+      // opens the View options entry it names. That entry stays the keyboard
+      // and assistive-technology path with its full accessible name, and
+      // closing the surface returns focus to it because it is the invoker.
+      await page.locator("[data-view-options-flag]").click();
+      await expect(page.locator("[data-view-options]")).toBeVisible();
+      await closeViewOptions(page);
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            () =>
+              document.activeElement instanceof HTMLElement &&
+              document.activeElement.hasAttribute("data-grid-view-options"),
+          ),
+        )
+        .toBe(true);
+
+      // A blocking connection notice is the one exceptional state the layout
+      // may present, and it joins an active choice: the count, the flag, and
+      // the controls they qualify keep the width they paint and stay inside
+      // the narrow budget rather than widening the screen.
+      await page.route("**/api/status", async (route) => {
+        await route.abort();
+      });
+      await expect(page.locator("[data-grid-connection]")).toHaveText(
+        "Disconnected",
+      );
+      const offline = await narrowHeaderGeometry(page);
+      expect(offline.status.paintedWidth).toBeLessThanOrEqual(
+        offline.status.boxWidth + 0.5,
+      );
+      expect(offline.flag.paintedWidth).toBeLessThanOrEqual(
+        offline.flag.boxWidth + 0.5,
+      );
+      expect(offline.header).toBeLessThanOrEqual(88);
+      expect(offline.overflow).toBe(0);
+      expect(offline.smallest).toBeGreaterThanOrEqual(44);
+      await page.unroute("**/api/status");
+      await expect(page.locator("[data-grid-connection]")).toBeHidden();
+    }
+  });
+
+  test("a mixed-outcome batch reviews, retries, joins an Album, and removes only what it added", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 4);
+    const running = await server(base, root);
+    const ids = await browseIds(running.url);
+    // The session runs inside an open Album, so the batch's silence about the
+    // Album resume point is observable.
+    const { albumId } = await createAlbum(running.url, "Batch Session");
+    const target = await post(running.url, "/api/albums", { name: "Trip" });
+    const tripId = (
+      (await target.json()) as { albums: Array<{ id: string; name: string }> }
+    ).albums.find((album) => album.name === "Trip")!.id;
+
+    const progressWrites: string[] = [];
+    const memberBodies: Array<Record<string, unknown>> = [];
+    const batchBodies: Array<{
+      photos: Array<{ photoId: string; expectedCurrent: string }>;
+      selectionState: string;
+    }> = [];
+    page.on("request", (request) => {
+      if (request.method() !== "POST") return;
+      const path = new URL(request.url()).pathname;
+      if (path === `/api/albums/${albumId}/progress`) progressWrites.push(path);
+      if (path === `/api/albums/${tripId}/members`)
+        memberBodies.push(request.postDataJSON() as Record<string, unknown>);
+      if (path === "/api/photos/state")
+        batchBodies.push(
+          request.postDataJSON() as {
+            photos: Array<{ photoId: string; expectedCurrent: string }>;
+            selectionState: string;
+          },
+        );
+    });
+
+    await openGrid(page, running.url, "Batch Session");
+    await page.setViewportSize({ width: 1000, height: 700 });
+
+    // One batch reports all three outcomes at once. The two real writes behind
+    // the seam are admitted for real, so the facts Review refreshes are the
+    // true ones; the third Photo is reported missing while the fixture still
+    // holds it, which is the client-side presentation the contract owns.
+    await page.route("**/api/photos/state", async (route) => {
+      const body = route.request().postDataJSON() as {
+        photos: Array<{ photoId: string; expectedCurrent: string }>;
+        selectionState: string;
+      };
+      batchBodies.push(body);
+      // Only the three-Photo batch takes the mixed seam; every later request
+      // (the retry after Review) is answered by the real server.
+      if (body.photos.length !== 3) return route.continue();
+      await post(running.url, `/api/photos/${body.photos[0]!.photoId}/state`, {
+        field: "selectionState",
+        value: body.selectionState,
+      });
+      await post(running.url, `/api/photos/${body.photos[1]!.photoId}/state`, {
+        field: "selectionState",
+        value: "rejected",
+      });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          applied: [
+            {
+              photoId: body.photos[0]!.photoId,
+              priorValue: body.photos[0]!.expectedCurrent,
+            },
+          ],
+          changedElsewhere: [
+            { photoId: body.photos[1]!.photoId, currentValue: "rejected" },
+          ],
+          missing: [{ photoId: body.photos[2]!.photoId }],
+        }),
+      });
+    });
+
+    const cell = (index: number) =>
+      page.locator(`[data-photo-index="${index}"]`);
+    await page.locator("[data-grid-select-mode]").click();
+    for (const index of [0, 1, 2]) await cell(index).click();
+    await expect(page.locator("[data-batch-count]")).toHaveText(
+      "3 / 100 Photos",
+    );
+
+    await page.locator("[data-batch-select]").click();
+    const mixed =
+      "1 Photo selected. 1 Photo changed elsewhere. Review them before retrying. 1 Photo no longer in this Library. Album resume point unchanged.";
+    await expect(page.locator("[data-grid-status]")).toHaveText(mixed);
+    await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+      mixed,
+    );
+    await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+      "data-tone",
+      "warning",
+    );
+    await expect(page.locator("[data-batch-retained]")).toBeVisible();
+    // Persistent result counts: the confirmed decision, the observed change,
+    // and the untouched Photos each move once.
+    await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+      "Source progress: 1 selected · 0 rejected · 3 undecided",
+    );
+    await expect(page.locator("[data-grid-visible-results]")).toHaveText(
+      "Visible results: 4 of 4 Photos",
+    );
+    // The missing Photo stays in the selection and the tray count.
+    await expect(page.locator("[data-batch-count]")).toHaveText(
+      "3 / 100 Photos",
+    );
+
+    // Review refreshes the changed Photo, focuses its cell, and opens no
+    // modal; the retry then carries only the Photos the Library holds.
+    await page.getByRole("button", { name: "Review 1 Photo" }).click();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "1 Photo reviewed. Retry the batch when ready.",
+    );
+    await expect(cell(1).locator(".cell-state.rejected")).toHaveText("×");
+    await expect(cell(1)).toBeFocused();
+    await expect(page.locator("[data-view-options]")).toBeHidden();
+    await expect(page.locator("[data-source-dialog]")).toHaveJSProperty(
+      "open",
+      false,
+    );
+    await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+      "Source progress: 1 selected · 1 rejected · 2 undecided",
+    );
+    await expect(
+      page.getByRole("button", { name: "Review 1 Photo" }),
+    ).toBeHidden();
+
+    await page.locator("[data-batch-select]").click();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "2 Photos selected. Album resume point unchanged.",
+    );
+    expect(batchBodies.at(-1)).toEqual({
+      photos: [
+        { photoId: ids[0], expectedCurrent: "selected" },
+        { photoId: ids[1], expectedCurrent: "rejected" },
+      ],
+      selectionState: "selected",
+    });
+    // The retry decided the two Photos the Library holds; the missing Photo
+    // creates no decision count of its own and stays undecided.
+    await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+      "Source progress: 2 selected · 0 rejected · 2 undecided",
+    );
+
+    // Add to Album carries the same Photos minus the missing one, and the
+    // scoped compensation removes only what it added.
+    await page.locator("[data-batch-album-select]").selectOption(tripId);
+    await page.locator("[data-batch-album-add]").click();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "2 Photos added to “Trip”. Album resume point unchanged.",
+    );
+    await expect(
+      page.getByRole("button", { name: "Remove added Photos" }),
+    ).toBeVisible();
+    expect(memberBodies).toEqual([{ photoIds: [ids[0], ids[1]] }]);
+    expect(
+      (await state(running.url, tripId)).members.map(
+        (member) => member.photoId,
+      ),
+    ).toEqual([ids[0], ids[1]]);
+
+    await page.getByRole("button", { name: "Remove added Photos" }).click();
+    await expect(page.locator("[data-grid-status]")).toHaveText(
+      "2 Photos removed from “Trip”.",
+    );
+    await expect(
+      page.getByRole("button", { name: "Remove added Photos" }),
+    ).toBeHidden();
+    expect((await state(running.url, tripId)).members).toEqual([]);
+
+    // A batch carries no Album position write even in an open Album, and the
+    // selection stays until the clear exit.
+    expect(progressWrites).toEqual([]);
+    await expect(page.locator("[data-batch-count]")).toHaveText(
+      "3 / 100 Photos",
+    );
+    // The clear exit empties the multi-selection and leaves Select mode.
+    await page.locator("[data-grid-multi-done]").click();
+    await expect(page.locator("[data-grid-batch]")).toBeHidden();
+    await expect(page.locator("[data-grid-select-mode]")).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await expect(page.locator("[data-batch-retained]")).toBeHidden();
+    await page.unroute("**/api/photos/state");
+  });
+
+  test("a deep-linked Photo whose Original is unavailable keeps its Photo, facts, and decisions", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writeFile(join(root, "a.jpg"), await jpeg());
+    await writeFile(join(root, "b.jpg"), await jpeg());
+    const running = await server(base, root);
+    const opened = (await (
+      await post(running.url, "/api/browse", { source: "library" })
+    ).json()) as { token: string };
+    const window = await browseWindow(running.url, opened.token, 0);
+    const target = window.photos.find(
+      (photo) => photo.originalFilename === "a.jpg",
+    );
+    if (!target) throw new Error("Library has no a.jpg");
+    await fetch(`${running.url}/api/browse/${opened.token}`, {
+      method: "DELETE",
+      headers: { Origin: running.url },
+    });
+    // The Original File leaves the disk; the Photo and its remembered facts
+    // stay in the Library after the scan publishes the change.
+    await rm(join(root, "a.jpg"));
+    await post(running.url, "/api/scan", {});
+    await expect
+      .poll(async () => {
+        const response = await fetch(`${running.url}/api/status`);
+        return ((await response.json()) as { state: string }).state;
+      })
+      .toBe("idle");
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${running.url}/?photoId=${target.id}`);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText(/Original File is unavailable/)).toBeVisible();
+    // No silent replacement: the address keeps the requested Photo and the
+    // Photo View presents that identity.
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(target.id);
+    await expect(page.getByText("1 / 2")).toBeVisible();
+    await expect(page.locator("[data-photo-filename]")).toHaveText("a.jpg");
+
+    // Remembered facts stay available through the details surface.
+    await openPhotoToolsView(page, "details");
+    await expect(page.locator("[data-metadata]")).toBeVisible();
+    await returnToPhotoTools(page);
+    await closePhotoTools(page);
+
+    // A decision is still admitted against the remembered Photo, advances,
+    // and persists.
+    await page.getByRole("button", { name: "Select" }).click();
+    await expect(page.getByText("2 / 2")).toBeVisible();
+    expect(await photoById(running.url, target.id)).toMatchObject({
+      available: false,
+      selectionState: "selected",
+    });
+  });
+
+  test("an external page and the browser's own return leave exactly one mounted browser", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="1"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("2 / 3")).toBeVisible();
+
+    // A real external page is a different origin. A second loopback origin
+    // exercises the same browser mechanics — leaving the document and the
+    // browser's own return — without making the gate depend on the internet.
+    const external = createServer(
+      (_request: IncomingMessage, response: ServerResponse) => {
+        response.writeHead(200, { "Content-Type": "text/html" });
+        response.end(
+          "<!doctype html><title>External</title><h1>External Page</h1>",
+        );
+      },
+    );
+    externals.push(external);
+    await new Promise<void>((resolve) =>
+      external.listen(0, "127.0.0.1", resolve),
+    );
+    const address = external.address();
+    if (typeof address !== "object" || address === null)
+      throw new Error("the external page did not bind");
+    const externalUrl = `http://127.0.0.1:${address.port}/`;
+
+    // Leave to the external origin, then take the browser's own return.
+    await page.goto(externalUrl);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+      "External Page",
+    );
+    await page.goBack();
+    // The destination the address names is revalidated, not left inert.
+    await expect(page.getByText("2 / 3")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBeTruthy();
+
+    // Mount and disposal survive the round trip: exactly one browser, one
+    // Grid, one Photo View, and one connection state.
+    const mounted = await page.evaluate(() => ({
+      browsers: document.querySelectorAll("[data-browser]").length,
+      grids: document.querySelectorAll("[data-grid-view]").length,
+      reviews: document.querySelectorAll("[data-photo-view]").length,
+      states: document.querySelectorAll("[data-connection]").length,
+    }));
+    expect(mounted).toEqual({
+      browsers: 1,
+      grids: 1,
+      reviews: 1,
+      states: 1,
+    });
+    // One subscription drives the scroller: a single scroll event renders once.
+    const frames = await page.evaluate(async () => {
+      const viewport = document.querySelector<HTMLElement>(
+        "[data-grid-viewport]",
+      );
+      if (!viewport) return -1;
+      let count = 0;
+      const onScroll = () => {
+        count += 1;
+      };
+      viewport.addEventListener("scroll", onScroll);
+      viewport.scrollTop = 120;
+      viewport.dispatchEvent(new Event("scroll"));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+      viewport.removeEventListener("scroll", onScroll);
+      return count;
+    });
+    expect(frames).toBe(1);
+    // The returned browser is operable: navigation continues from the
+    // destination the address names.
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByText("3 / 3")).toBeVisible();
+  });
+
+  test("a traversal into an entry with unusable restoration state renders its destination as a direct entry", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="2"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("3 / 6")).toBeVisible();
+    const photoId = new URL(page.url()).searchParams.get("photoId");
+    expect(photoId).toBeTruthy();
+
+    // With its restoration state intact, the in-app source return traverses
+    // the known parent Grid entry: the browser's own Forward reopens the
+    // Photo the traversal left.
+    await goBack(page);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await goForward(page);
+    await expect(page.getByText("3 / 6")).toBeVisible();
+    await closePhotoTools(page);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await goForward(page);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("3 / 6")).toBeVisible();
+    await goBack(page);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+
+    for (const shape of [
+      {
+        name: "unknown version",
+        state: { slipstream: { version: 99, entryId: "stale" } },
+      },
+      { name: "malformed", state: { slipstream: "not-an-entry" } },
+      { name: "absent", state: null },
+    ]) {
+      // Reopen the Photo so its entry is current, then make its restoration
+      // metadata unusable the way an older page or a foreign writer would.
+      await page.locator('[data-photo-index="2"]').click();
+      await expect(page.getByText("3 / 6")).toBeVisible();
+      await page.evaluate((value) => {
+        history.replaceState(value, "");
+      }, shape.state);
+      await goBack(page);
+      await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+      await goForward(page);
+      // The traversal renders the destination its URL names; the Photo is
+      // never silently replaced by the Grid.
+      await expect(page.locator("[data-review]")).toBeVisible();
+      await expect(page.getByText("3 / 6")).toBeVisible();
+      expect(new URL(page.url()).searchParams.get("photoId")).toBe(photoId);
+      // Treated as a direct entry, the in-app source return replaces the
+      // entry instead of traversing it: no parent relationship is inferred
+      // from history length or a referrer, and the browser's own Forward has
+      // no Photo to reopen.
+      await closePhotoTools(page);
+      await page.getByRole("button", { name: "Back to Grid" }).click();
+      await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+      expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+      await goForward(page);
+      await expect(page.locator("[data-review]")).toBeHidden();
+      expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+    }
+  });
+
+  /// Closing a supporting surface returns focus to its invoker, or to the
+  /// nearest valid control when that invoker cannot take focus. A Rating entry
+  /// is disabled while its admitted write settles, so closing the surface in
+  /// that window must still leave focus on a valid control instead of dropping
+  /// it to the document body.
+  test("a Rating write settles after its surface closes without claiming cancellation", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    // Hold the Rating write after the server has committed it, so the surface
+    // is closed while the write is still settling.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = false;
+    await page.route("**/api/photos/*/state", async (route) => {
+      if (!holding) return route.continue();
+      const response = await route.fetch();
+      await gate;
+      try {
+        await route.fulfill({ response });
+      } catch {
+        /* Teardown may cancel the held transfer. */
+      }
+    });
+    holding = true;
+    await openRatingChoices(page);
+    await page.locator('[data-rating-value="4"]').click();
+    await expect(page.locator("[data-status]")).toHaveText("Saving Rating…");
+
+    // Closing the surface mid-settlement claims neither cancellation nor
+    // success; the admitted write keeps its owner.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-rating-choices]")).toBeHidden();
+    // The close returns focus to its invoker, or the nearest valid control if
+    // that invoker cannot take focus: keyboard focus stays on a real control
+    // of the view the Photographer is working in.
+    const focused = await page.evaluate(() => {
+      const active = document.activeElement;
+      return active instanceof HTMLElement && active !== document.body
+        ? active.tagName
+        : "";
+    });
+    expect(focused).not.toBe("");
+    expect(
+      await page.evaluate(() =>
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement.closest("[data-photo-view]") !== null
+          : false,
+      ),
+    ).toBe(true);
+    await expect(page.locator("[data-status]")).not.toHaveText(/cancel/i);
+
+    release();
+    holding = false;
+    await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+    await expect(page.locator("[data-rating]")).toHaveText("4 stars");
+    expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 4 });
+    await page.unroute("**/api/photos/*/state");
+  });
+
+  /// A write that settles after the browser left its Photo may not repaint or
+  /// advance the destination the browser is on, and the committed decision must
+  /// still be truthful when the browser returns to that Photo. The retained
+  /// window is revalidated against the committed decision state, so the
+  /// Forward return presents "Selected" instead of the pre-decision fact.
+  test("a held Select write cannot repaint or advance a Grid the browser returned to", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("1 / 6")).toBeVisible();
+    const photoUrl = page.url();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = false;
+    await page.route("**/api/photos/*/state", async (route) => {
+      if (!holding) return route.continue();
+      const response = await route.fetch();
+      await gate;
+      try {
+        await route.fulfill({ response });
+      } catch {
+        /* The traversal may cancel the held transfer. */
+      }
+    });
+    holding = true;
+    await page.locator("[data-dock-select]").click();
+    await expect(page.locator("[data-status]")).toHaveText(
+      "Saving Selection State…",
+    );
+    // The advance waits for the save, so the Photo and its address are still
+    // the ones the browser is looking at when it goes Back.
+    await expect(page.getByText("1 / 6")).toBeVisible();
+
+    await goBack(page);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    release();
+    holding = false;
+    // The admitted write settles, but the detached outcome cannot repaint or
+    // advance the destination the browser left.
+    await expect(page.locator("[data-review]")).toBeHidden();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+    // The Library holds the write that committed, read once the held write the
+    // traversal released is observable: the response can land after the
+    // navigation that cancelled it, so the state is read rather than assumed.
+    await expect
+      .poll(async () => (await libraryPhoto(running.url, 0)).selectionState)
+      .toBe("selected");
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+
+    // Forward reopens the Photo the entry represents, with the committed
+    // decision truthful and no duplicate entry created: the traversal
+    // re-enters the entry the browser left, so the stack does not grow.
+    const length = await historyLength(page);
+    await goForward(page);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("1 / 6")).toBeVisible();
+    expect(page.url()).toBe(photoUrl);
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    expect(await historyLength(page)).toBe(length);
+    // The Grid presents the same committed decision after this return, and
+    // the source counts it moved agree with the Photo.
+    await goBack(page);
+    await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+    await expect(page.locator('[data-photo-index="0"] .cell-state')).toHaveText(
+      "✓",
+    );
+    expect(await libraryPhoto(running.url, 0)).toMatchObject({
+      selectionState: "selected",
+    });
+    await page.unroute("**/api/photos/*/state");
+  });
+
+  test("a 40,000-Photo deep link and repeated navigation stay bounded", async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    const base = await mkdtemp(join(tmpdir(), "slipstream-browser-40k-310-"));
+    temporary.push(base);
+    const root = join(base, "originals");
+    await mkdir(root);
+    await mkdir(join(base, "state"));
+    await mkdir(join(base, "cache"));
+    await chmod(join(base, "state"), 0o700);
+    const generator = `
+      const { Database } = await import("bun:sqlite");
+      const database = new Database(process.env.STATE_DB);
+      database.exec(await Bun.file(process.env.SCHEMA_PATH).text());
+      const insertOriginal = database.prepare(
+        "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available) VALUES(?1,?2,'jpeg',1,1.0,1)",
+      );
+      const insertPhoto = database.prepare(
+        "INSERT INTO photos(id,jpeg_original_id,ambiguous,available,preview_state,sort_path) VALUES(?1,?2,0,1,'inspection-pending',?3)",
+      );
+      const insertBinding = database.prepare(
+        "INSERT INTO library_metadata VALUES('canonical_root',?1)",
+      );
+      database.exec("BEGIN");
+      for (let index = 0; index < 40000; index += 1) {
+        const path = String(index).padStart(6, "0") + ".jpg";
+        const originalId = index.toString(16).padStart(8, "0").repeat(8);
+        const photoId = (0x100000 + index).toString(16).padStart(8, "0").repeat(8);
+        insertOriginal.run(originalId, path);
+        insertPhoto.run(photoId, originalId, path);
+      }
+      database.exec("COMMIT");
+      insertBinding.run(process.env.ROOT);
+      database.close();
+    `;
+    execFileSync("bun", ["-e", generator], {
+      env: {
+        ...process.env,
+        STATE_DB: join(base, "state", "library.sqlite"),
+        ROOT: root,
+        SCHEMA_PATH: join(process.cwd(), "compatibility/sqlite/schema-v4.sql"),
+      },
+      stdio: "inherit",
+    });
+    const running = await server(base, root);
+    const lastPhotoId = (0x100000 + 39999)
+      .toString(16)
+      .padStart(8, "0")
+      .repeat(8);
+    const windowReads: string[] = [];
+    const snapshotOpens: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (request.method() === "POST" && url.pathname === "/api/browse")
+        snapshotOpens.push(url.pathname);
+      if (
+        request.method() === "GET" &&
+        /^\/api\/browse\/[^/]+$/.test(url.pathname)
+      )
+        windowReads.push(url.search);
+    });
+
+    // A deep link with no prior history resolves the late Photo by identity.
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${running.url}/?photoId=${lastPhotoId}`);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("40000 / 40000")).toBeVisible();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBe(lastPhotoId);
+
+    // The in-app source return opens the source Grid without leaving the site.
+    await closePhotoTools(page);
+    await page.getByRole("button", { name: "Back to Grid" }).click();
+    await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    expect(await page.locator(".photo-cell").count()).toBeLessThan(200);
+
+    // Repeated navigation between the Grid and the late Photo keeps the
+    // rendered window, the admitted facts, and the Snapshot count bounded.
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      // The restored anchor keeps the late Photo's row mounted inside the
+      // bounded window, so the repeated visit stays clickable.
+      await expect(page.locator('[data-photo-index="39999"]')).toBeAttached();
+      await page.locator('[data-photo-index="39999"]').click();
+      await expect(page.getByText("40000 / 40000")).toBeVisible();
+      expect(new URL(page.url()).searchParams.get("photoId")).toBe(lastPhotoId);
+      // The browser's own return restores the Grid into the same bounded
+      // window rather than remounting the source.
+      await goBack(page);
+      await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+      await waitForGridFrame(page);
+      expect(await page.locator(".photo-cell").count()).toBeLessThan(200);
+      expect(await page.locator("[data-grid-view]").count()).toBe(1);
+      // Forward re-addresses the same late Photo by identity.
+      await goForward(page);
+      await expect(page.getByText("40000 / 40000")).toBeVisible();
+      expect(new URL(page.url()).searchParams.get("photoId")).toBe(lastPhotoId);
+      await goBack(page);
+      await expect(page.getByText("Ready · 40,000 Photos")).toBeVisible();
+      await waitForGridFrame(page);
+    }
+    // Each traversal admits a bounded number of windows and Snapshots: the
+    // repeated navigation introduces no unbounded transfer or cache.
+    expect(windowReads.length).toBeLessThanOrEqual(24);
+    expect(snapshotOpens.length).toBeLessThanOrEqual(8);
+
+    // Leaving the source applies the ordinary release rules: no historical
+    // Snapshot is retained merely because an older entry names it.
+    const token = await page.evaluate(async () => {
+      const opened = (await (
+        await fetch("/api/browse", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source: "library" }),
+        })
+      ).json()) as { token?: string };
+      return typeof opened.token === "string" ? opened.token : undefined;
+    });
+    expect(token).toBeTruthy();
+  });
+});
+
+test.describe("Issue #310 touch-tablet and desktop qualification", () => {
+  for (const hasTouch of [true, false]) {
+    const viewport = hasTouch
+      ? { width: 1024, height: 768 }
+      : { width: 1280, height: 800 };
+    const label = hasTouch ? "touch-tablet" : "desktop";
+    test.describe(label, () => {
+      test.use({ hasTouch });
+
+      test(`${viewport.width} by ${viewport.height} keeps targets, layout, and destinations inside their contracts`, async ({
+        page,
+      }) => {
+        test.setTimeout(120_000);
+        const { base, root } = await fixture();
+        await writePhotos(root, 24);
+        const running = await server(base, root);
+        await page.setViewportSize(viewport);
+        await page.goto(running.url);
+        await expect(page.getByText("Ready · 24 Photos")).toBeVisible();
+        await waitForGridFrame(page);
+
+        // A wide Grid keeps resizable source navigation beside the Photos:
+        // the narrow disclosure is not this layout's presentation.
+        await expect(page.locator("[data-source-toggle]")).toBeHidden();
+        await expect(page.locator("#source-panel")).toBeVisible();
+        await expect(page.locator("[data-source-resizer]")).toBeAttached();
+
+        // The 44-pixel target rule is scoped to narrow and short layouts by the
+        // Product Spec; a wide layout keeps its own 2.25rem floor, so no
+        // target drops below the design minimum and none overflows.
+        const normal = await wideGridGeometry(page);
+        expect(normal.overflow).toBe(0);
+        expect(normal.smallest).toBeGreaterThanOrEqual(36);
+
+        // Select mode replaces the normal controls and keeps every target.
+        await page.locator("[data-grid-select-mode]").click();
+        await expect(page.locator("[data-grid-batch]")).toBeVisible();
+        const selected = await wideGridGeometry(page);
+        expect(selected.overflow).toBe(0);
+        expect(selected.smallest).toBeGreaterThanOrEqual(36);
+        await expect(page.locator("[data-grid-view-options]")).toBeHidden();
+        await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
+        await page.locator("[data-grid-multi-done]").click();
+        await expect(page.locator("[data-grid-batch]")).toBeHidden();
+
+        // Photo View at the same viewport.
+        await page.locator('[data-photo-index="0"]').click();
+        await expect(page.locator("[data-review]")).toBeVisible();
+        await waitForLoadedReviewImage(page);
+        const layout = await photoGeometry(page);
+        expect(layout.overflow).toBe(0);
+        expect(layout.scrollWidth).toBe(layout.clientWidth);
+        // As with the Grid, the 44-pixel rule is scoped to narrow and short
+        // layouts; the wide Photo View keeps its own 2.5rem floor.
+        const targets = await interactiveGeometry(
+          page.locator("[data-photo-view]"),
+        );
+        expect(
+          targets.filter(({ width, height }) => width < 40 || height < 40),
+        ).toEqual([]);
+        expect(targets.filter(({ contained }) => !contained)).toEqual([]);
+        await expect(
+          page.getByRole("button", { name: "Previous", exact: true }),
+        ).toHaveCount(1);
+        await expect(
+          page.getByRole("button", { name: "Next", exact: true }),
+        ).toHaveCount(1);
+        // Wide Photo View may show its bounded neighbor strip.
+        await expect(page.locator("[data-filmstrip]")).toBeVisible();
+
+        // Rotation recomputes the layout while the destination and the
+        // contracts hold.
+        await page.setViewportSize({
+          width: viewport.height,
+          height: viewport.width,
+        });
+        await expect(page.locator("[data-review]")).toBeVisible();
+        await expect(page.getByText("1 / 24")).toBeVisible();
+        const rotated = await photoGeometry(page);
+        expect(rotated.overflow).toBe(0);
+        expect(rotated.scrollWidth).toBe(rotated.clientWidth);
+        const rotatedTargets = await interactiveGeometry(
+          page.locator("[data-photo-view]"),
+        );
+        expect(
+          rotatedTargets.filter(
+            ({ width, height }) => width < 40 || height < 40,
+          ),
+        ).toEqual([]);
+      });
+    });
+  }
+});
+
+test.describe("Issue #310 rotated narrow qualification", () => {
+  /// The Product Spec scopes the 44-pixel target rule and the 240-pixel
+  /// Preview reservation to the rotated narrow layouts at 667 by 375 and
+  /// 844 by 390, alongside the upright 375 by 667 and 390 by 844 sizes.
+  for (const viewport of [
+    { width: 667, height: 375 },
+    { width: 844, height: 390 },
+  ]) {
+    test(`the rotated ${viewport.width} by ${viewport.height} layout keeps targets, overflow, and its Preview reservation`, async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      const { base, root } = await fixture();
+      await writePhotos(root, 12);
+      const running = await server(base, root);
+      await page.setViewportSize(viewport);
+      await page.goto(running.url);
+      await expect(page.getByText("Ready · 12 Photos")).toBeVisible();
+      await waitForGridFrame(page);
+
+      // A short layout is still a narrow and short layout: the 44-pixel
+      // target rule applies and no page-level overflow appears.
+      const normal = await wideGridGeometry(page);
+      expect(normal.overflow).toBe(0);
+      expect(normal.smallest).toBeGreaterThanOrEqual(44);
+
+      // Select mode replaces the normal controls and keeps every target.
+      await page.locator("[data-grid-select-mode]").click();
+      await expect(page.locator("[data-grid-batch]")).toBeVisible();
+      const selected = await wideGridGeometry(page);
+      expect(selected.overflow).toBe(0);
+      expect(selected.smallest).toBeGreaterThanOrEqual(44);
+      await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
+      await page.locator("[data-grid-multi-done]").click();
+      await expect(page.locator("[data-grid-batch]")).toBeHidden();
+
+      // Photo View reserves at least 240 pixels for the Preview at these
+      // sizes, holds no page overflow, and keeps every target reachable.
+      await page.locator('[data-photo-index="0"]').click();
+      await expect(page.locator("[data-review]")).toBeVisible();
+      await waitForLoadedReviewImage(page);
+      const layout = await photoGeometry(page);
+      expect(layout.overflow).toBe(0);
+      expect(layout.scrollWidth).toBe(layout.clientWidth);
+      expect(layout.preview?.height).toBeGreaterThanOrEqual(240);
+      const targets = await interactiveGeometry(
+        page.locator("[data-photo-view]"),
+      );
+      expect(
+        targets.filter(({ width, height }) => width < 44 || height < 44),
+      ).toEqual([]);
+      expect(targets.filter(({ contained }) => !contained)).toEqual([]);
+      await expect(
+        page.getByRole("button", { name: "Next", exact: true }),
+      ).toHaveCount(1);
+    });
+  }
+});
+
+test.describe("Issue #310 keyboard and modal qualification", () => {
+  test("Photo tools owns the keyboard and no background shortcut acts behind it", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    for (const name of ["a.jpg", "b.jpg", "c.jpg"])
+      await writeFile(join(root, name), await jpeg());
+    const running = await server(base, root);
+    const { albumId } = await createAlbum(running.url, "Tools Keyboard");
+    await startReview(page, running.url, "Tools Keyboard", albumId);
+    await waitForLoadedReviewImage(page);
+
+    // A committed Rating gives the sweep something it must not disturb.
+    await openRatingChoices(page);
+    await page.locator('[data-rating-value="3"]').click();
+    await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-rating-choices]")).toBeHidden();
+
+    let mutationRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        new URL(request.url()).pathname.endsWith("/state")
+      )
+        mutationRequests += 1;
+    });
+    const before = await state(running.url, albumId);
+
+    await openPhotoTools(page);
+    await expect(page.locator("[data-photo-tools-close]")).toBeFocused();
+    for (const key of [
+      "ArrowLeft",
+      "ArrowRight",
+      "p",
+      "x",
+      "u",
+      "d",
+      "f",
+      "+",
+      "-",
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "Control+z",
+    ])
+      await page.keyboard.press(key);
+    // No background decision, Rating, navigation, zoom, or Undo acted.
+    expect(mutationRequests).toBe(0);
+    expect(await state(running.url, albumId)).toEqual(before);
+    await expect(page.getByText("1 / 3")).toBeVisible();
+    await expect(page.locator("[data-rating]")).toHaveText("3 stars");
+    await expect(page.locator("[data-photo-tools]")).toBeVisible();
+    // Focus never lands behind the surface.
+    expect(
+      await page.evaluate(() =>
+        document
+          .querySelector("[data-photo-tools]")!
+          .contains(document.activeElement),
+      ),
+    ).toBe(true);
+
+    // The native close request dismisses the surface, restores its invoker,
+    // and the shortcuts work again afterwards.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+    await page.keyboard.press("x");
+    await expect(page.getByText("2 / 3")).toBeVisible();
+  });
 });
