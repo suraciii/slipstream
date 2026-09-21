@@ -2792,20 +2792,25 @@ export function createLibraryBrowserView(
     filmstrip.closest<HTMLElement>("dialog") ?? undefined;
   const restoreHeldStripFocus = () => {
     if (heldStripIndex === null || !filmstripInteractive) return;
+    const surface = stripSurface();
+    // Only a focus this view parked is one it may return: any other owner
+    // keeps the keyboard, so the held entry stays held. A native modal makes
+    // the Photo View inert, so the surface that holds the strip — and anything
+    // focused inside it — is a parked owner too.
     const parked =
       document.activeElement === document.body ||
       document.activeElement === photoView ||
-      document.activeElement === stripSurface();
-    // Only a focus this view parked is one it may return: any other owner
-    // keeps the keyboard, so the held entry stays held rather than being
-    // consumed by a restore that cannot happen.
+      (surface !== undefined && surface.contains(document.activeElement));
     if (!parked) return;
-    const index = heldStripIndex;
-    heldStripIndex = null;
+    // The held index survives until a presented, enabled entry actually takes
+    // the focus. A rebuild that replaces the entry lands after this update, so
+    // consuming the index here would leave nothing for that rebuild's retry.
     const entry = filmstrip.querySelector<HTMLButtonElement>(
-      `[data-filmstrip-index="${index}"]`,
+      `[data-filmstrip-index="${heldStripIndex}"]`,
     );
-    if (entry && !entry.disabled) entry.focus();
+    if (!entry || entry.disabled || entry.offsetParent === null) return;
+    heldStripIndex = null;
+    entry.focus();
   };
   const applyFilmstripInteractivity = () => {
     for (const rendered of renderedFilmstripCells.values())
