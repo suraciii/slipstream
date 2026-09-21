@@ -465,7 +465,8 @@
 }
 
 /* The entry label is fixed and the active-choice flag truncates, so a long
-   order can never clip the control it qualifies. */
+   order can never clip the control it qualifies. The flag carries the View
+   options entry's activation, because the entry it names cannot contain it. */
 .options-flag {
   flex: 0 1 auto;
   min-width: 0;
@@ -474,6 +475,7 @@
   color: var(--focus);
   font-weight: 650;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .grid-selection-count {
@@ -1897,8 +1899,10 @@
   }
 
   /* The compact status is a required header fact, so its slot keeps the width
-     its text paints and the source disclosure truncates instead. Only an
-     exceptional notice is capped, so it can never widen the screen. */
+     its text paints and the source disclosure truncates instead. A blocking
+     notice is one short line ("Disconnected" paints 83px at this size) that
+     the shrinking disclosure absorbs, so every fact the row carries stays
+     visible without widening the screen. */
   .grid-heading {
     flex: 0 0 auto;
   }
@@ -1909,8 +1913,9 @@
     font-size: 0.66rem;
   }
 
-  /* The source disclosure reserves little, grows into the space the fixed
-     facts leave, and is the one element that truncates. */
+  /* The source disclosure is the one element that truncates: its 2rem basis
+     gives up width to the fixed facts, and its grow factor takes the space
+     they leave. */
   .source-toggle {
     flex: 1 1 2rem;
   }
@@ -1926,9 +1931,11 @@
   }
 
   /* The View options entry keeps its two controls in the row, while the flag
-     it carries becomes a second header line: the flag is the one header fact
+     it names becomes a second header line: the flag is the one header fact
      that can outgrow the controls, and it must not take the count's or a
-     control's width. */
+     control's width. The group steps out of its flex item so the flag becomes
+     a row item the entry can span, because an entry that carried the flag
+     itself measured 101.8px against the 88px narrow header budget. */
   .grid-tools {
     display: contents;
   }

@@ -4129,6 +4129,16 @@ export function createLibraryBrowserView(
     if (!alive || viewOptionsOpen.hidden) return;
     openViewOptions();
   });
+  // A narrow header cannot fit the active-choice flag inside the View options
+  // entry, so the flag names the choices beside it and carries the entry's
+  // activation: the entry stays the keyboard and assistive-technology path
+  // with its full accessible name, and closing the surface returns focus to it
+  // because it is the invoker recorded here.
+  viewOptionsFlag.addEventListener("click", () => {
+    if (!alive || viewOptionsFlag.hidden) return;
+    viewOptionsOpen.focus();
+    openViewOptions();
+  });
   viewOptionsClose.addEventListener("click", () => closeViewOptions());
   viewOptionsCancel.addEventListener("click", () => closeViewOptions());
   viewOptionsApply.addEventListener("click", () => applyViewOptions());

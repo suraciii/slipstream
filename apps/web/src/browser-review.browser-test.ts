@@ -20026,6 +20026,23 @@ test.describe("Issue #310 integrated qualification", () => {
         ).toHaveAccessibleName(/^View options, /);
       }
 
+      // The flag line names the choices instead of leaving a dead line, so it
+      // opens the View options entry it names. That entry stays the keyboard
+      // and assistive-technology path with its full accessible name, and
+      // closing the surface returns focus to it because it is the invoker.
+      await page.locator("[data-view-options-flag]").click();
+      await expect(page.locator("[data-view-options]")).toBeVisible();
+      await closeViewOptions(page);
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            () =>
+              document.activeElement instanceof HTMLElement &&
+              document.activeElement.hasAttribute("data-grid-view-options"),
+          ),
+        )
+        .toBe(true);
+
       // A blocking connection notice is the one exceptional state the layout
       // may present, and it joins an active choice: the count, the flag, and
       // the controls they qualify keep the width they paint and stay inside
