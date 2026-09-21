@@ -37,6 +37,12 @@ type ModalSurfaceRegistration = Readonly<{
   /// True while this surface presents as a modal rather than an inline
   /// layout, so focus can only return into it by opening it again.
   modal: () => boolean;
+  /// Runs when this controller actually shows the surface. A surface the
+  /// controller reopens on an invoker's behalf — a subview entry inside a
+  /// surface that had to close for another one — needs the same disclosure
+  /// bookkeeping an explicit activation performs, or the entry that opened it
+  /// reports a closed state while its surface is open.
+  onOpen?: () => void;
 }>;
 
 export interface ModalSurfaces {
@@ -120,7 +126,10 @@ export function createModalSurfaces(): ModalSurfaces {
     const dialog = registration.dialog;
     activeKind = kind;
     activeInvoker = invoker;
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      dialog.showModal();
+      registration.onOpen?.();
+    }
   };
 
   const listen = (kind: ModalSurfaceKind): void => {

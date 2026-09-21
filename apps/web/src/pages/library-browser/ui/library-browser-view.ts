@@ -696,7 +696,7 @@ export function createLibraryBrowserView(
               </div>
             </div>
           </dialog>
-          <dialog class="rating-dialog" data-rating-choices aria-labelledby="rating-choices-title">
+          <dialog class="rating-dialog" id="rating-choices" data-rating-choices aria-labelledby="rating-choices-title">
             <div class="rating-sheet">
               <header class="rating-header"><h2 id="rating-choices-title">Rating</h2><button type="button" class="quiet" data-rating-choices-close>Close</button></header>
               <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
@@ -1144,6 +1144,20 @@ export function createLibraryBrowserView(
   /// True while the Sources surface presents as a modal rather than the wide
   /// resizable sidebar: a narrow Grid, or any Photo View.
   const sourcesAreModal = () => compactSources.matches || !photoView.hidden;
+  /// The disclosure state of the two Photo View entries mirrors the surface
+  /// itself, so a native close request, an explicit Close, a destination
+  /// change, and a surface the controller reopens on an invoker's behalf all
+  /// leave both entries in the same state.
+  const syncSecondarySurface = () => {
+    dockMore.setAttribute(
+      "aria-expanded",
+      String(surfaces.isActive("photo-tools")),
+    );
+    dockRating.setAttribute(
+      "aria-expanded",
+      String(surfaces.isActive("rating")),
+    );
+  };
   surfaces.register("sources", {
     dialog: sourceDialog,
     modal: sourcesAreModal,
@@ -1155,10 +1169,12 @@ export function createLibraryBrowserView(
   surfaces.register("rating", {
     dialog: ratingDialog,
     modal: () => true,
+    onOpen: syncSecondarySurface,
   });
   surfaces.register("photo-tools", {
     dialog: photoToolsDialog,
     modal: () => true,
+    onOpen: syncSecondarySurface,
   });
   surfaces.register("album-form", {
     dialog: albumFormDialog,
@@ -1446,15 +1462,6 @@ export function createLibraryBrowserView(
     }
     send({ kind: "filmstrip-resize" });
   };
-  const syncSecondarySurface = () => {
-    // The disclosure state mirrors the surface itself, so a native close
-    // request, an explicit Close, and a destination change all leave the two
-    // entries in the same state.
-    const toolsOpen = surfaces.isActive("photo-tools");
-    const ratingOpen = surfaces.isActive("rating");
-    dockMore.setAttribute("aria-expanded", String(toolsOpen));
-    dockRating.setAttribute("aria-expanded", String(ratingOpen));
-  };
   /// Opens Photo tools on its list, or moves it to one subview. A pending
   /// gesture never competes with the surface that takes over the pointer and
   /// the keyboard.
@@ -1528,17 +1535,20 @@ export function createLibraryBrowserView(
   /// sidebar, so only a narrow Grid or a Photo View opens it as a modal.
   const openSources = () => {
     if (!alive || !sourcesAreModal()) return;
+    // The invoker is read before any surface closes. Closing the surface that
+    // holds the activating control moves focus out of it, and the invoker is
+    // what closing this surface returns focus to — reopening the surface that
+    // holds it when that surface had to close for this one.
+    const invoker =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
     // A pending gesture must never compete with the surface that takes over
     // the pointer and the keyboard.
     resetGestures();
     closePhotoTools(false);
     closeRatingChoices(false);
-    surfaces.open(
-      "sources",
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : undefined,
-    );
+    surfaces.open("sources", invoker);
     syncSourceLayout();
     syncSourcesExpanded();
     sourceClose.focus();
@@ -1637,15 +1647,16 @@ export function createLibraryBrowserView(
     draftFilter = committedFilter;
     sortSelect.value = draftOrder;
     filterSelect.value = draftFilter;
+    // Read the invoker before closing the surface that holds it, exactly as
+    // opening Sources does.
+    const invoker =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : undefined;
     resetGestures();
     closePhotoTools(false);
     closeRatingChoices(false);
-    surfaces.open(
-      "view-options",
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : undefined,
-    );
+    surfaces.open("view-options", invoker);
     viewOptionsClose.focus();
   };
   const closeViewOptions = (restoreFocus = true) => {
@@ -2773,14 +2784,24 @@ export function createLibraryBrowserView(
   /// held entry is remembered by index because a settled decision rebuilds
   /// the strip and replaces the old button element.
   let heldStripIndex: number | null = null;
+  /// The native surface that currently holds the strip, when a compact layout
+  /// discloses it inside Photo tools. A modal makes the rest of the document
+  /// inert, so a focus move that would park on the Photo View lands on the
+  /// surface itself instead.
+  const stripSurface = (): HTMLElement | undefined =>
+    filmstrip.closest<HTMLElement>("dialog") ?? undefined;
   const restoreHeldStripFocus = () => {
     if (heldStripIndex === null || !filmstripInteractive) return;
     const parked =
       document.activeElement === document.body ||
-      document.activeElement === photoView;
+      document.activeElement === photoView ||
+      document.activeElement === stripSurface();
+    // Only a focus this view parked is one it may return: any other owner
+    // keeps the keyboard, so the held entry stays held rather than being
+    // consumed by a restore that cannot happen.
+    if (!parked) return;
     const index = heldStripIndex;
     heldStripIndex = null;
-    if (!parked) return;
     const entry = filmstrip.querySelector<HTMLButtonElement>(
       `[data-filmstrip-index="${index}"]`,
     );
@@ -4332,7 +4353,13 @@ export function createLibraryBrowserView(
       applyFilmstripInteractivity();
       if (holdsStripFocus) {
         heldStripIndex = Number(heldElement.dataset.filmstripIndex);
-        photoView.focus();
+        // A native modal makes the rest of the document inert, so the Photo
+        // View cannot take a parked focus while the strip is disclosed inside
+        // Photo tools: the surface that holds the strip does, and the restore
+        // below recognizes it as the parked owner.
+        const surface = stripSurface();
+        if (surface) surface.focus();
+        else photoView.focus();
       } else if (!wasStripInteractive && model.filmstripEnabled) {
         restoreHeldStripFocus();
       }

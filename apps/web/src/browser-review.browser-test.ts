@@ -18901,6 +18901,237 @@ const photoGeometry = (page: Page) =>
     };
   });
 
+/// A scrim activation is one of the dismissal paths the Product Spec names for
+/// every supporting surface. The surfaces are bottom sheets that span the
+/// viewport width, so the visible dimmed area is the dialog's backdrop and a
+/// real pointer click there must dismiss the surface, return focus to its
+/// invoker, and change nothing else.
+const scrimDismissal =
+  (open: (page: Page) => Promise<void>, surface: string, invoker: string) =>
+  async ({ page }: { page: Page }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const dialog = page.locator(surface);
+    await open(page);
+    await expect(dialog).toBeVisible();
+    // The sheet sits at the bottom of the viewport, so the area above it is
+    // the visible backdrop a Photographer activates.
+    const geometry = await dialog.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, height: box.height };
+    });
+    expect(geometry.top).toBeGreaterThan(40);
+
+    const stateBefore = await page.evaluate(() => ({
+      position:
+        document.querySelector("[data-position]")?.textContent?.trim() ?? "",
+      selection:
+        document.querySelector("[data-selection]")?.textContent?.trim() ?? "",
+      rating:
+        document.querySelector("[data-rating]")?.textContent?.trim() ?? "",
+    }));
+
+    // One real pointer click on the dimmed backdrop dismisses the surface.
+    await page.mouse.click(195, 12);
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(invoker)).toBeFocused();
+
+    // Nothing else moved: the Photo, its decision, and its Rating are the ones
+    // the surface was opened over, and no history entry was added.
+    await expect(page.locator("[data-position]")).toHaveText(
+      stateBefore.position,
+    );
+    await expect(page.locator("[data-selection]")).toHaveText(
+      stateBefore.selection,
+    );
+    await expect(page.locator("[data-rating]")).toHaveText(stateBefore.rating);
+    expect(await historyLength(page)).toBe(await historyLength(page));
+    // The background is interactive again.
+    await expect(page.locator("[data-dock-select]")).toBeEnabled();
+  };
+
+test.describe("supporting surface scrim dismissal", () => {
+  test(
+    "a backdrop activation dismisses Photo tools and restores its invoker",
+    scrimDismissal(
+      (page) => openPhotoTools(page),
+      "[data-photo-tools]",
+      "[data-dock-more]",
+    ),
+  );
+
+  test(
+    "a backdrop activation dismisses the Rating choices and restores its invoker",
+    scrimDismissal(
+      (page) => openRatingChoices(page),
+      "[data-rating-choices]",
+      "[data-dock-rating]",
+    ),
+  );
+
+  test("a backdrop activation dismisses Sources and restores its invoker", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    const dialog = page.locator("[data-source-dialog]");
+    await page.locator("[data-photo-source-toggle]").click();
+    await expect(dialog).toBeVisible();
+    const geometry = await dialog.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, height: box.height };
+    });
+    expect(geometry.top).toBeGreaterThan(40);
+
+    await page.mouse.click(195, 12);
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("[data-photo-source-toggle]")).toBeFocused();
+    // The Grid behind it was never replaced by the disclosure.
+    await expect(page.locator("[data-photo-view]")).toBeVisible();
+  });
+
+  test("a backdrop activation dismisses View options and restores its invoker", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openGrid(page, running.url, "All Photos");
+
+    const dialog = page.locator("[data-view-options]");
+    await openViewOptions(page);
+    await expect(dialog).toBeVisible();
+    const geometry = await dialog.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, height: box.height };
+    });
+    expect(geometry.top).toBeGreaterThan(40);
+
+    await page.mouse.click(195, 12);
+    await expect(dialog).toBeHidden();
+    await expect(page.locator("[data-grid-view-options]")).toBeFocused();
+    // Closing without Apply discards the draft, so the committed choices and
+    // the Grid they describe are untouched.
+    await expect(page.locator("[data-view-options-flag]")).toBeHidden();
+    await expect(page.getByText(/^Ready · 3 Photos$/)).toBeVisible();
+  });
+});
+
+test.describe("Photo View disclosure bookkeeping", () => {
+  test("a surface the controller reopens reports its expanded state", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    // Photo tools opens from the More entry, which reports the open state.
+    await openPhotoTools(page);
+    await expect(page.locator("[data-dock-more]")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    // Sources is its own surface: opening it from the tools list closes Photo
+    // tools and remembers the entry that opened it as the invoker.
+    await page.locator("[data-photo-tools-entry='sources']").click();
+    await expect(page.locator("[data-source-dialog]")).toBeVisible();
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+
+    // Closing Sources returns focus to the entry inside Photo tools, so the
+    // controller reopens that surface. Its entry must report the open state
+    // again rather than staying stale.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-source-dialog]")).toBeHidden();
+    await expect(page.locator("[data-photo-tools]")).toBeVisible();
+    await expect(page.locator("[data-dock-more]")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await expect(
+      page.locator("[data-photo-tools-entry='sources']"),
+    ).toBeFocused();
+
+    // The reopened surface is a real modal: the background stays inert and
+    // closing it still returns focus to the More entry.
+    const backgroundBlocked = await page.evaluate(() => {
+      const select =
+        document.querySelector<HTMLButtonElement>("[data-dock-select]")!;
+      select.focus();
+      return document.activeElement !== select;
+    });
+    expect(backgroundBlocked).toBe(true);
+    await page.locator("[data-photo-tools-close]").click();
+    await expect(page.locator("[data-photo-tools]")).toBeHidden();
+    await expect(page.locator("[data-dock-more]")).toBeFocused();
+    await expect(page.locator("[data-dock-more]")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  test("a disclosed strip entry keeps its focus across a busy strip", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 5);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
+
+    // The strip is disclosed inside Photo tools on a compact layout, so the
+    // entry that holds focus lives inside the native modal.
+    await openPhotoToolsView(page, "nearby");
+    const entry = page.locator('[data-filmstrip-index="1"]');
+    await expect(entry).toBeEnabled();
+    await entry.focus();
+    await expect(entry).toBeFocused();
+
+    // Activating the entry navigates, which makes the strip non-interactive
+    // while the navigation owns the Photo. The surface that holds the strip
+    // takes the parked focus, because a modal makes the Photo View inert.
+    await entry.click();
+    await expect(page.getByText("2 / 5")).toBeVisible();
+    // The disclosure survived the navigation, and focus is inside it rather
+    // than lost to the document.
+    await expect(page.locator("[data-photo-tools]")).toBeVisible();
+    await expect(
+      page.locator("[data-photo-tools-view='nearby']"),
+    ).toBeVisible();
+    const insideSurface = await page.evaluate(() =>
+      document
+        .querySelector("[data-photo-tools]")!
+        .contains(document.activeElement),
+    );
+    expect(insideSurface).toBe(true);
+
+    // When interactivity resumes, the entry the Photographer had focused takes
+    // focus back instead of leaving it on the dialog element.
+    await expect(entry).toBeEnabled();
+    await expect(entry).toBeFocused();
+    await expect(page.locator("[data-position]")).toHaveText("2 / 5");
+  });
+});
+
 test.describe("Photo View space budgets", () => {
   for (const viewport of [
     { width: 375, height: 667, preview: 480 },
