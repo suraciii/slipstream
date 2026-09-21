@@ -9865,7 +9865,9 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
   await expect(page.getByText("3 / 3")).toBeVisible();
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
     page.keyboard.press("Control+z"),
   );
@@ -9874,7 +9876,9 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Select" }).click(),
   );
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  await closePhotoTools(page);
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
@@ -9884,12 +9888,15 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
   });
   await page.getByRole("button", { name: "Reject" }).click();
   await expectConnection(page, "Disconnected");
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
+  await closePhotoTools(page);
   await page.unroute("**/api/photos/*/state");
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
   await expectConnection(page, "Connected");
+  await openPhotoTools(page);
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
 });
 
@@ -10890,6 +10897,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
     page.getByRole("button", { name: "Undo" }).click(),
   );
   await expect(page.getByText("1 / 3")).toBeVisible();
+  await closePhotoTools(page);
 
   let releaseFailure!: () => void;
   const failureReleased = new Promise<void>((resolve) => {
