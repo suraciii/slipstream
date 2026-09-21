@@ -1455,9 +1455,14 @@ export function createLibraryBrowserView(
     // the source has none.
     if (filmstripModel && filmstripModel.cells.length > 1) {
       const interactive = filmstripInteractive;
+      rehomingRememberedStrip = true;
       renderFilmstrip(filmstripModel);
+      rehomingRememberedStrip = false;
       filmstripInteractive = interactive;
       applyFilmstripInteractivity();
+      // The rebuild read the remembered interactivity, so the held entry is
+      // restored only now, against the live fact this re-homing put back.
+      restoreHeldStripFocus();
       return;
     }
     send({ kind: "filmstrip-resize" });
@@ -2784,6 +2789,11 @@ export function createLibraryBrowserView(
   /// held entry is remembered by index because a settled decision rebuilds
   /// the strip and replaces the old button element.
   let heldStripIndex: number | null = null;
+  /// Whether the strip is being re-homed from the remembered model, whose
+  /// interactivity fact can predate the busy gate that just parked the focus.
+  /// The live fact is put back immediately after such a rebuild, so a held
+  /// entry is never restored against the stale one the rebuild read.
+  let rehomingRememberedStrip = false;
   /// The native surface that currently holds the strip, when a compact layout
   /// discloses it inside Photo tools. A modal makes the rest of the document
   /// inert, so a focus move that would park on the Photo View lands on the
@@ -2791,6 +2801,7 @@ export function createLibraryBrowserView(
   const stripSurface = (): HTMLElement | undefined =>
     filmstrip.closest<HTMLElement>("dialog") ?? undefined;
   const restoreHeldStripFocus = () => {
+    if (rehomingRememberedStrip) return;
     if (heldStripIndex === null || !filmstripInteractive) return;
     const surface = stripSurface();
     // Only a focus this view parked is one it may return: any other owner

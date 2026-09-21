@@ -13389,6 +13389,65 @@ test("the filmstrip disables its entries while a navigation is in flight", async
   await expect(entry(60)).toHaveAttribute("aria-current", "true");
 });
 
+test("a focused filmstrip entry keeps its focus across a busy strip beside the Preview", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 5);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await page.locator('[data-photo-index="2"]').click();
+  await waitForLoadedReviewImage(page);
+
+  // A wide layout presents the strip beside the Preview, in its own home and
+  // outside every native surface, so the view parks on the Photo View itself
+  // while the strip cannot be operated.
+  const strip = page.locator("[data-filmstrip]");
+  await expect(strip).toBeVisible();
+  const entry = strip.locator('[data-filmstrip-index="1"]');
+  await expect(entry).toBeEnabled();
+  await entry.focus();
+  await expect(entry).toBeFocused();
+
+  // Hold the decision's write so it stays in flight: the Photo View owns the
+  // decision while it settles, and the strip is gated on the same admission,
+  // so an activation that would be dropped is never offered.
+  let releaseDecision!: () => void;
+  const decisionGate = new Promise<void>((resolve) => {
+    releaseDecision = resolve;
+  });
+  let decisionWrites = 0;
+  await page.route("**/api/photos/*/state", async (route) => {
+    decisionWrites += 1;
+    await decisionGate;
+    try {
+      await route.continue();
+    } catch {
+      /* a superseding write may abort the held request */
+    }
+  });
+  try {
+    // The decision is a Photo View shortcut the strip never owns, so focus
+    // stays on the entry while the write settles.
+    await page.keyboard.press("p");
+    await expect.poll(() => decisionWrites).toBeGreaterThan(0);
+    await expect(entry).toBeDisabled();
+    // The Photo View holds the parked focus, because no native surface does.
+    await expect(page.locator("[data-photo-view]")).toBeFocused();
+  } finally {
+    releaseDecision();
+  }
+
+  // The decision advances to the next Photo, and the presented entry the
+  // Photographer had focused takes focus back rather than leaving the keyboard
+  // on the Photo View.
+  await expect(page.locator("[data-position]")).toHaveText("4 / 5");
+  await expect(entry).toBeEnabled();
+  await expect(entry).toBeFocused();
+});
+
 test("detached Grid image errors cannot poison the replacement cell", async ({
   page,
 }) => {
@@ -18936,6 +18995,10 @@ const scrimDismissal =
         document.querySelector("[data-rating]")?.textContent?.trim() ?? "",
     }));
 
+    // Opening a supporting surface adds no entry of its own, so the length the
+    // Photographer reached the Photo with is the one the dismissal must leave.
+    const lengthBefore = await historyLength(page);
+
     // One real pointer click on the dimmed backdrop dismisses the surface.
     await page.mouse.click(195, 12);
     await expect(dialog).toBeHidden();
@@ -18950,7 +19013,7 @@ const scrimDismissal =
       stateBefore.selection,
     );
     await expect(page.locator("[data-rating]")).toHaveText(stateBefore.rating);
-    expect(await historyLength(page)).toBe(await historyLength(page));
+    expect(await historyLength(page)).toBe(lengthBefore);
     // The background is interactive again.
     await expect(page.locator("[data-dock-select]")).toBeEnabled();
   };
