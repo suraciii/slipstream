@@ -529,6 +529,65 @@ describe("SourceGridOwner", () => {
     });
   });
 
+  test("presents a committed decision the retained window could not take", async () => {
+    const owner = createSourceGridOwner((input, init) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/browse" && init?.method === "POST")
+        return Promise.resolve(
+          opened("browse-1", 2, 0, { selected: 0, rejected: 0, undecided: 2 }),
+        );
+      if (url.pathname === "/api/browse/browse-1")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              start: 0,
+              total: 2,
+              photos: [photo("photo-0"), photo("photo-1")],
+            }),
+            { status: 200 },
+          ),
+        );
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    const authority = await openLibrary(owner, "browse-1");
+    await owner.loadWindow(0, { kind: "source", authority });
+    expect(owner.photoAt(0)!.selectionState).toBe("undecided");
+
+    // A write that settles after the browser left its Photo patches no
+    // retained window, so the decision is recorded instead of applied.
+    owner.noteCommittedDecision(
+      authority,
+      "photo-0",
+      "selectionState",
+      "selected",
+    );
+    owner.noteCommittedDecision(authority, "photo-1", "rating", 4);
+    expect(owner.photoAt(0)!.selectionState).toBe("selected");
+    expect(owner.photoAt(1)!.rating).toBe(4);
+    expect(owner.selectionCounts).toEqual({
+      selected: 1,
+      rejected: 0,
+      undecided: 1,
+    });
+    // The decision is consumed exactly once, and a later read of the same fact
+    // is the fact that was committed.
+    expect(owner.photoAt(0)!.selectionState).toBe("selected");
+    expect(owner.selectionCounts).toEqual({
+      selected: 1,
+      rejected: 0,
+      undecided: 1,
+    });
+
+    // A stale source records nothing, and a replacement source holds no
+    // decision recorded for the one it replaced.
+    const stale = owner.authority;
+    await owner.open({ kind: "library" });
+    owner.noteCommittedDecision(stale, "photo-0", "selectionState", "rejected");
+    owner.noteCommittedDecision(stale, "photo-0", "rating", 5);
+    owner.dispose();
+    owner.noteCommittedDecision(owner.authority, "photo-0", "rating", 5);
+  });
+
   test("keeps the attempted source and retry state after an open failure", async () => {
     const owner = createSourceGridOwner((input, init) => {
       const url = requestUrl(input);

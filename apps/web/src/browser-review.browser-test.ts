@@ -20368,77 +20368,158 @@ test.describe("Issue #310 integrated qualification", () => {
     }
   });
 
-  /// DEFECT D2 (low, truthfulness): a decision whose write settles after the
-  /// browser left the Photo is not reflected when the browser returns to that
-  /// Photo. The Forward traversal reuses the retained Browse window without
-  /// revalidation, so the Photo View presents the pre-decision fact.
-  /// Expected: the committed decision is truthful after the return.
-  /// Observed: "Undecided" while the Library holds "selected".
-  test.fixme(
-    "a held Select write cannot repaint or advance a Grid the browser returned to",
-    async ({ page }) => {
-      test.setTimeout(120_000);
-      const { base, root } = await fixture();
-      await writePhotos(root, 6);
-      const running = await server(base, root);
-      await page.setViewportSize({ width: 1280, height: 800 });
-      await page.goto(running.url);
-      await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
-      await waitForGridFrame(page);
-      await page.locator('[data-photo-index="0"]').click();
-      await expect(page.locator("[data-review]")).toBeVisible();
-      await expect(page.getByText("1 / 6")).toBeVisible();
-      const photoUrl = page.url();
+  /// Closing a supporting surface returns focus to its invoker, or to the
+  /// nearest valid control when that invoker cannot take focus. A Rating entry
+  /// is disabled while its admitted write settles, so closing the surface in
+  /// that window must still leave focus on a valid control instead of dropping
+  /// it to the document body.
+  test("a Rating write settles after its surface closes without claiming cancellation", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 3);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await startReview(page, running.url, "All Photos");
+    await waitForLoadedReviewImage(page);
 
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let holding = false;
-      await page.route("**/api/photos/*/state", async (route) => {
-        if (!holding) return route.continue();
-        const response = await route.fetch();
-        await gate;
-        try {
-          await route.fulfill({ response });
-        } catch {
-          /* The traversal may cancel the held transfer. */
-        }
-      });
-      holding = true;
-      await page.locator("[data-dock-select]").click();
-      await expect(page.locator("[data-status]")).toHaveText(
-        "Saving Selection State…",
-      );
-      // The advance waits for the save, so the Photo and its address are still
-      // the ones the browser is looking at when it goes Back.
-      await expect(page.getByText("1 / 6")).toBeVisible();
+    // Hold the Rating write after the server has committed it, so the surface
+    // is closed while the write is still settling.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = false;
+    await page.route("**/api/photos/*/state", async (route) => {
+      if (!holding) return route.continue();
+      const response = await route.fetch();
+      await gate;
+      try {
+        await route.fulfill({ response });
+      } catch {
+        /* Teardown may cancel the held transfer. */
+      }
+    });
+    holding = true;
+    await openRatingChoices(page);
+    await page.locator('[data-rating-value="4"]').click();
+    await expect(page.locator("[data-status]")).toHaveText("Saving Rating…");
 
-      await goBack(page);
-      await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
-      release();
-      holding = false;
-      // The admitted write settles, but the detached outcome cannot repaint or
-      // advance the destination the browser left.
-      await expect(page.locator("[data-review]")).toBeHidden();
-      expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
-      expect(await libraryPhoto(running.url, 0)).toMatchObject({
-        selectionState: "selected",
-      });
-      await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    // Closing the surface mid-settlement claims neither cancellation nor
+    // success; the admitted write keeps its owner.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-rating-choices]")).toBeHidden();
+    // The close returns focus to its invoker, or the nearest valid control if
+    // that invoker cannot take focus: keyboard focus stays on a real control
+    // of the view the Photographer is working in.
+    const focused = await page.evaluate(() => {
+      const active = document.activeElement;
+      return active instanceof HTMLElement && active !== document.body
+        ? active.tagName
+        : "";
+    });
+    expect(focused).not.toBe("");
+    expect(
+      await page.evaluate(() =>
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement.closest("[data-photo-view]") !== null
+          : false,
+      ),
+    ).toBe(true);
+    await expect(page.locator("[data-status]")).not.toHaveText(/cancel/i);
 
-      // Forward reopens the Photo the entry represents, with the committed
-      // decision truthful and no duplicate entry created.
-      const length = await historyLength(page);
-      await goForward(page);
-      await expect(page.locator("[data-review]")).toBeVisible();
-      await expect(page.getByText("1 / 6")).toBeVisible();
-      expect(page.url()).toBe(photoUrl);
-      await expect(page.locator("[data-selection]")).toHaveText("Selected");
-      expect(await historyLength(page)).toBe(length + 1);
-      await page.unroute("**/api/photos/*/state");
-    },
-  );
+    release();
+    holding = false;
+    await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
+    await expect(page.locator("[data-rating]")).toHaveText("4 stars");
+    expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 4 });
+    await page.unroute("**/api/photos/*/state");
+  });
+
+  /// A write that settles after the browser left its Photo may not repaint or
+  /// advance the destination the browser is on, and the committed decision must
+  /// still be truthful when the browser returns to that Photo. The retained
+  /// window is revalidated against the committed decision state, so the
+  /// Forward return presents "Selected" instead of the pre-decision fact.
+  test("a held Select write cannot repaint or advance a Grid the browser returned to", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(running.url);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await page.locator('[data-photo-index="0"]').click();
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("1 / 6")).toBeVisible();
+    const photoUrl = page.url();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holding = false;
+    await page.route("**/api/photos/*/state", async (route) => {
+      if (!holding) return route.continue();
+      const response = await route.fetch();
+      await gate;
+      try {
+        await route.fulfill({ response });
+      } catch {
+        /* The traversal may cancel the held transfer. */
+      }
+    });
+    holding = true;
+    await page.locator("[data-dock-select]").click();
+    await expect(page.locator("[data-status]")).toHaveText(
+      "Saving Selection State…",
+    );
+    // The advance waits for the save, so the Photo and its address are still
+    // the ones the browser is looking at when it goes Back.
+    await expect(page.getByText("1 / 6")).toBeVisible();
+
+    await goBack(page);
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+    release();
+    holding = false;
+    // The admitted write settles, but the detached outcome cannot repaint or
+    // advance the destination the browser left.
+    await expect(page.locator("[data-review]")).toBeHidden();
+    expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
+    // The Library holds the write that committed, read once the held write the
+    // browser left behind is observable: the traversal releases it, and the
+    // server applies it at its own pace.
+    await expect
+      .poll(async () => (await libraryPhoto(running.url, 0)).selectionState)
+      .toBe("selected");
+    await expect(page.getByText("Ready · 6 Photos")).toBeVisible();
+
+    // Forward reopens the Photo the entry represents, with the committed
+    // decision truthful and no duplicate entry created: the traversal
+    // re-enters the entry the browser left, so the stack does not grow.
+    const length = await historyLength(page);
+    await goForward(page);
+    await expect(page.locator("[data-review]")).toBeVisible();
+    await expect(page.getByText("1 / 6")).toBeVisible();
+    expect(page.url()).toBe(photoUrl);
+    await expect(page.locator("[data-selection]")).toHaveText("Selected");
+    expect(await historyLength(page)).toBe(length);
+    // The Grid presents the same committed decision after this return, and
+    // the source counts it moved agree with the Photo.
+    await goBack(page);
+    await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+    await expect(page.locator('[data-photo-index="0"] .cell-state')).toHaveText(
+      "✓",
+    );
+    expect(await libraryPhoto(running.url, 0)).toMatchObject({
+      selectionState: "selected",
+    });
+    await page.unroute("**/api/photos/*/state");
+  });
 
   test("a 40,000-Photo deep link and repeated navigation stay bounded", async ({
     page,

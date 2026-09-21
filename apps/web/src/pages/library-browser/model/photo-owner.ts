@@ -78,6 +78,15 @@ export interface PhotoSourcePort {
     photoId: string,
     rating: number,
   ): boolean;
+  /// Records one decision the server committed for a Photo this View no
+  /// longer addresses, so the source presents it when that Photo's fact is
+  /// resolved again.
+  noteCommittedDecision(
+    sourceAuthority: SourceAuthority,
+    photoId: string,
+    field: "selectionState" | "rating",
+    value: SelectionState | number,
+  ): void;
   trimFacts(sourceAuthority: SourceAuthority, anchor: number): void;
 }
 
@@ -496,13 +505,25 @@ export function createPhotoOwner(
       } finally {
         if (busyAuthority === record.authority) busyAuthority = undefined;
       }
-      if (!exact(record, photo.id, index))
+      if (!exact(record, photo.id, index)) {
+        // The write committed, but the Photo it addresses is no longer the
+        // one this View holds, so patching the retained window would repaint
+        // the destination the browser moved to. The committed decision is
+        // recorded instead: the source presents it when that Photo is
+        // resolved again.
+        source.noteCommittedDecision(
+          record.sourceAuthority,
+          photo.id,
+          field,
+          value,
+        );
         return Object.freeze({
           ...captured,
           kind: "detached",
           field,
           advance,
         });
+      }
       if (result.kind === "persisted" && result.undo) {
         const applied = patchState(
           record,

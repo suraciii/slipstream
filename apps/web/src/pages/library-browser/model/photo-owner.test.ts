@@ -82,6 +82,10 @@ const sourceAuthority = () => Object.freeze({}) as SourceAuthority;
 class FakeSource implements PhotoSourcePort {
   authority = sourceAuthority();
   facts = new Map<number, PhotoSummary>();
+  decisions = new Map<
+    string,
+    Readonly<{ field: "selectionState" | "rating"; value: unknown }>
+  >();
   moved: number[] = [];
   trimmed: number[] = [];
   windows: PhotoWindowAuthority[] = [];
@@ -143,6 +147,15 @@ class FakeSource implements PhotoSourcePort {
     const index = this.findPhotoIndex(photoId);
     if (index === undefined) return this.isSourceCurrent(authority);
     return this.patch(authority, index, photoId, { selectionState });
+  }
+  noteCommittedDecision(
+    authority: SourceAuthority,
+    photoId: string,
+    field: "selectionState" | "rating",
+    value: PhotoSummary["selectionState"] | number,
+  ): void {
+    if (!this.isSourceCurrent(authority)) return;
+    this.decisions.set(photoId, { field, value });
   }
   trimFacts(authority: SourceAuthority, anchor: number): void {
     if (this.isSourceCurrent(authority)) this.trimmed.push(anchor);
@@ -783,6 +796,32 @@ describe("PhotoOwner", () => {
       }),
     );
     expect((await write.settlement).kind).toBe("detached");
+  });
+
+  test("records a committed decision whose Photo the browser left", async () => {
+    const source = new FakeSource();
+    source.facts.set(0, fact("photo-0"));
+    const held = deferred<Response>();
+    const { owner } = bind(source, () => held.promise);
+    // The browser leaves the Photo while its write is still in flight, which
+    // detaches the open the admitted write addresses.
+    const write = owner.mutate("selectionState", "selected", false)!;
+    owner.dispose();
+    held.resolve(
+      Response.json({
+        applied: [{ photoId: "photo-0", priorValue: "undecided" }],
+        changedElsewhere: [],
+        missing: [],
+      }),
+    );
+    expect((await write.settlement).kind).toBe("detached");
+    // The write committed, so the decision is recorded for the source instead
+    // of patching a window the browser already left.
+    expect(source.decisions.get("photo-0")).toEqual({
+      field: "selectionState",
+      value: "selected",
+    });
+    expect(source.facts.get(0)?.selectionState).toBe("undecided");
   });
 
   test("applies one bounded batch write and records one batch Undo", async () => {
