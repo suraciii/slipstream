@@ -6971,13 +6971,11 @@ test("a held membership read is discarded when the Photo changes", async ({
       .catch(() => {});
   });
   try {
+    await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
     await openPhotoToolsView(page, "albums");
     await expect(page.getByText("Loading Albums…")).toBeVisible();
     // Navigating is a background action, so the disclosure closes for it and
     // the held read is discarded with the Photo it belonged to.
-    await closePhotoTools(page);
-    await page.getByRole("button", { name: /^Photo 1 of 2/ }).click();
-    await expect(page.getByText("Loading Albums…")).toBeVisible();
     await closePhotoTools(page);
     await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText("2 / 2")).toBeVisible();
@@ -8537,13 +8535,15 @@ test("in-flight membership and delete operations stay disabled across re-renders
     "Removed from the Album. It stays in this open view until reopened.",
     { timeout: 15000 },
   );
-  await closePhotoTools(page);
-  await page.getByRole("button", { name: "Back to Grid" }).click();
-  await expect(page.getByRole("link", { name: /^Slow 1 Photo/ })).toBeVisible();
   expect(calls).toBe(1);
   // The removed member is no longer a member within the open snapshot.
+  await openMembershipPanel(page);
   await expect(slowMembership).toBeEnabled();
   await expect(slowMembership).not.toBeChecked();
+  // The bounded Album list follows the admitted removal.
+  await closePhotoTools(page);
+  await openSources(page);
+  await expect(page.getByRole("link", { name: /^Slow 1 Photo/ })).toBeVisible();
 });
 
 test("a current saved-position failure blocks decisions until Photo Retry confirms it", async ({
