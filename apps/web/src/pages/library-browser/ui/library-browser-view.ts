@@ -131,8 +131,6 @@ export type LibraryBrowserIntent =
       order: ViewSourceOrder;
       selection: ViewSelectionFilter;
     }>
-  | Readonly<{ kind: "sort-change"; order: ViewSourceOrder }>
-  | Readonly<{ kind: "filter-change"; selection: ViewSelectionFilter }>
   | Readonly<{ kind: "source-open"; source: SourceReference }>
   /// Resolves an Album's saved position under the existing saved-position
   /// rules and opens Photo View. Its destination requires resolution, so it
@@ -638,7 +636,7 @@ export function createLibraryBrowserView(
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
         <section class="grid-view" data-grid-view aria-labelledby="grid-title">
-          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options aria-label="View options">Options<span class="options-flag" data-view-options-flag hidden></span></button><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count role="status"></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
+          <header class="grid-header"><div class="grid-header-row"><button type="button" class="quiet source-toggle" data-source-toggle aria-controls="source-panel" aria-expanded="false"><span class="source-toggle-name" data-grid-compact-title>All Photos</span><span class="source-toggle-indicator" aria-hidden="true">▾</span></button><div class="grid-heading"><h2 id="grid-title" data-grid-title>All Photos</h2><p data-grid-status role="status"></p></div><p class="grid-connection" data-grid-connection role="status" hidden></p><div class="grid-tools" data-grid-tools><button type="button" class="quiet" data-grid-view-options>Options<span class="options-flag" data-view-options-flag hidden></span></button><button type="button" class="quiet" data-grid-select-mode aria-pressed="false">Select mode</button></div><div class="grid-selection" data-grid-selection hidden><p class="grid-selection-count" data-batch-count></p><button type="button" class="quiet" data-grid-multi-done>Done</button></div></div><p class="grid-summary" data-grid-summary role="status" aria-live="polite"></p></header>
           <div class="grid-viewport" data-grid-viewport tabindex="0" aria-label="Photo Library Grid"><div class="grid-canvas" data-grid-canvas></div><div class="grid-layer" data-grid-layer></div><div class="grid-empty" data-grid-empty hidden><p data-grid-empty-message role="status"></p><button type="button" data-grid-empty-action hidden>Check Library</button></div></div>
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
@@ -881,22 +879,20 @@ export function createLibraryBrowserView(
     "[data-grid-select-mode]",
   );
   const gridTools = required<HTMLElement>(root, "[data-grid-tools]");
-  /// Presents the current source in both views. The narrow disclosure's
-  /// accessible name identifies both Sources and the current source, so a
-  /// screen reader names the destination the control opens, while the visible
-  /// label stays the truncated source name.
   /// Presents the connection state. A wide layout keeps it in the application
-  /// header; a narrow layout has no dedicated brand or connected-status row, so
-  /// the open view's own header carries it beside its primary actions. Exactly
-  /// one indicator holds the text at a time.
+  /// header. A narrow layout has no dedicated brand or connected-status row,
+  /// so the normal state shows no permanent connection text at all and the
+  /// open view's own header carries the state beside its primary actions only
+  /// while it is a failure. Exactly one indicator holds the text at a time.
   let connectionState = true;
   const presentConnection = () => {
-    const state = connectionState ? "Connected" : "Disconnected";
-    gridConnection.classList.toggle("offline", !connectionState);
-    photoConnection.classList.toggle("offline", !connectionState);
+    const failed = !connectionState;
+    const state = failed ? "Disconnected" : "Connected";
+    gridConnection.classList.toggle("offline", failed);
+    photoConnection.classList.toggle("offline", failed);
     if (!compactSources.matches) {
       connection.textContent = state;
-      connection.classList.toggle("offline", !connectionState);
+      connection.classList.toggle("offline", failed);
       gridConnection.textContent = "";
       gridConnection.hidden = true;
       photoConnection.textContent = "";
@@ -904,12 +900,18 @@ export function createLibraryBrowserView(
       return;
     }
     connection.textContent = "";
+    // A narrow normal state presents no connection text: the compact header
+    // keeps its row for the source, the count, and the two tool entries.
     const inPhoto = !photoView.hidden;
-    gridConnection.textContent = inPhoto ? "" : state;
-    gridConnection.hidden = inPhoto;
-    photoConnection.textContent = inPhoto ? state : "";
-    photoConnection.hidden = !inPhoto;
+    gridConnection.textContent = inPhoto || !failed ? "" : state;
+    gridConnection.hidden = inPhoto || !failed;
+    photoConnection.textContent = !inPhoto || !failed ? "" : state;
+    photoConnection.hidden = !inPhoto || !failed;
   };
+  /// Presents the current source in both views. The narrow disclosure's
+  /// accessible name identifies both Sources and the current source, so a
+  /// screen reader names the destination the control opens, while the visible
+  /// label stays the truncated source name.
   const presentSourceTitle = (name: string) => {
     gridTitle.textContent = name;
     photoTitle.textContent = name;
@@ -1244,6 +1246,11 @@ export function createLibraryBrowserView(
   let gridMultiEnabled = false;
   let gridMultiResult: GridBatchResultViewModel | undefined;
   let gridMultiSelected: (index: number) => boolean = () => false;
+  /// The cell an explicit focus request names. `focusGridIndex` moves focus to
+  /// a cell on purpose — Review focuses the Photos it refreshed — so the next
+  /// render focuses it even when another control holds focus. A merged
+  /// re-render without such a request only reclaims focus the Grid owns.
+  let pendingGridCellFocus: number | undefined;
   /// The Grid's Photo facts for the current render. Restoration asks this for
   /// the stable identity of the top visible Photo, so the view never keeps
   /// Photo facts of its own.
@@ -1525,7 +1532,9 @@ export function createLibraryBrowserView(
     Math.max(360, Math.min(gridViewport.clientHeight, window.innerHeight));
   /// The normal header's nondefault indication. It names the active filter
   /// and order in text, so the state never depends on color alone and is
-  /// never inferred from the loaded cells.
+  /// never inferred from the loaded cells. The flag is part of the entry's
+  /// accessible name, so a screen reader hears the committed choices with the
+  /// control that opens them.
   const presentViewOptionsFlag = () => {
     const parts: string[] = [];
     if (committedFilter !== "all")
@@ -1542,6 +1551,12 @@ export function createLibraryBrowserView(
     const text = parts.filter(Boolean).join(" · ");
     viewOptionsFlag.textContent = text ? ` · ${text}` : "";
     viewOptionsFlag.hidden = text === "";
+    // The visible label is "Options" on a narrow row, so the accessible name
+    // spells out the entry and the committed choices it will show.
+    viewOptionsOpen.setAttribute(
+      "aria-label",
+      text === "" ? "View options" : `View options, ${text}`,
+    );
   };
   /// Opens View options with the committed choices as its draft, so an
   /// unapplied change can be discarded without touching the open Grid.
@@ -2321,7 +2336,7 @@ export function createLibraryBrowserView(
     // rules and opens Photo View, so its destination is not an address: it
     // stays an explicit button beside the Album's Grid destination, reachable
     // from any source. View options carries the same action for the open
-    // Album.
+    // Album; both emit the one album-resume intent.
     if (album.hasSavedPosition) {
       const resume = document.createElement("button");
       resume.type = "button";
@@ -3042,11 +3057,22 @@ export function createLibraryBrowserView(
     for (const [position, rendered] of renderedCells)
       rendered.cell.tabIndex = position === index ? 0 : -1;
     const active = document.activeElement;
-    // Grid View owns its whole surface: the header, the Grid, and the batch
-    // tray. A control the Photographer just used in any of them keeps the
-    // Grid's keyboard position restorable.
+    // An explicit focus request names the cell it wants. Otherwise only the
+    // Grid itself owns the keyboard position: focus on the body, on nothing,
+    // or inside the Grid viewport is reclaimable, while the header tools, the
+    // selection header, and the batch tray own their own focus, so a control
+    // the Photographer is using there is never pulled back into a cell while a
+    // batch settles.
+    const requested = pendingGridCellFocus !== undefined;
+    pendingGridCellFocus = undefined;
     const owns =
-      active === null || active === document.body || gridView.contains(active);
+      requested ||
+      active === null ||
+      active === document.body ||
+      (gridViewport.contains(active) &&
+        !gridTools.contains(active) &&
+        !gridSelection.contains(active) &&
+        !gridBatch.contains(active));
     if (!owns || index === undefined) return;
     const cell = gridLayer.querySelector<HTMLButtonElement>(
       `[data-photo-index="${index}"]`,
@@ -4048,8 +4074,8 @@ export function createLibraryBrowserView(
   viewOptionsApply.addEventListener("click", () => applyViewOptions());
   albumResume.addEventListener("click", () => {
     if (!alive || albumResume.hidden) return;
-    // Resume resolves the saved position under the existing saved-position
-    // rules and opens Photo View, so its destination is not an address.
+    // The View options entry for the open Album. The Sources row carries the
+    // same action for any Album, so one album-resume intent serves both.
     const album = sourceModel?.albums.find((candidate) => candidate.active);
     if (album) send({ kind: "album-resume", albumId: album.id });
   });
@@ -4417,6 +4443,9 @@ export function createLibraryBrowserView(
       const count = columns();
       const target = Math.max(0, Math.min(Math.max(gridTotal - 1, 0), index));
       gridKeyboardIndex = target;
+      // This is a deliberate focus move, so it survives a control that holds
+      // focus now, such as the tray's Review action.
+      pendingGridCellFocus = target;
       gridViewport.scrollTop = Math.floor(target / count) * rowPitch();
       scheduleGridRender();
     },

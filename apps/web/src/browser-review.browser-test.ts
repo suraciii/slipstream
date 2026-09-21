@@ -580,6 +580,30 @@ async function settledView(page: Page) {
     .toBe(1);
 }
 
+/// The indicators that carry the connection state: the application header on a
+/// wide layout, and the open view's own header on a narrow one.
+const connectionIndicator = (page: Page, state: "Connected" | "Disconnected") =>
+  page
+    .locator(
+      "[data-connection], [data-grid-connection], [data-photo-connection]",
+    )
+    .filter({ hasText: state });
+
+/// Reads the connection state the open layout presents. A narrow layout has no
+/// dedicated brand or connected-status row, so a normal state presents no
+/// connection text at all and only a failure is shown beside the affected
+/// primary action.
+async function expectConnection(
+  page: Page,
+  state: "Connected" | "Disconnected",
+) {
+  if (state === "Connected" && (await page.locator(".app-header").isHidden())) {
+    await expect(connectionIndicator(page, "Connected")).toHaveCount(0);
+    return;
+  }
+  await expect(connectionIndicator(page, state)).toBeVisible();
+}
+
 async function openSources(page: Page) {
   await settledView(page);
   // Exactly one disclosure is visible: the Grid's on a narrow Grid, the Photo
@@ -2934,7 +2958,7 @@ test("a Grid Undo keeps the Grid owning the recovery routing", async ({
     route.fulfill({ status: 409, body: "conflict" }),
   );
   await page.keyboard.press("p");
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry connection" }),
   ).toBeVisible();
@@ -3045,6 +3069,16 @@ test("Grid batch tray stays reachable at a 390px viewport", async ({
   await mode.click();
   await expect(tray).toBeVisible();
   await expect(page.locator("[data-batch-count]")).toHaveText("0 / 100 Photos");
+  // The tray count is a visual summary only: the Grid status surface owns the
+  // one live region, so a selection change is never announced twice.
+  await expect(page.locator("[data-batch-count]")).not.toHaveAttribute(
+    "role",
+    "status",
+  );
+  await expect(page.locator("[data-grid-status]")).toHaveAttribute(
+    "role",
+    "status",
+  );
   // The tray stays visible with zero selected Photos, and its batch actions
   // are unavailable while nothing is selected.
   await expect(page.locator("[data-batch-actions]")).toBeVisible();
@@ -4187,6 +4221,68 @@ test("Grid Select mode and the batch actions are reachable from the keyboard", a
   await expect(cell(0)).not.toHaveClass(/multi-selected/);
 });
 
+test("a settling batch never pulls focus out of the batch tray", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // The Photographer works entirely from the keyboard: arrow into the Grid to
+  // mark a Photo, then Tab into the tray to decide it.
+  await page.locator("[data-grid-select-mode]").click();
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="0"]')).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-batch-count]")).toHaveText("1 / 100 Photos");
+
+  // Hold the batch write so the tray's controls disable while it settles.
+  let releaseBatch!: () => void;
+  const batchReleased = new Promise<void>((resolve) => {
+    releaseBatch = resolve;
+  });
+  await page.route("**/api/photos/state", async (route) => {
+    await batchReleased;
+    await route.continue();
+  });
+  const batchDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/photos/state",
+  );
+  const batchSelect = page.locator("[data-batch-select]");
+  await batchSelect.focus();
+  await page.keyboard.press("Enter");
+  await expect(batchSelect).toBeDisabled();
+  // The tray parks the focused control on the selection header's Done.
+  await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
+
+  // The merged renders the settling batch produces must not reclaim the Grid's
+  // keyboard position from a control the tray owns.
+  await page.waitForTimeout(250);
+  releaseBatch();
+  await batchDone;
+  await page.unroute("**/api/photos/state");
+
+  await expect(batchSelect).toBeEnabled();
+  await expect(batchSelect).toBeFocused();
+  await expect(
+    page.locator('[data-photo-index="0"] .cell-state.selected'),
+  ).toHaveText("✓");
+  // The Grid's keyboard position is untouched: returning focus to the Grid
+  // takes it back, and the arrow keys still address the marked Photo's row.
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.focus();
+  await expect(viewport).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="1"]')).toBeFocused();
+});
+
 test("a focused batch control keeps a reachable focus while its batch settles", async ({
   page,
 }) => {
@@ -4425,7 +4521,7 @@ test("a failed Grid decision reports on the Grid status line and keeps Photo Vie
   );
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(focusedCell.locator(".cell-state")).toHaveCount(0);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   // A transport failure reports its uncertainty on the same line.
   await page.unroute("**/api/photos/*/state");
@@ -4944,7 +5040,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     await expect(page.locator("[data-photo-view]")).toBeVisible();
     await expect(page.locator("[data-stage] img")).toHaveCount(0);
     await expect(page.locator("[data-rating-wheel]")).toBeHidden();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(
       page.getByRole("button", { name: "Retry", exact: true }),
     ).toBeHidden();
@@ -4953,7 +5049,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     // transport failure. The Preview response, not a timer, settles readiness.
     releasePreview();
     await waitForLoadedReviewImage(page);
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await page.unroute("**/api/photos/*/preview");
 
     let failedCurrentPreview = false;
@@ -4976,7 +5072,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     });
     await page.locator("[data-dock-next]").click();
     await expect(page.locator("[data-position]")).toHaveText("2 / 2");
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     await expect(
       page.getByRole("button", { name: "Retry", exact: true }),
     ).toBeEnabled();
@@ -4984,7 +5080,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
 
     await page.unroute("**/api/photos/*/preview");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await waitForLoadedReviewImage(page);
     await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   } finally {
@@ -5475,7 +5571,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
 
   await page.route("**/api/photos/*/state", (route) => route.abort());
   await page.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
   await page.locator("[data-zoom-slider]").fill("800");
@@ -5514,7 +5610,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
@@ -5556,7 +5652,7 @@ test("an answered non-conflict Undo failure remains retryable", async ({
     "selected",
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByText("Undo could not be saved. Try Undo again."),
   ).toBeVisible();
@@ -5627,13 +5723,13 @@ test("an idle browser reports a lost connection from the status probe", async ({
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 
   // The Photographer takes no action here. Only the reachability probe runs,
   // and the server stops answering it.
   await page.route("**/api/status", (route) => route.abort());
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Reject" })).toBeDisabled();
   await expect(
@@ -5648,7 +5744,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
 
   // A usable status answer confirms the connection again.
   await page.unroute("**/api/status");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 
   // An answered status error is a server-side condition, not a lost
@@ -5657,7 +5753,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
     route.fulfill({ status: 503, body: "unavailable" }),
   );
   await page.waitForTimeout(3_000);
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/status");
 });
@@ -5681,7 +5777,7 @@ test("a connection proven outside the probe is lost again when the probe reports
   await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
   await page.getByRole("link", { name: /^All Photos/ }).click();
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 
   // The idle probe stops answering, so the browser stops claiming a server.
   const probeGate = statusAnswerGate();
@@ -5689,7 +5785,7 @@ test("a connection proven outside the probe is lost again when the probe reports
     await probeGate.wait();
     await route.abort();
   });
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   // Opening another source succeeds while the probe still cannot answer, so
   // that request proves the transport and the browser claims the connection
@@ -5700,7 +5796,7 @@ test("a connection proven outside the probe is lost again when the probe reports
   await expect.poll(() => probeGate.held()).toBeGreaterThan(0);
   await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   resumeProbe();
 
   // The next probe reports the same loss again. Reachability is judged
@@ -5718,8 +5814,11 @@ test("a usable status answer leaves an established connection untouched", async 
   for (const name of ["a.jpg", "b.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
+  // The connection presentation lives in the application header on a wide
+  // layout; a narrow layout shows no permanent connection text at all.
   await openGrid(page, running.url, "All Photos");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await expectConnection(page, "Connected");
 
   let probes = 0;
   await page.route("**/api/status", (route) => {
@@ -5729,8 +5828,7 @@ test("a usable status answer leaves an established connection untouched", async 
   // The probe answers on every poll. Nothing is lost, so the connection
   // presentation must not be written again while those answers arrive.
   const rewrites = await page.evaluate(async () => {
-    // Exactly one indicator carries the state: the application header on a
-    // wide layout, the open view's header on a narrow one.
+    // Exactly one indicator carries the state on a wide layout.
     const elements = Array.from(
       document.querySelectorAll<HTMLElement>(
         "[data-connection], [data-grid-connection], [data-photo-connection]",
@@ -5775,7 +5873,7 @@ test("an uncertain Undo retires Undo and requires Photo Retry", async ({
 
   await page.route("**/api/photos/*/state", (route) => route.abort());
   await page.getByRole("button", { name: "Undo" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(
@@ -5815,7 +5913,7 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
@@ -5921,7 +6019,7 @@ test("Photo View recovery status wraps without hiding Retry or lower controls", 
   }
 
   await retry.click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(status).toHaveText("Connected. Current state refreshed.");
   const steadyStatus = await status.evaluate((element) => ({
     height: element.getBoundingClientRect().height,
@@ -6754,7 +6852,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect(
     page.getByText("Could not add this Photo to “Picks”."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/albums/*/members");
@@ -6770,7 +6868,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await membershipCheckbox(page, "Picks").check();
   await retried;
 
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await expect(membershipCheckbox(page, "Picks")).toBeChecked();
@@ -7583,7 +7681,7 @@ test("the application status monitor owns scan failure, retry, and completion", 
       name: "Refresh Current Source",
     }),
   ).toBeInViewport();
-  await expect(page.getByText("Connected")).toBeVisible();
+  await expectConnection(page, "Connected");
   await page.locator("[data-grid-summary] .summary-action").click();
   await expect(
     page.locator("[data-grid-summary]").getByRole("button", {
@@ -8095,7 +8193,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const failed = progressResponse(page, albumId, 503);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await failed;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(
       "Album position could not be saved. Retry before making more decisions.",
@@ -8110,7 +8208,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await expect(page.locator("[data-status]")).toHaveText(
     "Could not refresh this Photo. Retry to continue.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toBeEnabled();
@@ -8135,7 +8233,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await expect(page.locator("[data-status]")).toHaveText(
     "Showing retained Preview.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/photos/*/preview");
@@ -8143,7 +8241,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const recovered = progressResponse(page, albumId);
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await recovered;
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
@@ -8199,7 +8297,7 @@ test("saved-position confirmation cannot be reverted by an older Overview", asyn
       albumId,
       page.getByRole("button", { name: /^Photo 1 of 2/ }),
     );
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await openSources(page);
     // The saved position is exposed as a separate Resume action, not as part
     // of the Album's Grid destination name.
@@ -8709,9 +8807,9 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
@@ -8758,7 +8856,7 @@ test("a remembered folder source waits for the File Location binding before reop
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   const opensAfterRefresh = folderOpens;
 
   // The global Retry cannot bind File Locations, so it must NOT send a
@@ -8893,7 +8991,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   );
   await rootToggle.click();
   await rootReloaded;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
@@ -8970,7 +9068,7 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   });
   await expect(retryA).toBeVisible();
   await expect(retryB).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   failing.delete("a");
   await retryA.click();
@@ -8979,12 +9077,12 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   ).toBeVisible();
   await expect(retryA).toBeHidden();
   await expect(retryB).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   failing.delete("b");
   await retryB.click();
   await expect(retryB).toBeHidden();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 });
 
 test("a leaf Folder renders no expand control and keeps its row aligned", async ({
@@ -9283,7 +9381,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await page.getByRole("link", { name: /^Review(?: |$)/ }).click();
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: /Photo 1 of/ }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await event("pointerdown", 100, 0, 48);
   await event("pointermove", 200, 10, 48);
@@ -9367,13 +9465,13 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
     await route.abort();
   });
   await page.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await page.unroute("**/api/photos/*/state");
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
 });
 
@@ -10260,7 +10358,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await post(running.url, "/api/scan", {});
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
@@ -10314,7 +10412,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await page.unroute("**/api/photos/*/preview");
   await actionWithProgress(page, albumId, () =>
@@ -10348,7 +10446,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await page.unroute("**/api/photos/*/preview");
   await actionWithProgress(page, albumId, () =>
@@ -10386,7 +10484,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   // The failed write belongs to the Photo that initiated it. The newer Photo
   // and its confirmed position remain current and are not disconnected by a
   // stale settlement.
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/albums/*/progress");
   await expect
@@ -10892,7 +10990,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   });
 
   await page.goto(running.url);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByText(/returned an invalid response/)).toBeVisible();
   await expect(page.getByText(/Ready · 1 Photo/)).toBeHidden();
   await expect.poll(() => overviewRequests).toBeGreaterThan(0);
@@ -10909,7 +11007,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   windowMode = "ready";
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   expect(browseAllocations).toBe(1);
   expect(overviewRequests).toBe(initialOverviewRequests);
   expect(new Set(windowTokens).size).toBe(1);
@@ -10942,7 +11040,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
     });
   });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText("Connection lost. Retry to refresh this Photo."),
   ).toBeVisible();
@@ -10955,7 +11053,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await typed503;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   previewMode = "unknown-state";
@@ -10965,7 +11063,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await unknownState;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   previewMode = "ready-without-url";
@@ -10975,12 +11073,12 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await malformedReady;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
@@ -10996,7 +11094,7 @@ test("Photo Retry reports a replacement current fact instead of remaining in pro
     route.fulfill({ status: 503, body: '{"error":"failed"}' }),
   );
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   let replacementServed = false;
   await page.route(
@@ -11023,7 +11121,7 @@ test("Photo Retry reports a replacement current fact instead of remaining in pro
   await expect(page.locator("[data-status]")).toHaveText(
     "Could not refresh this Photo. Retry to continue.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toBeEnabled();
@@ -14021,14 +14119,17 @@ test("a failed filter change keeps the requested view recoverable through Retry"
   ).toBeVisible();
   // The blocking failure is visible beside the affected primary action, not
   // only inside the closed options surface.
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.locator("[data-photo-index]")).toHaveCount(0);
-  await expect(page.locator("[data-grid-source-progress]")).toBeHidden();
+  // The complete source decision counts are a View options fact, and a failed
+  // open presents none of them. The element lives inside that surface, so the
+  // guard reads its text rather than its visibility.
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText("");
 
   // Retry reopens the requested filtered view, not the previous one.
   const browseBodies = recordBrowseBodies(page);
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expectGridOrder(page, [allIds[0]!]);
   await openViewOptions(page);
   await expect(page.locator("[data-filter-select]")).toHaveValue("selected");
@@ -14883,12 +14984,12 @@ test("repeated failure of one source range keeps one exact Recovery owner", asyn
   try {
     await scrollBoundary();
     await expect.poll(() => attempts).toBeGreaterThanOrEqual(1);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const afterFirst = attempts;
     await scrollBoundary();
     await expect.poll(() => attempts).toBeGreaterThan(afterFirst);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     failing = false;
     const recovered = page.waitForResponse((response) => {
@@ -14901,7 +15002,7 @@ test("repeated failure of one source range keeps one exact Recovery owner", asyn
     });
     await scrollBoundary();
     await recovered;
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
   } finally {
     await page.unroute(/\/api\/browse\//);
@@ -14963,7 +15064,7 @@ test("a source establishment failure retires the claim it replaces", async ({
       element.scrollTop = element.scrollHeight;
       element.dispatchEvent(new Event("scroll"));
     });
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     // Opening the second source fails on its establishing window, which
     // replaces the first source's claim with its own.
@@ -14980,7 +15081,7 @@ test("a source establishment failure retires the claim it replaces", async ({
     await expect.poll(() => albumWindowFailures).toBeGreaterThan(0);
     albumPhase = false;
     await albumOpen;
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     // Retrying the second source releases its claim and the predecessor
     // claim the transition replaced.
@@ -14988,7 +15089,7 @@ test("a source establishment failure retires the claim it replaces", async ({
     failLibraryRange = false;
     await openSources(page);
     await page.getByRole("button", { name: "Retry connection" }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.locator("[data-sources]")).toBeHidden();
     await page.locator('[data-photo-index="0"]').click();
@@ -15174,7 +15275,7 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 11–70 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const failedAttempts = tailAttempts;
     failing = false;
@@ -15189,7 +15290,7 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Ready · 70 Photos",
     );
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator('[data-photo-index="69"]')).toBeVisible();
     expect(new Set(tokens).size).toBe(1);
     expect(browseAllocations).toBe(0);
@@ -15270,7 +15371,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const initial60 = attempts.get("60")!;
     const initial120 = attempts.get("120")!;
@@ -15284,7 +15385,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(initialOverviewRequests);
     expect(firstWindowReloads).toBe(0);
@@ -15297,7 +15398,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect
       .poll(() => attempts.get("120") ?? 0)
       .toBeGreaterThan(failed120);
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     expect(attempts.get("60")).toBe(recovered60);
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(initialOverviewRequests);
@@ -15654,7 +15755,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
     element.scrollTop = element.scrollHeight;
   });
   await expect.poll(() => expiredServed).toBe(true);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "This source expired and could not be reopened. Retry the connection.",
   );
@@ -15828,7 +15929,7 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
     }>;
     const reopenedToken = (await opened).token;
     await replacementWindow;
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator("[data-stage]")).toContainText(
       "Preview unavailable",
     );
@@ -16361,7 +16462,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     // then the Photo-owned adjacent tail prefetch fails.
     await page.getByRole("button", { name: "Next" }).click();
     await expect.poll(() => reopenWindowFailed).toBe(true);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     const photoRetry = page.locator("[data-retry-photo]");
     await expect(photoRetry).toBeVisible();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
@@ -16372,7 +16473,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     expect(overviewRequests).toBe(initialOverviewRequests);
     expect(reopenPhotoId).not.toBe("");
 
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     // The original-token adjacent request has already been superseded by the
     // reopen. Release its stale route now; the successor gate remains held so
@@ -16529,7 +16630,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator("[data-status]")).toHaveText(
       "Connected. Current state refreshed.",
     );
@@ -16768,7 +16869,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
       ),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByRole("button", { name: "Retry connection" }),
   ).toBeHidden();
@@ -17078,7 +17179,7 @@ test("a range re-admission that recovers a failed source establishment also esta
   ).toBeVisible();
 
   await page.getByRole("link", { name: "Review 3 Photos" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(/could not be loaded \(HTTP 503\)/),
   ).toBeVisible();
@@ -17088,7 +17189,7 @@ test("a range re-admission that recovers a failed source establishment also esta
   // re-admits the establishing window on its own.
   windowReady = true;
   await scrollGrid(page, 1);
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByText("Ready · 3 Photos", { exact: true }),
   ).toBeVisible();
@@ -17713,11 +17814,11 @@ test.describe("browser navigation", () => {
     // plus a source-return action; it never silently reverses history.
     await page.route("**/api/photos/*/preview", (route) => route.abort());
     await page.getByRole("button", { name: "Next", exact: true }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     expect(page.url()).not.toBe(target);
     await page.unroute("**/api/photos/*/preview");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
   });
 
   test("rapid Back and Forward during a slow window cannot repaint an obsolete destination", async ({
@@ -18235,7 +18336,7 @@ test("View options names an active nondefault filter and order in the header", a
 
   const entry = page.locator("[data-grid-view-options]");
   const flag = page.locator("[data-view-options-flag]");
-  // The default view carries no indication.
+  // The default view carries no indication, so the name stays the plain entry.
   await expect(flag).toBeHidden();
   await expect(entry).toHaveAccessibleName("View options");
 
@@ -18247,7 +18348,11 @@ test("View options names an active nondefault filter and order in the header", a
   // choices.
   await expect(flag).toBeVisible();
   await expect(flag).toHaveText(" · Undecided · Capture Time, latest first");
-  await expect(entry).toHaveAccessibleName("View options");
+  // The indication is part of the entry's accessible name, so a screen reader
+  // hears the committed choices with the control that opens them.
+  await expect(entry).toHaveAccessibleName(
+    "View options, Undecided · Capture Time, latest first",
+  );
 
   // Closing without Apply leaves the committed indication untouched.
   await openViewOptions(page);

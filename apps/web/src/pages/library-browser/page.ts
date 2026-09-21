@@ -1622,58 +1622,6 @@ export function mountLibraryBrowser(
     }
   }
 
-  /// An explicit order change reopens the same source with the new order,
-  /// keeping the browser-local current Photo by identity. A source with no
-  /// current Photo yet starts at the first Photo of the new order.
-  const changeSort = async (order: SourceViewOrder): Promise<void> => {
-    if (!applicationAlive || pageBusy || photoOwner.busy) return;
-    if (order === sourceGrid.order) return;
-    // A Folder reopen needs the current File Location binding: without it a
-    // sort change can only send a stale publication and fail as a false
-    // disconnection. Match the refresh/reopen precondition.
-    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
-      const bound = await awaitRootBinding();
-      if (!applicationAlive || !bound) {
-        if (applicationAlive)
-          setGridStatusText("Could not load this source. Retry to continue.");
-        return;
-      }
-    }
-    await openSourceDescriptor(
-      sourceGrid.source,
-      photoOwner.lastCurrentPhotoId,
-      order,
-      sourceGrid.selection,
-      { address: "replace" },
-    );
-  };
-
-  /// A filter change reopens the same source in the new view and keeps the
-  /// browser-local current Photo by identity when that Photo still matches the
-  /// new filter. Otherwise the reopened view starts at its first Photo.
-  const changeFilter = async (selection: SelectionFilter): Promise<void> => {
-    if (!applicationAlive || pageBusy || photoOwner.busy) return;
-    if (selection === sourceGrid.selection) return;
-    // A Folder reopen needs the current File Location binding: without it a
-    // filter change can only send a stale publication and fail as a false
-    // disconnection. Match the refresh/reopen precondition.
-    if (sourceGrid.kind === "folder" && !fileLocations.publication) {
-      const bound = await awaitRootBinding();
-      if (!applicationAlive || !bound) {
-        if (applicationAlive)
-          setGridStatusText("Could not load this source. Retry to continue.");
-        return;
-      }
-    }
-    await openSourceDescriptor(
-      sourceGrid.source,
-      photoOwner.lastCurrentPhotoId,
-      sourceGrid.order,
-      selection,
-      { address: "replace" },
-    );
-  };
-
   /// Commits one View options draft. A thumbnail-size-only change never
   /// reaches here: it is Grid presentation and keeps the open Snapshot and its
   /// anchor. Order and filter commit together, so a combined change opens one
@@ -3838,12 +3786,6 @@ export function mountLibraryBrowser(
       }
       case "view-options-apply":
         void applyViewOptions(intent.order, intent.selection);
-        return;
-      case "sort-change":
-        void changeSort(intent.order);
-        return;
-      case "filter-change":
-        void changeFilter(intent.selection);
         return;
       case "source-open": {
         // Choosing a source creates one Grid destination with that source's

@@ -1632,10 +1632,6 @@
   display: none;
 }
 
-[hidden] {
-  display: none !important;
-}
-
 @media (max-width: 1100px) and (min-width: 761px) {
   .review-tools {
     grid-template-columns: minmax(15rem, 0.75fr) minmax(20rem, 1fr);
@@ -1738,11 +1734,6 @@
   .grid-selection button {
     padding: 0.25rem 0.4rem;
     font-size: 0.68rem;
-  }
-
-  .grid-heading p {
-    max-width: 7rem;
-    font-size: 0.62rem;
   }
 
   .grid-connection,

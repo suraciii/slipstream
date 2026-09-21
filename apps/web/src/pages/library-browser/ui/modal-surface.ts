@@ -49,7 +49,6 @@ export interface ModalSurfaces {
   /// Closes every active surface without returning focus, for a destination
   /// change that supersedes them all.
   closeAll(): void;
-  active(): ModalSurfaceKind | undefined;
   isActive(kind: ModalSurfaceKind): boolean;
   /// True while a modal surface is active, so background shortcuts stay off.
   blocking(): boolean;
@@ -193,7 +192,6 @@ export function createModalSurfaces(): ModalSurfaces {
       for (const kind of Array.from(registrations.keys()))
         if (isOpen(kind)) close(kind, false);
     },
-    active: () => activeKind,
     isActive: (kind) => activeKind === kind,
     blocking: () => activeKind !== undefined,
     focus: focusInvoker,
