@@ -1,0 +1,1095 @@
+$ bun run format:check && bun run test:fast && bun run build
+$ prettier --check .github apps compatibility design scripts tools CONTRIBUTING.md README.md THIRD-PARTY-NOTICES.md eslint.config.js package.json playwright.config.ts tsconfig.json
+Checking formatting...
+All matched files use Prettier code style!
+$ bun run check:album-language && bun run test:license && bun run test:container-input && bun run test:docker-context && bun run test:compose-storage && bun run test:workflow && bun run test:worktree-preflight && bun run test:raw-contract && bun run test:rust && bun run test:raw-discovery && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser
+$ bun run scripts/check-album-language.ts
+Album language check passed
+$ bun test tools/license-contract.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/license-contract.test.ts:
+(pass) every active project surface uses the MIT license [1.48ms]
+
+ 1 pass
+ 0 fail
+ 16 expect() calls
+Ran 1 test across 1 file. [3.00ms]
+$ bun test tools/container-input-contract.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/container-input-contract.test.ts:
+(pass) Dockerfile enumerates every base image and pins each non-scratch input [0.78ms]
+(pass) Ubuntu native inputs use one official amd64 snapshot and explicit direct locks [0.24ms]
+(pass) each Ubuntu stage has one pinned CA, source, lock, update, install, and cleanup sequence [0.66ms]
+(pass) the container and Compose focused contracts are wired through test:fast and verify [0.30ms]
+(pass) deployment documentation distinguishes build inputs from qualification output [0.09ms]
+
+ 5 pass
+ 0 fail
+ 331 expect() calls
+Ran 5 tests across 1 file. [4.00ms]
+$ bun test tools/docker-context-contract.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/docker-context-contract.test.ts:
+(pass) Git and Docker ignores cover every supported Original extension [4.06ms]
+
+ 1 pass
+ 0 fail
+ 290 expect() calls
+Ran 1 test across 1 file. [5.00ms]
+$ bun test tools/compose-storage-preflight.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/compose-storage-preflight.test.ts:
+(pass) startup rejects missing image input before Docker and preserves Originals [23.00ms]
+(pass) startup rejects unassigned image input before Docker and preserves Originals [18.22ms]
+(pass) startup rejects quoted image input before Docker and preserves Originals [20.26ms]
+(pass) startup rejects interpolated image input before Docker and preserves Originals [17.24ms]
+(pass) startup rejects mutable tag image input before Docker and preserves Originals [18.51ms]
+(pass) startup rejects invalid digest image input before Docker and preserves Originals [17.35ms]
+(pass) startup rejects duplicate image input before Docker and preserves Originals [18.00ms]
+(pass) Library Expansion rejects missing image input before Docker and preserves Originals [17.22ms]
+(pass) Library Expansion rejects unassigned image input before Docker and preserves Originals [16.68ms]
+(pass) Library Expansion rejects quoted image input before Docker and preserves Originals [17.73ms]
+(pass) Library Expansion rejects interpolated image input before Docker and preserves Originals [21.68ms]
+(pass) Library Expansion rejects mutable tag image input before Docker and preserves Originals [21.16ms]
+(pass) Library Expansion rejects invalid digest image input before Docker and preserves Originals [18.78ms]
+(pass) Library Expansion rejects duplicate image input before Docker and preserves Originals [17.94ms]
+(pass) startup rejects missing library storage before Docker [12.91ms]
+(pass) startup rejects non-directory library storage before Docker [12.86ms]
+(pass) startup rejects missing state storage before Docker [16.54ms]
+(pass) startup rejects non-directory state storage before Docker [18.43ms]
+(pass) startup rejects missing cache storage before Docker [18.16ms]
+(pass) startup rejects non-directory cache storage before Docker [21.08ms]
+(pass) startup and Library Expansion forward canonical sources with builds disabled [95.99ms]
+(pass) storage paths may contain the names of other storage keys [49.32ms]
+(pass) a raw non-UTF-8 storage input fails before Docker and preserves Originals [15.86ms]
+(pass) a canonical non-UTF-8 storage path fails before Docker and preserves Originals [16.72ms]
+(pass) a raw non-UTF-8 findmnt path fails before Docker and preserves Originals [25.74ms]
+(pass) a NUL inside the library value fails closed before startup [7.20ms]
+(pass) a NUL inside the state value fails closed before startup [5.88ms]
+(pass) a NUL inside the cache value fails closed before startup [5.86ms]
+(pass) a NUL inside the library value fails closed before Library Expansion [5.91ms]
+(pass) a NUL inside the state value fails closed before Library Expansion [5.78ms]
+(pass) a NUL inside the cache value fails closed before Library Expansion [5.42ms]
+(pass) a NUL inside a storage key fails closed before Docker [5.93ms]
+(pass) a trailing NUL fails closed before Docker [5.17ms]
+(pass) a nested cross-filesystem bind alias fails before Docker and preserves Originals [40.91ms]
+(pass) exact Linux bind-mount alias for library-state never starts Compose or changes Originals tree or content [36.23ms]
+(pass) descendant Linux bind-mount alias for library-state never starts Compose or changes Originals tree or content [38.62ms]
+(pass) reverse Linux bind-mount alias for library-state never starts Compose or changes Originals tree or content [43.02ms]
+(pass) exact Linux bind-mount alias for library-cache never starts Compose or changes Originals tree or content [39.51ms]
+(pass) descendant Linux bind-mount alias for library-cache never starts Compose or changes Originals tree or content [39.21ms]
+(pass) reverse Linux bind-mount alias for library-cache never starts Compose or changes Originals tree or content [40.62ms]
+(pass) exact Linux bind-mount alias for state-cache never starts Compose or changes Originals tree or content [41.39ms]
+(pass) descendant Linux bind-mount alias for state-cache never starts Compose or changes Originals tree or content [42.64ms]
+(pass) reverse Linux bind-mount alias for state-cache never starts Compose or changes Originals tree or content [39.31ms]
+(pass) an unavailable Linux mount coordinate fails closed before Compose [24.77ms]
+(pass) invalid Linux mount coordinate fields fail closed before Compose [100.12ms]
+(pass) ambiguous Linux mount coordinate output fails closed before Compose [72.42ms]
+(pass) equal library-state topology never starts Compose or changes Originals tree or content [24.17ms]
+(pass) forward library-state topology never starts Compose or changes Originals tree or content [21.89ms]
+(pass) reverse library-state topology never starts Compose or changes Originals tree or content [24.79ms]
+(pass) alias library-state topology never starts Compose or changes Originals tree or content [22.35ms]
+(pass) equal library-cache topology never starts Compose or changes Originals tree or content [22.21ms]
+(pass) forward library-cache topology never starts Compose or changes Originals tree or content [22.90ms]
+(pass) reverse library-cache topology never starts Compose or changes Originals tree or content [21.01ms]
+(pass) alias library-cache topology never starts Compose or changes Originals tree or content [21.52ms]
+(pass) equal state-cache topology never starts Compose or changes Originals tree or content [22.33ms]
+(pass) forward state-cache topology never starts Compose or changes Originals tree or content [20.57ms]
+(pass) reverse state-cache topology never starts Compose or changes Originals tree or content [20.97ms]
+(pass) alias state-cache topology never starts Compose or changes Originals tree or content [19.96ms]
+(pass) Library Expansion cannot bypass a failed storage preflight [19.30ms]
+(pass) the storage parser rejects ambiguous declarations before Compose [80.16ms]
+(pass) a safe alias cannot hide an ambiguous canonical storage path [85.70ms]
+(pass) unsupported Compose overrides cannot follow the preflight [51.54ms]
+(pass) remote Docker selection is rejected before Compose [323.72ms]
+(pass) the entry point clears Compose configuration-selection process variables [52.17ms]
+(pass) environment-file configuration wins over ambient values [72.79ms]
+(pass) the environment file cannot select a Compose project, profile, file, or Docker context [87.83ms]
+(pass) down parses semantic-invalid image and storage values with stop-only sentinels [142.10ms]
+(pass) Docker Compose config preserves the digest-only storage contract [26.93ms]
+
+ 68 pass
+ 0 fail
+ 537 expect() calls
+Ran 68 tests across 1 file. [2.43s]
+$ bun test tools/workflow-contract.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/workflow-contract.test.ts:
+(pass) reviewed actions are immutable and bind to exact version comments [0.68ms]
+(pass) local actions are allowed and unrelated uses text is ignored [0.16ms]
+(pass) mutable, unknown, container, and inaccurately labelled actions fail closed [0.11ms]
+(pass) actionlint-valid YAML aliases cannot hide lexical action targets [0.03ms]
+(pass) qualification workflows use only reviewed immutable actions [0.67ms]
+
+ 5 pass
+ 0 fail
+ 21 expect() calls
+Ran 5 tests across 1 file. [4.00ms]
+$ bun test tools/worktree-preflight.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/worktree-preflight.test.ts:
+(pass) worktree preflight is fail-fast and non-destructive [0.04ms]
+(pass) preflight restores locked dependencies and can be repeated over edits [83.08ms]
+(pass) preflight rejects a toolchain mismatch before installing dependencies [18.96ms]
+(pass) preflight stops before Cargo when Bun installation fails [35.84ms]
+
+ 4 pass
+ 0 fail
+ 27 expect() calls
+Ran 4 tests across 1 file. [143.00ms]
+$ bun test tools/raw-gate-contract.test.ts
+bun test v1.4.0 (34cbb9a40)
+
+tools/raw-gate-contract.test.ts:
+(pass) test:raw fails clearly before scenarios when the sample is absent [7.44ms]
+(pass) test:raw rejects a path that is not a regular file [7.56ms]
+(pass) the RAW plan keeps the exact serial native, service, and browser gate [0.12ms]
+(pass) discovery parses exactly four native/service and one browser scenario [0.41ms]
+(pass) discovery fails when its command fails [0.05ms]
+(pass) discovery fails instead of accepting zero intended scenarios [0.03ms]
+(pass) discovery fails instead of accepting an extra scenario [0.05ms]
+
+ 7 pass
+ 0 fail
+ 12 expect() calls
+Ran 7 tests across 1 file. [18.00ms]
+$ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=1
+   Compiling libc v0.2.189
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling find-msvc-tools v0.1.11
+   Compiling shlex v2.0.1
+   Compiling pkg-config v0.3.32
+    Checking itoa v1.0.18
+    Checking pin-project-lite v0.2.17
+   Compiling version_check v0.9.5
+   Compiling serde_core v1.0.228
+    Checking futures-core v0.3.34
+    Checking bytes v1.11.1
+   Compiling autocfg v1.5.1
+    Checking typenum v1.20.1
+   Compiling zmij v1.0.23
+   Compiling dunce v1.0.5
+   Compiling vcpkg v0.2.15
+    Checking smallvec v1.15.2
+   Compiling httparse v1.10.1
+   Compiling serde_json v1.0.149
+    Checking bytemuck v1.25.2
+    Checking memchr v2.8.3
+    Checking zune-core v0.5.3
+    Checking tower-service v0.3.3
+   Compiling serde v1.0.228
+    Checking pxfm v0.1.30
+    Checking foreign-types-shared v0.3.1
+    Checking httpdate v1.0.3
+    Checking fallible-streaming-iterator v0.1.9
+    Checking futures-task v0.3.34
+    Checking atomic-waker v1.1.2
+    Checking byteorder-lite v0.1.0
+    Checking cfg-if v1.0.4
+    Checking slab v0.4.12
+    Checking fallible-iterator v0.3.0
+    Checking cpufeatures v0.2.17
+    Checking bitflags v2.13.1
+    Checking tower-layer v0.3.3
+    Checking sync_wrapper v1.0.2
+    Checking futures-channel v0.3.34
+    Checking mime v0.3.17
+    Checking matchit v0.8.4
+    Checking percent-encoding v2.3.2
+    Checking futures-util v0.3.34
+   Compiling generic-array v0.14.7
+    Checking zune-jpeg v0.5.15
+   Compiling num-traits v0.2.19
+    Checking http v1.4.0
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+    Checking http-body v1.1.0
+    Checking errno v0.3.14
+    Checking mio v1.2.2
+    Checking socket2 v0.6.5
+   Compiling jobserver v0.1.35
+    Checking http-body-util v0.1.5
+    Checking signal-hook-registry v1.4.8
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.7
+    Checking digest v0.10.7
+   Compiling cc v1.4.4
+    Checking axum-core v0.5.6
+    Checking sha2 v0.10.9
+    Checking serde_path_to_error v0.1.20
+    Checking moxcms v0.8.1
+   Compiling libsqlite3-sys v0.38.2
+   Compiling lcms2-sys v4.0.7
+   Compiling slipstream-core v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-core)
+   Compiling slipstream-compat v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-compat)
+   Compiling serde_derive v1.0.228
+   Compiling tokio-macros v2.7.2
+   Compiling foreign-types-macros v0.2.4
+    Checking foreign-types v0.5.0
+    Checking lcms2 v6.1.1
+    Checking tokio v1.53.1
+    Checking image v0.25.10
+    Checking hyper v1.11.0
+    Checking tower v0.5.3
+    Checking hyper-util v0.1.20
+    Checking axum v0.8.9
+    Checking rusqlite v0.40.2
+    Checking slipstream-server v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.29s
+   Compiling itoa v1.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.34
+   Compiling typenum v1.20.1
+   Compiling bytes v1.11.1
+   Compiling smallvec v1.15.2
+   Compiling bytemuck v1.25.2
+   Compiling pxfm v0.1.30
+   Compiling memchr v2.8.3
+   Compiling foreign-types-shared v0.3.1
+   Compiling zune-core v0.5.3
+   Compiling cfg-if v1.0.4
+   Compiling byteorder-lite v0.1.0
+   Compiling fallible-iterator v0.3.0
+   Compiling cpufeatures v0.2.17
+   Compiling bitflags v2.13.1
+   Compiling libc v0.2.189
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling tower-service v0.3.3
+   Compiling sync_wrapper v1.0.2
+   Compiling slab v0.4.12
+   Compiling tower-layer v0.3.3
+   Compiling futures-task v0.3.34
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.23
+   Compiling httparse v1.10.1
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling mime v0.3.17
+   Compiling num-traits v0.2.19
+   Compiling matchit v0.8.4
+   Compiling percent-encoding v2.3.2
+   Compiling foreign-types v0.5.0
+   Compiling futures-channel v0.3.34
+   Compiling zune-jpeg v0.5.15
+   Compiling futures-util v0.3.34
+   Compiling http v1.4.0
+   Compiling generic-array v0.14.7
+   Compiling jobserver v0.1.35
+   Compiling errno v0.3.14
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling cc v1.4.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling http-body v1.1.0
+   Compiling digest v0.10.7
+   Compiling tokio v1.53.1
+   Compiling http-body-util v0.1.5
+   Compiling sha2 v0.10.9
+   Compiling axum-core v0.5.6
+   Compiling serde_json v1.0.149
+   Compiling serde v1.0.228
+   Compiling serde_path_to_error v0.1.20
+   Compiling moxcms v0.8.1
+   Compiling lcms2-sys v4.0.7
+   Compiling libsqlite3-sys v0.38.2
+   Compiling slipstream-core v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-core)
+   Compiling slipstream-compat v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-compat)
+   Compiling lcms2 v6.1.1
+   Compiling hyper v1.11.0
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.8.9
+   Compiling image v0.25.10
+   Compiling rusqlite v0.40.2
+   Compiling slipstream-server v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.51s
+     Running unittests src/lib.rs (target/debug/deps/slipstream_compat-28e776891e26c1d4)
+
+running 11 tests
+test tests::batch_workflow_contract_examples_match_wire_rules ... ok
+test tests::canonical_schema_snapshots_execute_with_bundled_sqlite ... ok
+test tests::every_compatibility_file_has_an_executing_consumer ... ok
+test tests::native_shim_and_rust_image_color_candidates_link_and_run ... ok
+test tests::preview_fixture_contract_is_deterministic_and_complete ... ok
+test tests::preview_fixture_matrix_runs_rust_derivative_for_every_recipe ... 
+(process:3482205): VIPS-WARNING **: 22:36:06.039: corrupt profile
+
+(process:3482205): VIPS-WARNING **: 22:36:06.041: corrupt profile
+ok
+test tests::review_derivative_url_validator_matches_server_identifier_grammar ... ok
+test tests::selected_axum_stack_compiles_and_serves_an_owned_state ... ok
+test tests::shared_identity_vectors_match_contract_serialization ... ok
+test tests::shared_protocol_goldens_preserve_absence_instead_of_null ... ok
+test tests::startup_vectors_are_parseable_and_cover_defaults_and_explicit_binding ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+     Running unittests src/lib.rs (target/debug/deps/slipstream_core-4d16f5e5e6dd14ca)
+
+running 142 tests
+test cache::tests::cache_key_matches_updated_unicode_vector_shape ... ok
+test cache::tests::cache_rejects_original_subtree_and_non_utf8_roots ... ok
+test cache::tests::cached_jpeg_validation_rejects_marker_complete_corruption_and_invalid_icc ... ok
+test cache::tests::current_manifest_accepts_the_persisted_raw_fallback_source ... ok
+test cache::tests::duplicate_requests_coalesce_before_newer_identity_supersedes_old_work ... ok
+test cache::tests::generates_atomic_derivative_and_manifest_with_truthful_facts ... ok
+test cache::tests::invalidation_detaches_old_in_flight_work_before_same_key_retry ... ok
+test cache::tests::malformed_oversized_and_wrong_key_metadata_is_ignored ... ok
+test cache::tests::newer_manifest_identity_detaches_queued_older_generation ... ok
+test cache::tests::newer_manifest_identity_supersedes_in_flight_generation ... ok
+test cache::tests::persistent_content_failures_survive_reconstruction_and_retry ... ok
+test cache::tests::same_key_concurrent_requests_coalesce_without_duplicate_processing ... ok
+test cache::tests::shared_native_budget_limits_capture_and_derivative_work_to_two ... ok
+test cache::tests::shutdown_rejects_admission_and_does_not_publish_queued_work ... ok
+test cache::tests::stale_fallback_reports_stored_source_facts_and_key ... ok
+test cache::tests::superseded_in_flight_failure_returns_invalidated ... ok
+test capture::tests::capture_reuse_revision_includes_discovery_device_and_inode ... ok
+test capture::tests::changed_between_discovery_and_open_is_rejected_without_old_revision ... ok
+test capture::tests::checked_in_order_vector_keeps_camera_local_offset_out_of_the_order_key ... ok
+test capture::tests::jpeg_parser_uses_real_segment_boundaries_not_arbitrary_exif_bytes ... ok
+test capture::tests::malformed_offsets_are_invalid_and_excessive_metadata_is_rejected ... ok
+test capture::tests::parses_review_metadata_with_camera_display_values ... ok
+test capture::tests::parses_selected_field_subseconds_and_offset_without_applying_offset ... ok
+test capture::tests::raw_uses_only_its_primary_tiff_container_without_sensor_unpack ... ok
+test capture::tests::same_size_same_mtime_path_replacement_is_rejected_by_discovery_identity ... ok
+test capture::tests::shared_metadata_vectors_cover_precedence_normalization_and_failure_states ... ok
+test capture::tests::sparse_large_raw_reads_only_tiff_ranges_and_preserves_original_bytes ... ok
+test confinement::tests::canonical_path_is_derived_from_the_retained_descriptor ... ok
+test confinement::tests::counts_the_current_directory_before_recursing ... ok
+test confinement::tests::descendant_descriptor_identity_distinguishes_different_directories ... ok
+test confinement::tests::descriptor_canonicalization_distinguishes_literal_deleted_suffix_from_unlink ... ok
+test confinement::tests::detects_in_place_revision_changes_and_drains_admitted_reads ... ok
+test confinement::tests::fifo_original_replacement_is_rejected_without_blocking ... ok
+test confinement::tests::reads_only_regular_files_with_bounded_revision_checked_operations ... ok
+test confinement::tests::rejects_a_symlink_library_root ... ok
+test confinement::tests::rejects_supported_non_utf8_names_without_lossy_conversion ... ok
+test confinement::tests::rejects_symlink_and_directory_escape_after_replacement ... ok
+test confinement::tests::reports_pre_epoch_files_unreadable_without_aborting_siblings ... ok
+test confinement::tests::scan_and_reads_never_mutate_originals_and_close_rejects_new_operations ... ok
+test confinement::tests::sony_original_remains_unchanged ... ignored, requires SLIPSTREAM_RAW_SAMPLE
+test confinement::tests::traverses_deterministically_and_enforces_all_limits ... ok
+test confinement::tests::treats_supported_symlinks_as_unreadable_without_following_them ... ok
+test confinement::tests::validates_paths_and_scan_limits ... ok
+test derivative::tests::applies_all_exif_orientations_once_and_sanitizes_metadata ... ok
+test derivative::tests::process_is_bounded_and_does_not_upscale ... ok
+test derivative::tests::rejects_truncated_jpeg_and_never_exposes_shutdown ... 
+(process:3482308): VIPS-WARNING **: 22:36:06.412: error in tile 0 x 8
+ok
+test derivative::tests::representative_pixels_are_stable_after_lanczos_normalization ... ok
+test derivative::tests::resizes_with_no_upscale_and_keeps_profile_classes_explicit ... ok
+test identity::tests::classifies_the_complete_supported_extension_set ... ok
+test identity::tests::matches_shared_identity_vectors ... ok
+test identity::tests::pairing_removes_only_the_last_extension_and_preserves_case ... ok
+test identity::tests::rejects_invalid_modification_times_without_panicking ... ok
+test identity::tests::renders_filesystem_milliseconds_like_the_javascript_authority ... ok
+test library::tests::coalesces_concurrent_scans_into_one_scanner_operation ... ok
+test library::tests::concurrent_scan_waiters_are_bounded_deterministically ... ok
+test library::tests::dropped_scan_waiters_release_capacity_before_completion ... ok
+test library::tests::expansion_failures_leave_binding_and_locations_unchanged ... ok
+test library::tests::expansion_preserves_legacy_identity_and_user_state_then_discovers_sibling ... ok
+test library::tests::lifecycle_rejects_operations_after_shutdown ... ok
+test library::tests::manual_recovery_refuses_retire_with_user_state ... ok
+test library::tests::manual_recovery_rejects_duplicate_source_mappings ... ok
+test library::tests::manual_recovery_rejects_stale_and_colliding_batches ... ok
+test library::tests::manual_recovery_reports_verified_content_behind_an_occupied_destination ... ok
+test library::tests::manual_recovery_restores_unavailable_photo_without_fingerprint ... ok
+test library::tests::manual_recovery_retires_only_unreferenced_default_destination ... ok
+test library::tests::manual_recovery_verifies_fingerprinted_originals ... ok
+test library::tests::persistence_backpressure_remains_typed_at_library_boundary ... ok
+test library::tests::rejects_non_utf8_canonical_root_before_creating_state ... ok
+test library::tests::scan_failure_does_not_replace_the_previous_persisted_snapshot ... ok
+test library::tests::scan_progress_reports_truthful_phases_and_counters ... ok
+test library::tests::scan_recovery_follows_a_unique_exact_candidate ... ok
+test library::tests::scan_recovery_treats_unreadable_same_kind_candidates_as_ambiguous ... ok
+test library::tests::scanner_shutdown_waits_for_an_admitted_in_flight_scan ... ok
+test native::tests::matching_jpeg_wins_and_unusable_matching_jpeg_falls_back_only_to_raw ... ok
+test native::tests::raw_capture_time_wrapper_reports_a_native_status_for_non_raw_descriptor ... ok
+test native::tests::sony_embedded_preview_is_largest_usable_candidate_and_original_is_unchanged ... ignored, requires SLIPSTREAM_RAW_SAMPLE
+test native::tests::validates_matching_jpeg_and_rejects_malformed_bytes ... ok
+test persistence::admission::tests::creates_missing_components_from_retained_ancestors_after_path_replacement ... ok
+test persistence::admission::tests::prepares_reverifies_and_admits_safe_files ... ok
+test persistence::admission::tests::rejects_an_intermediate_symlink_without_creating_inside_the_library ... ok
+test persistence::admission::tests::rejects_database_and_sidecar_links_and_unsafe_state_mode ... ok
+test persistence::admission::tests::rejects_fifo_database_and_sidecar_without_blocking ... ok
+test persistence::admission::tests::rejects_present_sidecar_before_creating_missing_database ... ok
+test persistence::admission::tests::rejects_state_under_library_before_creating_it ... ok
+test persistence::admission::tests::retained_state_descriptor_survives_path_replacement_and_reverify_detects_inode_swap ... ok
+test persistence::owner::tests::adding_an_existing_album_member_is_idempotent ... ok
+test persistence::owner::tests::album_crud_normalizes_names_and_preserves_rows_across_restart ... ok
+test persistence::owner::tests::album_name_uniqueness_folds_ascii_case_only ... ok
+test persistence::owner::tests::album_summaries_and_browse_target_avoid_member_materialization ... ok
+test persistence::owner::tests::applies_scans_transactionally_and_preserves_unavailable_pair_identity ... ok
+test persistence::owner::tests::batch_photo_state_compares_each_photo_and_reports_a_complete_partition ... ok
+test persistence::owner::tests::batch_photo_state_rolls_back_earlier_matches_when_a_later_write_fails ... ok
+test persistence::owner::tests::batch_photo_state_validation_classifies_malformed_requests_as_invalid ... ok
+test persistence::owner::tests::capture_order_orders_each_photo_by_its_own_original_and_retains_unavailable_facts ... ok
+test persistence::owner::tests::equal_capture_and_path_ties_use_photo_id_bytes ... ok
+test persistence::owner::tests::every_present_sidecar_blocks_writes_without_changing_database ... ok
+test persistence::owner::tests::every_present_sidecar_rejects_startup_before_creating_database ... ok
+test persistence::owner::tests::folder_members_mutation_is_atomic_and_reports_idempotent_counts ... ok
+test persistence::owner::tests::initializes_exact_v5_and_runs_fifo_writes ... ok
+test persistence::owner::tests::legacy_v3_binary_fence_rejects_canonical_v4 ... ok
+test persistence::owner::tests::legacy_v4_binary_fence_rejects_canonical_v5_without_changes ... ok
+test persistence::owner::tests::library_snapshot_orders_raw_first_capture_then_missing_paths ... ok
+test persistence::owner::tests::malformed_v2_wal_rejection_preserves_database_and_sidecars ... ok
+test persistence::owner::tests::membership_batch_reports_identities_and_compensates_idempotently ... ok
+test persistence::owner::tests::membership_batches_are_atomic_and_order_operations_are_dense ... ok
+test persistence::owner::tests::migrates_shared_v0_and_v1_to_v5_and_rejects_malformed_v2 ... ok
+test persistence::owner::tests::new_library_id_collision_is_rejected_before_insertion ... ok
+test persistence::owner::tests::newer_v7_database_is_rejected_without_changes ... ok
+test persistence::owner::tests::preserves_decisions_and_memberships_while_reconciling_rows ... ok
+test persistence::owner::tests::preserves_preview_facts_only_for_unchanged_original_and_uses_cas ... ok
+test persistence::owner::tests::progress_state_cas_undo_and_atomic_progress_are_scoped_and_global ... ok
+test persistence::owner::tests::relocation_resets_preview_and_moves_identity_in_one_transaction ... ok
+test persistence::owner::tests::rolls_back_scan_and_keeps_the_prior_snapshot_without_partial_rows ... ok
+test persistence::owner::tests::root_mismatch_rejects_before_migration_without_changes ... ok
+test persistence::owner::tests::saturation_and_shutdown_drain_are_explicit ... ok
+test persistence::owner::tests::shared_rejection_fixtures_are_rejected_without_database_changes ... ok
+test persistence::owner::tests::shutdown_rejects_library_mutations_after_lifecycle_close ... ok
+test persistence::owner::tests::stale_fallback_preview_completion_is_ignored_after_candidate_change ... ok
+test persistence::owner::tests::unavailable_members_keep_state_and_sidecar_admission_blocks_writes ... ok
+test persistence::owner::tests::v3_migration_preserves_every_row_identity_and_user_owned_state ... ok
+test persistence::owner::tests::v4_migration_to_v5_preserves_album_state_in_one_step ... ok
+test persistence::owner::tests::wal_only_root_binding_is_rejected_without_changing_database_or_sidecars ... ok
+test persistence::schema::tests::exact_manifest_rejects_extra_or_changed_objects ... ok
+test persistence::schema::tests::exact_v1_through_v5_manifests_match_shared_contracts ... ok
+test preview::tests::close_is_idempotent_and_rejects_new_requests ... ok
+test preview::tests::current_cache_misses_regenerate_missing_or_corrupt_derivatives ... ok
+test preview::tests::demand_driven_service_generates_both_targets_without_precomputing ... ok
+test preview::tests::explicit_retry_bypasses_durable_unavailable_without_rescan ... ok
+test preview::tests::malformed_matching_jpeg_is_reported_unavailable_without_raw_fallback ... ok
+test preview::tests::published_cache_hits_reuse_derivatives_without_an_original ... ok
+test preview::tests::raw_photo_previews_from_embedded_jpeg_independent_of_sibling_jpeg ... ignored, requires SLIPSTREAM_RAW_SAMPLE
+test preview::tests::sony_opt_in_service_uses_largest_embedded_candidate_without_mutating_original ... ignored, requires SLIPSTREAM_RAW_SAMPLE
+test preview::tests::thumbnail_requests_never_overwrite_review_preview_facts ... ok
+test preview::tests::unavailable_photo_does_not_enqueue_work ... ok
+test preview::tests::unavailable_preview_is_seeded_and_short_circuited_after_reopen ... ok
+test reconcile::tests::keeps_photo_identity_for_the_same_original_location ... ok
+test reconcile::tests::moves_identity_with_a_relocated_original ... ok
+test reconcile::tests::preview_preserves_only_matching_location_size_and_mtime ... ok
+test reconcile::tests::remembers_unavailable_photo_with_its_decisions ... ok
+test reconcile::tests::same_basename_raw_and_jpeg_stay_independent_photos ... ok
+test reconcile::tests::selected_source_follows_the_original_kind ... ok
+test reconcile::tests::unreadable_original_has_no_selected_source ... ok
+
+test result: ok. 138 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.91s
+
+     Running unittests src/lib.rs (target/debug/deps/slipstream_server-080bc9d5760d3e5a)
+
+running 72 tests
+test tests::album_and_state_protocol_persists_across_reopen ... ok
+test tests::album_browse_open_resolves_saved_position_without_members_response ... ok
+test tests::album_saved_position_falls_back_by_membership_position_in_time_views ... ok
+test tests::album_time_views_order_members_without_rewriting_membership_positions ... ok
+test tests::album_view_change_anchors_the_current_photo_instead_of_the_saved_position ... ok
+test tests::application_rejects_overlapping_paths_before_opening_state_or_cache ... ok
+test tests::background_scan_failure_keeps_prior_published_library_and_reports_failed ... ok
+test tests::batch_photo_state_applies_to_every_requested_photo ... ok
+test tests::batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests ... ok
+test tests::batch_photo_state_reports_a_missing_photo_without_blocking_the_rest ... ok
+test tests::browse_delete_releases_the_snapshot ... ok
+test tests::browse_open_honors_preferred_photo_and_rejects_invalid_ids ... ok
+test tests::browse_open_rejects_unknown_and_source_invalid_order ... ok
+test tests::browse_position_resolves_identity_within_one_snapshot ... ok
+test tests::browse_protocol_fixtures_execute_with_captured_token ... ok
+test tests::browse_selection_filter_membership_is_frozen_until_the_source_reopens ... ok
+test tests::browse_selection_filter_projects_album_and_folder_sources_without_writes ... ok
+test tests::browse_selection_filter_selects_from_the_source_order_with_source_counts ... ok
+test tests::browse_tokens_are_process_unique_and_expiry_is_enforced ... ok
+test tests::browse_view_order_reverses_only_capture_time_and_keeps_missing_last ... ok
+test tests::browse_windows_hydrate_only_current_thumbnail_manifests ... ok
+test tests::browse_windows_report_the_ordering_original_filename ... ok
+test tests::cache_protocol_fixtures_execute_with_declared_headers ... ok
+test tests::checked_in_startup_vectors_parse_through_the_typed_config ... ok
+test tests::descending_paged_windows_stay_globally_ordered_without_duplicates ... ok
+test tests::dropped_scan_waiters_do_not_cancel_the_leader_or_leak_applying_status ... ok
+test tests::empty_album_opens_lists_and_accepts_first_member ... ok
+test tests::file_location_counts_propagate_through_deep_ancestors ... ok
+test tests::file_location_queries_decode_spaces_and_report_exact_expiry ... ok
+test tests::file_location_windows_derive_bounded_folders_from_one_publication ... ok
+test tests::folder_album_add_uses_recursive_publication_and_is_idempotent ... ok
+test tests::folder_sources_filter_ancestry_and_expire_with_publication ... ok
+test tests::folder_view_order_reverses_only_capture_time_within_the_subtree ... ok
+test tests::fresh_service_is_healthy_while_library_initializes_then_status_reaches_published_idle ... ok
+test tests::header_limit_rejects_only_values_over_sixteen_kib ... ok
+test tests::healthz_is_exact_json_and_head_api_has_no_body ... ok
+test tests::mutation_body_limits_and_json_errors_are_rejected_before_writes ... ok
+test tests::mutations_do_not_require_origin_and_scan_has_no_body ... ok
+test tests::no_usable_source_seed_is_short_circuited_from_published_facts ... ok
+test tests::occupied_port_startup_cleans_up_and_can_retry ... ok
+test tests::offline_expansion_config_requires_only_storage_settings ... ok
+test tests::overview_and_browse_windows_remain_bounded_for_forty_thousand_photos ... ok
+test tests::persisted_forty_thousand_photo_library_serves_bounded_overview_before_rescan_completes ... ok
+test tests::persisted_library_serves_immediately_while_background_rescan_runs ... ok
+test tests::photo_albums_route_reports_true_membership_from_the_owner ... ok
+test tests::photo_json_omits_optional_values_and_preserves_original_order ... ok
+test tests::photo_metadata_protocol_returns_capture_time_when_available ... ok
+test tests::photo_state_mutation_updates_the_browse_snapshot_without_reload ... ok
+test tests::post_to_static_path_is_rejected_without_reading_or_mutating ... ok
+test tests::preview_derivative_protocol_revalidates_source_and_reports_stale_truth ... ok
+test tests::publication_keeps_scan_owned_invalidation_availability_and_user_state ... ok
+test tests::publication_preserves_facts_committed_between_scan_and_publication ... ok
+test tests::real_port_zero_server_is_ready_and_close_is_idempotent ... ok
+test tests::recovery_http_rejects_duplicate_source_mappings ... ok
+test tests::recovery_http_restores_unavailable_photo_without_fingerprint ... ok
+test tests::recovery_http_retires_discovered_destination_photo ... ok
+test tests::recovery_http_validates_requests ... ok
+test tests::recovery_http_verifies_fingerprints_and_rejects_mismatches ... ok
+test tests::response_goldens_match_real_serialized_routes ... ok
+test tests::shared_protocol_vectors_execute_all_requests_with_exact_results ... ok
+test tests::shutdown_drains_background_scan_before_closing ... ok
+test tests::shutdown_returns_only_after_live_scan_waiters_receive_terminal_status ... ok
+test tests::start_server_rejects_missing_web_root_before_opening_application ... ok
+test tests::startup_and_explicit_waiters_share_one_scan_cycle_and_terminal_status ... ok
+test tests::startup_defaults_to_loopback_and_allows_custom_host ... ok
+test tests::startup_vectors_reject_relative_paths_and_invalid_ports ... ok
+test tests::static_file_symlink_is_not_followed ... ok
+test tests::static_files_have_revalidation_and_head_without_a_body ... ok
+test tests::storage_layout_rejects_symlink_aliases ... ok
+test tests::thumbnail_requests_keep_review_preview_facts_exact ... ok
+test tests::trusted_network_listener_does_not_use_request_metadata_as_access_control ... ok
+test tests::unbounded_library_routes_are_retired ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.19s
+
+     Running unittests src/main.rs (target/debug/deps/slipstream_server-deb0d04dedc10844)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/expand_library_cli.rs (target/debug/deps/expand_library_cli-0a711bd21ac152c7)
+
+running 1 test
+test expand_library_command_updates_binding_and_location_then_scans ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+   Doc-tests slipstream_compat
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slipstream_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests slipstream_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+$ bun run test:raw -- --list
+$ bun run scripts/test-raw.ts --list
+native and service scenarios: 4 discovered
+  confinement::tests::sony_original_remains_unchanged
+  native::tests::sony_embedded_preview_is_largest_usable_candidate_and_original_is_unchanged
+  preview::tests::raw_photo_previews_from_embedded_jpeg_independent_of_sibling_jpeg
+  preview::tests::sony_opt_in_service_uses_largest_embedded_candidate_without_mutating_original
+real-camera browser scenarios: 1 discovered
+  real-camera: shows matching JPEG then RAW embedded JPEG through the mobile production Review Session
+$ bun test src/pages/library-browser/model
+bun test v1.4.0 (34cbb9a40)
+
+src/pages/library-browser/model/application-owner.test.ts:
+(pass) ApplicationOwner > keeps a newer Overview failure visible when an older success lands [1.78ms]
+(pass) ApplicationOwner > Album persistence fences older Overview when convergence fails [0.31ms]
+(pass) ApplicationOwner > publication mismatch fences another old response before commit [0.14ms]
+(pass) ApplicationOwner > keeps a first foreground publication mismatch recoverable [0.08ms]
+(pass) ApplicationOwner > retains Overview recovery across a failed retry mismatch [0.12ms]
+(pass) ApplicationOwner > releases Overview recovery and reaches once after a current commit [0.23ms]
+(pass) ApplicationOwner > uses idle and active poll cadence while an answered status failure stays silent [0.28ms]
+(pass) ApplicationOwner > reports the transport outcome of every status probe to the application [0.29ms]
+(pass) ApplicationOwner > keeps probing reachability while the Library check stays failed [0.24ms]
+(pass) ApplicationOwner > claims the Retry action when the committed overview is already failed [0.13ms]
+(pass) ApplicationOwner > settles one terminal scan and signs a one-shot refresh intent [0.49ms]
+(pass) ApplicationOwner > monitor consumes a held scan command exactly once without publication deduplication [0.38ms]
+(pass) ApplicationOwner > classifies rejected scan HTTP status inside the Application owner [0.28ms]
+(pass) ApplicationOwner > keeps the newest Album notice when an older failure settles late [0.04ms]
+(pass) ApplicationOwner > a newer Album mutation rejects an older saved-position confirmation [0.20ms]
+(pass) ApplicationOwner > a foreground load merges saved position and reaches normally [0.23ms]
+(pass) ApplicationOwner > a later Overview owns saved progress cleared by the server [0.12ms]
+(pass) ApplicationOwner > an unrelated Album mutation preserves saved-position authority [0.07ms]
+(pass) ApplicationOwner > exact position invalidation preserves a newer shared Overview [0.09ms]
+(pass) ApplicationOwner > dispose silences a held Overview response [0.07ms]
+(pass) ApplicationOwner > dispose silences a held status poll and cancels its cadence [0.09ms]
+(pass) ApplicationOwner > dispose silences a held post-Album Overview refresh [0.10ms]
+(pass) ApplicationOwner > disposed public commands are inert and cannot admit new work [0.10ms]
+(pass) ApplicationOwner > freezes emitted Summary actions against consumer forgery [0.12ms]
+(pass) ApplicationOwner > consumer event failures cannot reclassify committed state or escape dispose [0.18ms]
+
+src/pages/library-browser/model/saved-position-owner.test.ts:
+(pass) SavedPositionOwner > serializes admitted writes and skips queued stale targets before HTTP [0.41ms]
+(pass) SavedPositionOwner > classifies confirmed, stale, and answered failures without policy leakage [0.12ms]
+(pass) SavedPositionOwner > reports current transport failure and detaches every stale settlement [0.21ms]
+(pass) SavedPositionOwner > dispose rejects new writes, detaches in-flight work, and skips queued work [0.08ms]
+
+src/pages/library-browser/model/file-location-owner.test.ts:
+(pass) FileLocationOwner > keeps exact failed ranges while unrelated windows remain usable [1.89ms]
+(pass) FileLocationOwner > shares one root bind and detaches every waiter on reset [0.14ms]
+(pass) FileLocationOwner > reports publication conflicts without rebinding or changing retained state [0.09ms]
+(pass) FileLocationOwner > bounds expanded direct-child windows while retaining the root [0.53ms]
+(pass) FileLocationOwner > same-parent supersession detaches a late response and keeps the newer page [0.18ms]
+(pass) FileLocationOwner > collapse does not detach an already admitted parent window [0.12ms]
+(pass) FileLocationOwner > detaches a mismatched bound publication and sends the exact query [0.12ms]
+(pass) FileLocationOwner > replaces only the exact failure identity and retains newest ordering [0.19ms]
+(pass) FileLocationOwner > dispose suppresses a late root commit [0.09ms]
+(pass) FileLocationOwner > a root bind requested after dispose settles detached [0.04ms]
+(pass) FileLocationOwner > invalidates produced outcomes after reset or dispose [0.43ms]
+(pass) FileLocationOwner > returns one outcome identity to all shared root-binding joiners [0.15ms]
+
+src/pages/library-browser/model/async-ownership.test.ts:
+(pass) TaskScope > latest work aborts or detaches its predecessor and cleans exactly once [0.16ms]
+(pass) TaskScope > coalesced callers join one keyed operation and cleanup after shared settlement [0.14ms]
+(pass) TaskScope > halting a detached shared task settles all joiners immediately [0.07ms]
+(pass) TaskScope > ordered work keeps older success after newer failure but honors commit order and floor [0.03ms]
+(pass) SettlementFamily > deduplicates admission while preserving global latest settlement ownership [0.07ms]
+(pass) SummaryNoticeChannel > preserves an older admitted failure behind newer actionable recovery [0.04ms]
+(pass) SummaryNoticeChannel > a newer Album success clears displayed failure but not a failure that settles later [0.07ms]
+(pass) SummaryNoticeChannel > reload atomically invalidates active, pending, release, and background work [0.05ms]
+(pass) SummaryNoticeChannel > silent failures discard their one-shot background epoch [0.01ms]
+(pass) SummaryNoticeChannel > releaseKind requires an authorizer from the same owner kind [0.01ms]
+(pass) SummaryNoticeChannel > each background request gets one monotonic one-shot epoch [0.01ms]
+(pass) RecoveryGate > unrelated reachability cannot release a current Photo recovery claim [0.13ms]
+(pass) RecoveryGate > a lost transport probe withholds readiness without owning a claim [0.03ms]
+(pass) RecoveryGate > A to B success retires predecessor claims without touching independent ranges [0.10ms]
+(pass) RecoveryGate > B failure replaces A predecessor and stale A never reactivates [0.05ms]
+(pass) RecoveryGate > a recovered claim is consumed and cannot be reactivated [0.02ms]
+(pass) RecoveryGate > transition identity is gate-local, atomic, and one-shot [0.04ms]
+(pass) RecoveryGate > rapid A to B to C retires the full predecessor lineage but keeps unrelated C claims [0.04ms]
+
+src/pages/library-browser/model/source-grid-owner.test.ts:
+(pass) SourceGridOwner > releases stale and disposed Browse tokens exactly once [0.86ms]
+(pass) SourceGridOwner > releases the original and every stale token across three overlapping replacements [0.30ms]
+(pass) SourceGridOwner > sends only the requested order and reports it as the open view order [0.22ms]
+(pass) SourceGridOwner > sends only a non-default Selection filter and replaces the open counts [0.14ms]
+(pass) SourceGridOwner > moves the server counts only for one confirmed Selection transition [0.78ms]
+(pass) SourceGridOwner > moves the counts for one confirmed batch outcome by Photo identity [0.26ms]
+(pass) SourceGridOwner > reconciles a refreshed Photo fact against the source counts [0.20ms]
+(pass) SourceGridOwner > keeps reconciled progress counts non-negative after an external write [0.12ms]
+(pass) SourceGridOwner > keeps the attempted source and retry state after an open failure [0.09ms]
+(pass) SourceGridOwner > retains at most three bounded Browse windows [0.66ms]
+(pass) SourceGridOwner > retains Photo, Original kind, and Preview facts in a bounded window [0.17ms]
+(pass) SourceGridOwner > resolves retained and remote Photo positions without loading the source [0.43ms]
+(pass) SourceGridOwner > does not commit a stale window into a replacement source [0.19ms]
+(pass) SourceGridOwner > promotes an aborted Grid window to explicit Photo-owned high priority [0.24ms]
+(pass) SourceGridOwner > returns the cancelled opaque Photo owner without mapping it to the replacement lifetime [0.23ms]
+(pass) SourceGridOwner > classifies expired, answered, and transport window failures for the explicit owner [0.31ms]
+(pass) SourceGridOwner > rejects malformed opens and short non-tail windows [0.20ms]
+(pass) SourceGridOwner > carries the ordering Original filename and rejects a malformed one [0.25ms]
+(pass) SourceGridOwner > keeps a replacement source unready until its required window loads [0.37ms]
+(pass) SourceGridOwner > owns the Grid position and moves its pending anchor only for the current source [0.22ms]
+(pass) SourceGridOwner > rejects stale-source and evicted Photo patches instead of injecting facts [0.50ms]
+(pass) SourceGridOwner > clears an expired token before failed reopen and retries with a new snapshot [0.48ms]
+(pass) SourceGridOwner > coalesces thumbnails and prevents a detached image from poisoning its replacement [0.44ms]
+(pass) SourceGridOwner > retains the same failed hydrated URL across Grid replacement and accepts a changed URL [0.13ms]
+(pass) SourceGridOwner > bounds the rebuildable Thumbnail cache independently of Library size [1.97ms]
+(pass) SourceGridOwner > bounds Thumbnail delivery failures and accepts a newly hydrated URL [1.23ms]
+(pass) SourceGridOwner > releases the owner's hold on Grid images the view drops [5.10ms]
+(pass) SourceGridOwner > cleans a browser-managed image transfer exactly once [0.16ms]
+(pass) SourceGridOwner > coalesces concurrent range demands into one fetch and one settlement [3.60ms]
+(pass) SourceGridOwner > keeps facts for the latest reported range when an older window settles late [2.42ms]
+(pass) SourceGridOwner > covers a large reported range and stays bounded when distant windows load [1.73ms]
+(pass) SourceGridOwner > a settled Photo window keeps its own facts under the retention bound [1.40ms]
+(pass) SourceGridOwner > protects the actual clamped tail anchor under retention pressure [1.51ms]
+(pass) SourceGridOwner > clamps pathological range reports and keeps the fixed floor [1.26ms]
+(pass) SourceGridOwner > visits the clamped tail window the range start cannot align to [4.89ms]
+(pass) SourceGridOwner > does not re-request a fully loaded tail window [3.57ms]
+(pass) SourceGridOwner > shares one in-flight window between range admission and a control-flow load [2.56ms]
+(pass) SourceGridOwner > shares one in-flight window between a Grid range and a source load [2.31ms]
+(pass) SourceGridOwner > one throwing settlement subscriber cannot silence the others [1.19ms]
+(pass) SourceGridOwner > notifies failed and expired range settlements once [1.23ms]
+
+src/pages/library-browser/model/browser-navigation.test.ts:
+(pass) browser address decoding > the six documented examples decode to their destinations [0.29ms]
+(pass) browser address decoding > a bare address and an omitted source both mean All Photos [0.02ms]
+(pass) browser address decoding > an Album accepts album-order and rejects it elsewhere [0.03ms]
+(pass) browser address decoding > a duplicate recognized parameter is invalid [0.02ms]
+(pass) browser address decoding > an empty value for an optional parameter is invalid [0.03ms]
+(pass) browser address decoding > unknown values and source-incompatible options are invalid [0.04ms]
+(pass) browser address decoding > Folder Locations stay relative and component-valid after one decode [0.09ms]
+(pass) browser address decoding > an encoded reserved character inside a valid Location round-trips [0.06ms]
+(pass) browser address decoding > unknown query keys are ignored and never make an address invalid [0.04ms]
+(pass) browser address decoding > identifiers outside the server's shape are invalid [0.02ms]
+(pass) browser address encoding > the encoder omits defaults and keeps canonical parameter order [0.04ms]
+(pass) browser address encoding > every documented example round-trips through encode and decode [0.05ms]
+(pass) browser address encoding > an address is canonicalized by dropping unknown keys [0.02ms]
+(pass) browser address encoding > a Grid destination drops the Photo identity [0.02ms]
+(pass) browser address encoding > same source, order, and filter is what lets a traversal reuse a Snapshot [0.02ms]
+(pass) history entry state > a valid entry is read back with its bounded metadata [0.06ms]
+(pass) history entry state > absent, malformed, and unknown-version state is a direct entry [0.03ms]
+(pass) history entry state > the namespace merges without overwriting other history state fields [0.03ms]
+
+src/pages/library-browser/model/photo-owner.test.ts:
+(pass) PhotoOwner > owns current and adjacent Preview priority and suppresses stale completion [0.76ms]
+(pass) PhotoOwner > patches ready Preview facts and owns the browser image lease [0.23ms]
+(pass) PhotoOwner > always settles Selection and Rating writes with exact failure policy [0.45ms]
+(pass) PhotoOwner > applies a persisted mutation, records one Undo, and advances only by outcome [0.15ms]
+(pass) PhotoOwner > resolves an Undo target by Photo identity after a source replacement [0.34ms]
+(pass) PhotoOwner > addresses a Grid write by position and records the same one-level Undo [0.15ms]
+(pass) PhotoOwner > refuses Grid writes that address no change or no Photo [0.08ms]
+(pass) PhotoOwner > keeps Retry authority current while its Photo fact is reloaded [0.07ms]
+(pass) PhotoOwner > keeps a loaded Review image through pending navigation and releases it on commit [0.09ms]
+(pass) PhotoOwner > clears an unfinished Review transfer when navigation starts [0.04ms]
+(pass) PhotoOwner > retains a loaded Review image when pending navigation is canceled [0.05ms]
+(pass) PhotoOwner > commits a Photo navigation only after its target fact is available [0.07ms]
+(pass) PhotoOwner > does not commit a pending Photo navigation after source rebind [0.04ms]
+(pass) PhotoOwner > reloads an evicted Undo through an opaque window then returns to its Photo [0.13ms]
+(pass) PhotoOwner > keeps answered non-conflict Undo retryable and retires conflict or transport [0.24ms]
+(pass) PhotoOwner > dispose is idempotent, aborts reads, and lets admitted writes settle detached [0.13ms]
+(pass) PhotoOwner > applies one bounded batch write and records one batch Undo [0.69ms]
+(pass) PhotoOwner > presents per-Photo changed and missing outcomes without moving facts [0.16ms]
+(pass) PhotoOwner > consumes the prior Undo description when a batch write loses the connection [0.15ms]
+(pass) PhotoOwner > keeps a failed batch Undo retryable and retires its conflicts [0.14ms]
+(pass) PhotoOwner > keeps a batch Undo retryable after a transport failure [0.15ms]
+(pass) PhotoOwner > replaces the one-level Undo in both directions and survives a rebind [0.10ms]
+(pass) PhotoOwner > classifies a batch response that omits a requested Photo as malformed [0.09ms]
+(pass) PhotoOwner > rejects duplicated and invented batch outcomes as malformed [0.13ms]
+(pass) PhotoOwner > refuses an empty batch and detaches an admitted one on dispose [0.07ms]
+
+src/pages/library-browser/model/album-action-owner.test.ts:
+(pass) AlbumActionOwner > owns the five Album write routes and bodies [0.79ms]
+(pass) AlbumActionOwner > returns identity-bearing batch Add and compensation results [0.60ms]
+(pass) AlbumActionOwner > rejects incomplete identity-bearing membership results [0.08ms]
+(pass) AlbumActionOwner > rejects malformed identity-bearing compensation results [0.06ms]
+(pass) AlbumActionOwner > owns one bounded Folder-to-Album action and preserves its counts [0.21ms]
+(pass) AlbumActionOwner > returns only an exact, unambiguous created Album identity [0.40ms]
+(pass) AlbumActionOwner > suppresses only duplicate membership keys [0.16ms]
+(pass) AlbumActionOwner > keeps global latest-wins and Photo surface ownership independent [0.13ms]
+(pass) AlbumActionOwner > classifies answered client failures without losing connectivity [0.11ms]
+(pass) AlbumActionOwner > classifies service and transport failures for the global latest owner [0.18ms]
+(pass) AlbumActionOwner > keys form continuation by stable form identity [0.03ms]
+(pass) AlbumActionOwner > returns source-guarded current-Album removal metadata [0.07ms]
+(pass) AlbumActionOwner > dispose rejects new actions but lets an admitted write settle silently [0.06ms]
+
+ 155 pass
+ 0 fail
+ 2742 expect() calls
+Ran 155 tests across 8 files. [72.00ms]
+$ eslint .
+$ bun run --workspaces --if-present typecheck
+@slipstream/web typecheck: Exited with code 0
+$ bun run build:rust && bun run --cwd apps/web build && bun x playwright test
+$ cargo build --workspace --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+$ vite build
+vite v7.3.5 building client environment for production...
+transforming...
+✓ 26 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.40 kB │ gzip:  0.26 kB
+dist/assets/index-DPKchwhL.css   28.81 kB │ gzip:  5.94 kB
+dist/assets/index-CLfI0oim.js   194.71 kB │ gzip: 56.06 kB
+✓ built in 395ms
+
+Running 276 tests using 1 worker
+
+  ✓    1 apps/web/src/browser-review.browser-test.ts:1016:1 › uses singular and plural Photo counts in Grid status and source cards (676ms)
+  ✓    2 apps/web/src/browser-review.browser-test.ts:1077:1 › exposes one main and named sources navigation landmarks while loading and after rendering (291ms)
+  ✓    3 apps/web/src/browser-review.browser-test.ts:1148:1 › starts from a Album, shows facts, accessible controls, and resumes persisted progress after restart (1.1s)
+  ✓    4 apps/web/src/browser-review.browser-test.ts:1220:1 › narrow Grid discloses Sources as one named modal surface and restores focus (447ms)
+  ✓    5 apps/web/src/browser-review.browser-test.ts:1337:1 › narrow Grid uses its width and keeps Library Folder understandable (245ms)
+  ✓    6 apps/web/src/browser-review.browser-test.ts:1380:1 › short mobile viewports keep every Photo action reachable and operable (2.4s)
+  ✓    7 apps/web/src/browser-review.browser-test.ts:1551:1 › wide desktop Preview retains fit gesture ownership (358ms)
+  ✓    8 apps/web/src/browser-review.browser-test.ts:1564:1 › Preview zoom is explicit, bounded, and never records a decision (947ms)
+  ✓    9 apps/web/src/browser-review.browser-test.ts:1727:1 › desktop wheel zoom keeps the image point under the pointer stationary (739ms)
+  ✓   10 apps/web/src/browser-review.browser-test.ts:1769:1 › touch pinch zooms around the gesture midpoint without deciding (441ms)
+  ✓   11 apps/web/src/browser-review.browser-test.ts:1843:1 › window resize recomputes Fit and keeps a manual percentage (729ms)
+  ✓   12 apps/web/src/browser-review.browser-test.ts:1878:1 › a pan that began while zoomed never becomes a decision (524ms)
+  ✓   13 apps/web/src/browser-review.browser-test.ts:1932:1 › zoom controls are disabled while no Preview image is measurable (661ms)
+  ✓   14 apps/web/src/browser-review.browser-test.ts:1982:1 › a Photo without usable Preview bytes reports no zoom percentage (740ms)
+  ✓   15 apps/web/src/browser-review.browser-test.ts:2024:1 › a Fit below the manual floor keeps stepping monotonic (2.5s)
+  ✓   16 apps/web/src/browser-review.browser-test.ts:2070:1 › keyboard zoom-in steps the Preview without deciding (459ms)
+  ✓   17 apps/web/src/browser-review.browser-test.ts:2105:1 › returning to Grid View resets the zoom state to Fit (611ms)
+  ✓   18 apps/web/src/browser-review.browser-test.ts:2140:1 › a manual pan is re-clamped after the Preview area grows (677ms)
+  ✓   19 apps/web/src/browser-review.browser-test.ts:2192:1 › Photo View shows review capture metadata and explicit missing values (413ms)
+  ✓   20 apps/web/src/browser-review.browser-test.ts:2229:1 › Photo View reshapes Capture Time without reinterpreting it (945ms)
+  ✓   21 apps/web/src/browser-review.browser-test.ts:2437:5 › touch qualification › fit Preview at 844x390 yields real vertical touch scrolling while horizontal decisions and manual zoom pan remain owned (1.1s)
+  ✓   22 apps/web/src/browser-review.browser-test.ts:2437:5 › touch qualification › fit Preview at 667x375 yields real vertical touch scrolling while horizontal decisions and manual zoom pan remain owned (1.2s)
+  ✓   23 apps/web/src/browser-review.browser-test.ts:2444:1 › current source and Rating are programmatic states and Back to Grid restores Photo focus (686ms)
+  ✓   24 apps/web/src/browser-review.browser-test.ts:2511:1 › Album forms focus their task and restore a stable initiating action (1.2s)
+  ✓   25 apps/web/src/browser-review.browser-test.ts:2607:1 › Album names and management actions do not overlap (503ms)
+  ✓   26 apps/web/src/browser-review.browser-test.ts:2679:1 › a valid 120-character Album name stays contained in Grid and Photo View (623ms)
+  ✓   27 apps/web/src/browser-review.browser-test.ts:2821:1 › Clear is available only for a decided Photo (572ms)
+  ✓   28 apps/web/src/browser-review.browser-test.ts:2910:1 › visible controls and keyboard share mutation, advance, rating independence, and one-level undo semantics (915ms)
+  ✓   29 apps/web/src/browser-review.browser-test.ts:2970:1 › Sources owns the keyboard while the Photo View is inert (568ms)
+  ✓   30 apps/web/src/browser-review.browser-test.ts:3023:1 › Grid View moves cell focus with the arrow keys and opens the focused Photo (1.3s)
+  ✓   31 apps/web/src/browser-review.browser-test.ts:3092:1 › Grid View decision and Rating keys act on the focused cell without opening Photo View (1.1s)
+  ✓   32 apps/web/src/browser-review.browser-test.ts:3183:1 › a Grid Undo keeps the Grid owning the recovery routing (515ms)
+  ✓   33 apps/web/src/browser-review.browser-test.ts:3219:1 › Grid multi-selection marks Photos with modifiers, Select mode, and one clear exit (643ms)
+  ✓   34 apps/web/src/browser-review.browser-test.ts:3307:1 › Grid batch tray stays reachable at a 390px viewport (368ms)
+  ✓   35 apps/web/src/browser-review.browser-test.ts:3383:1 › Grid batch Select decides every multi-selected Photo and Undo restores them as one unit (722ms)
+  ✓   36 apps/web/src/browser-review.browser-test.ts:3484:1 › Grid batch failure retains the selection and offers retry (631ms)
+  ✓   37 apps/web/src/browser-review.browser-test.ts:3543:1 › Grid batch Undo restores the rest when one Photo changed elsewhere (658ms)
+  ✓   38 apps/web/src/browser-review.browser-test.ts:3581:1 › Grid batch reports a Photo the current Library no longer holds and decides the rest (775ms)
+  ✓   39 apps/web/src/browser-review.browser-test.ts:3706:1 › Grid batch Review refreshes changed Photos before a retry (803ms)
+  ✓   40 apps/web/src/browser-review.browser-test.ts:3787:1 › Grid batch Review retains a changed Photo when refresh shows it missing (737ms)
+  ✓   41 apps/web/src/browser-review.browser-test.ts:3874:1 › Grid batch Review retries after a refresh loses a retained Photo fact (699ms)
+  ✓   42 apps/web/src/browser-review.browser-test.ts:3956:1 › Grid batch Review keeps a refresh failure retryable (955ms)
+  ✓   43 apps/web/src/browser-review.browser-test.ts:4034:1 › Grid batch Review keeps existing Photos under retention pressure (1.4s)
+  ✓   44 apps/web/src/browser-review.browser-test.ts:4082:1 › Grid batch Add to Album adds every multi-selected Photo through one bounded write (1.1s)
+  ✓   45 apps/web/src/browser-review.browser-test.ts:4185:1 › deleting the target Album expires its batch compensation action (627ms)
+  ✓   46 apps/web/src/browser-review.browser-test.ts:4230:1 › Album compensation reports when it clears a saved position (586ms)
+  ✓   47 apps/web/src/browser-review.browser-test.ts:4287:1 › an Album batch result states that the resume point is unchanged (774ms)
+  ✓   48 apps/web/src/browser-review.browser-test.ts:4339:1 › Grid multi-selection stops at the batch bound and names it (640ms)
+  ✓   49 apps/web/src/browser-review.browser-test.ts:4390:1 › Grid Select mode and the batch actions are reachable from the keyboard (363ms)
+  ✓   50 apps/web/src/browser-review.browser-test.ts:4473:1 › a settling batch never pulls focus out of the batch tray (728ms)
+  ✓   51 apps/web/src/browser-review.browser-test.ts:4535:1 › a focused batch control keeps a reachable focus while its batch settles (403ms)
+  ✓   52 apps/web/src/browser-review.browser-test.ts:4587:1 › Opening another source clears the Grid multi-selection (494ms)
+  ✓   53 apps/web/src/browser-review.browser-test.ts:4617:1 › Undo of a Photo View Rating that did not advance stays in the open Grid (670ms)
+  ✓   54 apps/web/src/browser-review.browser-test.ts:4650:1 › Grid keyboard movement follows the rendered row at every thumbnail size (1.4s)
+  ✓   55 apps/web/src/browser-review.browser-test.ts:4703:1 › Grid keyboard movement works at a compact viewport and yields to the Sources drawer (555ms)
+  ✓   56 apps/web/src/browser-review.browser-test.ts:4744:1 › a failed Grid decision reports on the Grid status line and keeps Photo View closed (554ms)
+  ✓   57 apps/web/src/browser-review.browser-test.ts:4791:1 › fit-mode Pointer Events show pending feedback, ignore below threshold, and commit right/left only on release (489ms)
+  ✓   58 apps/web/src/browser-review.browser-test.ts:4863:1 › touch Rating Wheel previews six values and commits once on release (6.6s)
+  ✓   59 apps/web/src/browser-review.browser-test.ts:5015:1 › mobile Photo View presents the Quick Action Dock and reachable secondary tools (684ms)
+  ✓   60 apps/web/src/browser-review.browser-test.ts:5186:1 › mobile qualification measures the continuous touch path and action surfaces (1.5s)
+  ✓   61 apps/web/src/browser-review.browser-test.ts:5363:1 › mobile qualification measures delayed Preview and explicit recovery (680ms)
+  ✓   62 apps/web/src/browser-review.browser-test.ts:5455:1 › mobile qualification fences a delayed Rating write after source navigation (737ms)
+  ✓   63 apps/web/src/browser-review.browser-test.ts:5547:1 › Rating Wheel hands off before the hold and cancels on competing touch input (2.4s)
+  ✓   64 apps/web/src/browser-review.browser-test.ts:5720:1 › Rating Wheel failures keep the prior Rating and Photo position honest (1.4s)
+  ✓   65 apps/web/src/browser-review.browser-test.ts:5775:1 › Rating Wheel reuses answered and malformed mutation status (2.4s)
+  ✓   66 apps/web/src/browser-review.browser-test.ts:5849:1 › swipe direction labels stay out of sight until a drag is pending on a hover-capable pointer (336ms)
+  ✓   67 apps/web/src/browser-review.browser-test.ts:5895:3 › touch swipe direction labels › stay visible for a touch pointer without a drag (332ms)
+  ✓   68 apps/web/src/browser-review.browser-test.ts:5911:1 › persistence failure and disconnect do not advance or lie, and explicit Retry recovers in place (801ms)
+  ✓   69 apps/web/src/browser-review.browser-test.ts:5984:1 › an answered non-conflict Undo failure remains retryable (602ms)
+  ✓   70 apps/web/src/browser-review.browser-test.ts:6039:1 › a stale answered Undo failure cannot restore Undo into a replacement source (646ms)
+  ✓   71 apps/web/src/browser-review.browser-test.ts:6087:1 › an idle browser reports a lost connection from the status probe (8.1s)
+  ✓   72 apps/web/src/browser-review.browser-test.ts:6131:1 › a connection proven outside the probe is lost again when the probe reports it (5.3s)
+  ✓   73 apps/web/src/browser-review.browser-test.ts:6180:1 › a usable status answer leaves an established connection untouched (5.4s)
+  ✓   74 apps/web/src/browser-review.browser-test.ts:6231:1 › an uncertain Undo retires Undo and requires Photo Retry (602ms)
+  ✓   75 apps/web/src/browser-review.browser-test.ts:6256:1 › stale undo conflict is visible and zoomed horizontal drag pans without mutating; navigation resets fit (984ms)
+  ✓   76 apps/web/src/browser-review.browser-test.ts:6310:1 › Photo View recovery status wraps without hiding Retry or lower controls (1.1s)
+  ✓   77 apps/web/src/browser-review.browser-test.ts:6414:1 › keeps unavailable Photos ordered and allows their decisions without a Preview (687ms)
+  ✓   78 apps/web/src/browser-review.browser-test.ts:6454:1 › album management creates, renames, and deletes Albums with confirmation (704ms)
+  ✓   79 apps/web/src/browser-review.browser-test.ts:6503:1 › creating an Album opens that exact empty Album on desktop and narrow layouts (1.1s)
+  ✓   80 apps/web/src/browser-review.browser-test.ts:6616:1 › a delayed Album creation cannot replace a newer source or Photo (878ms)
+  ✓   81 apps/web/src/browser-review.browser-test.ts:6695:1 › deleting the open album returns to the All Photos source (477ms)
+  ✓   82 apps/web/src/browser-review.browser-test.ts:6738:1 › the current photo joins and leaves albums from the photo view (1.0s)
+  ✓   83 apps/web/src/browser-review.browser-test.ts:6820:1 › the membership panel lists the current Photo's Albums across sources and reloads (864ms)
+  ✓   84 apps/web/src/browser-review.browser-test.ts:6914:1 › a failed membership read stays retryable without blocking decisions (849ms)
+  ✓   85 apps/web/src/browser-review.browser-test.ts:6955:1 › a held membership read is discarded when the Photo changes (427ms)
+  ✓   86 apps/web/src/browser-review.browser-test.ts:7047:1 › deleting an Album re-verifies the current Photo's membership (576ms)
+  ✓   87 apps/web/src/browser-review.browser-test.ts:7088:1 › the membership panel is operable by keyboard (409ms)
+  ✓   88 apps/web/src/browser-review.browser-test.ts:7121:1 › an older saved-position response cannot supersede a newer Album removal (773ms)
+  ✓   89 apps/web/src/browser-review.browser-test.ts:7242:1 › a successful membership retry recovers its exact Album connection (579ms)
+  ✓   90 apps/web/src/browser-review.browser-test.ts:7293:1 › a membership read landing during a failed toggle never strands the panel (610ms)
+  ✓   91 apps/web/src/browser-review.browser-test.ts:7376:1 › a membership read never repaints over an in-flight toggle (745ms)
+  ✓   92 apps/web/src/browser-review.browser-test.ts:7489:1 › different Album membership keys admit independently (416ms)
+  ✓   93 apps/web/src/browser-review.browser-test.ts:7547:1 › album management failures are reported without claiming completion (468ms)
+  ✓   94 apps/web/src/browser-review.browser-test.ts:7567:1 › album creation reports duplicates and validates name boundaries by code points (577ms)
+  ✓   95 apps/web/src/browser-review.browser-test.ts:7612:1 › creating an album from the photo view opens it and makes it available for membership (880ms)
+  ✓   96 apps/web/src/browser-review.browser-test.ts:7653:1 › a failed removal stays retryable from the photo view (734ms)
+  ✓   97 apps/web/src/browser-review.browser-test.ts:7695:1 › renaming the open album updates every heading in place (524ms)
+  ✓   98 apps/web/src/browser-review.browser-test.ts:7718:1 › album form operations do not clobber a newer form (562ms)
+  ✓   99 apps/web/src/browser-review.browser-test.ts:7759:1 › a late album success cannot overwrite a newer removal notice (610ms)
+  ✓  100 apps/web/src/browser-review.browser-test.ts:7798:1 › a superseded album failure surfaces in the library summary (598ms)
+  ✓  101 apps/web/src/browser-review.browser-test.ts:7847:1 › a pending delete keeps a newer create form and its draft (545ms)
+  ✓  102 apps/web/src/browser-review.browser-test.ts:7887:1 › a renamed open album reconnects under its new name (676ms)
+  ✓  103 apps/web/src/browser-review.browser-test.ts:7921:1 › an older overview success still bootstraps after a newer reload fails (468ms)
+  ✓  104 apps/web/src/browser-review.browser-test.ts:7974:1 › the application status monitor owns scan failure, retry, and completion (8.1s)
+  ✓  105 apps/web/src/browser-review.browser-test.ts:8112:1 › an Overview failure cannot re-enable an admitted empty-Library check (2.4s)
+  ✓  106 apps/web/src/browser-review.browser-test.ts:8223:1 › terminal scan completion fences a delayed applying-to-idle status pair (5.8s)
+  ✓  107 apps/web/src/browser-review.browser-test.ts:8316:1 › a stale overview response cannot revert newer album state (473ms)
+  ✓  108 apps/web/src/browser-review.browser-test.ts:8373:1 › publication validation rejects an overview body captured before replacement (300ms)
+  ✓  109 apps/web/src/browser-review.browser-test.ts:8431:1 › an unpublished Overview cannot replace an already published generation (180ms)
+  ✓  110 apps/web/src/browser-review.browser-test.ts:8468:1 › album form re-renders preserve caret position and validation messages (804ms)
+  ✓  111 apps/web/src/browser-review.browser-test.ts:8516:1 › in-flight membership and delete operations stay disabled across re-renders (1.3s)
+  ✓  112 apps/web/src/browser-review.browser-test.ts:8600:1 › a current saved-position failure blocks decisions until Photo Retry confirms it (533ms)
+  ✓  113 apps/web/src/browser-review.browser-test.ts:8672:1 › saved-position confirmation cannot be reverted by an older Overview (536ms)
+  ✓  114 apps/web/src/browser-review.browser-test.ts:8746:1 › an answered stale saved-position write is not a disconnection (505ms)
+  ✓  115 apps/web/src/browser-review.browser-test.ts:8777:1 › queued stale saved positions are skipped and sent stale success is silent (738ms)
+  ✓  116 apps/web/src/browser-review.browser-test.ts:8841:1 › duplicate album names answer without presenting a disconnection (514ms)
+  ✓  117 apps/web/src/browser-review.browser-test.ts:8872:1 › album form inputs keep focus across background refreshes (805ms)
+  ✓  118 apps/web/src/browser-review.browser-test.ts:8901:1 › source panel album failures report beside the library summary, not the photo status (424ms)
+  ✓  119 apps/web/src/browser-review.browser-test.ts:8927:1 › an admitted album add completes after switching sources (518ms)
+  ✓  120 apps/web/src/browser-review.browser-test.ts:8968:1 › file locations show a bounded tree and open recursive folder sources (942ms)
+  ✓  121 apps/web/src/browser-review.browser-test.ts:9037:1 › adds the current recursive Folder to an Album from Grid View (448ms)
+  ✓  122 apps/web/src/browser-review.browser-test.ts:9086:1 › an empty Library still shows and opens the Library Folder root (655ms)
+  ✓  123 apps/web/src/browser-review.browser-test.ts:9148:1 › an empty All Photos source remains openable after switching away (571ms)
+  ✓  124 apps/web/src/browser-review.browser-test.ts:9179:1 › file location publication values stay unique across server restarts (117ms)
+  ✓  125 apps/web/src/browser-review.browser-test.ts:9197:1 › a failed folder source open reconnects to the same folder, not All Photos (534ms)
+  ✓  126 apps/web/src/browser-review.browser-test.ts:9245:1 › a remembered folder source waits for the File Location binding before reopening (618ms)
+  ✓  127 apps/web/src/browser-review.browser-test.ts:9313:1 › delayed File Location responses from a superseded publication are discarded (620ms)
+  ✓  128 apps/web/src/browser-review.browser-test.ts:9368:1 › failed File Location ranges keep siblings and retry only the failed range (815ms)
+  ✓  129 apps/web/src/browser-review.browser-test.ts:9456:1 › independent failed File Location parents keep exact retry ownership (778ms)
+  ✓  130 apps/web/src/browser-review.browser-test.ts:9514:1 › a leaf Folder renders no expand control and keeps its row aligned (317ms)
+  ✓  131 apps/web/src/browser-review.browser-test.ts:9558:1 › Library refresh stays reachable without owning a primary slot (339ms)
+  ✓  132 apps/web/src/browser-review.browser-test.ts:9598:1 › file locations reload coherently when a scan replaces the publication (499ms)
+  ✓  133 apps/web/src/browser-review.browser-test.ts:9635:1 › shows empty and no-album start states and only uses same-service requests (406ms)
+  ✓  134 apps/web/src/browser-review.browser-test.ts:9671:1 › persists manual navigation and advanced current Photo across leave, reload, and restart (1.0s)
+  ✓  135 apps/web/src/browser-review.browser-test.ts:9722:1 › binds gestures to their starting Photo and covers exact thresholds, cancellation, and disconnect (964ms)
+  ✓  136 apps/web/src/browser-review.browser-test.ts:9820:1 › keyboard works from focused buttons, real client deltas pan, and uncertain mutation retires undo (1.3s)
+  -  137 apps/web/src/browser-review.browser-test.ts:9915:1 › real-camera: shows matching JPEG then RAW embedded JPEG through the mobile production Review Session
+  ✓  138 apps/web/src/browser-review.browser-test.ts:10000:1 › Library Review uses server Capture Time order, snapshots it, and stores no progress (747ms)
+  ✓  139 apps/web/src/browser-review.browser-test.ts:10073:1 › Grid sort offers one explicit Capture Time order and refreshes in that order (877ms)
+  ✓  140 apps/web/src/browser-review.browser-test.ts:10170:1 › Grid sort keeps the current Photo by identity and repositions around it (591ms)
+  ✓  141 apps/web/src/browser-review.browser-test.ts:10235:1 › Album sort defaults to Album order and time views leave positions alone (1.0s)
+  ✓  142 apps/web/src/browser-review.browser-test.ts:10325:1 › a sort open superseded by a newer source open leaves the newer order committed (545ms)
+  ✓  143 apps/web/src/browser-review.browser-test.ts:10396:1 › a Folder sort change waits for the File Location binding before reopening (2.6s)
+  ✓  144 apps/web/src/browser-review.browser-test.ts:10500:1 › an Album sort change keeps the current Photo and its resume identity (1.0s)
+  ✓  145 apps/web/src/browser-review.browser-test.ts:10596:1 › Previous and Next follow the order selected from the Grid (549ms)
+  ✓  146 apps/web/src/browser-review.browser-test.ts:10668:1 › a Library order switch aligns windows beyond the first Grid window (850ms)
+  ✓  147 apps/web/src/browser-review.browser-test.ts:10774:1 › active Library Review keeps its Capture Time snapshot until the next Session (511ms)
+  ✓  148 apps/web/src/browser-review.browser-test.ts:10822:1 › Album Review snapshots explicit members across rescan and reconnect (762ms)
+  ✓  149 apps/web/src/browser-review.browser-test.ts:10879:1 › reconnect retains confirmed undo and a delayed stale progress failure stays silent (969ms)
+  ✓  150 apps/web/src/browser-review.browser-test.ts:10948:1 › Album resume wraps past an unavailable saved member and retains it when all are unavailable (524ms)
+  ✓  151 apps/web/src/browser-review.browser-test.ts:11011:1 › ready Preview facts render immediately during revalidation (639ms)
+  ✓  152 apps/web/src/browser-review.browser-test.ts:11057:1 › Grid thumbnails survive virtual re-renders without refetching (264ms)
+  ✓  153 apps/web/src/browser-review.browser-test.ts:11105:1 › hydrated Grid thumbnails render without thumbnail API requests (500ms)
+  ✓  154 apps/web/src/browser-review.browser-test.ts:11145:1 › source switching reaches Ready while Grid derivatives remain held (635ms)
+  ✓  155 apps/web/src/browser-review.browser-test.ts:11212:1 › an admitted Album write settles after application teardown without presentation (362ms)
+  ✓  156 apps/web/src/browser-review.browser-test.ts:11254:1 › application teardown halts image ownership and releases the Browse token (2.1s)
+  ✓  157 apps/web/src/browser-review.browser-test.ts:11308:1 › application teardown during File Location rebind stays silent (335ms)
+  ✓  158 apps/web/src/browser-review.browser-test.ts:11360:1 › leaving Photo View cancels a pending review image transfer (305ms)
+  ✓  159 apps/web/src/browser-review.browser-test.ts:11405:1 › answered Browse-window failure owns source Retry and does not declare Ready (633ms)
+  ✓  160 apps/web/src/browser-review.browser-test.ts:11474:1 › current Preview HTTP failure disconnects until Photo Retry (596ms)
+  ✓  161 apps/web/src/browser-review.browser-test.ts:11542:1 › Photo Retry reports a replacement current fact instead of remaining in progress (531ms)
+  ✓  162 apps/web/src/browser-review.browser-test.ts:11588:1 › source switching aborts a pending current-Photo Preview request (467ms)
+  ✓  163 apps/web/src/browser-review.browser-test.ts:11630:1 › opening Photo View aborts Grid fallback thumbnail requests (326ms)
+  ✓  164 apps/web/src/browser-review.browser-test.ts:11664:1 › a superseded source open is aborted before the newer source renders (595ms)
+  ✓  165 apps/web/src/browser-review.browser-test.ts:11731:1 › source changes invalidate queued Grid renders (364ms)
+  ✓  166 apps/web/src/browser-review.browser-test.ts:11789:1 › source switching cancels the previous pending window (535ms)
+  ✓  167 apps/web/src/browser-review.browser-test.ts:11849:1 › source switching aborts fallback thumbnail requests (566ms)
+  ✓  168 apps/web/src/browser-review.browser-test.ts:11888:1 › scroll events coalesce Grid rendering to one animation frame (376ms)
+  ✓  169 apps/web/src/browser-review.browser-test.ts:11989:1 › a scroll burst admits one window request per covering aligned window (2.2s)
+  ✓  170 apps/web/src/browser-review.browser-test.ts:12027:1 › a scrolled Grid keeps the DOM of the Photos that stay rendered (428ms)
+  ✓  171 apps/web/src/browser-review.browser-test.ts:12094:1 › a fast multi-window scroll mutates the Grid at most once per frame (576ms)
+  ✓  172 apps/web/src/browser-review.browser-test.ts:12178:1 › a scroll reversal converges without churn or repeat requests (481ms)
+  ✓  173 apps/web/src/browser-review.browser-test.ts:12230:1 › out-of-order window settlements render every loaded Photo position (3.9s)
+  ✓  174 apps/web/src/browser-review.browser-test.ts:12290:1 › a large viewport loads only covering windows and stays bounded (1.3s)
+  ✓  175 apps/web/src/browser-review.browser-test.ts:12319:1 › a source switch rebuilds the Grid range for the replacement source (554ms)
+  ✓  176 apps/web/src/browser-review.browser-test.ts:12359:1 › Back to Grid restoration supersedes a queued scroll render (379ms)
+  ✓  177 apps/web/src/browser-review.browser-test.ts:12401:1 › hydrated Grid thumbnail delivery failures stay attached to the Photo (564ms)
+  ✓  178 apps/web/src/browser-review.browser-test.ts:12538:1 › Grid presents Photo, Original kind, and Preview facts without removing actions (353ms)
+  ✓  179 apps/web/src/browser-review.browser-test.ts:12621:1 › Grid and Photo View identify a Photo by its Original filename (276ms)
+  ✓  180 apps/web/src/browser-review.browser-test.ts:12679:1 › a long Original filename truncates without breaking Grid or Photo View (228ms)
+  ✓  181 apps/web/src/browser-review.browser-test.ts:12759:1 › Photo View shows a bounded filmstrip of neighbors and navigates through it (720ms)
+  ✓  182 apps/web/src/browser-review.browser-test.ts:12818:1 › a Photo View navigation binds again the strip thumbnails it detached mid-transfer (705ms)
+  ✓  183 apps/web/src/browser-review.browser-test.ts:12879:1 › the filmstrip marks the current Photo and keeps its decisions truthful (935ms)
+  ✓  184 apps/web/src/browser-review.browser-test.ts:12923:1 › the filmstrip follows the open source's filtered sequence (1.1s)
+  ✓  185 apps/web/src/browser-review.browser-test.ts:12974:1 › the filmstrip follows an Album's explicit order (521ms)
+  ✓  186 apps/web/src/browser-review.browser-test.ts:13020:1 › the filmstrip yields on a short viewport and stays inside a narrow one (690ms)
+  ✓  187 apps/web/src/browser-review.browser-test.ts:13110:1 › the filmstrip is keyboard operable without owning Photo View shortcuts (868ms)
+  ✓  188 apps/web/src/browser-review.browser-test.ts:13146:1 › the filmstrip presents only the neighbors its loaded window holds (2.1s)
+  ✓  189 apps/web/src/browser-review.browser-test.ts:13244:1 › a source without neighbors hides the filmstrip and binds nothing (369ms)
+  ✓  190 apps/web/src/browser-review.browser-test.ts:13270:1 › activating the current filmstrip entry keeps manual zoom and refetches nothing (581ms)
+  ✓  191 apps/web/src/browser-review.browser-test.ts:13321:1 › the filmstrip disables its entries while a navigation is in flight (1.8s)
+  ✓  192 apps/web/src/browser-review.browser-test.ts:13392:1 › a focused filmstrip entry keeps its focus across a busy strip beside the Preview (530ms)
+  ✓  193 apps/web/src/browser-review.browser-test.ts:13451:1 › detached Grid image errors cannot poison the replacement cell (282ms)
+  ✓  194 apps/web/src/browser-review.browser-test.ts:13647:1 › Grid cells keep uniform cards while displaying true Photo aspect ratios (607ms)
+  ✓  195 apps/web/src/browser-review.browser-test.ts:13776:1 › Grid thumbnail sizes re-lay out the Grid around the reader's place (1.7s)
+  ✓  196 apps/web/src/browser-review.browser-test.ts:13881:1 › every Grid thumbnail size keeps uniform cards, true aspect ratios, and even narrow rows (957ms)
+  ✓  197 apps/web/src/browser-review.browser-test.ts:13991:1 › a large viewport stays bounded at every thumbnail size (854ms)
+  ✓  198 apps/web/src/browser-review.browser-test.ts:14024:1 › a focused filmstrip entry keeps a reachable focus across a decision (757ms)
+  ✓  199 apps/web/src/browser-review.browser-test.ts:14062:1 › Grid cells badge only recorded Selection States (683ms)
+  ✓  200 apps/web/src/browser-review.browser-test.ts:14105:1 › Grid filter shows one Selection State at a time and keeps source progress (1.8s)
+  ✓  201 apps/web/src/browser-review.browser-test.ts:14272:1 › Grid filter re-anchors the current Photo and survives a refresh, sort, and scan (1.6s)
+  ✓  202 apps/web/src/browser-review.browser-test.ts:14390:1 › a decision inside a filtered view keeps its membership and its Photo (1.2s)
+  ✓  203 apps/web/src/browser-review.browser-test.ts:14479:1 › an Album source filters its members and keeps Album progress (1.2s)
+  ✓  204 apps/web/src/browser-review.browser-test.ts:14572:1 › Grid progress follows confirmed decisions, Undo, and a reload (1.1s)
+  ✓  205 apps/web/src/browser-review.browser-test.ts:14659:1 › a failed filter change keeps the requested view recoverable through Retry (538ms)
+  ✓  206 apps/web/src/browser-review.browser-test.ts:14722:1 › a filtered view larger than one window pages through its own sequence (2.4s)
+  ✓  207 apps/web/src/browser-review.browser-test.ts:14813:1 › EXIF-rotated thumbnails display the corrected orientation exactly once (283ms)
+  ✓  208 apps/web/src/browser-review.browser-test.ts:14845:1 › a RAW and its JPEG render independent Grid cells with the JPEG's rotation (285ms)
+
+  ✓  209 apps/web/src/browser-review.browser-test.ts:14907:1 › the recovery review entry restores a moved Photo without a rescan (806ms)
+  ✓  210 apps/web/src/browser-review.browser-test.ts:15002:1 › Grid placeholders and late thumbnails never change cell geometry (1.3s)
+  ✓  211 apps/web/src/browser-review.browser-test.ts:15093:1 › a completed mutation cannot reopen or advance a superseding source (497ms)
+  ✓  212 apps/web/src/browser-review.browser-test.ts:15153:1 › an Undo Preview continuation cannot label or persist a newer Photo (560ms)
+  ✓  213 apps/web/src/browser-review.browser-test.ts:15197:1 › opening a Photo from the Grid persists the Album position (608ms)
+  ✓  214 apps/web/src/browser-review.browser-test.ts:15240:1 › Undo returns to the affected Photo and refreshes its Preview and facts (530ms)
+  ✓  215 apps/web/src/browser-review.browser-test.ts:15270:1 › Undo reloads the affected Photo after its facts leave the loaded window (1.2s)
+  ✓  216 apps/web/src/browser-review.browser-test.ts:15321:1 › an evicted Undo reload cannot write into a replacement source (1.4s)
+  ✓  217 apps/web/src/browser-review.browser-test.ts:15413:1 › failed Browse recovery clears the expired token before Retry opens a fresh snapshot (698ms)
+  ✓  218 apps/web/src/browser-review.browser-test.ts:15545:1 › repeated failure of one source range keeps one exact Recovery owner (649ms)
+  ✓  219 apps/web/src/browser-review.browser-test.ts:15601:1 › a source establishment failure retires the claim it replaces (783ms)
+  ✓  220 apps/web/src/browser-review.browser-test.ts:15692:1 › a failed expired reopen binds the thumbnails of its retained cells again (786ms)
+  ✓  221 apps/web/src/browser-review.browser-test.ts:15802:1 › Grid Retry replays a clamped tail range from its original Photo anchor (586ms)
+  ✓  222 apps/web/src/browser-review.browser-test.ts:15893:1 › Grid Retry reloads only exact failed ranges on the current Browse token (940ms)
+  ✓  223 apps/web/src/browser-review.browser-test.ts:16004:1 › an expired Album snapshot replaces retired membership memory (1.4s)
+  ✓  224 apps/web/src/browser-review.browser-test.ts:16137:3 › a replacement Album keeps retained Grid cells unavailable when its first window returns HTTP 503 (1.3s)
+  ✓  225 apps/web/src/browser-review.browser-test.ts:16137:3 › a replacement Album keeps retained Grid cells unavailable when its first window returns malformed data (1.2s)
+  ✓  226 apps/web/src/browser-review.browser-test.ts:16300:1 › a failed expired Album reopen retains retired membership memory (1.0s)
+  ✓  227 apps/web/src/browser-review.browser-test.ts:16367:1 › Photo View recovery defers Grid windows until Grid is visible (708ms)
+  ✓  228 apps/web/src/browser-review.browser-test.ts:16576:1 › Photo Retry reloads the current aligned range after an expired reopen prefetch fails (746ms)
+  ✓  229 apps/web/src/browser-review.browser-test.ts:17297:1 › navigation promotes an aborted adjacent window to current priority (604ms)
+  ✓  230 apps/web/src/browser-review.browser-test.ts:17373:1 › stale opaque Photo windows cannot claim Recovery after Back to Grid (792ms)
+  ✓  231 apps/web/src/browser-review.browser-test.ts:17487:1 › file locations stay bounded on a 40,000-Photo Library with a large folder hierarchy (5.6s)
+  ✓  232 apps/web/src/browser-review.browser-test.ts:17573:1 › a persisted 40,000-Photo Library is served from persisted state and stays browsable across the startup rescan (5.2s)
+  ✓  233 apps/web/src/browser-review.browser-test.ts:17743:1 › a range re-admission that recovers a failed source establishment also establishes readiness (505ms)
+  ✓  234 apps/web/src/browser-review.browser-test.ts:17917:3 › browser navigation › a bare application URL opens the All Photos Grid and pushes no entry (391ms)
+  ✓  235 apps/web/src/browser-review.browser-test.ts:17941:3 › browser navigation › a deep link opens the exact destination and reload preserves it (433ms)
+  ✓  236 apps/web/src/browser-review.browser-test.ts:17977:3 › browser navigation › Back from Photo View restores the Grid anchor, offset, and cell focus (732ms)
+  ✓  237 apps/web/src/browser-review.browser-test.ts:18024:3 › browser navigation › Forward reopens the last Photo and stepping replaces the entry (384ms)
+  ✓  238 apps/web/src/browser-review.browser-test.ts:18056:3 › browser navigation › repeated activation of the current destination adds no entry (415ms)
+  ✓  239 apps/web/src/browser-review.browser-test.ts:18077:3 › browser navigation › a directly loaded Photo returns to its source Grid without leaving the site (252ms)
+  ✓  240 apps/web/src/browser-review.browser-test.ts:18100:3 › browser navigation › choosing a source creates one Grid destination and never opens Photo View (450ms)
+  ✓  241 apps/web/src/browser-review.browser-test.ts:18118:3 › browser navigation › applying a filter replaces the destination and survives a reload (601ms)
+  ✓  242 apps/web/src/browser-review.browser-test.ts:18142:3 › browser navigation › a deleted Album destination falls back to All Photos with an explanation (430ms)
+  ✓  243 apps/web/src/browser-review.browser-test.ts:18167:3 › browser navigation › a Photo missing from the requested view falls back to its source Grid (305ms)
+  ✓  244 apps/web/src/browser-review.browser-test.ts:18192:3 › browser navigation › an invalid address is explained and replaced once with All Photos (266ms)
+  ✓  245 apps/web/src/browser-review.browser-test.ts:18216:3 › browser navigation › a Folder entry whose publication changed requires an explicit action (2.5s)
+  ✓  246 apps/web/src/browser-review.browser-test.ts:18280:3 › browser navigation › a failed traversal keeps its target URL and a retryable destination (1.4s)
+  ✓  247 apps/web/src/browser-review.browser-test.ts:18346:3 › browser navigation › an expired Browse token reopens the snapshot during a Forward traversal (1.3s)
+  ✓  248 apps/web/src/browser-review.browser-test.ts:18407:3 › browser navigation › a failed traversal keeps its target URL and stays retryable (467ms)
+  ✓  249 apps/web/src/browser-review.browser-test.ts:18432:3 › browser navigation › rapid Back and Forward during a slow window cannot repaint an obsolete destination (1.5s)
+  ✓  250 apps/web/src/browser-review.browser-test.ts:18475:3 › browser navigation › Album Resume is separate from opening the Album Grid and establishes a parent (907ms)
+  ✓  251 apps/web/src/browser-review.browser-test.ts:18525:3 › browser navigation › restoring a Grid writes no Album saved position (1.7s)
+  ✓  252 apps/web/src/browser-review.browser-test.ts:18558:3 › browser navigation › a stale success cannot repaint a destination the browser has left (390ms)
+  ✓  253 apps/web/src/browser-review.browser-test.ts:18595:3 › browser navigation › pagehide and a back-forward cache restore leave exactly one mounted browser (545ms)
+  ✓  254 apps/web/src/browser-review.browser-test.ts:18656:3 › browser navigation › a reloaded Grid destination restores its anchor and focuses the Grid (766ms)
+  ✓  255 apps/web/src/browser-review.browser-test.ts:18705:3 › browser navigation › a 40,000-Photo Library restores a late Grid anchor and stays bounded (3.8s)
+  ✓  256 apps/web/src/browser-review.browser-test.ts:18847:5 › narrow Grid space budgets › normal and Select-mode regions fit 375 by 667 (328ms)
+  ✓  257 apps/web/src/browser-review.browser-test.ts:18847:5 › narrow Grid space budgets › normal and Select-mode regions fit 390 by 844 (344ms)
+  ✓  258 apps/web/src/browser-review.browser-test.ts:18883:3 › narrow Grid space budgets › 200 percent text reflows without page-level horizontal overflow (295ms)
+  ✓  259 apps/web/src/browser-review.browser-test.ts:19022:3 › supporting surface scrim dismissal › a backdrop activation dismisses Photo tools and restores its invoker (472ms)
+  ✓  260 apps/web/src/browser-review.browser-test.ts:19031:3 › supporting surface scrim dismissal › a backdrop activation dismisses the Rating choices and restores its invoker (463ms)
+  ✓  261 apps/web/src/browser-review.browser-test.ts:19040:3 › supporting surface scrim dismissal › a backdrop activation dismisses Sources and restores its invoker (456ms)
+  ✓  262 apps/web/src/browser-review.browser-test.ts:19066:3 › supporting surface scrim dismissal › a backdrop activation dismisses View options and restores its invoker (317ms)
+  ✓  263 apps/web/src/browser-review.browser-test.ts:19095:3 › Photo View disclosure bookkeeping › a surface the controller reopens reports its expanded state (436ms)
+  ✓  264 apps/web/src/browser-review.browser-test.ts:19154:3 › Photo View disclosure bookkeeping › a disclosed strip entry keeps its focus across a busy strip (538ms)
+  ✓  265 apps/web/src/browser-review.browser-test.ts:19207:5 › Photo View space budgets › Photo View reserves its Preview region at 375 by 667 (450ms)
+  ✓  266 apps/web/src/browser-review.browser-test.ts:19207:5 › Photo View space budgets › Photo View reserves its Preview region at 390 by 844 (444ms)
+  ✓  267 apps/web/src/browser-review.browser-test.ts:19207:5 › Photo View space budgets › Photo View reserves its Preview region at 667 by 375 (443ms)
+  ✓  268 apps/web/src/browser-review.browser-test.ts:19207:5 › Photo View space budgets › Photo View reserves its Preview region at 844 by 390 (446ms)
+  ✓  269 apps/web/src/browser-review.browser-test.ts:19254:3 › Photo View space budgets › a closed supporting surface holds no layout space and no control (451ms)
+  ✓  270 apps/web/src/browser-review.browser-test.ts:19312:3 › Photo View space budgets › Photo tools keeps focus, survives a re-render, and adds no history (690ms)
+  ✓  271 apps/web/src/browser-review.browser-test.ts:19375:3 › Photo View space budgets › 200 percent text and reduced motion keep every Photo action reachable (547ms)
+  ✓  272 apps/web/src/browser-review.browser-test.ts:19423:3 › Photo View space budgets › rotation preserves the Photo, its decisions, and the disclosed strip (644ms)
+  ✓  273 apps/web/src/browser-review.browser-test.ts:19467:1 › View options names an active nondefault filter and order in the header (444ms)
+  ✓  274 apps/web/src/browser-review.browser-test.ts:19505:1 › View options groups every view control and closes with no layout space (260ms)
+  ✓  275 apps/web/src/browser-review.browser-test.ts:19552:1 › a batch result stays persistent and Review focuses the affected cells (573ms)
+  ✓  276 apps/web/src/browser-review.browser-test.ts:19610:1 › the empty Library, an empty Album, and no filter matches stay distinct (765ms)
+
+  1 skipped
+  275 passed (4.3m)
+$ bun run build:rust && bun run build:workspace
+$ cargo build --workspace --locked
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+$ bun run --workspaces --if-present build
+@slipstream/web build: vite v7.3.5 building client environment for production...
+@slipstream/web build: transforming...
+@slipstream/web build: ✓ 26 modules transformed.
+@slipstream/web build: rendering chunks...
+@slipstream/web build: computing gzip size...
+@slipstream/web build: dist/index.html                   0.40 kB │ gzip:  0.26 kB
+@slipstream/web build: dist/assets/index-DPKchwhL.css   28.81 kB │ gzip:  5.94 kB
+@slipstream/web build: dist/assets/index-CLfI0oim.js   194.71 kB │ gzip: 56.06 kB
+@slipstream/web build: ✓ built in 334ms
+@slipstream/web build: Exited with code 0
