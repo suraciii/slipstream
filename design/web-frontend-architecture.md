@@ -123,8 +123,8 @@ defined by Web Async Ownership:
   It yields Fit-state vertical touch panning to native Photo View
   scrolling, retains Fit-state horizontal decision gestures, and takes full
   Preview drag ownership whenever the zoom state is manual. The page UI also
-  owns the transient mobile Quick Action Dock, Secondary Sheet, pending Rating
-  Wheel gesture, Wheel candidate, and disclosure focus. These
+  owns the transient mobile Quick Action Dock, Photo tools surface, pending
+  Rating Wheel gesture, Wheel candidate, and disclosure focus. These
   values are presentation state and do not become Photo owner state.
 - The **page API** owns Library Browser HTTP calls, wire response types, and
   response decoding. It accepts cancellation inputs from the calling owner but
@@ -215,8 +215,8 @@ Select and Reject controls stay available in every zoom state.
 ### Mobile Photo View interaction state
 
 The mobile Photo View adds a transient action hierarchy without adding a new
-frontend lifetime. The page UI owns the Quick Action Dock, the Secondary Sheet,
-and the Rating Wheel's pointer state. The Photo owner remains
+frontend lifetime. The page UI owns the Quick Action Dock, the Photo tools
+surface, and the Rating Wheel's pointer state. The Photo owner remains
 the sole owner of the current Photo, Rating and Selection State persistence,
 Undo, async authority, and settlement classification.
 
@@ -241,7 +241,7 @@ mutation.
 
 The Quick Action Dock is a responsive presentation of existing intents. It
 must not become a second page controller or a second persistence admission. The
-Secondary Sheet presents existing Details, Album, Zoom, Clear, and Undo
+Photo tools surface presents existing Details, Album, Zoom, Clear, and Undo
 controls; each retains its existing owner, failure isolation, and focus
 restoration rules. Previous/Next remain in the primary navigation group.
 [Browser Navigation and Responsive Surfaces](browser-navigation.md#responsive-presentation-boundary)
@@ -448,7 +448,7 @@ Verification must prove:
 - existing browser scenarios continue to cover startup, File Locations, Grid,
   Photo Review, Album management, reconnect and race behavior, teardown, and a
   large Library;
-- mobile Photo View checks prove Quick Action Dock and Secondary Sheet focus,
+- mobile Photo View checks prove Quick Action Dock and Photo tools focus,
   safe-area, and ownership behavior, and Rating Wheel checks prove the
   450-millisecond hold, 12 CSS-pixel handoff, release-only mutation, explicit
   fallback, cancellation, and stale-settlement rules;

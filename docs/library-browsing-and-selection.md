@@ -51,7 +51,7 @@ Selection State or Rating change.
 
 ## Mobile Photo View Quick Actions
 
-The Quick Action Dock, Secondary Sheet, explicit Rating choices, and separate
+The Quick Action Dock, Photo tools, explicit Rating choices, and separate
 Photo navigation follow [Photo View](library-browser-experience.md#photo-view)
 and [Supporting Surfaces](library-browser-experience.md#supporting-surfaces).
 They reuse the existing Photo, Album, Rating, Selection State, and Undo owners

@@ -1,7 +1,8 @@
 /// The page UI's shared native-modal lifecycle for supporting surfaces.
 ///
-/// Sources, View options, Album forms, and recovery review are one kind of
-/// surface: exactly one is active at a time, opening it moves focus into it,
+/// Sources, View options, Rating, Photo tools, Album forms, and recovery review
+/// are one kind of surface: exactly one is active at a time, opening it moves
+/// focus into it,
 /// Tab and Shift+Tab stay inside it, the background receives no pointer
 /// input, focus, or shortcuts, and closing it returns focus to the invoker
 /// that opened it. Native `dialog.showModal()` supplies that lifecycle, so
@@ -15,6 +16,8 @@
 export type ModalSurfaceKind =
   | "sources"
   | "view-options"
+  | "rating"
+  | "photo-tools"
   | "album-form"
   | "recovery";
 
@@ -34,6 +37,12 @@ type ModalSurfaceRegistration = Readonly<{
   /// True while this surface presents as a modal rather than an inline
   /// layout, so focus can only return into it by opening it again.
   modal: () => boolean;
+  /// Runs when this controller actually shows the surface. A surface the
+  /// controller reopens on an invoker's behalf — a subview entry inside a
+  /// surface that had to close for another one — needs the same disclosure
+  /// bookkeeping an explicit activation performs, or the entry that opened it
+  /// reports a closed state while its surface is open.
+  onOpen?: () => void;
 }>;
 
 export interface ModalSurfaces {
@@ -117,7 +126,10 @@ export function createModalSurfaces(): ModalSurfaces {
     const dialog = registration.dialog;
     activeKind = kind;
     activeInvoker = invoker;
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) {
+      dialog.showModal();
+      registration.onOpen?.();
+    }
   };
 
   const listen = (kind: ModalSurfaceKind): void => {
@@ -137,10 +149,18 @@ export function createModalSurfaces(): ModalSurfaces {
       },
       { signal: controller.signal },
     );
-    // A close this controller did not start still clears its bookkeeping.
-    dialog.addEventListener("close", () => cleanup(kind, true, activeInvoker), {
-      signal: controller.signal,
-    });
+    // A close this controller did not start still clears its bookkeeping. A
+    // close event that was already queued when this dialog was reopened is
+    // stale: the dialog is open again, so the surface that is active now keeps
+    // its bookkeeping rather than being cleared by an event from before it.
+    dialog.addEventListener(
+      "close",
+      () => {
+        if (dialog.open) return;
+        cleanup(kind, true, activeInvoker);
+      },
+      { signal: controller.signal },
+    );
     // A click that lands on the dialog itself rather than its content is a
     // scrim activation for a surface that spans the viewport.
     dialog.addEventListener(

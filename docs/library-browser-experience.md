@@ -139,7 +139,7 @@ its image demand under the existing bounded neighbor-strip lifecycle. The explic
 Previous/Next pair remains available when the strip is closed.
 
 The mobile Quick Action Dock consists of Reject, Rating, Select, and More.
-Its closed Secondary Sheet must occupy no space and expose no focusable
+Its closed Photo tools surface must occupy no space and expose no focusable
 controls. More opens these supporting actions:
 
 - Clear and Undo, with their existing availability rules;
