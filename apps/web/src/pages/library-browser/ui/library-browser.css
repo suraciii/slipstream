@@ -464,7 +464,13 @@
   white-space: nowrap;
 }
 
+/* The entry label is fixed and the active-choice flag truncates, so a long
+   order can never clip the control it qualifies. */
 .options-flag {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--focus);
   font-weight: 650;
   white-space: nowrap;
@@ -1864,6 +1870,14 @@
     gap: 0.3rem;
   }
 
+  /* An active-choice flag is a header fact that can outgrow the controls it
+     qualifies, so a row that carries one holds a second line for it instead of
+     widening the screen. A row without one keeps its single line, where a
+     blocking connection notice shrinks the source disclosure instead. */
+  .grid-header-row:has(.options-flag:not([hidden])) {
+    flex-wrap: wrap;
+  }
+
   /* The narrow row carries four controls, so the tools and the compact
      indicators step down a size while every target stays at least 44 pixels
      tall. */
@@ -1882,10 +1896,23 @@
     display: none;
   }
 
+  /* The compact status is a required header fact, so its slot keeps the width
+     its text paints and the source disclosure truncates instead. Only an
+     exceptional notice is capped, so it can never widen the screen. */
+  .grid-heading {
+    flex: 0 0 auto;
+  }
+
   .grid-heading p {
     flex: none;
-    max-width: 7.5rem;
+    max-width: 9rem;
     font-size: 0.66rem;
+  }
+
+  /* The source disclosure reserves little, grows into the space the fixed
+     facts leave, and is the one element that truncates. */
+  .source-toggle {
+    flex: 1 1 2rem;
   }
 
   .source-toggle {
@@ -1898,8 +1925,22 @@
     min-height: 2.75rem;
   }
 
+  /* The View options entry keeps its two controls in the row, while the flag
+     it carries becomes a second header line: the flag is the one header fact
+     that can outgrow the controls, and it must not take the count's or a
+     control's width. */
   .grid-tools {
-    flex: none;
+    display: contents;
+  }
+
+  .grid-tools button {
+    flex: 0 0 auto;
+  }
+
+  .options-flag {
+    order: 1;
+    flex: 0 0 100%;
+    font-size: 0.68rem;
   }
 
   .grid-summary:not(:empty) {

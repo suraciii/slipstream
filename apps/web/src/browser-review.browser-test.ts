@@ -992,6 +992,47 @@ async function restorePhotoViewTop(page: Page) {
     .toBe(true);
 }
 
+/// Measures the two facts a narrow Grid header must present legibly — the
+/// compact status and the Options flag that names an active choice — as the
+/// painted width of each against the box it is laid out in, plus the header's
+/// height, the page-level overflow, and the smallest target of the open view.
+const narrowHeaderGeometry = (page: Page) =>
+  page.evaluate(() => {
+    const measure = (selector: string) => {
+      const node = document.querySelector(selector) as HTMLElement;
+      const box = node.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const painted = range.getBoundingClientRect();
+      return {
+        text: (node.textContent ?? "").trim(),
+        boxWidth: box.width,
+        paintedWidth: painted.width,
+      };
+    };
+    const targets = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "[data-grid-view] button:not([hidden]), [data-grid-view] select:not([hidden]), [data-grid-view] [tabindex='0']",
+      ),
+    ).filter((target) => target.offsetParent !== null);
+    return {
+      status: measure("[data-grid-status]"),
+      flag: measure("[data-view-options-flag]"),
+      header: (
+        document.querySelector(".grid-header") as HTMLElement
+      ).getBoundingClientRect().height,
+      smallest: Math.min(
+        ...targets.flatMap((target) => {
+          const rect = target.getBoundingClientRect();
+          return [rect.width, rect.height];
+        }),
+      ),
+      overflow:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    };
+  });
+
 async function interactiveGeometry(container: Locator) {
   return container.evaluate((root) => {
     const rootBox = root.getBoundingClientRect();
@@ -19919,47 +19960,73 @@ test.describe("Issue #310 integrated qualification", () => {
     expect(mutations.length).toBe(mutationsBeforeTraversal);
   });
 
-  /// DEFECT D3 (medium, layout/truthfulness): the narrow Grid header's
-  /// compact status is the only normal-state presentation of the visible
-  /// result count. As soon as a nondefault filter or order widens the Options
-  /// flag, the shrinkable status box ellipsizes the count away behind the
-  /// Options control ("Ready · …").
-  /// Expected: the header indicates the active choice AND the visible result
-  /// count legibly. Observed: the count is truncated at 390 by 844 and 375 by
-  /// 667. The count remains reachable inside View options, and no page-level
-  /// horizontal overflow is introduced.
-  test.fixme(
-    "a narrow header keeps the result count legible beside an active filter flag",
-    async ({ page }) => {
-      test.setTimeout(120_000);
-      const { base, root } = await fixture();
-      await writePhotos(root, 6);
-      const running = await server(base, root);
-      await page.setViewportSize({ width: 390, height: 844 });
+  /// The narrow Grid header carries two required facts: the visible result
+  /// count and the indication of an active nondefault filter or order. The
+  /// active choice widens the Options entry's flag, so neither fact may take
+  /// the other's width: the count used to ellipsize behind the widened flag
+  /// ("Ready · …") and collapse entirely once a filter and an order were
+  /// applied together.
+  test("a narrow header keeps the result count and the active choice legible", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    for (const viewport of [
+      { width: 375, height: 667 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
       await page.goto(running.url);
       await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
       await waitForGridFrame(page);
-      await openViewOptions(page);
-      await page.locator("[data-filter-select]").selectOption("undecided");
-      await applyViewOptions(page);
-      await expect
-        .poll(() => page.locator("[data-grid-status]").textContent())
-        .toBe("Ready · 6 Photos");
-      // The status is a required header fact: its box must hold the text instead
-      // of ellipsizing it behind the widened Options control.
-      const legible = await page.evaluate(() => {
-        const status = document.querySelector(
-          "[data-grid-status]",
-        ) as HTMLElement;
-        const box = status.getBoundingClientRect();
-        const range = document.createRange();
-        range.selectNodeContents(status);
-        const painted = range.getBoundingClientRect();
-        return painted.width <= box.width + 0.5;
-      });
-      expect(legible).toBe(true);
-    },
-  );
+      // The default header is one compact row inside the narrow budget.
+      const plain = await narrowHeaderGeometry(page);
+      expect(plain.header).toBeLessThanOrEqual(88);
+      expect(plain.overflow).toBe(0);
+
+      for (const choices of [
+        { filter: "undecided", order: "source-default" },
+        { filter: "undecided", order: "capture-time-desc" },
+        { filter: "selected", order: "capture-time-desc" },
+      ]) {
+        await openViewOptions(page);
+        await expect
+          .poll(() => page.locator("[data-sort-select] option").count())
+          .toBeGreaterThan(1);
+        await page.locator("[data-filter-select]").selectOption(choices.filter);
+        await page.locator("[data-sort-select]").selectOption(choices.order);
+        await applyViewOptions(page);
+        await expect
+          .poll(() => page.locator("[data-grid-status]").textContent())
+          .toMatch(/Photos$/);
+
+        // Both facts keep the width they paint: the count is never ellipsized
+        // and the active-choice flag reads in full, so the header indicates the
+        // committed choices and the visible result count legibly.
+        const header = await narrowHeaderGeometry(page);
+        expect(header.status.text).toBe(
+          choices.filter === "selected" ? "0 Photos" : "Ready · 6 Photos",
+        );
+        expect(header.status.paintedWidth).toBeLessThanOrEqual(
+          header.status.boxWidth + 0.5,
+        );
+        expect(header.flag.paintedWidth).toBeLessThanOrEqual(
+          header.flag.boxWidth + 0.5,
+        );
+        // The facts stay inside the narrow header budget, the controls they
+        // qualify keep their own width, and nothing widens the screen.
+        expect(header.header).toBeLessThanOrEqual(88);
+        expect(header.overflow).toBe(0);
+        expect(header.smallest).toBeGreaterThanOrEqual(44);
+        // The committed choices are still named with the entry that opens them.
+        await expect(
+          page.locator("[data-grid-view-options]"),
+        ).toHaveAccessibleName(/^View options, /);
+      }
+    }
+  });
 
   test("a mixed-outcome batch reviews, retries, joins an Album, and removes only what it added", async ({
     page,
@@ -20491,8 +20558,7 @@ test.describe("Issue #310 integrated qualification", () => {
     await expect(page.locator("[data-review]")).toBeHidden();
     expect(new URL(page.url()).searchParams.get("photoId")).toBeNull();
     // The Library holds the write that committed, read once the held write the
-    // browser left behind is observable: the traversal releases it, and the
-    // server applies it at its own pace.
+    // traversal released is observable: the server applies it at its own pace.
     await expect
       .poll(async () => (await libraryPhoto(running.url, 0)).selectionState)
       .toBe("selected");
@@ -20871,4 +20937,3 @@ test.describe("Issue #310 keyboard and modal qualification", () => {
     await expect(page.getByText("2 / 3")).toBeVisible();
   });
 });
-
