@@ -550,28 +550,148 @@ async function openGrid(page: Page, url: string, name: string) {
   await page.goto(url);
   await openSources(page);
   const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  await page
+  const source = page
     .locator("[data-source-list]")
-    .getByRole("link", { name: new RegExp(`^${escapedName}(?: |$)`) })
-    .click();
+    .getByRole("link", { name: new RegExp(`^${escapedName}(?: |$)`) });
+  // Waiting for the link before clicking keeps a Library summary that is still
+  // arriving from surfacing as an unexplained click timeout.
+  await expect(source).toBeVisible();
+  await source.click();
   await page
     .locator("[data-grid-status]")
     .filter({ hasText: /^(?:Ready · \d[\d,]* Photos?|0 Photos)$/ })
     .waitFor();
   await waitForGridFrame(page);
 }
-async function openSources(page: Page) {
-  for (const toggle of await page
-    .getByRole("button", { name: "Sources", exact: true })
-    .all()) {
-    if (
-      (await toggle.isVisible()) &&
-      (await toggle.getAttribute("aria-expanded")) !== "true"
-    ) {
-      await toggle.click();
-      return;
-    }
+/// Opens the Sources surface from the current-source disclosure. Its accessible
+/// name identifies both Sources and the current source.
+/// Waits until exactly one of the two views owns the screen. Both surfaces this
+/// file drives — Sources and View options — are reachable while a source open
+/// is still pending, so this only settles which view is showing.
+async function settledView(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          Array.from(
+            document.querySelectorAll<HTMLElement>(
+              "[data-grid-view], [data-photo-view]",
+            ),
+          ).filter((node) => node.hidden).length,
+      ),
+    )
+    .toBe(1);
+}
+
+/// Waits until the view the current address names is the one showing, so a
+/// Sources disclosure never races the Grid shell a Photo destination renders
+/// before the Photo it resolves opens. A Grid destination has no shell to wait
+/// out — its Grid may stay pending for as long as the test holds its open — so
+/// the guard reads the address rather than the status text. View options
+/// deliberately does not wait for this, because it is reachable while an open
+/// is pending.
+async function settledDestination(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const namesPhoto = new URL(window.location.href).searchParams.has(
+          "photoId",
+        );
+        const grid = document.querySelector<HTMLElement>("[data-grid-view]");
+        const photo = document.querySelector<HTMLElement>("[data-photo-view]");
+        if (photo && !photo.hidden) {
+          const position =
+            document.querySelector("[data-position]")?.textContent ?? "";
+          return /^[1-9]\d* \/ [1-9]\d*$/.test(position.trim());
+        }
+        // A Grid that is not standing in for a Photo destination has settled,
+        // whether or not its source open is still pending.
+        return Boolean(grid && !grid.hidden && !namesPhoto);
+      }),
+    )
+    .toBe(true);
+}
+
+/// The indicators that carry the connection state: the application header on a
+/// wide layout, and the open view's own header on a narrow one.
+const connectionIndicator = (page: Page, state: "Connected" | "Disconnected") =>
+  page
+    .locator(
+      "[data-connection], [data-grid-connection], [data-photo-connection]",
+    )
+    .filter({ hasText: state });
+
+/// Reads the connection state the open layout presents. A narrow layout has no
+/// dedicated brand or connected-status row, so a normal state presents no
+/// connection text at all and only a failure is shown beside the affected
+/// primary action.
+async function expectConnection(
+  page: Page,
+  state: "Connected" | "Disconnected",
+) {
+  if (state === "Connected" && (await page.locator(".app-header").isHidden())) {
+    await expect(connectionIndicator(page, "Connected")).toHaveCount(0);
+    return;
   }
+  await expect(connectionIndicator(page, state)).toBeVisible();
+}
+
+async function openSources(page: Page) {
+  await settledDestination(page);
+  // Exactly one disclosure is visible: the Grid's on a narrow Grid, the Photo
+  // View's while a Photo is open. Resolving it by visibility keeps a
+  // destination render that briefly presents the Grid shell from racing the
+  // click.
+  const disclosure = page.locator(
+    "[data-source-toggle]:visible, [data-photo-source-toggle]:visible",
+  );
+  if ((await disclosure.count()) === 0) {
+    // A wide Grid keeps Sources as the resizable sidebar, which is always shown.
+    await expect(page.locator("#source-panel")).toBeVisible();
+    return;
+  }
+  if ((await disclosure.getAttribute("aria-expanded")) !== "true")
+    await disclosure.click();
+  await expect(page.locator("[data-source-dialog]")).toBeVisible();
+}
+
+/// Opens View options, which owns the Selection State filter, the source
+/// order, the thumbnail size, the complete source counts, and the
+/// source-specific actions.
+async function openViewOptions(page: Page) {
+  const surface = page.locator("[data-view-options]");
+  if (await surface.isVisible()) return;
+  await settledView(page);
+  await page.locator("[data-grid-view-options]").click();
+  await expect(surface).toBeVisible();
+}
+
+/// Reads the Library summary. A narrow layout keeps it inside the Sources
+/// surface, which stays closed until it is disclosed.
+async function expectLibrarySummary(page: Page) {
+  const narrow = await page.locator("[data-source-toggle]").isVisible();
+  if (narrow) await openSources(page);
+  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  if (narrow) {
+    await page.keyboard.press("Escape");
+    await expect(page.locator("[data-source-dialog]")).toBeHidden();
+  }
+}
+
+/// Closes View options without committing, so the Grid keeps the committed
+/// choices and the normal header is reachable again.
+async function closeViewOptions(page: Page) {
+  const surface = page.locator("[data-view-options]");
+  if (!(await surface.isVisible())) return;
+  await page.locator("[data-view-options-cancel]").click();
+  await expect(surface).toBeHidden();
+}
+
+/// Commits the View options draft once. Closing without Apply discards it, so
+/// every committed filter, order, or thumbnail-size change goes through here.
+async function applyViewOptions(page: Page) {
+  await page.locator("[data-view-options-apply]").click();
+  await expect(page.locator("[data-view-options]")).toBeHidden();
 }
 
 /// Album membership is read and managed in one panel: the facts list names the
@@ -710,6 +830,14 @@ async function touchRateWithClock(
 ) {
   const preview = page.locator("[data-preview]");
   const wheel = page.locator("[data-rating-wheel]");
+  // An installed clock keeps ticking in real time, so a fastForward measured
+  // from "now" overshoots the hold threshold by however long the gesture's
+  // round trips took — a margin of about a millisecond that a loaded machine
+  // routinely exceeds. Freezing the clock before the gesture makes the
+  // threshold exact: the hold timer starts at the paused time and only
+  // fastForward advances it. The clock resumes once the threshold is proven, so
+  // the application's own timers run again for the rest of the test.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()));
   const center = await preview.evaluate((surface) => {
     const box = surface.getBoundingClientRect();
     return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
@@ -725,6 +853,8 @@ async function touchRateWithClock(
   await expect(wheel).toBeHidden();
   await page.clock.fastForward(1);
   await expect(wheel).toBeVisible();
+  // The threshold is proven, so the application's own timers run again.
+  await page.clock.resume();
   const option = page.locator(`[data-rating-wheel-value="${value}"]`);
   const target = await option.boundingBox();
   expect(target).not.toBeNull();
@@ -975,7 +1105,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   servers.splice(servers.indexOf(running), 1);
   running = await server(base, root);
   await page.goto(running.url);
-  await page.getByRole("button", { name: "Sources", exact: true }).click();
+  await openSources(page);
   await page.getByRole("link", { name: /^Picks \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -989,7 +1119,7 @@ test("starts from a Album, shows facts, accessible controls, and resumes persist
   await expect(page.locator("[data-selection]")).toHaveText("Selected");
 });
 
-test("narrow Grid keeps sources in a dismissible drawer and restores focus", async ({
+test("narrow Grid discloses Sources as one named modal surface and restores focus", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -997,14 +1127,26 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   const sources = page.locator("[data-source-toggle]");
   const panel = page.locator("#source-panel");
+  const dialog = page.locator("[data-source-dialog]");
   const gridViewport = page.locator("[data-grid-viewport]");
   const gridHeight = () => gridViewport.evaluate((node) => node.clientHeight);
+  const insideSurface = () =>
+    page.evaluate(() =>
+      document
+        .querySelector("[data-source-dialog]")
+        ?.contains(document.activeElement),
+    );
   await expect(sources).toBeVisible();
   await expect(sources).toHaveAttribute("aria-expanded", "false");
-  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  // The disclosure's accessible name identifies both Sources and the current
+  // source, and a closed surface renders nothing.
+  await expect(sources).toHaveAccessibleName("Sources — All Photos");
+  await expect(panel).toBeHidden();
+  await expect(dialog).toBeHidden();
   // The Grid keeps the height the app leaves below the view controls and
   // reaches the bottom of the window.
   expect(
@@ -1013,23 +1155,32 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
     ),
   ).toBe(0);
   const closedGridHeight = await gridHeight();
-  // The narrow header wraps its progress line below the controls, and the
-  // Show, Size, and Sort controls need two rows at this viewport width, so
-  // the Grid holds three complete Medium rows plus the top of the fourth.
-  // Pin that measured floor (178 px row pitch: a 166 px cell and a 12 px
-  // gap) with a little margin, so later header growth cannot silently eat
-  // the Grid. The dense thumbnail size fits a fourth complete row here and
-  // is the Photographer's own choice at this viewport.
+  // One compact header row replaces the stacked toolbar, so the Grid keeps
+  // the height that row leaves it. Pin that measured floor with a little
+  // margin, so later header growth cannot silently eat the Grid.
   expect(closedGridHeight).toBeGreaterThanOrEqual(3 * 178 + 40);
 
   await sources.click();
   await expect(sources).toHaveAttribute("aria-expanded", "true");
-  await expect(panel).toHaveAttribute("aria-hidden", "false");
-  // The drawer overlays the Grid instead of shrinking it.
+  await expect(dialog).toBeVisible();
+  // The surface overlays the Grid instead of shrinking it.
   expect(await gridHeight()).toBe(closedGridHeight);
   await expect(
     page.getByRole("link", { name: /^All Photos(?: |$)/ }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Close", exact: true }),
+  ).toBeFocused();
+
+  // Tab and Shift+Tab stay inside the surface, and a background control can be
+  // neither focused nor activated while it is open.
+  for (let step = 0; step < 6; step += 1) await page.keyboard.press("Tab");
+  expect(await insideSurface()).toBe(true);
+  await page.keyboard.press("Shift+Tab");
+  expect(await insideSurface()).toBe(true);
+  await page.locator("[data-grid-select-mode]").focus();
+  expect(await insideSurface()).toBe(true);
+
   const sourceContrast = await panel.evaluate((container) => {
     const background = getComputedStyle(container).backgroundColor;
     return Array.from(
@@ -1048,14 +1199,6 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
         contrastRatio(foreground, background) >= 4.5,
     ),
   ).toBe(true);
-  expect(
-    await page
-      .locator("[data-grid-view]")
-      .evaluate((node) => (node as HTMLElement).inert),
-  ).toBe(true);
-  await expect(
-    page.getByRole("button", { name: "Close", exact: true }),
-  ).toBeFocused();
   const drawerTargets = await panel.evaluate((container) =>
     Array.from(
       container.querySelectorAll<HTMLElement>(
@@ -1071,18 +1214,24 @@ test("narrow Grid keeps sources in a dismissible drawer and restores focus", asy
   expect(
     drawerTargets.every(({ width, height }) => width >= 44 && height >= 44),
   ).toBe(true);
+
+  // A pointer activation aimed at the Grid behind the surface never reaches
+  // it: the scrim dismisses the surface and no Photo opens.
+  await page.locator('[data-photo-index="0"]').click({ force: true });
+  await expect(dialog).toBeHidden();
+  await expect(page.locator("[data-review]")).toBeHidden();
+
+  await sources.click();
   await page.keyboard.press("Escape");
-  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  await expect(panel).toBeHidden();
+  await expect(dialog).toBeHidden();
   await expect(sources).toBeFocused();
-  expect(
-    await page
-      .locator("[data-grid-view]")
-      .evaluate((node) => (node as HTMLElement).inert),
-  ).toBe(false);
 
   await sources.click();
   await page.getByRole("link", { name: /^All Photos(?: |$)/ }).click();
-  await expect(panel).toHaveAttribute("aria-hidden", "true");
+  // Selecting a source closes the surface and returns focus to the Grid.
+  await expect(panel).toBeHidden();
+  await expect(dialog).toBeHidden();
   await expect(page.locator("[data-grid-viewport]")).toBeFocused();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
@@ -1179,7 +1328,7 @@ test("short mobile viewports keep every Photo action reachable and operable", as
 
     await openSources(page);
     const sourcePanel = page.locator("#source-panel");
-    await expect(sourcePanel).toHaveAttribute("aria-hidden", "false");
+    await expect(sourcePanel).toBeVisible();
     await page.getByRole("button", { name: "New Album" }).click();
     const sourceTargets = await interactiveGeometry(sourcePanel);
     expect(
@@ -2379,9 +2528,20 @@ test("a valid 120-character Album name stays contained in Grid and Photo View", 
     await page.setViewportSize(viewport);
     await waitForGridFrame(page);
     await expect(page.locator("[data-grid-title]")).toHaveText(emptyAlbumName);
-    await expect(
-      page.getByRole("heading", { name: emptyAlbumName, exact: true }),
-    ).toBeVisible();
+    await expect(page.locator("[data-grid-compact-title]")).toHaveText(
+      emptyAlbumName,
+    );
+    if (viewport.width <= 760) {
+      // A narrow layout carries the source title in the Sources disclosure,
+      // whose accessible name identifies both Sources and the current source.
+      await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
+        `Sources — ${emptyAlbumName}`,
+      );
+    } else {
+      await expect(
+        page.getByRole("heading", { name: emptyAlbumName, exact: true }),
+      ).toBeVisible();
+    }
     await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
     await expect(page.locator("[data-grid-empty-message]")).toHaveText(
       emptyMessage,
@@ -2648,9 +2808,7 @@ test("Sources owns the keyboard while the Photo View is inert", async ({
   expect(await state(running.url, albumId)).toEqual(before);
 
   await page.keyboard.press("Escape");
-  await expect(
-    page.getByRole("button", { name: "Sources", exact: true }).last(),
-  ).toBeFocused();
+  await expect(page.locator("[data-photo-source-toggle]")).toBeFocused();
   await expect(page.getByText("1 / 3")).toBeVisible();
   await expect(page.getByText("5 stars", { exact: true })).toBeVisible();
   await actionWithProgress(page, albumId, () => page.keyboard.press("x"));
@@ -2842,7 +3000,7 @@ test("a Grid Undo keeps the Grid owning the recovery routing", async ({
     route.fulfill({ status: 409, body: "conflict" }),
   );
   await page.keyboard.press("p");
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry connection" }),
   ).toBeVisible();
@@ -2871,25 +3029,24 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   await expect(mode).toHaveAttribute("aria-pressed", "false");
   await expect(cell(0)).not.toHaveClass(/multi-selected/);
 
-  // Select mode exposes the bounded tray before the first Photo is marked.
+  // Select mode exposes the bounded tray before the first Photo is marked,
+  // with its actions present but unavailable while nothing is selected.
   await mode.click();
   await expect(bar).toBeVisible();
   await expect(count).toHaveText("0 / 100 Photos");
-  await expect(page.locator("[data-batch-source]")).toHaveText(
-    "Source: All Photos",
-  );
+  // The header names the open source, so the tray never restates it.
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
   await expect(page.locator("[data-batch-retained]")).toBeHidden();
-  await expect(page.locator("[data-batch-actions]")).toBeHidden();
-  await mode.click();
+  await expect(page.locator("[data-batch-actions]")).toBeVisible();
+  await expect(page.locator("[data-batch-select]")).toBeDisabled();
+  await page.locator("[data-grid-multi-done]").click();
   await expect(bar).toBeHidden();
 
   // A Control-click toggles one Photo and becomes the range anchor.
   await cell(0).click({ modifiers: ["Control"] });
   await expect(bar).toBeVisible();
   await expect(count).toHaveText("1 / 100 Photos");
-  await expect(page.locator("[data-batch-source]")).toHaveText(
-    "Source: All Photos",
-  );
+  await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
   await expect(cell(0)).toHaveClass(/multi-selected/);
   await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("[data-review]")).toBeHidden();
@@ -2929,7 +3086,9 @@ test("Grid multi-selection marks Photos with modifiers, Select mode, and one cle
   await expect(cell(2)).toHaveAttribute("aria-pressed", "false");
   await cell(4).click();
   await expect(count).toHaveText("2 / 100 Photos");
-  await page.locator("[data-batch-clear]").click();
+  // Done is the visible clear exit: it empties the multi-selection and leaves
+  // Select mode.
+  await page.locator("[data-grid-multi-done]").click();
   await expect(bar).toBeHidden();
   await expect(mode).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("[data-batch-retained]")).toBeHidden();
@@ -2952,11 +3111,30 @@ test("Grid batch tray stays reachable at a 390px viewport", async ({
   await mode.click();
   await expect(tray).toBeVisible();
   await expect(page.locator("[data-batch-count]")).toHaveText("0 / 100 Photos");
-  await expect(page.locator("[data-batch-actions]")).toBeHidden();
+  // The tray count is a visual summary only: the Grid status surface owns the
+  // one live region, so a selection change is never announced twice.
+  await expect(page.locator("[data-batch-count]")).not.toHaveAttribute(
+    "role",
+    "status",
+  );
+  await expect(page.locator("[data-grid-status]")).toHaveAttribute(
+    "role",
+    "status",
+  );
+  // The tray stays visible with zero selected Photos, and its batch actions
+  // are unavailable while nothing is selected.
+  await expect(page.locator("[data-batch-actions]")).toBeVisible();
+  await expect(page.locator("[data-batch-select]")).toBeDisabled();
+  await expect(page.locator("[data-batch-reject]")).toBeDisabled();
+  await expect(page.locator("[data-batch-album-add]")).toBeDisabled();
+  // The normal View controls are replaced, not stacked above the tray.
+  await expect(page.locator("[data-grid-view-options]")).toBeHidden();
+  await expect(mode).toBeHidden();
+  await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
 
   await page.locator('[data-photo-index="0"]').click();
   await expect(page.locator("[data-batch-retained]")).toBeHidden();
-  await expect(page.locator("[data-batch-actions]")).toBeVisible();
+  await expect(page.locator("[data-batch-select]")).toBeEnabled();
   const geometry = await tray.evaluate((element) => {
     const box = element.getBoundingClientRect();
     const controls = Array.from(
@@ -4036,45 +4214,113 @@ test("Grid Select mode and the batch actions are reachable from the keyboard", a
   await expect(page.locator("[data-batch-count]")).toHaveText("1 / 100 Photos");
   await expect(cell(0)).toHaveAttribute("aria-pressed", "true");
 
-  // Every batch action is in the Grid's keyboard order going backwards from
-  // the Grid entry, enabled and ready for its own activation.
+  // Select mode replaces the normal header tools with the count and Done, and
+  // the tray is the bottom action region: the Grid entry sits between them, so
+  // a keyboard user reaches every action in both directions.
+  await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Shift+Tab");
-  await expect(viewport).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-clear]")).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-album-add]")).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-album-select]")).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-reject]")).toBeFocused();
-  await expect(page.locator("[data-batch-reject]")).toBeEnabled();
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-select]")).toBeFocused();
-  await expect(page.locator("[data-batch-select]")).toBeEnabled();
-
-  // ... and forward from the bar the Grid entry closes the walk, so a
-  // keyboard user reaches every action in both directions.
-  for (const selector of [
-    "[data-batch-reject]",
-    "[data-batch-album-select]",
-    "[data-batch-album-add]",
-    "[data-batch-clear]",
-  ]) {
-    await page.keyboard.press("Tab");
-    await expect(page.locator(selector)).toBeFocused();
-  }
+  await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(viewport).toBeFocused();
 
+  // The tray is the bottom action region of Grid View: it follows the Grid's
+  // cells, and every batch action is reachable from it in both directions.
+  // Only the cell the Grid keyboard owns is tabbable, so it is the one that
+  // leads into the tray.
+  await page.locator('[data-photo-index="0"]').focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("[data-batch-select]")).toBeFocused();
+  await expect(page.locator("[data-batch-select]")).toBeEnabled();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("[data-batch-reject]")).toBeFocused();
+  await expect(page.locator("[data-batch-reject]")).toBeEnabled();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("[data-batch-album-select]")).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("[data-batch-album-add]")).toBeFocused();
+  for (const selector of [
+    "[data-batch-album-select]",
+    "[data-batch-reject]",
+    "[data-batch-select]",
+  ]) {
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.locator(selector)).toBeFocused();
+  }
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator('[data-photo-index="0"]')).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(viewport).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
+
   // The clear exit is keyboard-operable too: it empties the selection and
   // leaves Select mode.
-  await page.keyboard.press("Shift+Tab");
-  await expect(page.locator("[data-batch-clear]")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(bar).toBeHidden();
   await expect(mode).toHaveAttribute("aria-pressed", "false");
   await expect(cell(0)).not.toHaveClass(/multi-selected/);
+});
+
+test("a settling batch never pulls focus out of the batch tray", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // The Photographer works entirely from the keyboard: arrow into the Grid to
+  // mark a Photo, then Tab into the tray to decide it.
+  await page.locator("[data-grid-select-mode]").click();
+  await page.locator("[data-grid-viewport]").focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="0"]')).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("[data-batch-count]")).toHaveText("1 / 100 Photos");
+
+  // Hold the batch write so the tray's controls disable while it settles.
+  let releaseBatch!: () => void;
+  const batchReleased = new Promise<void>((resolve) => {
+    releaseBatch = resolve;
+  });
+  await page.route("**/api/photos/state", async (route) => {
+    await batchReleased;
+    await route.continue();
+  });
+  const batchDone = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === "/api/photos/state",
+  );
+  const batchSelect = page.locator("[data-batch-select]");
+  await batchSelect.focus();
+  await page.keyboard.press("Enter");
+  await expect(batchSelect).toBeDisabled();
+  // The tray parks the focused control on the selection header's Done.
+  await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
+
+  // The merged renders the settling batch produces must not reclaim the Grid's
+  // keyboard position from a control the tray owns.
+  await page.waitForTimeout(250);
+  releaseBatch();
+  await batchDone;
+  await page.unroute("**/api/photos/state");
+
+  await expect(batchSelect).toBeEnabled();
+  await expect(batchSelect).toBeFocused();
+  await expect(
+    page.locator('[data-photo-index="0"] .cell-state.selected'),
+  ).toHaveText("✓");
+  // The Grid's keyboard position is untouched: returning focus to the Grid
+  // takes it back, and the arrow keys still address the marked Photo's row.
+  const viewport = page.locator("[data-grid-viewport]");
+  await viewport.focus();
+  await expect(viewport).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator('[data-photo-index="1"]')).toBeFocused();
 });
 
 test("a focused batch control keeps a reachable focus while its batch settles", async ({
@@ -4096,8 +4342,8 @@ test("a focused batch control keeps a reachable focus while its batch settles", 
   await expect(page.locator("[data-batch-count]")).toHaveText("2 / 100 Photos");
 
   // While the batch decision settles, its controls disable; a focused one
-  // would drop keyboard focus to the body, so the bar parks it on the Select
-  // mode toggle and returns it when interactivity resumes.
+  // would drop keyboard focus to the body, so the tray parks it on the
+  // selection header's Done and returns it when interactivity resumes.
   let releaseBatch!: () => void;
   const batchReleased = new Promise<void>((resolve) => {
     releaseBatch = resolve;
@@ -4114,7 +4360,7 @@ test("a focused batch control keeps a reachable focus while its batch settles", 
   await batchSelect.focus();
   await page.keyboard.press("Enter");
   await expect(batchSelect).toBeDisabled();
-  await expect(mode).toBeFocused();
+  await expect(page.locator("[data-grid-multi-done]")).toBeFocused();
   releaseBatch();
   await batchDone;
   await page.unroute("**/api/photos/state");
@@ -4231,6 +4477,7 @@ test("Grid keyboard movement follows the rendered row at every thumbnail size", 
     if (request.method() === "POST" && request.url().endsWith("/state"))
       statePosts.push(request.url());
   });
+  await openViewOptions(page);
   await size.focus();
   await page.keyboard.press("p");
   await page.keyboard.press("x");
@@ -4314,7 +4561,7 @@ test("a failed Grid decision reports on the Grid status line and keeps Photo Vie
   );
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(focusedCell.locator(".cell-state")).toHaveCount(0);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   // A transport failure reports its uncertainty on the same line.
   await page.unroute("**/api/photos/*/state");
@@ -4833,7 +5080,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     await expect(page.locator("[data-photo-view]")).toBeVisible();
     await expect(page.locator("[data-stage] img")).toHaveCount(0);
     await expect(page.locator("[data-rating-wheel]")).toBeHidden();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(
       page.getByRole("button", { name: "Retry", exact: true }),
     ).toBeHidden();
@@ -4842,7 +5089,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     // transport failure. The Preview response, not a timer, settles readiness.
     releasePreview();
     await waitForLoadedReviewImage(page);
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await page.unroute("**/api/photos/*/preview");
 
     let failedCurrentPreview = false;
@@ -4865,7 +5112,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
     });
     await page.locator("[data-dock-next]").click();
     await expect(page.locator("[data-position]")).toHaveText("2 / 2");
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     await expect(
       page.getByRole("button", { name: "Retry", exact: true }),
     ).toBeEnabled();
@@ -4873,7 +5120,7 @@ test("mobile qualification measures delayed Preview and explicit recovery", asyn
 
     await page.unroute("**/api/photos/*/preview");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await waitForLoadedReviewImage(page);
     await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   } finally {
@@ -5364,7 +5611,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
 
   await page.route("**/api/photos/*/state", (route) => route.abort());
   await page.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Zoom in" })).toBeEnabled();
   await page.locator("[data-zoom-slider]").fill("800");
@@ -5403,7 +5650,7 @@ test("persistence failure and disconnect do not advance or lie, and explicit Ret
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByText("1 / 2")).toBeVisible();
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
@@ -5445,7 +5692,7 @@ test("an answered non-conflict Undo failure remains retryable", async ({
     "selected",
   );
   await expect(page.getByText("2 / 2")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByText("Undo could not be saved. Try Undo again."),
   ).toBeVisible();
@@ -5516,13 +5763,13 @@ test("an idle browser reports a lost connection from the status probe", async ({
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
   await startReview(page, running.url, "All Photos");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 
   // The Photographer takes no action here. Only the reachability probe runs,
   // and the server stops answering it.
   await page.route("**/api/status", (route) => route.abort());
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Reject" })).toBeDisabled();
   await expect(
@@ -5537,7 +5784,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
 
   // A usable status answer confirms the connection again.
   await page.unroute("**/api/status");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 
   // An answered status error is a server-side condition, not a lost
@@ -5546,7 +5793,7 @@ test("an idle browser reports a lost connection from the status probe", async ({
     route.fulfill({ status: 503, body: "unavailable" }),
   );
   await page.waitForTimeout(3_000);
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/status");
 });
@@ -5570,7 +5817,7 @@ test("a connection proven outside the probe is lost again when the probe reports
   await expect(page.getByRole("link", { name: /shoot 1 Photo/ })).toBeVisible();
   await page.getByRole("link", { name: /^All Photos/ }).click();
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 
   // The idle probe stops answering, so the browser stops claiming a server.
   const probeGate = statusAnswerGate();
@@ -5578,7 +5825,7 @@ test("a connection proven outside the probe is lost again when the probe reports
     await probeGate.wait();
     await route.abort();
   });
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   // Opening another source succeeds while the probe still cannot answer, so
   // that request proves the transport and the browser claims the connection
@@ -5589,7 +5836,7 @@ test("a connection proven outside the probe is lost again when the probe reports
   await expect.poll(() => probeGate.held()).toBeGreaterThan(0);
   await page.getByRole("link", { name: /shoot 1 Photo/ }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   resumeProbe();
 
   // The next probe reports the same loss again. Reachability is judged
@@ -5607,8 +5854,11 @@ test("a usable status answer leaves an established connection untouched", async 
   for (const name of ["a.jpg", "b.jpg"])
     await writeFile(join(root, name), await jpeg());
   const running = await server(base, root);
+  // The connection presentation lives in the application header on a wide
+  // layout; a narrow layout shows no permanent connection text at all.
   await openGrid(page, running.url, "All Photos");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await expectConnection(page, "Connected");
 
   let probes = 0;
   await page.route("**/api/status", (route) => {
@@ -5618,21 +5868,30 @@ test("a usable status answer leaves an established connection untouched", async 
   // The probe answers on every poll. Nothing is lost, so the connection
   // presentation must not be written again while those answers arrive.
   const rewrites = await page.evaluate(async () => {
-    const element = document.querySelector("[data-connection]")!;
+    // Exactly one indicator carries the state on a wide layout.
+    const elements = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "[data-connection], [data-grid-connection], [data-photo-connection]",
+      ),
+    );
     let records = 0;
     const observer = new MutationObserver((entries) => {
       records += entries.length;
     });
-    observer.observe(element, {
-      childList: true,
-      characterData: true,
-      subtree: true,
-    });
+    for (const element of elements)
+      observer.observe(element, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
     await new Promise((resolve) => {
       setTimeout(resolve, 5_000);
     });
     observer.disconnect();
-    return { records, text: element.textContent };
+    return {
+      records,
+      text: elements.map((element) => element.textContent).join(""),
+    };
   });
   expect(probes).toBeGreaterThanOrEqual(2);
   expect(rewrites.text).toBe("Connected");
@@ -5654,7 +5913,7 @@ test("an uncertain Undo retires Undo and requires Photo Retry", async ({
 
   await page.route("**/api/photos/*/state", (route) => route.abort());
   await page.getByRole("button", { name: "Undo" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(
@@ -5694,7 +5953,7 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
@@ -5800,7 +6059,7 @@ test("Photo View recovery status wraps without hiding Retry or lower controls", 
   }
 
   await retry.click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(status).toHaveText("Connected. Current state refreshed.");
   const steadyStatus = await status.evaluate((element) => ({
     height: element.getBoundingClientRect().height,
@@ -5912,26 +6171,35 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
     await post(running.url, "/api/albums", { name: existingName });
     await page.setViewportSize(viewport);
     await page.goto(running.url);
+    if (viewport.width === 390) await openSources(page);
     await expect(
       page.getByText("Library ready", { exact: true }),
     ).toBeVisible();
-
-    if (viewport.width === 390) await openSources(page);
     await page
       .getByRole("link", { name: new RegExp(`^${existingName} 0 Photos`) })
       .click();
-    await expect(
-      page.getByRole("heading", { name: existingName }),
-    ).toBeVisible();
+    if (viewport.width === 390)
+      await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
+        `Sources — ${existingName}`,
+      );
+    else
+      await expect(
+        page.getByRole("heading", { name: existingName }),
+      ).toBeVisible();
 
     if (viewport.width === 390) await openSources(page);
     await page.getByRole("button", { name: "New Album" }).click();
     await page.getByLabel("Album name").fill(createdName);
     await page.getByRole("button", { name: "Create Album" }).click();
 
-    await expect(
-      page.getByRole("heading", { name: createdName }),
-    ).toBeVisible();
+    if (viewport.width === 390)
+      await expect(page.locator("[data-source-toggle]")).toHaveAccessibleName(
+        `Sources — ${createdName}`,
+      );
+    else
+      await expect(
+        page.getByRole("heading", { name: createdName }),
+      ).toBeVisible();
     await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
     await expect(
       page.getByText(
@@ -5993,6 +6261,8 @@ test("creating an Album opens that exact empty Album on desktop and narrow layou
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Ambiguous");
   await page.getByRole("button", { name: "Create Album" }).click();
+  // The failure lands in the Library summary that owns the form.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByText("The Album could not be created.")).toBeVisible();
   await expect(page.getByLabel("Album name")).toHaveValue("Ambiguous");
   await expect(page.locator("[data-grid-title]")).toHaveText("Created 2");
@@ -6036,6 +6306,9 @@ test("a delayed Album creation cannot replace a newer source or Photo", async ({
     await page.getByLabel("Album name").fill(createdName);
     await page.getByRole("button", { name: "Create Album" }).click();
     await started;
+    // Closing the form never cancels the admitted write; it only releases the
+    // surface so the newer source can be chosen.
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
     if (changedOwner === "source") {
       await page.getByRole("link", { name: /^Existing 2 Photos/ }).click();
@@ -6619,7 +6892,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await expect(
     page.getByText("Could not add this Photo to “Picks”."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/albums/*/members");
@@ -6635,7 +6908,7 @@ test("a successful membership retry recovers its exact Album connection", async 
   await membershipCheckbox(page, "Picks").check();
   await retried;
 
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await expect(page.getByText("Added to the Album.")).toBeVisible();
   await expect(membershipCheckbox(page, "Picks")).toBeChecked();
@@ -7090,7 +7363,9 @@ test("album form operations do not clobber a newer form", async ({ page }) => {
   await page.getByRole("button", { name: "Rename Alpha" }).click();
   await page.getByLabel("Album name").fill("Alpha Two");
   await page.getByRole("button", { name: "Save Name" }).click();
-  // While Alpha's request is pending, open and edit Beta's rename form.
+  // While Alpha's request is pending, close its form and open and edit Beta's
+  // rename form: at most one Album form is active at a time.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "Rename Beta" }).click();
   await page.getByLabel("Album name").fill("Beta Two");
   release!();
@@ -7216,7 +7491,9 @@ test("a pending delete keeps a newer create form and its draft", async ({
   });
   await page.getByRole("button", { name: "Delete Doomed" }).click();
   await page.getByRole("button", { name: "Delete Album" }).click();
-  // While the deletion is pending, open a create form and draft a name.
+  // While the deletion is pending, close its form and open a create form and
+  // draft a name: at most one Album form is active at a time.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Draft");
   release!();
@@ -7255,6 +7532,8 @@ test("a renamed open album reconnects under its new name", async ({ page }) => {
   await page.getByLabel("Album name").fill("Sibling Two");
   await page.getByRole("button", { name: "Save Name" }).click();
   await expect(page.getByText("Disconnected")).toBeVisible();
+  // Closing the form never cancels the admitted write; the retry still runs.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.unroute("**/api/albums/*/rename");
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByRole("heading", { name: "After" })).toBeVisible();
@@ -7313,7 +7592,7 @@ test("an older overview success still bootstraps after a newer reload fails", as
   await page.unroute("**/api/overview");
   await retry.click();
   await expect(page.getByText("Connected")).toBeVisible();
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expectLibrarySummary(page);
 });
 
 test("the application status monitor owns scan failure, retry, and completion", async ({
@@ -7325,7 +7604,7 @@ test("the application status monitor owns scan failure, retry, and completion", 
   await post(running.url, "/api/albums", { name: "Keep" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expectLibrarySummary(page);
 
   let command: "rejected" | "held" | "lost" = "rejected";
   let statusMode: "failed" | "idle" | "inspecting" | "cycle" = "failed";
@@ -7372,9 +7651,11 @@ test("the application status monitor owns scan failure, retry, and completion", 
     await route.abort();
   });
 
-  const retryCheck = page.getByRole("button", {
-    name: "Retry Library Check",
-  });
+  // The Library-level notice is reachable from the Grid without opening the
+  // Sources surface.
+  const retryCheck = page
+    .locator("[data-grid-summary]")
+    .getByRole("button", { name: "Retry Library Check" });
   await expect(retryCheck).toBeVisible();
   await expect(retryCheck).toBeInViewport();
   await openSources(page);
@@ -7389,7 +7670,8 @@ test("the application status monitor owns scan failure, retry, and completion", 
   await page.getByRole("button", { name: "Create Album" }).click();
   await duplicateAlbum;
   await expect(page.getByLabel("Album name")).toHaveValue("Keep");
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.keyboard.press("Escape");
   statusMode = "idle";
   await retryCheck.click();
   await expect(page.getByText("Disconnected")).toBeVisible();
@@ -7433,13 +7715,18 @@ test("the application status monitor owns scan failure, retry, and completion", 
         "Library check complete. Open Browse Snapshots remain unchanged.",
       ),
   ).toBeVisible();
+  // The Library notice owns its own action, beside the summary that carries it.
   await expect(
-    page.getByRole("button", { name: "Refresh Current Source" }),
+    page.locator("[data-grid-summary]").getByRole("button", {
+      name: "Refresh Current Source",
+    }),
   ).toBeInViewport();
-  await expect(page.getByText("Connected")).toBeVisible();
-  await page.getByRole("button", { name: "Refresh Current Source" }).click();
+  await expectConnection(page, "Connected");
+  await page.locator("[data-grid-summary] .summary-action").click();
   await expect(
-    page.getByRole("button", { name: "Refresh Current Source" }),
+    page.locator("[data-grid-summary]").getByRole("button", {
+      name: "Refresh Current Source",
+    }),
   ).toBeHidden();
   await expect(page.locator("[data-grid-summary]")).toHaveText("");
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
@@ -7453,7 +7740,7 @@ test("an Overview failure cannot re-enable an admitted empty-Library check", asy
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expectLibrarySummary(page);
 
   let command: "rejected" | "held" = "rejected";
   let statusState = "failed";
@@ -7687,6 +7974,7 @@ test("a stale overview response cannot revert newer album state", async ({
       response.url().endsWith("/api/albums") &&
       response.request().method() === "POST",
   );
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "New Album" }).click();
   await page.getByLabel("Album name").fill("Newest");
   await page.getByRole("button", { name: "Create Album" }).click();
@@ -7945,7 +8233,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const failed = progressResponse(page, albumId, 503);
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   await failed;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(
       "Album position could not be saved. Retry before making more decisions.",
@@ -7960,7 +8248,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await expect(page.locator("[data-status]")).toHaveText(
     "Could not refresh this Photo. Retry to continue.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toBeEnabled();
@@ -7985,7 +8273,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   await expect(page.locator("[data-status]")).toHaveText(
     "Showing retained Preview.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/photos/*/preview");
@@ -7993,7 +8281,7 @@ test("a current saved-position failure blocks decisions until Photo Retry confir
   const recovered = progressResponse(page, albumId);
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await recovered;
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
@@ -8049,7 +8337,7 @@ test("saved-position confirmation cannot be reverted by an older Overview", asyn
       albumId,
       page.getByRole("button", { name: /^Photo 1 of 2/ }),
     );
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await openSources(page);
     // The saved position is exposed as a separate Resume action, not as part
     // of the Album's Grid destination name.
@@ -8242,7 +8530,9 @@ test("source panel album failures report beside the library summary, not the pho
   await page.getByRole("button", { name: "Rename Panel" }).click();
   await page.getByLabel("Album name").fill("Nowhere");
   await page.getByRole("button", { name: "Save Name" }).click();
-  // The failure lands in the Library summary that owns the form.
+  // The failure lands in the Library summary that owns the form, so closing
+  // the form reveals it beside the Library, not in the Photo status.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByText("The Album could not be renamed.")).toBeVisible();
   // The Photo-view status is not overwritten by the panel's failure.
   await expect(page.getByRole("status").first()).not.toContainText(
@@ -8385,6 +8675,9 @@ test("adds the current recursive Folder to an Album from Grid View", async ({
     page.getByText("Ready · 2 Photos", { exact: true }),
   ).toBeVisible();
 
+  // Add Folder is a source-specific action, so View options holds it for the
+  // open Folder source.
+  await openViewOptions(page);
   await page
     .getByLabel("Add Folder to", { exact: true })
     .selectOption({ label: "Trip Picks" });
@@ -8411,7 +8704,7 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expectLibrarySummary(page);
   await openSources(page);
   await expect(
     page.getByRole("link", { name: /^Library Folder 0 Photos/ }),
@@ -8458,11 +8751,11 @@ test("an empty Library still shows and opens the Library Folder root", async ({
   await expect(
     page.locator("[data-grid-summary]").getByText(/Library check complete/),
   ).toBeVisible();
-  const refreshCurrent = page.getByRole("button", {
-    name: "Refresh Current Source",
-  });
+  const refreshCurrent = page.locator("[data-refresh]");
+  await openViewOptions(page);
   await expect(refreshCurrent).toBeInViewport();
   await refreshCurrent.click();
+  await closeViewOptions(page);
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 });
 
@@ -8473,7 +8766,7 @@ test("an empty All Photos source remains openable after switching away", async (
   const running = await server(base, root);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(running.url);
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expectLibrarySummary(page);
   await openSources(page);
 
   const allPhotos = page.getByRole("link", {
@@ -8554,9 +8847,9 @@ test("a failed folder source open reconnects to the same folder, not All Photos"
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByRole("heading", { name: "shoot · Folder" }),
   ).toBeVisible();
@@ -8597,16 +8890,20 @@ test("a remembered folder source waits for the File Location binding before reop
     await route.continue();
   });
   await page.route(/\/api\/file-locations/, (route) => route.abort());
-  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await openViewOptions(page);
+  await page.locator("[data-refresh]").click();
+  await closeViewOptions(page);
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   const opensAfterRefresh = folderOpens;
 
   // The global Retry cannot bind File Locations, so it must NOT send a
   // publicationless Folder open: the truthful failure stays visible.
-  await page.getByRole("button", { name: "Retry" }).click();
+  await closeViewOptions(page);
+  await openSources(page);
+  await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
@@ -8734,7 +9031,7 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   );
   await rootToggle.click();
   await rootReloaded;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(/Could not load folders \(shoot items 1–60\)/),
   ).toBeVisible();
@@ -8751,6 +9048,8 @@ test("failed File Location ranges keep siblings and retry only the failed range"
   await expect(
     page.getByText("An Album with this name already exists."),
   ).toBeHidden();
+  // The Album form releases the surface so the range owner stays actionable.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
   failing = false;
   await page.getByRole("button", { name: /^Retry Folders/ }).click();
@@ -8809,7 +9108,7 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   });
   await expect(retryA).toBeVisible();
   await expect(retryB).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   failing.delete("a");
   await retryA.click();
@@ -8818,12 +9117,12 @@ test("independent failed File Location parents keep exact retry ownership", asyn
   ).toBeVisible();
   await expect(retryA).toBeHidden();
   await expect(retryB).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   failing.delete("b");
   await retryB.click();
   await expect(retryB).toBeHidden();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
 });
 
 test("a leaf Folder renders no expand control and keeps its row aligned", async ({
@@ -8870,7 +9169,7 @@ test("a leaf Folder renders no expand control and keeps its row aligned", async 
   expect(rows[1]!.title).toBe("parent · Subfolders");
 });
 
-test("Library refresh stays reachable without owning the sidebar footer slot", async ({
+test("Library refresh stays reachable without owning a primary slot", async ({
   page,
 }) => {
   const { base, root } = await fixture();
@@ -8881,22 +9180,27 @@ test("Library refresh stays reachable without owning the sidebar footer slot", a
   await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
   await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
 
-  const refresh = page.getByRole("button", { name: "Refresh Source" });
+  // The recovery action is a View options entry, so it never occupies a
+  // permanently prominent primary slot, and the normal header keeps its two
+  // tool entries.
+  await expect(page.locator("[data-refresh]")).toBeHidden();
+  const refresh = page.locator("[data-refresh]");
+  await openViewOptions(page);
   await expect(refresh).toBeVisible();
   await expect(refresh).toBeEnabled();
-  // The recovery action no longer fills the panel width like a primary
+  // The recovery action does not fill the surface width like a primary
   // action, but it still works and stays keyboard reachable.
   const widths = await page.evaluate(() => {
     const button = document.querySelector<HTMLElement>("[data-refresh]");
-    const panel = document.querySelector<HTMLElement>("#source-panel")!;
-    if (!button) throw new Error("Refresh Source is missing");
+    const surface = document.querySelector<HTMLElement>("[data-view-options]")!;
+    if (!button) throw new Error("Refresh Current Source is missing");
     return {
       button: button.getBoundingClientRect().width,
-      panel: panel.getBoundingClientRect().width,
+      surface: surface.getBoundingClientRect().width,
       focusable: !button.hasAttribute("disabled"),
     };
   });
-  expect(widths.button).toBeLessThan(widths.panel);
+  expect(widths.button).toBeLessThan(widths.surface);
   expect(widths.focusable).toBe(true);
 
   await refresh.focus();
@@ -8994,7 +9298,7 @@ test("persists manual navigation and advanced current Photo across leave, reload
     .poll(async () => (await state(running.url, albumId)).position)
     .toBe(1);
   await page.getByRole("button", { name: "Back to Grid" }).click();
-  await page.getByRole("button", { name: "Sources", exact: true }).click();
+  await openSources(page);
   await page.getByRole("link", { name: /^Progress \d+ Photos/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -9117,7 +9421,7 @@ test("binds gestures to their starting Photo and covers exact thresholds, cancel
   await page.getByRole("link", { name: /^Review(?: |$)/ }).click();
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: /Photo 1 of/ }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await event("pointerdown", 100, 0, 48);
   await event("pointermove", 200, 10, 48);
@@ -9201,13 +9505,13 @@ test("keyboard works from focused buttons, real client deltas pan, and uncertain
     await route.abort();
   });
   await page.getByRole("button", { name: "Reject" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
   await page.unroute("**/api/photos/*/state");
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Retry" }).click(),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Undo" })).toBeDisabled();
 });
 
@@ -9241,7 +9545,7 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await rm(matching);
   await post(running.url, "/api/scan", {});
   await page.reload();
-  await page.getByRole("button", { name: "Sources", exact: true }).click();
+  await openSources(page);
   await page.getByRole("link", { name: /^Review(?: |$)/ }).click();
   await openPhotoAndWaitForProgress(
     page,
@@ -9405,25 +9709,36 @@ test("Grid sort offers one explicit Capture Time order and refreshes in that ord
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
   const sort = page.locator("[data-sort-select]");
+  await openViewOptions(page);
   await expect(sort).toBeVisible();
   await expect(sort).toBeEnabled();
-  await expect(sort).toHaveAccessibleName("Sort");
+  await expect(sort).toHaveAccessibleName("Source order");
   await expect(page.locator("[data-sort-select] option")).toHaveText([
     "Capture Time, earliest first",
     "Capture Time, latest first",
   ]);
   await expect(sort).toHaveValue("source-default");
+  await applyViewOptions(page);
   await expectGridOrder(page, ascending);
 
-  // The control sits in the Grid's keyboard order, after the Select mode
-  // toggle the header ends with.
+  // The View options entry sits in the Grid's keyboard order, after the Grid
+  // entry itself.
   await page.locator("[data-grid-viewport]").focus();
   await page.keyboard.press("Shift+Tab");
   await expect(page.locator("[data-grid-select-mode]")).toBeFocused();
   await page.keyboard.press("Shift+Tab");
-  await expect(sort).toBeFocused();
+  await expect(page.locator("[data-grid-view-options]")).toBeFocused();
 
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
+  // Closing without Apply discards the draft, so the committed order is the
+  // only one the Grid can present.
+  await page.locator("[data-view-options-cancel]").click();
+  await expect(sort).toHaveValue("source-default");
+  await expectGridOrder(page, ascending);
+  await openViewOptions(page);
+  await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, descending);
   await expect(sort).toHaveValue("capture-time-desc");
   expect(browseBodies.at(-1)).toEqual({
@@ -9432,8 +9747,9 @@ test("Grid sort offers one explicit Capture Time order and refreshes in that ord
   });
 
   // An explicit refresh builds a new snapshot with the selected order.
-  await openSources(page);
-  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await openViewOptions(page);
+  await page.locator("[data-refresh]").click();
+  await closeViewOptions(page);
   await expect(sort).toBeEnabled();
   await expectGridOrder(page, descending);
   await expect(sort).toHaveValue("capture-time-desc");
@@ -9488,7 +9804,9 @@ test("Grid sort keeps the current Photo by identity and repositions around it", 
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
 
   const browseBodies = recordBrowseBodies(page);
+  await openViewOptions(page);
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, descending);
   // The order change keeps the Photo at the current Grid position by ID
   // instead of reopening at the first position.
@@ -9545,15 +9863,19 @@ test("Album sort defaults to Album order and time views leave positions alone", 
   await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("Explicit order");
   const sort = page.locator("[data-sort-select]");
+  await openViewOptions(page);
   await expect(page.locator("[data-sort-select] option")).toHaveText([
     "Album order",
     "Capture Time, earliest first",
     "Capture Time, latest first",
   ]);
   await expect(sort).toHaveValue("source-default");
+  await applyViewOptions(page);
   await expectGridOrder(page, albumOrder);
 
+  await openViewOptions(page);
   await sort.selectOption("capture-time-asc");
+  await applyViewOptions(page);
   await expectGridOrder(page, ascending);
   expect(browseBodies.at(-1)).toEqual({
     source: "album",
@@ -9561,7 +9883,9 @@ test("Album sort defaults to Album order and time views leave positions alone", 
     order: "capture-time-asc",
   });
 
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, descending);
   expect(browseBodies.at(-1)).toEqual({
     source: "album",
@@ -9578,6 +9902,7 @@ test("Album sort defaults to Album order and time views leave positions alone", 
   await openSources(page);
   await page.getByRole("link", { name: /All Photos/ }).click();
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await openViewOptions(page);
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",
   );
@@ -9588,6 +9913,7 @@ test("Album sort defaults to Album order and time views leave positions alone", 
   await expectGridOrder(page, ascending);
 
   // ...and reopening this Album returns to its persisted order.
+  await closeViewOptions(page);
   await openSources(page);
   await page.getByRole("link", { name: /^Explicit order(?: |$)/ }).click();
   await expect(page.locator("[data-sort-select]")).toHaveValue(
@@ -9634,9 +9960,15 @@ test("a sort open superseded by a newer source open leaves the newer order commi
   await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
   await expectGridOrder(page, ascending);
   const sort = page.locator("[data-sort-select]");
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
-  // The control cannot submit a second order while this open is busy.
+  await applyViewOptions(page);
+  // One Apply commits one open: a second Apply while that open is busy
+  // submits nothing, so the held order change is never duplicated.
+  await openViewOptions(page);
   await expect(sort).toBeDisabled();
+  await expect(sort).toHaveValue("capture-time-desc");
+  await applyViewOptions(page);
   await expect
     .poll(
       () =>
@@ -9707,11 +10039,15 @@ test("a Folder sort change waits for the File Location binding before reopening"
 
   const browseBodies = recordBrowseBodies(page);
   const sort = page.locator("[data-sort-select]");
+  await openViewOptions(page);
   await expect(sort).toBeEnabled();
   // The Folder tree failure is what the user sees first; the order change
   // must not add a second, different failure on top of it.
-  const connectionBefore = await page.locator("[data-connection]").innerText();
+  const connectionBefore = await page
+    .locator("[data-grid-connection]")
+    .innerText();
   await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
 
   // The guard defers the order change instead of sending a Folder open with
   // the superseded publication, so no Browse is attempted at all.
@@ -9725,21 +10061,26 @@ test("a Folder sort change waits for the File Location binding before reopening"
     page.getByRole("button", { name: /^Photo 1 of 1/ }),
   ).toBeVisible();
   await expect
-    .poll(() => page.locator("[data-connection]").innerText())
+    .poll(() => page.locator("[data-grid-connection]").innerText())
     .toBe(connectionBefore);
+  await openViewOptions(page);
   await expect(sort).toHaveValue("source-default");
 
   // Once the binding route recovers, a fresh open uses the current
   // publication and the selected order applies to the reopened Folder.
   await page.unroute(/\/api\/file-locations/);
-  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await openViewOptions(page);
+  await page.locator("[data-refresh]").click();
+  await closeViewOptions(page);
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
   const publication = (
     (await (await fetch(`${running.url}/api/status`)).json()) as {
       publication: string;
     }
   ).publication;
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
   const expected = await browseOrderedIds(running.url, {
     source: "folder",
     folderPath: "shoot",
@@ -9809,7 +10150,9 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
 
   const browseBodies = recordBrowseBodies(page);
   const sort = page.locator("[data-sort-select]");
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, descending);
   // The Album reopen carries the Album identity and the current Photo anchor.
   expect(browseBodies.at(-1)).toEqual({
@@ -9838,6 +10181,7 @@ test("an Album sort change keeps the current Photo and its resume identity", asy
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
   await openSources(page);
   await page.getByRole("link", { name: /^Anchored(?: |$)/ }).click();
+  await openViewOptions(page);
   await expect(page.locator("[data-sort-select]")).toHaveValue(
     "source-default",
   );
@@ -9890,7 +10234,9 @@ test("Previous and Next follow the order selected from the Grid", async ({
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
 
   const browseBodies = recordBrowseBodies(page);
+  await openViewOptions(page);
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, descending);
   expect(browseBodies.at(-1)).toEqual({
     source: "library",
@@ -9959,7 +10305,9 @@ test("a Library order switch aligns windows beyond the first Grid window", async
   await expect(page.locator("[data-grid-layer]")).toBeVisible();
 
   const browseBodies = recordBrowseBodies(page);
+  await openViewOptions(page);
   await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await applyViewOptions(page);
   expect(browseBodies.at(-1)).toEqual({
     source: "library",
     order: "capture-time-desc",
@@ -10050,7 +10398,7 @@ test("active Library Review keeps its Capture Time snapshot until the next Sessi
   await post(running.url, "/api/scan", {});
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await page.getByRole("button", { name: "Next" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
@@ -10104,7 +10452,7 @@ test("Album Review snapshots explicit members across rescan and reconnect", asyn
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await page.unroute("**/api/photos/*/preview");
   await actionWithProgress(page, albumId, () =>
@@ -10138,7 +10486,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   await page.route("**/api/photos/*/preview", (route) => route.abort());
   await actionWithProgress(page, albumId, async () => {
     await page.getByRole("button", { name: "Next" }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
   });
   await page.unroute("**/api/photos/*/preview");
   await actionWithProgress(page, albumId, () =>
@@ -10176,7 +10524,7 @@ test("reconnect retains confirmed undo and a delayed stale progress failure stay
   // The failed write belongs to the Photo that initiated it. The newer Photo
   // and its confirmed position remain current and are not disconnected by a
   // stale settlement.
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
   await page.unroute("**/api/albums/*/progress");
   await expect
@@ -10421,8 +10769,9 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
       .first()
       .elementHandle();
     expect(pendingGridImage).not.toBeNull();
-    await openSources(page);
-    await page.getByRole("button", { name: "Refresh Source" }).click();
+    await openViewOptions(page);
+    await page.locator("[data-refresh]").click();
+    await closeViewOptions(page);
     await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
     await expect(page.getByText(/^Ready · 70 Photos$/)).toBeVisible();
     expect(
@@ -10681,7 +11030,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   });
 
   await page.goto(running.url);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByText(/returned an invalid response/)).toBeVisible();
   await expect(page.getByText(/Ready · 1 Photo/)).toBeHidden();
   await expect.poll(() => overviewRequests).toBeGreaterThan(0);
@@ -10698,7 +11047,7 @@ test("answered Browse-window failure owns source Retry and does not declare Read
   windowMode = "ready";
   await page.getByRole("button", { name: "Retry connection" }).click();
   await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   expect(browseAllocations).toBe(1);
   expect(overviewRequests).toBe(initialOverviewRequests);
   expect(new Set(windowTokens).size).toBe(1);
@@ -10731,7 +11080,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
     });
   });
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText("Connection lost. Retry to refresh this Photo."),
   ).toBeVisible();
@@ -10744,7 +11093,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await typed503;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   previewMode = "unknown-state";
@@ -10754,7 +11103,7 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await unknownState;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   previewMode = "ready-without-url";
@@ -10764,12 +11113,12 @@ test("current Preview HTTP failure disconnects until Photo Retry", async ({
   );
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await malformedReady;
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
 
   await page.unroute("**/api/photos/*/preview");
   await page.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(page.getByRole("button", { name: "Select" })).toBeEnabled();
 });
 
@@ -10785,7 +11134,7 @@ test("Photo Retry reports a replacement current fact instead of remaining in pro
     route.fulfill({ status: 503, body: '{"error":"failed"}' }),
   );
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
 
   let replacementServed = false;
   await page.route(
@@ -10812,7 +11161,7 @@ test("Photo Retry reports a replacement current fact instead of remaining in pro
   await expect(page.locator("[data-status]")).toHaveText(
     "Could not refresh this Photo. Retry to continue.",
   );
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByRole("button", { name: "Retry", exact: true }),
   ).toBeEnabled();
@@ -11553,6 +11902,7 @@ test("a large viewport loads only covering windows and stays bounded", async ({
 test("a source switch rebuilds the Grid range for the replacement source", async ({
   page,
 }) => {
+  test.setTimeout(120_000);
   const { base, root } = await fixture();
   await writePhotos(root, 80);
   const running = await server(base, root);
@@ -12161,7 +12511,9 @@ test("the filmstrip follows the open source's filtered sequence", async ({
     await page.getByRole("button", { name: "Back to Grid" }).click();
     await expect(page.locator("[data-grid-view]")).toBeVisible();
   }
+  await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("selected");
+  await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 2 Photos",
   );
@@ -12748,7 +13100,9 @@ async function selectGridThumbnailSize(
   page: Page,
   step: Readonly<{ value: string; height: number }>,
 ) {
+  await openViewOptions(page);
   await page.locator("[data-size-select]").selectOption(step.value);
+  await applyViewOptions(page);
   await expect
     .poll(async () => {
       const layout = await gridThumbnailLayout(page);
@@ -12908,9 +13262,11 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
 
   const viewport = page.locator("[data-grid-viewport]");
   const size = page.locator("[data-size-select]");
-  await expect(size).toHaveAccessibleName("Size");
+  await openViewOptions(page);
+  await expect(size).toHaveAccessibleName("Thumbnail size");
   await expect(size.locator("option")).toHaveText(["Small", "Medium", "Large"]);
   await expect(size).toHaveValue("medium");
+  await applyViewOptions(page);
   const medium = await gridThumbnailLayout(page);
   expect([medium.cellWidth, medium.cellHeight]).toEqual([140, 166]);
   expect(medium.rowPitch).toBe(178);
@@ -12922,7 +13278,17 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
   const retainedThumbnail = await page
     .locator('[data-photo-index="0"] img')
     .elementHandle();
+  // The thumbnail URL is bound asynchronously when the Browse response did not
+  // hydrate it, so the settled state this assertion is about is a cell that
+  // already presents its Photo. Capturing before the URL lands would compare
+  // null with null and prove nothing.
+  await expect
+    .poll(async () => (await retainedThumbnail!.getAttribute("src")) !== null)
+    .toBe(true);
   const retainedSource = await retainedThumbnail!.getAttribute("src");
+  // The captured identity is a real derivative URL, so the comparison below
+  // cannot pass vacuously.
+  expect(retainedSource).toContain("/thumbnail/");
   await selectGridThumbnailSize(page, { value: "small", height: 130 });
   await expectGridConverged(page, windows);
   // A size change re-lays out the cells the Grid still shows without
@@ -12973,6 +13339,7 @@ test("Grid thumbnail sizes re-lay out the Grid around the reader's place", async
   await expect(page.locator("[data-grid-title]")).toHaveText(
     "Library Folder · Folder",
   );
+  await openViewOptions(page);
   await expect(size).toHaveValue("large");
   await expect
     .poll(async () => (await gridThumbnailLayout(page)).cellWidth)
@@ -13253,12 +13620,12 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   const size = page.locator("[data-size-select]");
   const sort = page.locator("[data-sort-select]");
   const browseBodies = recordBrowseBodies(page);
-  // The filter offers every Choice plus the unfiltered default, and the
-  // view controls sit in the Grid's keyboard order, after the Select mode
-  // toggle the header ends with.
+  // View options groups the filter, the order, and the thumbnail size, and it
+  // opens from the header's View options entry.
+  await openViewOptions(page);
   await expect(filter).toBeVisible();
   await expect(filter).toBeEnabled();
-  await expect(filter).toHaveAccessibleName("Show");
+  await expect(filter).toHaveAccessibleName("Selection State");
   await expect(page.locator("[data-filter-select] option")).toHaveText([
     "All",
     "Undecided",
@@ -13266,21 +13633,22 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
     "Rejected",
   ]);
   await expect(filter).toHaveValue("all");
+  await expect(sort).toBeVisible();
+  await expect(size).toBeVisible();
+  await applyViewOptions(page);
   await viewport.focus();
   await page.keyboard.press("Shift+Tab");
   await expect(page.locator("[data-grid-select-mode]")).toBeFocused();
   await page.keyboard.press("Shift+Tab");
-  await expect(sort).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(size).toBeFocused();
-  await page.keyboard.press("Shift+Tab");
-  await expect(filter).toBeFocused();
+  await expect(page.locator("[data-grid-view-options]")).toBeFocused();
 
   // The unfiltered Grid reports visible results and source-wide decision progress separately.
+  await openViewOptions(page);
   await expect(visibleResults).toHaveText("Visible results: 5 of 5 Photos");
   await expect(progress).toHaveText(
     "Source progress: 0 selected · 0 rejected · 5 undecided",
   );
+  await applyViewOptions(page);
 
   // Decide three Photos from the Grid keyboard, then keep the focus on the
   // filter to prove Grid decision keys never act through it.
@@ -13294,6 +13662,7 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("p");
   await expect(cell(2).locator(".cell-state.selected")).toHaveText("✓");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
@@ -13311,29 +13680,31 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   // focused Photo while it owns focus.
   expect(statePosts).toEqual([]);
   await expect(filter).toBeFocused();
+  await applyViewOptions(page);
   await expect(cell(3).locator(".cell-state")).toHaveCount(0);
   // The focused Photo keeps its facts: the Grid keys never reached it.
   expect(await libraryPhoto(running.url, 0)).toMatchObject({
     selectionState: "selected",
     rating: 0,
   });
-  await expect(progress).toHaveText(
-    "Source progress: 2 selected · 1 rejected · 2 undecided",
-  );
 
   // One Selection State at a time: the filtered view holds only the matching
   // Photos in the source order, while the progress still counts the source.
+  await openViewOptions(page);
   await filter.selectOption("selected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[0]!, allIds[2]!]);
   await expect(filter).toHaveValue("selected");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 2 Photos",
   );
   await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+  await openViewOptions(page);
   await expect(visibleResults).toHaveText("Visible results: 2 of 5 Photos");
   await expect(progress).toHaveText(
     "Source progress: 2 selected · 1 rejected · 2 undecided",
   );
+  await applyViewOptions(page);
   expect(browseBodies.at(-1)).toEqual({
     source: "library",
     selection: "selected",
@@ -13349,12 +13720,20 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
+  await openViewOptions(page);
   await filter.selectOption("rejected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[1]!]);
+  await openViewOptions(page);
   await filter.selectOption("undecided");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[3]!, allIds[4]!]);
+  await openViewOptions(page);
   await filter.selectOption("all");
+  await applyViewOptions(page);
   await expectGridOrder(page, allIds);
+  // The complete source counts and the filtered result count are two facts,
+  // so View options names them separately.
   await expect(visibleResults).toHaveText("Visible results: 5 of 5 Photos");
   await expect(progress).toHaveText(
     "Source progress: 2 selected · 1 rejected · 2 undecided",
@@ -13363,6 +13742,7 @@ test("Grid filter shows one Selection State at a time and keeps source progress"
   // The filter belongs to the open view: a reload starts unfiltered.
   await page.reload();
   await expect(page.getByText(/^Ready · 5 Photos$/)).toBeVisible();
+  await openViewOptions(page);
   await expect(page.locator("[data-filter-select]")).toHaveValue("all");
   await expectGridOrder(page, allIds);
 });
@@ -13405,7 +13785,9 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await cell(2).click();
   await expect(page.locator("[data-position]")).toHaveText("3 / 8");
   await page.getByRole("button", { name: "Back to Grid" }).click();
+  await openViewOptions(page);
   await filter.selectOption("selected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[0]!, allIds[1]!, anchorId]);
   expect(browseBodies.at(-1)).toEqual({
     source: "library",
@@ -13420,7 +13802,9 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await page.getByRole("button", { name: "Back to Grid" }).click();
 
   // An order change and an explicit refresh keep the filter and its counts.
+  await openViewOptions(page);
   await sort.selectOption("capture-time-desc");
+  await applyViewOptions(page);
   await expectGridOrder(page, [anchorId, allIds[1]!, allIds[0]!]);
   await expect(filter).toHaveValue("selected");
   // The order change also re-anchors on the current Photo: the last Photo
@@ -13431,8 +13815,9 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
     selection: "selected",
     photoId: allIds[0],
   });
-  await openSources(page);
-  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await openViewOptions(page);
+  await page.locator("[data-refresh]").click();
+  await closeViewOptions(page);
   await expect(filter).toBeEnabled();
   await expectGridOrder(page, [anchorId, allIds[1]!, allIds[0]!]);
   await expect(filter).toHaveValue("selected");
@@ -13458,14 +13843,17 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 3 Photos",
   );
+  await openViewOptions(page);
   await expect(page.locator("[data-grid-source-progress]")).toHaveText(
     "Source progress: 3 selected · 0 rejected · 5 undecided",
   );
+  await applyViewOptions(page);
 
   // The refresh after the scan publishes the new Photo, keeps the filter,
   // and reports the new source-wide progress.
-  await openSources(page);
-  await page.getByRole("button", { name: "Refresh Source" }).click();
+  await openViewOptions(page);
+  await page.locator("[data-refresh]").click();
+  await closeViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 3 Photos",
   );
@@ -13498,12 +13886,16 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   const status = page.locator("[data-grid-status]");
   const progress = page.locator("[data-grid-source-progress]");
   const empty = page.locator("[data-grid-empty]");
+  await openViewOptions(page);
   await filter.selectOption("selected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[0]!]);
   await expect(status).toHaveText("Ready · 1 Photo");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 1 selected · 0 rejected · 3 undecided",
   );
+  await applyViewOptions(page);
 
   // The decision changes the filtered Photo in place: the open view keeps its
   // frozen membership, and the write addresses the filtered sequence's Photo
@@ -13515,9 +13907,11 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   await page.keyboard.press("x");
   await expect(cell.locator(".cell-state.rejected")).toHaveText("×");
   await expect(status).toHaveText("Ready · 1 Photo");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
+  await applyViewOptions(page);
   expect(await libraryPhoto(running.url, 0)).toMatchObject({
     id: allIds[0],
     selectionState: "rejected",
@@ -13530,18 +13924,24 @@ test("a decision inside a filtered view keeps its membership and its Photo", asy
   // Only reopening the source applies the filter to the changed facts: the
   // Photo leaves the Selected view, and the view reports its own emptiness
   // without claiming an empty source or offering a Library check.
+  await openViewOptions(page);
   await filter.selectOption("all");
+  await applyViewOptions(page);
   await expectGridOrder(page, allIds);
+  await openViewOptions(page);
   await filter.selectOption("selected");
+  await applyViewOptions(page);
   await expect(empty).toBeVisible();
   await expect(page.locator("[data-grid-empty-message]")).toHaveText(
     "No Photos match this filter.",
   );
   await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
   await expect(status).toHaveText("0 Photos");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 0 selected · 1 rejected · 3 undecided",
   );
+  await applyViewOptions(page);
   // The committed filter belongs to the destination address, so the reload
   // restores the same view rather than the unfiltered source.
   await page.reload();
@@ -13590,13 +13990,17 @@ test("an Album source filters its members and keeps Album progress", async ({
   const browseBodies = recordBrowseBodies(page);
   // Album progress describes the Album's members, not the open view.
   await expect(status).toHaveText("Ready · 3 Photos");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 2 selected · 1 rejected · 0 undecided",
   );
+  await applyViewOptions(page);
 
   // The filter applies to the Album's members in membership position, and
   // the request stays one Album open with the filter.
+  await openViewOptions(page);
   await filter.selectOption("selected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[0]!, allIds[1]!]);
   await expect(status).toHaveText("Ready · 2 Photos");
   expect(browseBodies.at(-1)).toEqual({
@@ -13619,17 +14023,23 @@ test("an Album source filters its members and keeps Album progress", async ({
   await expect(filter).toHaveValue("selected");
 
   // A filter no Album member matches reports the filter, not an empty Album.
+  await openViewOptions(page);
   await filter.selectOption("undecided");
+  await applyViewOptions(page);
   await expect(empty).toBeVisible();
   await expect(page.locator("[data-grid-empty-message]")).toHaveText(
     "No Photos match this filter.",
   );
   await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
   await expect(status).toHaveText("0 Photos");
+  await openViewOptions(page);
   await expect(progress).toHaveText(
     "Source progress: 2 selected · 1 rejected · 0 undecided",
   );
+  await applyViewOptions(page);
+  await openViewOptions(page);
   await filter.selectOption("rejected");
+  await applyViewOptions(page);
   await expectGridOrder(page, [allIds[2]!]);
   await expect(status).toHaveText("Ready · 1 Photo");
 });
@@ -13752,19 +14162,27 @@ test("a failed filter change keeps the requested view recoverable through Retry"
     },
     { times: 1 },
   );
+  await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("selected");
+  await applyViewOptions(page);
   await expect(
     page.getByText("Could not load this source. Retry to continue."),
   ).toBeVisible();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  // The blocking failure is visible beside the affected primary action, not
+  // only inside the closed options surface.
+  await expectConnection(page, "Disconnected");
   await expect(page.locator("[data-photo-index]")).toHaveCount(0);
-  await expect(page.locator("[data-grid-source-progress]")).toBeHidden();
+  // The complete source decision counts are a View options fact, and a failed
+  // open presents none of them. The element lives inside that surface, so the
+  // guard reads its text rather than its visibility.
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText("");
 
   // Retry reopens the requested filtered view, not the previous one.
   const browseBodies = recordBrowseBodies(page);
   await page.getByRole("button", { name: "Retry" }).click();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expectGridOrder(page, [allIds[0]!]);
+  await openViewOptions(page);
   await expect(page.locator("[data-filter-select]")).toHaveValue("selected");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 1 Photo",
@@ -13815,7 +14233,9 @@ test("a filtered view larger than one window pages through its own sequence", as
     windowRequests.push(`${url.pathname}#${url.searchParams.get("start")}`);
   });
 
+  await openViewOptions(page);
   await page.locator("[data-filter-select]").selectOption("selected");
+  await applyViewOptions(page);
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "Ready · 120 Photos",
   );
@@ -14615,12 +15035,12 @@ test("repeated failure of one source range keeps one exact Recovery owner", asyn
   try {
     await scrollBoundary();
     await expect.poll(() => attempts).toBeGreaterThanOrEqual(1);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const afterFirst = attempts;
     await scrollBoundary();
     await expect.poll(() => attempts).toBeGreaterThan(afterFirst);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     failing = false;
     const recovered = page.waitForResponse((response) => {
@@ -14633,7 +15053,7 @@ test("repeated failure of one source range keeps one exact Recovery owner", asyn
     });
     await scrollBoundary();
     await recovered;
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator('[data-photo-index="60"]')).toBeVisible();
   } finally {
     await page.unroute(/\/api\/browse\//);
@@ -14695,7 +15115,7 @@ test("a source establishment failure retires the claim it replaces", async ({
       element.scrollTop = element.scrollHeight;
       element.dispatchEvent(new Event("scroll"));
     });
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     // Opening the second source fails on its establishing window, which
     // replaces the first source's claim with its own.
@@ -14712,7 +15132,7 @@ test("a source establishment failure retires the claim it replaces", async ({
     await expect.poll(() => albumWindowFailures).toBeGreaterThan(0);
     albumPhase = false;
     await albumOpen;
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     // Retrying the second source releases its claim and the predecessor
     // claim the transition replaced.
@@ -14720,7 +15140,7 @@ test("a source establishment failure retires the claim it replaces", async ({
     failLibraryRange = false;
     await openSources(page);
     await page.getByRole("button", { name: "Retry connection" }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.locator("[data-sources]")).toBeHidden();
     await page.locator('[data-photo-index="0"]').click();
@@ -14906,7 +15326,7 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 11–70 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const failedAttempts = tailAttempts;
     failing = false;
@@ -14921,7 +15341,7 @@ test("Grid Retry replays a clamped tail range from its original Photo anchor", a
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Ready · 70 Photos",
     );
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator('[data-photo-index="69"]')).toBeVisible();
     expect(new Set(tokens).size).toBe(1);
     expect(browseAllocations).toBe(0);
@@ -15002,7 +15422,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
 
     const initial60 = attempts.get("60")!;
     const initial120 = attempts.get("120")!;
@@ -15016,7 +15436,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect(page.locator("[data-grid-status]")).toHaveText(
       "Photos 121–180 could not be loaded (HTTP 503). Retry this range.",
     );
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(initialOverviewRequests);
     expect(firstWindowReloads).toBe(0);
@@ -15029,7 +15449,7 @@ test("Grid Retry reloads only exact failed ranges on the current Browse token", 
     await expect
       .poll(() => attempts.get("120") ?? 0)
       .toBeGreaterThan(failed120);
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     expect(attempts.get("60")).toBe(recovered60);
     expect(browseAllocations).toBe(0);
     expect(overviewRequests).toBe(initialOverviewRequests);
@@ -15386,7 +15806,7 @@ test("a failed expired Album reopen retains retired membership memory", async ({
     element.scrollTop = element.scrollHeight;
   });
   await expect.poll(() => expiredServed).toBe(true);
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(page.locator("[data-grid-status]")).toHaveText(
     "This source expired and could not be reopened. Retry the connection.",
   );
@@ -15560,7 +15980,7 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
     }>;
     const reopenedToken = (await opened).token;
     await replacementWindow;
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator("[data-stage]")).toContainText(
       "Preview unavailable",
     );
@@ -16093,7 +16513,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     // then the Photo-owned adjacent tail prefetch fails.
     await page.getByRole("button", { name: "Next" }).click();
     await expect.poll(() => reopenWindowFailed).toBe(true);
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     const photoRetry = page.locator("[data-retry-photo]");
     await expect(photoRetry).toBeVisible();
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
@@ -16104,7 +16524,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     expect(overviewRequests).toBe(initialOverviewRequests);
     expect(reopenPhotoId).not.toBe("");
 
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     await expect(page.getByRole("button", { name: "Select" })).toBeDisabled();
     // The original-token adjacent request has already been superseded by the
     // reopen. Release its stale route now; the successor gate remains held so
@@ -16261,7 +16681,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
     releaseAdjacentSuccessor();
     await expect(photoRetry).toBeEnabled();
     await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
     await expect(page.locator("[data-status]")).toHaveText(
       "Connected. Current state refreshed.",
     );
@@ -16334,6 +16754,7 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
 test("navigation promotes an aborted adjacent window to current priority", async ({
   page,
 }) => {
+  test.setTimeout(120_000);
   const { base, root } = await fixture();
   await writePhotos(root, 70);
   const running = await server(base, root);
@@ -16500,7 +16921,7 @@ test("stale opaque Photo windows cannot claim Recovery after Back to Grid", asyn
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
       ),
   );
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByRole("button", { name: "Retry connection" }),
   ).toBeHidden();
@@ -16810,7 +17231,7 @@ test("a range re-admission that recovers a failed source establishment also esta
   ).toBeVisible();
 
   await page.getByRole("link", { name: "Review 3 Photos" }).click();
-  await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Disconnected");
   await expect(
     page.getByText(/could not be loaded \(HTTP 503\)/),
   ).toBeVisible();
@@ -16820,7 +17241,7 @@ test("a range re-admission that recovers a failed source establishment also esta
   // re-admits the establishing window on its own.
   windowReady = true;
   await scrollGrid(page, 1);
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expectConnection(page, "Connected");
   await expect(
     page.getByText("Ready · 3 Photos", { exact: true }),
   ).toBeVisible();
@@ -17149,13 +17570,16 @@ test.describe("browser navigation", () => {
     await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
     await waitForGridFrame(page);
     const length = await historyLength(page);
+    await openViewOptions(page);
     await page.locator("[data-filter-select]").selectOption("undecided");
+    await applyViewOptions(page);
     await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
     expect(new URL(page.url()).searchParams.get("selection")).toBe("undecided");
     expect(await historyLength(page)).toBe(length);
     await page.reload();
     await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
     expect(new URL(page.url()).searchParams.get("selection")).toBe("undecided");
+    await openViewOptions(page);
     await expect(page.locator("[data-filter-select]")).toHaveValue("undecided");
   });
 
@@ -17442,11 +17866,11 @@ test.describe("browser navigation", () => {
     // plus a source-return action; it never silently reverses history.
     await page.route("**/api/photos/*/preview", (route) => route.abort());
     await page.getByRole("button", { name: "Next", exact: true }).click();
-    await expect(page.getByText("Disconnected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Disconnected");
     expect(page.url()).not.toBe(target);
     await page.unroute("**/api/photos/*/preview");
     await page.getByRole("button", { name: "Retry", exact: true }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expectConnection(page, "Connected");
   });
 
   test("rapid Back and Forward during a slow window cannot repaint an obsolete destination", async ({
@@ -17823,4 +18247,326 @@ test.describe("browser navigation", () => {
     // because an older entry names the same source.
     expect(token).toBeTruthy();
   });
+});
+
+test.describe("narrow Grid space budgets", () => {
+  /// Measures the Grid regions the Product Spec bounds, plus the page-level
+  /// overflow and the smallest interactive target of the open view.
+  const gridGeometry = (page: Page) =>
+    page.evaluate(() => {
+      const box = (selector: string) =>
+        (
+          document.querySelector(selector) as HTMLElement
+        ).getBoundingClientRect();
+      const header = box(".grid-header");
+      const tray = box("[data-grid-batch]");
+      const viewport = box("[data-grid-viewport]");
+      const targets = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "[data-grid-view] button:not([hidden]), [data-grid-view] select:not([hidden]), [data-grid-view] [tabindex='0']",
+        ),
+      )
+        .filter((target) => target.offsetParent !== null)
+        .map((target) => target.getBoundingClientRect())
+        .filter((rect) => rect.width > 0 || rect.height > 0);
+      return {
+        header: header.height,
+        tray: tray.height,
+        grid: viewport.height,
+        overflow:
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+        smallest: Math.min(
+          ...targets.flatMap((rect) => [rect.width, rect.height]),
+        ),
+      };
+    });
+
+  for (const viewport of [
+    { width: 375, height: 667 },
+    { width: 390, height: 844 },
+  ]) {
+    test(`normal and Select-mode regions fit ${viewport.width} by ${viewport.height}`, async ({
+      page,
+    }) => {
+      const { base, root } = await fixture();
+      await writePhotos(root, 24);
+      const running = await server(base, root);
+      await page.setViewportSize(viewport);
+      await page.goto(running.url);
+      await expect(page.getByText(/^Ready · 24 Photos$/)).toBeVisible();
+      await waitForGridFrame(page);
+
+      // One compact header row, no dedicated brand or connected-status row,
+      // and no page-level horizontal overflow.
+      const normal = await gridGeometry(page);
+      expect(normal.header).toBeLessThanOrEqual(88);
+      expect(normal.overflow).toBe(0);
+      expect(normal.smallest).toBeGreaterThanOrEqual(44);
+      // At 375 by 667 the Grid keeps at least 499 pixels even before Select
+      // mode takes its share.
+      expect(normal.grid).toBeGreaterThanOrEqual(499);
+
+      await page.locator("[data-grid-select-mode]").click();
+      await expect(page.locator("[data-grid-batch]")).toBeVisible();
+      const selected = await gridGeometry(page);
+      expect(selected.header + selected.tray).toBeLessThanOrEqual(168);
+      expect(selected.overflow).toBe(0);
+      expect(selected.smallest).toBeGreaterThanOrEqual(44);
+      if (viewport.height === 667)
+        expect(selected.grid).toBeGreaterThanOrEqual(499);
+      // The normal tools are replaced, not stacked above the tray.
+      await expect(page.locator("[data-grid-view-options]")).toBeHidden();
+      await expect(page.locator("[data-grid-select-mode]")).toBeHidden();
+      await expect(page.locator("[data-grid-multi-done]")).toBeVisible();
+    });
+  }
+
+  test("200 percent text reflows without page-level horizontal overflow", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    await writePhotos(root, 6);
+    const running = await server(base, root);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(running.url);
+    await expect(page.getByText(/^Ready · 6 Photos$/)).toBeVisible();
+    await waitForGridFrame(page);
+
+    const measure = () =>
+      page.evaluate(() => ({
+        overflow:
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+        header: (
+          document.querySelector(".grid-header") as HTMLElement
+        ).getBoundingClientRect().height,
+      }));
+    expect((await measure()).overflow).toBe(0);
+
+    // Enlarged text may reflow vertically and need not meet the pixel
+    // budgets, but every control and required fact stays reachable without
+    // page-level horizontal overflow.
+    await page.addStyleTag({
+      content: "html { font-size: 200%; }",
+    });
+    const enlarged = await measure();
+    expect(enlarged.overflow).toBe(0);
+    // The enlarged header may exceed the normal-state budget, and the Grid
+    // keeps a usable height beside it.
+    expect(enlarged.header).toBeGreaterThan(88);
+    expect(
+      await page
+        .locator("[data-grid-viewport]")
+        .evaluate((node) => node.clientHeight),
+    ).toBeGreaterThan(200);
+    // Every displaced control still has a reachable destination.
+    for (const selector of [
+      "[data-source-toggle]",
+      "[data-grid-view-options]",
+      "[data-grid-select-mode]",
+      "[data-grid-status]",
+      '[data-photo-index="0"]',
+    ]) {
+      const target = page.locator(selector);
+      await expect(target).toBeAttached();
+      await expect(target).not.toHaveCSS("display", "none");
+    }
+  });
+});
+
+test("View options names an active nondefault filter and order in the header", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const entry = page.locator("[data-grid-view-options]");
+  const flag = page.locator("[data-view-options-flag]");
+  // The default view carries no indication, so the name stays the plain entry.
+  await expect(flag).toBeHidden();
+  await expect(entry).toHaveAccessibleName("View options");
+
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("undecided");
+  await page.locator("[data-sort-select]").selectOption("capture-time-desc");
+  await applyViewOptions(page);
+  // The indication is text, not color alone, and names both committed
+  // choices.
+  await expect(flag).toBeVisible();
+  await expect(flag).toHaveText(" · Undecided · Capture Time, latest first");
+  // The indication is part of the entry's accessible name, so a screen reader
+  // hears the committed choices with the control that opens them.
+  await expect(entry).toHaveAccessibleName(
+    "View options, Undecided · Capture Time, latest first",
+  );
+
+  // Closing without Apply leaves the committed indication untouched.
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("rejected");
+  await closeViewOptions(page);
+  await expect(flag).toHaveText(" · Undecided · Capture Time, latest first");
+});
+
+test("View options groups every view control and closes with no layout space", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  const closedHeight = await page
+    .locator(".grid-header")
+    .evaluate((node) => node.clientHeight);
+  await openViewOptions(page);
+  // Every displaced control has one destination: the filter, the order, all
+  // three thumbnail sizes, the complete source counts, the current-source
+  // refresh, and the Apply and Cancel actions.
+  await expect(page.locator("[data-filter-select] option")).toHaveText([
+    "All",
+    "Undecided",
+    "Selected",
+    "Rejected",
+  ]);
+  await expect(page.locator("[data-sort-select]")).toBeVisible();
+  await expect(page.locator("[data-size-select] option")).toHaveText([
+    "Small",
+    "Medium",
+    "Large",
+  ]);
+  await expect(page.locator("[data-grid-visible-results]")).toHaveText(
+    "Visible results: 4 of 4 Photos",
+  );
+  await expect(page.locator("[data-grid-source-progress]")).toHaveText(
+    "Source progress: 0 selected · 0 rejected · 4 undecided",
+  );
+  await expect(page.locator("[data-refresh]")).toBeEnabled();
+  await expect(page.locator("[data-view-options-apply]")).toBeVisible();
+  await expect(page.locator("[data-view-options-cancel]")).toBeVisible();
+
+  // A closed options surface takes no layout space.
+  await closeViewOptions(page);
+  expect(
+    await page.locator(".grid-header").evaluate((node) => node.clientHeight),
+  ).toBe(closedHeight);
+});
+
+test("a batch result stays persistent and Review focuses the affected cells", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 4);
+  const running = await server(base, root);
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 4 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  await page.locator("[data-grid-select-mode]").click();
+  for (const index of [0, 1])
+    await page.locator(`[data-photo-index="${index}"]`).click();
+  // One Photo changes elsewhere, so the batch keeps the selection and offers
+  // its Review action.
+  const ids = await browseIds(running.url);
+  await post(running.url, `/api/photos/${ids[1]}/state`, {
+    field: "selectionState",
+    value: "rejected",
+  });
+  await page.locator("[data-batch-select]").click();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "1 Photo selected. 1 Photo changed elsewhere. Review them before retrying.",
+  );
+  // The result is persistent and actionable, and the selection is retained.
+  await expect(page.locator("[data-batch-retained]")).toBeVisible();
+  await expect(page.locator('[data-photo-index="0"]')).toHaveClass(
+    /multi-selected/,
+  );
+  await expect(page.locator('[data-photo-index="1"]')).toHaveClass(
+    /multi-selected/,
+  );
+  await expect(page.locator("[data-grid-batch-result]")).toHaveAttribute(
+    "data-tone",
+    "warning",
+  );
+  const review = page.getByRole("button", { name: "Review 1 Photo" });
+  await expect(review).toBeVisible();
+  // Review closes its disclosure and focuses the affected Grid cell rather
+  // than opening another modal.
+  await review.click();
+  await expect(page.locator("[data-grid-batch-result-text]")).toHaveText(
+    "1 Photo reviewed. Retry the batch when ready.",
+  );
+  await expect(page.locator('[data-photo-index="1"]')).toBeFocused();
+  // Review opens no other modal surface: the Grid keeps the keyboard.
+  await expect(page.locator("[data-view-options]")).toBeHidden();
+  await expect(page.locator("[data-source-dialog]")).toHaveJSProperty(
+    "open",
+    false,
+  );
+  await expect(page.locator("[data-album-form-dialog]")).toHaveJSProperty(
+    "open",
+    false,
+  );
+});
+
+test("the empty Library, an empty Album, and no filter matches stay distinct", async ({
+  page,
+}) => {
+  const { base, root } = await fixture();
+  await writePhotos(root, 2);
+  const running = await server(base, root);
+  // An Album with no members, so its empty state is its own.
+  const created = await post(running.url, "/api/albums", {
+    name: "Empty Album",
+  });
+  expect(created.ok).toBe(true);
+  const albumId = (
+    (await await created.json()) as { albums: Array<{ id: string }> }
+  ).albums[0]!.id;
+  await page.setViewportSize({ width: 1000, height: 700 });
+  await page.goto(running.url);
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await waitForGridFrame(page);
+
+  // No filter matches: the filter is named, and no Library check is offered.
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("rejected");
+  await applyViewOptions(page);
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "No Photos match this filter.",
+  );
+  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
+  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+
+  // An empty Album names the Album and its existing action.
+  await openSources(page);
+  await page.getByRole("link", { name: /^Empty Album 0 Photos/ }).click();
+  await expect(page.locator("[data-grid-empty-message]")).toHaveText(
+    "This Album contains no Photos. Add Photos from another source's Photo View.",
+  );
+  await expect(page.locator("[data-grid-empty-action]")).toBeHidden();
+  await expect(page.locator("[data-grid-status]")).toHaveText("0 Photos");
+  expect(albumId).toBeTruthy();
+
+  // An empty Library keeps its Library check action.
+  await openSources(page);
+  await page.getByRole("link", { name: /^All Photos 2 Photos/ }).click();
+  await expect(page.getByText(/^Ready · 2 Photos$/)).toBeVisible();
+  await openViewOptions(page);
+  await page.locator("[data-filter-select]").selectOption("all");
+  await applyViewOptions(page);
+  await page.evaluate(async () => {
+    const response = await fetch("/api/overview");
+    void response;
+  });
+  await expect(page.locator("[data-grid-empty]")).toBeHidden();
 });

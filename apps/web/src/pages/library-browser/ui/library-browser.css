@@ -1,3 +1,10 @@
+/* A control rendered for another layout must be unavailable to accessibility,
+   focus, and input, so the hidden attribute always wins over a layout rule
+   that would otherwise give the element a box. */
+[hidden] {
+  display: none !important;
+}
+
 .app-shell {
   display: grid;
   grid-template-rows: 3rem minmax(0, 1fr);
@@ -50,8 +57,33 @@
   min-height: 0;
   display: grid;
   --source-width: 14rem;
+  /* The selection tray's fixed height while it is visible. */
+  --batch-tray-height: 6.5rem;
   grid-template-columns: var(--source-width) 0.35rem minmax(0, 1fr);
   overflow: hidden;
+}
+
+.source-dialog:not([open]) {
+  /* A closed dialog renders nothing. */
+  display: none;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+/* A wide Grid keeps Sources as ordinary layout content beside the Photos, so
+   the dialog element itself contributes no box there. */
+.browser:not(.sources-drawer) .source-dialog {
+  display: contents;
+}
+
+/* A modal Sources surface — a narrow Grid, or any Photo View — carries its own
+   Close action. The wide sidebar has no invoker to return to. */
+.browser.sources-drawer .source-dialog[open] .source-close {
+  display: inline-flex;
 }
 
 .source-resizer {
@@ -67,7 +99,6 @@
   outline: none;
 }
 
-.source-scrim,
 .source-toggle,
 .source-close {
   display: none;
@@ -277,11 +308,6 @@
   }
 }
 
-.album-tools:has(.album-form),
-.album-tools:has(.album-confirm) {
-  grid-column: 1 / -1;
-}
-
 .album-form {
   min-width: 0;
   display: flex;
@@ -329,6 +355,8 @@
   text-align: left;
 }
 
+/* The Sources surface's footer carries the connection retry. Library refresh
+   is a View options entry, so it never owns a primary slot here. */
 .source-footer {
   display: grid;
   justify-items: start;
@@ -337,165 +365,117 @@
   border-top: 1px solid var(--border);
 }
 
-/* Library refresh is a recovery action, so it stays reachable but quiet
-   instead of owning the sidebar's primary slot. */
-.source-footer [data-refresh] {
-  border-color: transparent;
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.source-footer [data-refresh]:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--raised);
-  color: var(--text);
-}
-
 .grid-view {
   min-width: 0;
   min-height: 0;
   display: grid;
-  /* The header keeps its one-row height until the decision progress line
-     wraps below it. */
-  grid-template-rows: minmax(3.5rem, auto) minmax(0, 1fr);
+  /* The header, the Grid, and the batch tray are the three regions of Grid
+     View. A hidden tray is removed from the layout, so it costs no space. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: var(--canvas);
 }
 
 .grid-header {
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.55rem 0.9rem;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0.75rem;
   border-bottom: 1px solid var(--border);
+}
+
+/* The normal header's one row. The compact status entry takes its own line
+   below it only while it carries an exceptional notice. */
+.grid-header-row {
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .grid-header > div {
   min-width: 0;
 }
 
-/* Decision progress keeps the header's row while it fits and otherwise wraps
-   to the line below it, where it fills that line instead of truncating the
-   controls beside it. */
-.grid-progress {
+/* The narrow layout has no dedicated brand or connected-status row, so the
+   source disclosure carries the current source and the compact status slot
+   carries the count. A blocking connection failure is presented beside the
+   primary action of the open view. */
+.source-toggle {
   flex: 1 1 auto;
   min-width: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-
-.grid-progress span {
-  display: block;
-  overflow: visible;
-  text-overflow: clip;
-  white-space: normal;
-}
-
-.grid-progress span + span {
-  margin-top: 0.15rem;
-}
-
-.grid-filter,
-.grid-size {
-  flex: 0 0 auto;
-  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.3rem;
+  font-weight: 650;
+  text-align: left;
 }
 
-.grid-filter label,
-.grid-size label {
-  color: var(--muted);
-  font-size: 0.68rem;
-  white-space: nowrap;
-}
-
-.grid-filter select,
-.grid-size select {
+.source-toggle-name {
   min-width: 0;
-  max-width: 100%;
-  min-height: 2.25rem;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 0.375rem;
-  background: var(--canvas);
-  color: var(--text);
-  font-size: 0.72rem;
-}
-
-.grid-filter select:disabled {
-  opacity: 0.55;
-}
-
-.grid-sort {
-  min-width: 0;
-  flex: 0 0.25 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-left: auto;
-}
-
-.grid-sort label {
-  color: var(--muted);
-  font-size: 0.68rem;
-  white-space: nowrap;
-}
-
-.grid-sort select {
-  min-width: 0;
-  max-width: 100%;
-  min-height: 2.25rem;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 0.375rem;
-  background: var(--canvas);
-  color: var(--text);
-  font-size: 0.72rem;
-}
-
-.grid-sort select:disabled {
-  opacity: 0.55;
-}
-
-.folder-album-controls {
-  min-width: min(24rem, 42%);
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-left: auto;
-}
-
-.folder-album-controls label,
-.folder-album-controls p {
-  color: var(--muted);
-  font-size: 0.68rem;
-  white-space: nowrap;
-}
-
-.folder-album-controls select {
-  min-width: 7rem;
-  min-height: 2.25rem;
-  flex: 1;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 0.375rem;
-  background: var(--canvas);
-  color: var(--text);
-}
-
-.folder-album-controls button {
-  min-height: 2.25rem;
-  white-space: nowrap;
-}
-
-.folder-album-controls p {
-  max-width: 16rem;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-toggle-indicator {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.7em;
+}
+
+/* The source disclosure and the compact count truncate rather than widen the
+   screen, so a long Album name or a long status never overflows the page. */
+.grid-heading {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.grid-connection,
+.photo-connection {
+  flex: none;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.grid-connection.offline,
+.photo-connection.offline {
+  color: var(--warning);
+  font-weight: 650;
+}
+
+/* The normal header's tools: the View options entry names an active
+   nondefault filter or order, and the Select mode entry is a Grid interaction
+   mode. Select mode replaces both with the count and Done. */
+.grid-tools,
+.grid-selection {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.grid-tools button,
+.grid-selection button {
+  min-height: 2.25rem;
+  white-space: nowrap;
+}
+
+.options-flag {
+  color: var(--focus);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.grid-selection-count {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .grid-header h2,
@@ -510,6 +490,227 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Supporting surfaces share one native-modal presentation: a bottom sheet that
+   scrolls internally on a narrow layout, and a centered dialog on a wide one.
+   Sources uses the same surface whenever it is not the resizable sidebar. */
+.options-dialog,
+.album-dialog,
+.recovery-dialog,
+.browser.sources-drawer .source-dialog {
+  position: fixed;
+  z-index: 60;
+  inset: auto 0 0 0;
+  width: 100%;
+  max-width: none;
+  max-height: 88dvh;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-bottom: 0;
+  border-radius: 0.9rem 0.9rem 0 0;
+  background: var(--panel);
+  color: inherit;
+  box-shadow: 0 -1rem 2.5rem rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+.options-dialog::backdrop,
+.album-dialog::backdrop,
+.recovery-dialog::backdrop,
+.browser.sources-drawer .source-dialog::backdrop {
+  background: rgb(0 0 0 / 58%);
+}
+
+.options-sheet,
+.album-dialog-sheet,
+.recovery-sheet,
+.browser.sources-drawer .source-panel {
+  min-height: 0;
+  max-height: 88dvh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  padding: max(0.75rem, env(safe-area-inset-top)) 0.85rem
+    max(0.85rem, env(safe-area-inset-bottom));
+  overflow: hidden;
+}
+
+.browser.sources-drawer .source-panel {
+  border-right: 0;
+  box-shadow: none;
+}
+
+.options-body,
+.recovery-sheet > :not(.recovery-header) {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.options-header,
+.album-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.options-header h2,
+.album-dialog-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 680;
+}
+
+.options-progress {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.options-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+}
+
+.options-field label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.options-field select {
+  min-width: 0;
+  max-width: 60%;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--canvas);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.options-source-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.options-source-actions button {
+  min-height: 2.75rem;
+}
+
+.options-footer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.options-footer button {
+  flex: 1 1 0;
+  min-height: 2.75rem;
+}
+
+.options-footer .quiet {
+  flex: 0 0 auto;
+}
+
+.folder-album-controls {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.folder-album-controls label,
+.folder-album-controls p {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.folder-album-controls select {
+  flex: 1 1 8rem;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.375rem;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+.folder-album-controls button {
+  min-height: 2.75rem;
+}
+
+.folder-album-controls p {
+  flex: 1 1 100%;
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.album-dialog-sheet .album-form,
+.album-dialog-sheet .album-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.album-dialog-sheet .album-form input {
+  flex: 1 1 10rem;
+  min-width: 0;
+  min-height: 2.75rem;
+}
+
+.album-dialog-sheet .album-form button,
+.album-dialog-sheet .album-confirm button {
+  min-height: 2.75rem;
+}
+
+.album-dialog-sheet .album-form-message,
+.album-dialog-sheet .album-confirm p {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.recovery-dialog {
+  inset: auto 0 0 0;
+}
+
+@media (min-width: 761px) {
+  .options-dialog,
+  .album-dialog,
+  .recovery-dialog,
+  .browser.sources-drawer .source-dialog {
+    inset: 50% auto auto 50%;
+    transform: translate(-50%, -50%);
+    width: min(34rem, calc(100vw - 3rem));
+    max-height: min(85dvh, 44rem);
+    border-radius: 0.75rem;
+    border-bottom: 1px solid var(--border-strong);
+  }
+
+  .options-sheet,
+  .album-dialog-sheet,
+  .recovery-sheet,
+  .browser.sources-drawer .source-panel {
+    max-height: min(85dvh, 44rem);
+    padding: 1rem 1.15rem;
+  }
+
+  .browser.sources-drawer .source-panel {
+    width: min(24rem, calc(100vw - 3rem));
+    border-right: 1px solid var(--border-strong);
+    box-shadow: 0 1.25rem 3rem rgb(0 0 0 / 45%);
+  }
 }
 
 .grid-summary {
@@ -535,37 +736,35 @@
   color: var(--text);
 }
 
-/* The batch tray takes its own header row while Select mode is active or a
-   Photo is multi-selected, and stays out of the layout otherwise. */
+/* The batch tray is the bottom action region of Grid View. It stays visible
+   with zero selected Photos, a hidden tray leaves the layout entirely, and its
+   height is fixed while it is visible so a longer result message can never
+   change the Grid's geometry. */
 .grid-batch {
-  flex: 1 1 100%;
+  min-width: 0;
+  height: var(--batch-tray-height);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.75rem max(0.3rem, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.grid-batch-retained {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.grid-batch-result {
   min-width: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid var(--border);
-}
-
-.grid-batch-overview {
-  flex: 0 1 auto;
-  min-width: min(100%, 12rem);
-}
-
-.grid-batch-source,
-.grid-batch-retained {
-  margin-top: 0.15rem;
-  overflow: visible;
-  color: var(--muted);
-  font-size: 0.68rem;
-  text-overflow: clip;
-  white-space: normal;
-}
-
-.grid-batch-result {
-  flex: 1 1 16rem;
-  min-width: min(100%, 12rem);
   color: var(--muted);
   font-size: 0.72rem;
   line-height: 1.35;
@@ -587,18 +786,10 @@
   white-space: normal;
 }
 
-.grid-batch-count {
-  flex: 0 0 auto;
-  color: var(--text);
-  font-size: 0.72rem;
-  font-weight: 650;
-}
-
 .grid-batch-actions {
-  flex: 1 1 auto;
   min-width: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 0.35rem;
 }
@@ -793,34 +984,14 @@
   overflow-wrap: anywhere;
 }
 
+/* Photo View owns the whole browser width, so Sources opens as one modal
+   surface there exactly as it does on a narrow Grid. */
 .browser:has(.photo-view:not([hidden])) {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.browser:has(.photo-view:not([hidden])) .source-panel {
+.browser:has(.photo-view:not([hidden])) .source-resizer {
   display: none;
-}
-
-.browser:has(.photo-view:not([hidden])).sources-open .source-scrim {
-  position: absolute;
-  z-index: 20;
-  inset: 0;
-  display: block;
-  background: rgb(0 0 0 / 58%);
-}
-
-.browser:has(.photo-view:not([hidden])).sources-open .source-panel {
-  position: absolute;
-  z-index: 30;
-  inset: 0 auto 0 0;
-  width: min(20rem, 88vw);
-  display: grid;
-  border-right-color: var(--border-strong);
-  box-shadow: 1rem 0 2.5rem rgb(0 0 0 / 45%);
-}
-
-.browser:has(.photo-view:not([hidden])).sources-open .source-close {
-  display: inline-block;
 }
 
 .photo-view {
@@ -1461,10 +1632,6 @@
   display: none;
 }
 
-[hidden] {
-  display: none !important;
-}
-
 @media (max-width: 1100px) and (min-width: 761px) {
   .review-tools {
     grid-template-columns: minmax(15rem, 0.75fr) minmax(20rem, 1fr);
@@ -1497,12 +1664,15 @@
 }
 
 @media (max-width: 760px) {
+  /* A narrow layout has no dedicated brand or connected-status row: the
+     browser region owns the whole height and the Grid's own header carries
+     the source, its count, and the two tool entries. */
   .app-shell {
-    grid-template-rows: 2.75rem minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .app-header {
-    padding-inline: max(0.7rem, env(safe-area-inset-left));
+    display: none;
   }
 
   .browser {
@@ -1510,40 +1680,13 @@
     overflow: hidden;
   }
 
-  .source-scrim {
-    position: fixed;
-    z-index: 20;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
-    border: 0;
-    border-radius: 0;
-    background: rgb(0 0 0 / 58%);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 140ms ease-out;
-  }
-
-  .source-panel {
-    position: fixed;
-    z-index: 30;
-    inset: 0 auto 0 0;
-    width: min(20rem, 88vw);
-    padding: max(0.75rem, env(safe-area-inset-top)) 0.75rem
-      max(0.75rem, env(safe-area-inset-bottom));
-    border-right: 1px solid var(--border-strong);
-    box-shadow: 1rem 0 2.5rem rgb(0 0 0 / 45%);
-    transform: translateX(-102%);
-    transition: transform 160ms ease-out;
-  }
   .source-resizer {
     display: none;
   }
 
   .source-close,
   .source-toggle {
-    display: inline-block;
+    display: inline-flex;
   }
 
   .source-card,
@@ -1565,29 +1708,61 @@
     --folder-toggle-width: 2.75rem;
   }
 
-  .sources-open .source-scrim {
-    opacity: 1;
-    pointer-events: auto;
-  }
-
-  .sources-open .source-panel {
-    transform: translateX(0);
-  }
-
   .grid-view,
   .photo-view {
     width: 100%;
-    height: calc(100dvh - 2.75rem);
+    height: 100dvh;
   }
 
-  .grid-view {
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
+  /* One compact header row: the source disclosure, the count or current
+     loading status, View options, and Select mode. Routine progress never
+     adds another row, and the source disclosure is the one element that
+     truncates. */
   .grid-header {
-    min-height: 3.25rem;
-    flex-wrap: wrap;
-    padding: 0.35rem 0.55rem;
+    min-height: 2.75rem;
+    padding: 0.25rem 0.45rem;
+  }
+
+  .grid-header-row {
+    gap: 0.3rem;
+  }
+
+  /* The narrow row carries four controls, so the tools and the compact
+     indicators step down a size while every target stays at least 44 pixels
+     tall. */
+  .grid-tools button,
+  .grid-selection button {
+    padding: 0.25rem 0.4rem;
+    font-size: 0.68rem;
+  }
+
+  .grid-connection,
+  .photo-connection {
+    font-size: 0.64rem;
+  }
+
+  .grid-heading h2 {
+    display: none;
+  }
+
+  .grid-heading p {
+    flex: none;
+    max-width: 7.5rem;
+    font-size: 0.66rem;
+  }
+
+  .source-toggle {
+    padding: 0.3rem 0.45rem;
+    font-size: 0.85rem;
+  }
+
+  .grid-tools button,
+  .grid-selection button {
+    min-height: 2.75rem;
+  }
+
+  .grid-tools {
+    flex: none;
   }
 
   .grid-summary:not(:empty) {
@@ -1599,10 +1774,8 @@
     white-space: normal;
   }
 
-  .grid-batch-overview,
-  .grid-batch-result,
-  .grid-batch-actions {
-    flex-basis: 100%;
+  .grid-batch {
+    padding: 0.25rem 0.5rem max(0.25rem, env(safe-area-inset-bottom));
   }
 
   .grid-batch-actions {
@@ -1622,45 +1795,8 @@
     font-size: 0.68rem;
   }
 
-  .folder-album-controls {
-    min-width: 100%;
-    margin-left: 0;
-  }
-
-  .folder-album-controls select,
-  .folder-album-controls button {
-    min-height: 2.75rem;
-  }
-
-  .grid-sort select {
-    max-width: 8.5rem;
-    min-height: 2.75rem;
-  }
-
-  .grid-filter select {
-    max-width: 8.5rem;
-    min-height: 2.75rem;
-  }
-
-  .grid-size select {
-    max-width: 8.5rem;
-    min-height: 2.75rem;
-  }
-
-  .grid-heading {
-    flex: 1 1 0;
-  }
-
-  .source-toggle {
-    flex: none;
-  }
-
   .grid-layer {
     min-width: 100%;
-  }
-
-  .browser:has(.photo-view:not([hidden])) .source-panel {
-    display: grid;
   }
 
   .photo-view {
@@ -1990,22 +2126,6 @@
 .recovery-notice {
   margin: 0.25rem 0 0;
   font-size: 0.85rem;
-}
-
-.recovery-panel {
-  position: fixed;
-  inset: 10% auto auto 50%;
-  transform: translateX(-50%);
-  z-index: 60;
-  width: min(680px, calc(100vw - 2rem));
-  max-height: 80vh;
-  overflow-y: auto;
-  background: var(--surface, #1d1f24);
-  color: inherit;
-  border: 1px solid var(--border, #33363d);
-  border-radius: 10px;
-  padding: 1rem 1.25rem;
-  box-shadow: 0 18px 48px rgb(0 0 0 / 0.45);
 }
 
 .recovery-header {
