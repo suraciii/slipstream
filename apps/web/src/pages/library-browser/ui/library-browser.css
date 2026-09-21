@@ -494,10 +494,14 @@
 
 /* Supporting surfaces share one native-modal presentation: a bottom sheet that
    scrolls internally on a narrow layout, and a centered dialog on a wide one.
-   Sources uses the same surface whenever it is not the resizable sidebar. */
+   Sources uses the same surface whenever it is not the resizable sidebar.
+   Photo tools and Rating are the same kind of surface, so at most one of all
+   of them is ever active. */
 .options-dialog,
 .album-dialog,
 .recovery-dialog,
+.photo-tools-dialog,
+.rating-dialog,
 .browser.sources-drawer .source-dialog {
   position: fixed;
   z-index: 60;
@@ -519,6 +523,8 @@
 .options-dialog::backdrop,
 .album-dialog::backdrop,
 .recovery-dialog::backdrop,
+.photo-tools-dialog::backdrop,
+.rating-dialog::backdrop,
 .browser.sources-drawer .source-dialog::backdrop {
   background: rgb(0 0 0 / 58%);
 }
@@ -526,6 +532,8 @@
 .options-sheet,
 .album-dialog-sheet,
 .recovery-sheet,
+.photo-tools-sheet,
+.rating-sheet,
 .browser.sources-drawer .source-panel {
   min-height: 0;
   max-height: 88dvh;
@@ -543,13 +551,17 @@
 }
 
 .options-body,
-.recovery-sheet > :not(.recovery-header) {
+.recovery-sheet > :not(.recovery-header),
+.photo-tools-body {
   min-height: 0;
   overflow-y: auto;
 }
 
 .options-header,
-.album-dialog-header {
+.album-dialog-header,
+.photo-tools-header,
+.rating-header,
+.photo-tools-view-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -557,7 +569,9 @@
 }
 
 .options-header h2,
-.album-dialog-header h2 {
+.album-dialog-header h2,
+.photo-tools-header h2,
+.rating-header h2 {
   margin: 0;
   font-size: 0.95rem;
   font-weight: 680;
@@ -689,6 +703,8 @@
   .options-dialog,
   .album-dialog,
   .recovery-dialog,
+  .photo-tools-dialog,
+  .rating-dialog,
   .browser.sources-drawer .source-dialog {
     inset: 50% auto auto 50%;
     transform: translate(-50%, -50%);
@@ -701,6 +717,8 @@
   .options-sheet,
   .album-dialog-sheet,
   .recovery-sheet,
+  .photo-tools-sheet,
+  .rating-sheet,
   .browser.sources-drawer .source-panel {
     max-height: min(85dvh, 44rem);
     padding: 1rem 1.15rem;
@@ -994,12 +1012,16 @@
   display: none;
 }
 
+/* Photo View is one column of regions: the compact source-return and filename
+   row, the dominant Preview, the navigation group, the decision facts, and the
+   primary action region. Every supporting surface is a native modal, so a
+   closed panel holds no row and takes no space. */
 .photo-view {
   min-width: 0;
   min-height: 0;
   grid-column: 1 / -1;
   display: grid;
-  grid-template-rows: 3.5rem minmax(12rem, 1fr) auto auto auto;
+  grid-template-rows: auto minmax(10rem, 1fr) auto auto auto;
   overflow-y: auto;
   background: var(--canvas);
 }
@@ -1007,24 +1029,91 @@
 .photo-header {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(8rem, 1fr) auto minmax(8rem, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.45rem 0.75rem;
+  gap: 0.5rem;
+  padding: 0.2rem max(0.5rem, env(safe-area-inset-left)) 0.2rem
+    max(0.5rem, env(safe-area-inset-right));
   border-bottom: 1px solid var(--border);
-  text-align: center;
 }
 
 .photo-header > :first-child {
   justify-self: start;
 }
 
-.photo-header > :nth-child(2) {
+.photo-identity {
   min-width: 0;
+  display: grid;
+}
+
+.photo-header h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+/* The filename names the Original File the decision applies to. It truncates
+   instead of widening the view. */
+.photo-filename {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  text-align: center;
 }
 
 .photo-header > :last-child {
   justify-self: end;
+}
+
+/* One Previous/Next pair with the position and total. It is a separate group
+   from the primary actions, so it never shares an activation target with
+   Select or Reject. */
+.photo-navigation {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem max(0.5rem, env(safe-area-inset-left))
+    max(0.15rem, env(safe-area-inset-bottom))
+    max(0.5rem, env(safe-area-inset-right));
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.photo-navigation button {
+  min-height: 2.75rem;
+}
+
+.photo-position {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* The wide layout shows the bounded neighbor strip beside the Preview. A
+   compact layout discloses it inside Photo tools, so this home holds no strip
+   there and the single strip node moves to that disclosure. */
+.filmstrip-host {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}
+
+/* The Nearby Photos disclosure holds the same single strip node while it is
+   the presented content of Photo tools. */
+.filmstrip-tools {
+  min-width: 0;
+  display: flex;
+  justify-content: center;
 }
 
 .photo-header-actions {
@@ -1058,26 +1147,24 @@
   user-select: none;
 }
 
-.zoom-controls {
-  position: absolute;
-  z-index: 2;
-  top: 0.65rem;
-  right: 0.65rem;
+/* The complete Preview Zoom controls live in Photo tools. They never overlay
+   the Preview, so the image keeps the whole region and a closed tools surface
+   holds no zoom control at all. */
+.photo-tools-zoom {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
   gap: 0.2rem;
-  max-width: calc(100% - 1.3rem);
-  pointer-events: none;
-  padding: 0.2rem;
+  min-width: 0;
+  padding: 0.35rem;
   border: 1px solid var(--border-strong);
   border-radius: 0.375rem;
-  background: rgb(14 16 19 / 92%);
+  background: var(--canvas);
 }
 
-.zoom-controls > * {
-  pointer-events: auto;
+.photo-tools-zoom .zoom-slider {
+  flex: 1 1 8rem;
+  min-width: 7rem;
 }
 
 .zoom-control {
@@ -1290,9 +1377,9 @@
   }
 }
 
-/* The bounded neighbor strip: a quiet navigation aid between the Preview
-   and the review bar. It never widens Photo View and it yields on short
-   viewports so the Preview and the decision controls keep their space. */
+/* The bounded neighbor strip: a quiet navigation aid beside the Preview on a
+   wide layout, and the disclosed Nearby Photos content of Photo tools on a
+   compact one. It never widens Photo View. */
 .filmstrip {
   min-width: 0;
   display: flex;
@@ -1344,25 +1431,38 @@
   bottom: 0.1rem;
 }
 
+/* One compact row: the current Selection State and Rating, and the Photo
+   status. Both stay readable without opening Photo tools. */
 .review-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(24rem, 0.9fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 0.8rem;
-  padding: 0.55rem 0.75rem;
+  justify-content: space-between;
+  gap: 0.2rem 0.75rem;
+  min-width: 0;
+  padding: 0.3rem max(0.5rem, env(safe-area-inset-left))
+    max(0.3rem, env(safe-area-inset-bottom))
+    max(0.5rem, env(safe-area-inset-right));
   border-top: 1px solid var(--border);
   background: var(--panel);
 }
 
 .review-state {
   min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.85rem;
 }
 
+/* The decision facts keep one deterministic line height, so the Preview
+   region they sit beside never depends on host font metrics. */
 .facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem 1rem;
-  font-size: 0.76rem;
+  gap: 0.2rem 0.85rem;
+  font-size: 0.74rem;
+  line-height: 1.3;
 }
 
 .facts div {
@@ -1388,72 +1488,73 @@
   white-space: nowrap;
 }
 
-.metadata {
-  margin-top: 0.45rem;
+/* Capture Details, the Preview Source, and the combined detail-limit
+   explanation are Photo tools content, so they scroll inside the surface
+   instead of stacking under the Preview. */
+.photo-tools-facts {
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: 0.76rem;
 }
 
-.metadata > strong {
+.photo-tools-facts strong {
+  display: block;
   color: var(--text);
   font-size: 0.68rem;
   font-weight: 650;
 }
 
-.metadata dl {
+.photo-tools-facts dl {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.2rem 0.9rem;
+  gap: 0.25rem 0.9rem;
   margin: 0.2rem 0 0;
 }
 
-.metadata dl div {
+.photo-tools-facts div {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.3rem;
 }
 
-.metadata dt {
+.photo-tools-facts dt {
   color: var(--muted);
 }
 
-.metadata dd {
+.photo-tools-facts dd {
+  margin: 0;
   color: var(--text);
 }
 
+.photo-tools-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.76rem;
+}
+
+.photo-tools-preview-label {
+  color: var(--muted);
+}
+
+.photo-tools-detail-limit {
+  color: var(--muted);
+}
+
+.photo-tools-detail-limit::before {
+  content: "· ";
+}
+
+/* The status line reserves one line even while it is empty, so a message
+   appearing never moves the Preview. */
 .status {
   min-height: 1.1rem;
   color: var(--warning);
   font-size: 0.72rem;
-  line-height: 1.4;
+  line-height: 1.3;
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
   white-space: normal;
-}
-
-.decision-controls,
-.photo-controls {
-  display: grid;
-  gap: 0.4rem;
-}
-
-.decision-controls {
-  grid-template-columns: repeat(3, 1fr);
-}
-
-.photo-controls {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.photo-controls button {
-  min-height: 2.75rem;
-}
-
-.decision-controls span {
-  margin-left: 0.2rem;
-  color: currentColor;
-  font-size: 0.68rem;
-  opacity: 0.72;
 }
 
 .select-button {
@@ -1478,18 +1579,74 @@
   background: #592b26;
 }
 
-.review-tools {
-  min-width: 0;
+/* The primary action region: one Reject, one Rating entry with its explicit
+   current value, one Select, and More. It is the only Photo action row, on
+   every layout. */
+.quick-action-dock {
   display: grid;
-  grid-template-columns: minmax(16rem, 0.8fr) minmax(21rem, 1fr) minmax(
-      24rem,
-      1fr
-    );
-  align-items: end;
-  gap: 0.8rem;
-  padding: 0.5rem 0.75rem 0.65rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.2rem max(0.5rem, env(safe-area-inset-left))
+    max(0.2rem, env(safe-area-inset-bottom))
+    max(0.5rem, env(safe-area-inset-right));
   border-top: 1px solid var(--border);
   background: var(--panel);
+}
+
+.quick-action-dock button {
+  min-width: 0;
+  min-height: 2.75rem;
+  padding-inline: 0.2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76rem;
+}
+
+.rating-dock-button {
+  border-color: var(--rating);
+  background: #3a301e;
+  color: var(--rating);
+}
+
+/* Photo tools: the list of supporting actions, and the subviews that replace
+   it. Each subview carries its own local return to the list. */
+.photo-tools-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.3rem;
+}
+
+.photo-tools-actions button {
+  min-height: 2.75rem;
+}
+
+.photo-tools-entries {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+}
+
+.photo-tools-entries button {
+  min-height: 2.75rem;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.photo-tools-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.photo-tools-view-header h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 680;
 }
 
 .rating-controls {
@@ -1621,27 +1778,6 @@
   font-size: 0.72rem;
 }
 
-/* The mobile hierarchy is a presentation of the existing intents. Desktop
-   keeps the established Review Bar and Review Tools surfaces unchanged. */
-.quick-action-dock,
-.secondary-action-row,
-.secondary-sheet-header,
-.secondary-actions,
-.secondary-zoom-controls,
-.secondary-details {
-  display: none;
-}
-
-@media (max-width: 1100px) and (min-width: 761px) {
-  .review-tools {
-    grid-template-columns: minmax(15rem, 0.75fr) minmax(20rem, 1fr);
-  }
-
-  .photo-controls {
-    grid-column: 1 / -1;
-  }
-}
-
 @media (max-width: 760px), (max-height: 480px) {
   .app-shell button,
   .app-shell input,
@@ -1655,10 +1791,11 @@
   }
 }
 
-/* The strip is supporting content: on a short viewport it yields so the
-   Preview and every decision control keep their space. */
-@media (max-height: 480px) {
-  .filmstrip {
+/* The strip is supporting content: a compact layout discloses it inside Photo
+   tools, so this home holds no strip and the Preview and every decision
+   control keep their space. */
+@media (max-width: 760px), (max-height: 480px) {
+  .filmstrip-host {
     display: none;
   }
 }
@@ -1799,27 +1936,13 @@
     min-width: 100%;
   }
 
-  .photo-view {
-    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto auto auto auto;
-  }
-
   .photo-header {
-    grid-template-columns: minmax(6.5rem, 1fr) auto minmax(6.5rem, 1fr);
     gap: 0.35rem;
     padding: 0.25rem 0.5rem;
   }
 
-  .photo-header h2 {
-    max-width: 9rem;
-  }
-
   .preview {
     grid-template-columns: 2.4rem minmax(0, 1fr) 2.4rem;
-  }
-
-  .zoom-controls {
-    top: 0.45rem;
-    right: 0.45rem;
   }
 
   .zoom-control {
@@ -1829,18 +1952,6 @@
   .zoom-slider {
     width: 5.5rem;
     min-height: 2.75rem;
-  }
-
-  .review-bar {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.35rem;
-    padding: 0.4rem 0.5rem 0.5rem;
-  }
-
-  .review-state > .metadata,
-  .review-bar > .decision-controls,
-  .secondary-sheet .photo-controls {
-    display: none;
   }
 
   .facts {
@@ -1853,23 +1964,6 @@
     font-size: 0.68rem;
   }
 
-  .decision-controls,
-  .photo-controls {
-    gap: 0.3rem;
-  }
-
-  .review-tools {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.45rem;
-    padding: 0.45rem 0.5rem max(0.5rem, env(safe-area-inset-bottom));
-  }
-
-  .rating-controls,
-  .membership,
-  .photo-controls {
-    grid-column: auto;
-  }
-
   .rating-controls button {
     min-height: 2.75rem;
     font-size: 0.75rem;
@@ -1878,246 +1972,40 @@
   .membership-panel {
     max-height: 10rem;
   }
-
-  .photo-controls {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .photo-controls button {
-    min-width: 0;
-    padding-inline: 0.25rem;
-    font-size: 0.72rem;
-  }
 }
 
-@media (max-width: 760px), (max-height: 480px) {
+/* Short landscape consolidates navigation and the primary actions into one
+   row without shrinking either target, and the brand row yields, so the
+   Preview keeps the rest of the height. */
+@media (max-height: 480px) {
+  .app-shell:has(.photo-view:not([hidden])) {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .app-shell:has(.photo-view:not([hidden])) .app-header {
+    display: none;
+  }
+
   .photo-view {
-    grid-template-rows: 3.25rem minmax(10rem, 1fr) auto auto auto auto auto;
-  }
-
-  .photo-view > .quick-action-dock {
-    order: 1;
-  }
-
-  .photo-view > .review-bar {
-    order: 2;
-  }
-
-  .photo-view > .secondary-action-row {
-    order: 3;
-  }
-
-  .photo-view > .secondary-sheet {
-    order: 4;
-  }
-
-  .review-bar {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .review-state > .metadata,
-  .review-bar > .decision-controls {
-    display: none;
-  }
-
-  .secondary-sheet .photo-controls {
-    display: grid;
-  }
-
-  .secondary-sheet [data-secondary-undo] {
-    display: none;
-  }
-
-  .quick-action-dock {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 0.3rem;
-    min-width: 0;
-    padding: 0.4rem max(0.5rem, env(safe-area-inset-left)) 0.35rem
-      max(0.5rem, env(safe-area-inset-right));
-    border-top: 1px solid var(--border);
-    background: var(--panel);
-  }
-
-  .quick-action-dock button {
-    min-width: 0;
-    min-height: 2.75rem;
-    padding-inline: 0.2rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.72rem;
-  }
-
-  .rating-dock-button {
-    border-color: var(--rating);
-    background: #3a301e;
-    color: var(--rating);
-  }
-
-  .secondary-action-row {
-    display: flex;
-    justify-content: flex-end;
-    min-width: 0;
-    padding: 0.25rem max(0.5rem, env(safe-area-inset-left))
-      max(0.25rem, env(safe-area-inset-bottom))
-      max(0.5rem, env(safe-area-inset-right));
-    border-top: 1px solid var(--border);
-    background: var(--canvas);
-  }
-
-  .secondary-toggle {
-    min-height: 2.75rem;
-    padding-inline: 0.7rem;
-  }
-
-  .secondary-sheet[data-secondary-open="false"],
-  .secondary-sheet[data-secondary-open="true"] {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.55rem;
-    min-width: 0;
-    padding: 0.55rem max(0.5rem, env(safe-area-inset-left))
-      max(0.65rem, env(safe-area-inset-bottom))
-      max(0.5rem, env(safe-area-inset-right));
-    border-top: 1px solid var(--border-strong);
-    background: var(--panel);
-  }
-
-  .secondary-sheet[data-secondary-open="false"] .secondary-sheet-header {
-    display: none;
-  }
-
-  .secondary-sheet-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-
-  .secondary-sheet-header h3 {
-    margin: 0;
-    color: var(--text);
-    font-size: 0.8rem;
-  }
-
-  .secondary-sheet[data-secondary-open="false"] .secondary-sheet-header button {
-    visibility: hidden;
-    pointer-events: none;
-  }
-
-  .secondary-sheet-header button {
-    min-height: 2.75rem;
-  }
-
-  .secondary-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.3rem;
-  }
-
-  .secondary-actions button {
-    min-height: 2.75rem;
-  }
-
-  .rating-controls {
-    display: grid;
     grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    column-gap: 0.45rem;
+    grid-template-rows: auto minmax(9rem, 1fr) auto auto;
   }
 
-  .rating-controls legend {
-    margin: 0;
-  }
-
-  .membership {
-    gap: 0.2rem;
-  }
-
-  .membership-facts {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-  }
-
-  .membership-heading {
-    display: none;
-  }
-
-  .membership-status {
-    grid-column: 1;
-  }
-
-  .membership-actions {
-    grid-column: 2;
-  }
-
-  .membership-list,
-  .membership-message {
+  .photo-header,
+  .preview,
+  .review-bar {
     grid-column: 1 / -1;
   }
 
-  .secondary-sheet[data-secondary-open="false"] .secondary-zoom-controls,
-  .secondary-sheet[data-secondary-open="false"] .secondary-details {
-    display: none;
+  .photo-navigation {
+    grid-row: 4;
+    grid-column: 1;
+    border-top: 0;
   }
 
-  .secondary-zoom-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 0.2rem;
-    min-width: 0;
-    padding: 0.35rem;
-    border: 1px solid var(--border-strong);
-    border-radius: 0.375rem;
-    background: var(--canvas);
-  }
-
-  .secondary-zoom-controls .zoom-slider {
-    flex: 1 1 8rem;
-    min-width: 7rem;
-  }
-
-  .secondary-details {
-    display: block;
-    min-width: 0;
-    padding: 0.35rem 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 0.375rem;
-    background: var(--canvas);
-    color: var(--muted);
-    font-size: 0.72rem;
-  }
-
-  .secondary-details summary {
-    min-height: 2.2rem;
-    padding: 0.45rem 0.2rem;
-    color: var(--text);
-    cursor: pointer;
-    font-weight: 650;
-  }
-
-  .secondary-details dl {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.25rem 0.8rem;
-    margin: 0.2rem 0 0;
-  }
-
-  .secondary-details dl div {
-    display: flex;
-    gap: 0.25rem;
-  }
-
-  .secondary-details dt {
-    color: var(--muted);
-  }
-
-  .secondary-details dd {
-    margin: 0;
-    color: var(--text);
+  .photo-view > .quick-action-dock {
+    grid-row: 4;
+    grid-column: 2;
   }
 }
 
@@ -2221,10 +2109,6 @@
 @media (max-width: 420px) {
   .app-header h1 {
     font-size: 0.92rem;
-  }
-
-  .photo-header {
-    grid-template-columns: 6.6rem minmax(0, 1fr) 6.6rem;
   }
 
   .photo-header button {

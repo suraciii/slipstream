@@ -641,16 +641,8 @@ export function createLibraryBrowserView(
           <div class="grid-batch" data-grid-batch hidden><div class="grid-batch-result" data-grid-batch-result hidden><p class="grid-batch-retained" data-batch-retained hidden>Selection remains active</p><p data-grid-batch-result-text></p><button type="button" class="quiet" data-grid-batch-compensate hidden>Remove added Photos</button></div><div class="grid-batch-actions" data-batch-actions role="group" aria-label="Batch actions"><button type="button" data-batch-select>Select</button><button type="button" data-batch-reject>Reject</button><label for="batch-album-select">Add to</label><select id="batch-album-select" data-batch-album-select></select><button type="button" data-batch-album-add>Add to Album</button></div></div>
         </section>
         <section class="photo-view" data-review data-photo-view hidden tabindex="-1" aria-labelledby="photo-title">
-          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div><h2 id="photo-title" data-photo-title>Photo</h2><p data-position>0 / 0</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
+          <header class="photo-header"><button type="button" class="quiet" data-back>Back to Grid</button><div class="photo-identity"><h2 id="photo-title" data-photo-title>Photo</h2><p class="photo-filename" data-photo-filename>—</p></div><div class="photo-header-actions"><button type="button" class="quiet photo-source-toggle" data-photo-source-toggle aria-controls="source-panel" aria-expanded="false">Sources</button><p class="photo-connection" data-photo-connection role="status" hidden></p><button type="button" class="quiet" data-retry-photo hidden>Retry</button></div></header>
           <section class="preview" data-preview aria-label="Photo Preview">
-            <div class="zoom-controls" data-zoom-controls role="group" aria-label="Preview zoom">
-              <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
-              <button type="button" class="zoom-control zoom-step" data-zoom-out aria-label="Zoom out">−</button>
-              <input class="zoom-slider" type="range" data-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
-              <button type="button" class="zoom-control zoom-step" data-zoom-in aria-label="Zoom in">+</button>
-              <span class="zoom-level" data-zoom-level>—</span>
-              <button type="button" class="zoom-control" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
-            </div>
             <div class="swipe-feedback reject" data-reject-feedback>Reject</div>
             <div class="image-stage" data-stage><p>Loading Preview…</p></div>
             <div class="swipe-feedback select" data-select-feedback>Select</div>
@@ -660,37 +652,56 @@ export function createLibraryBrowserView(
               <div class="rating-wheel-options" data-rating-wheel-options role="group" aria-label="Rating choices"></div>
             </div>
           </section>
-          <div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div>
-          <section class="review-bar" aria-label="Photo review">
-            <div class="review-state"><dl class="facts"><div><dt>File</dt><dd data-photo-filename>—</dd></div><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div><div><dt>Preview</dt><dd data-source>—</dd></div></dl><div class="metadata" data-metadata aria-label="Capture details"><strong>Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div><p class="status" data-status role="status" aria-live="polite"></p></div>
-            <div class="decision-controls" aria-label="Selection controls"><button type="button" class="reject-button" data-reject>Reject <span aria-hidden="true">X</span></button><button type="button" class="quiet" data-clear>Clear <span aria-hidden="true">U</span></button><button type="button" class="select-button" data-select>Select <span aria-hidden="true">P</span></button></div>
-          </section>
+          <div class="photo-navigation" data-photo-navigation role="group" aria-label="Photo navigation"><button type="button" class="quiet" data-dock-previous>Previous</button><p class="photo-position" data-position>0 / 0</p><button type="button" class="quiet" data-dock-next>Next</button></div>
+          <div class="filmstrip-host" data-filmstrip-host><div class="filmstrip" data-filmstrip role="group" aria-label="Neighbor Photos" hidden></div></div>
+          <section class="review-bar" aria-label="Photo review"><div class="review-state"><dl class="facts"><div><dt>Selection</dt><dd data-selection>Undecided</dd></div><div><dt>Rating</dt><dd data-rating>No rating</dd></div></dl><p class="status" data-status role="status" aria-live="polite"></p></div></section>
           <div class="quick-action-dock" data-quick-action-dock role="toolbar" aria-label="Quick Photo actions">
-            <button type="button" class="quiet" data-dock-previous>Previous</button>
             <button type="button" class="reject-button" data-dock-reject>Reject</button>
-            <button type="button" class="rating-dock-button" data-dock-rating aria-controls="secondary-photo-tools" aria-expanded="false">Rating</button>
+            <button type="button" class="rating-dock-button" data-dock-rating aria-controls="rating-choices" aria-expanded="false">Rating</button>
             <button type="button" class="select-button" data-dock-select>Select</button>
-            <button type="button" class="quiet" data-dock-next>Next</button>
+            <button type="button" class="quiet" data-dock-more aria-controls="photo-tools-panel" aria-expanded="false">More</button>
           </div>
-          <div class="secondary-action-row" data-secondary-action-row>
-            <button type="button" class="quiet secondary-toggle" data-secondary-toggle aria-controls="secondary-photo-tools" aria-expanded="false">More Photo Tools</button>
-          </div>
-          <section class="review-tools secondary-sheet" id="secondary-photo-tools" data-secondary-sheet data-secondary-open="false" aria-label="More Photo tools">
-            <header class="secondary-sheet-header"><h3>More Photo Tools</h3><button type="button" class="quiet" data-secondary-close>Close</button></header>
-            <div class="secondary-actions" aria-label="Photo actions"><button type="button" class="quiet" data-secondary-clear>Clear</button><button type="button" class="quiet" data-secondary-undo disabled>Undo</button></div>
-            <div class="secondary-zoom-controls" data-secondary-zoom-controls role="group" aria-label="Preview zoom controls">
-              <button type="button" class="zoom-control" data-secondary-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
-              <button type="button" class="zoom-control zoom-step" data-secondary-zoom-out aria-label="Zoom out">−</button>
-              <input class="zoom-slider" type="range" data-secondary-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
-              <button type="button" class="zoom-control zoom-step" data-secondary-zoom-in aria-label="Zoom in">+</button>
-              <span class="zoom-level" data-secondary-zoom-level>—</span>
-              <button type="button" class="zoom-control" data-secondary-zoom-100 aria-label="Zoom to 100 percent">100%</button>
+          <dialog class="photo-tools-dialog" data-photo-tools aria-labelledby="photo-tools-title">
+            <div class="photo-tools-sheet" id="photo-tools-panel">
+              <header class="photo-tools-header"><h2 id="photo-tools-title" data-photo-tools-title>Photo tools</h2><button type="button" class="quiet" data-photo-tools-close>Close</button></header>
+              <div class="photo-tools-body">
+                <div class="photo-tools-view" data-photo-tools-view="tools">
+                  <div class="photo-tools-actions" aria-label="Photo actions"><button type="button" class="quiet" data-photo-tools-clear>Clear</button><button type="button" class="quiet" data-photo-tools-undo disabled>Undo</button></div>
+                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button></div>
+                </div>
+                <div class="photo-tools-view" id="photo-tools-view-albums" data-photo-tools-view="albums" hidden>
+                  <header class="photo-tools-view-header"><h3>Albums</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
+                  <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>
+                </div>
+                <div class="photo-tools-view" id="photo-tools-view-details" data-photo-tools-view="details" hidden>
+                  <header class="photo-tools-view-header"><h3>Details</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
+                  <div class="photo-tools-facts" data-metadata aria-label="Capture details"><strong>Capture Details</strong><dl><div><dt>Captured</dt><dd data-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-metadata-focal-length>—</dd></div></dl></div>
+                  <p class="photo-tools-preview"><span class="photo-tools-preview-label">Preview Source</span><span data-source>—</span><span class="photo-tools-detail-limit" data-detail-limit hidden>Limited by camera Preview resolution</span></p>
+                </div>
+                <div class="photo-tools-view" id="photo-tools-view-zoom" data-photo-tools-view="zoom" hidden>
+                  <header class="photo-tools-view-header"><h3>Preview Zoom</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
+                  <div class="photo-tools-zoom" data-zoom-controls role="group" aria-label="Preview zoom">
+                    <button type="button" class="zoom-control" data-zoom-fit aria-pressed="true" aria-label="Fit Window">Fit Window</button>
+                    <button type="button" class="zoom-control zoom-step" data-zoom-out aria-label="Zoom out">−</button>
+                    <input class="zoom-slider" type="range" data-zoom-slider min="10" max="800" step="1" value="100" aria-label="Zoom percentage" />
+                    <button type="button" class="zoom-control zoom-step" data-zoom-in aria-label="Zoom in">+</button>
+                    <span class="zoom-level" data-zoom-level>—</span>
+                    <button type="button" class="zoom-control" data-zoom-100 aria-label="Zoom to 100 percent">100%</button>
+                  </div>
+                </div>
+                <div class="photo-tools-view" id="photo-tools-view-nearby" data-photo-tools-view="nearby" hidden>
+                  <header class="photo-tools-view-header"><h3>Nearby Photos</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
+                  <div class="filmstrip-tools" data-filmstrip-tools></div>
+                </div>
+              </div>
             </div>
-            <details class="secondary-details" data-secondary-details><summary>Capture Details</summary><dl><div><dt>Captured</dt><dd data-secondary-metadata-capture-time>—</dd></div><div><dt>Aperture</dt><dd data-secondary-metadata-aperture>—</dd></div><div><dt>ISO</dt><dd data-secondary-metadata-iso>—</dd></div><div><dt>Shutter</dt><dd data-secondary-metadata-shutter-speed>—</dd></div><div><dt>Focal Length</dt><dd data-secondary-metadata-focal-length>—</dd></div></dl></details>
-            <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
-            <div class="membership" data-membership aria-label="Album membership"><div class="membership-facts"><p class="membership-heading">Albums</p><p class="membership-status" data-membership-status role="status">Loading Albums…</p><ul class="membership-list" data-membership-list hidden></ul><p class="membership-message" data-membership-message role="alert" hidden></p><div class="membership-actions"><button type="button" class="quiet" data-membership-manage aria-expanded="false" aria-controls="membership-panel">Manage</button><button type="button" data-membership-retry hidden>Retry Albums</button></div></div><div class="membership-panel" id="membership-panel" data-membership-panel hidden><div class="membership-options" data-membership-options></div></div></div>
-            <div class="photo-controls"><button type="button" class="quiet" data-previous>Previous</button><button type="button" class="quiet" data-undo disabled>Undo</button><button type="button" class="quiet" data-next>Next</button></div>
-          </section>
+          </dialog>
+          <dialog class="rating-dialog" data-rating-choices aria-labelledby="rating-choices-title">
+            <div class="rating-sheet">
+              <header class="rating-header"><h2 id="rating-choices-title">Rating</h2><button type="button" class="quiet" data-rating-choices-close>Close</button></header>
+              <fieldset class="rating-controls"><legend>Rating</legend><div data-ratings></div></fieldset>
+            </div>
+          </dialog>
         </section>
         <dialog class="options-dialog" data-view-options aria-labelledby="view-options-title">
           <div class="options-sheet">
@@ -890,7 +901,12 @@ export function createLibraryBrowserView(
     const state = failed ? "Disconnected" : "Connected";
     gridConnection.classList.toggle("offline", failed);
     photoConnection.classList.toggle("offline", failed);
-    if (!compactSources.matches) {
+    // A compact layout has no dedicated brand or connected-status row. A short
+    // viewport gives its whole height to the open Photo View, so the Photo
+    // header carries the state there exactly as a narrow layout does.
+    const compactChrome =
+      compactSources.matches || (!photoView.hidden && shortViewport.matches);
+    if (!compactChrome) {
       connection.textContent = state;
       connection.classList.toggle("offline", failed);
       gridConnection.textContent = "";
@@ -1010,35 +1026,17 @@ export function createLibraryBrowserView(
   const zoomSlider = required<HTMLInputElement>(root, "[data-zoom-slider]");
   const zoomLevel = required<HTMLElement>(root, "[data-zoom-level]");
   const zoom100 = required<HTMLButtonElement>(root, "[data-zoom-100]");
-  const secondaryZoomFit = required<HTMLButtonElement>(
-    root,
-    "[data-secondary-zoom-fit]",
-  );
-  const secondaryZoomOut = required<HTMLButtonElement>(
-    root,
-    "[data-secondary-zoom-out]",
-  );
-  const secondaryZoomIn = required<HTMLButtonElement>(
-    root,
-    "[data-secondary-zoom-in]",
-  );
-  const secondaryZoomSlider = required<HTMLInputElement>(
-    root,
-    "[data-secondary-zoom-slider]",
-  );
-  const secondaryZoomLevel = required<HTMLElement>(
-    root,
-    "[data-secondary-zoom-level]",
-  );
-  const secondaryZoom100 = required<HTMLButtonElement>(
-    root,
-    "[data-secondary-zoom-100]",
-  );
   const selection = required<HTMLElement>(root, "[data-selection]");
   const filmstrip = required<HTMLElement>(root, "[data-filmstrip]");
+  /// The two homes of the bounded neighbor strip: the wide Photo View shows it
+  /// beside the Preview, and a compact layout discloses it inside Photo tools.
+  /// One strip node moves between them, so no layout holds a second copy.
+  const filmstripHost = required<HTMLElement>(root, "[data-filmstrip-host]");
+  const filmstripTools = required<HTMLElement>(root, "[data-filmstrip-tools]");
   const photoFilename = required<HTMLElement>(root, "[data-photo-filename]");
   const rating = required<HTMLElement>(root, "[data-rating]");
   const previewSource = required<HTMLElement>(root, "[data-source]");
+  const detailLimit = required<HTMLElement>(root, "[data-detail-limit]");
   const metadataCaptureTime = required<HTMLElement>(
     root,
     "[data-metadata-capture-time]",
@@ -1056,32 +1054,9 @@ export function createLibraryBrowserView(
     root,
     "[data-metadata-focal-length]",
   );
-  const secondaryMetadataCaptureTime = required<HTMLElement>(
-    root,
-    "[data-secondary-metadata-capture-time]",
-  );
-  const secondaryMetadataAperture = required<HTMLElement>(
-    root,
-    "[data-secondary-metadata-aperture]",
-  );
-  const secondaryMetadataIso = required<HTMLElement>(
-    root,
-    "[data-secondary-metadata-iso]",
-  );
-  const secondaryMetadataShutterSpeed = required<HTMLElement>(
-    root,
-    "[data-secondary-metadata-shutter-speed]",
-  );
-  const secondaryMetadataFocalLength = required<HTMLElement>(
-    root,
-    "[data-secondary-metadata-focal-length]",
-  );
   const status = required<HTMLElement>(root, "[data-status]");
   const retryPhoto = required<HTMLButtonElement>(root, "[data-retry-photo]");
   const back = required<HTMLButtonElement>(root, "[data-back]");
-  const previous = required<HTMLButtonElement>(root, "[data-previous]");
-  const next = required<HTMLButtonElement>(root, "[data-next]");
-  const select = required<HTMLButtonElement>(root, "[data-select]");
   const membershipStatus = required<HTMLElement>(
     root,
     "[data-membership-status]",
@@ -1107,9 +1082,6 @@ export function createLibraryBrowserView(
     root,
     "[data-membership-options]",
   );
-  const reject = required<HTMLButtonElement>(root, "[data-reject]");
-  const clear = required<HTMLButtonElement>(root, "[data-clear]");
-  const undo = required<HTMLButtonElement>(root, "[data-undo]");
   const dockPrevious = required<HTMLButtonElement>(
     root,
     "[data-dock-previous]",
@@ -1117,23 +1089,45 @@ export function createLibraryBrowserView(
   const dockReject = required<HTMLButtonElement>(root, "[data-dock-reject]");
   const dockRating = required<HTMLButtonElement>(root, "[data-dock-rating]");
   const dockSelect = required<HTMLButtonElement>(root, "[data-dock-select]");
+  const dockMore = required<HTMLButtonElement>(root, "[data-dock-more]");
   const dockNext = required<HTMLButtonElement>(root, "[data-dock-next]");
-  const secondarySheet = required<HTMLElement>(root, "[data-secondary-sheet]");
-  const secondaryToggle = required<HTMLButtonElement>(
+  const photoToolsDialog = required<HTMLDialogElement>(
     root,
-    "[data-secondary-toggle]",
+    "[data-photo-tools]",
   );
-  const secondaryClose = required<HTMLButtonElement>(
+  const photoToolsTitle = required<HTMLElement>(
     root,
-    "[data-secondary-close]",
+    "[data-photo-tools-title]",
   );
-  const secondaryClear = required<HTMLButtonElement>(
+  const photoToolsClose = required<HTMLButtonElement>(
     root,
-    "[data-secondary-clear]",
+    "[data-photo-tools-close]",
   );
-  const secondaryUndo = required<HTMLButtonElement>(
+  const photoToolsClear = required<HTMLButtonElement>(
     root,
-    "[data-secondary-undo]",
+    "[data-photo-tools-clear]",
+  );
+  const photoToolsUndo = required<HTMLButtonElement>(
+    root,
+    "[data-photo-tools-undo]",
+  );
+  const photoToolsEntries = required<HTMLElement>(
+    root,
+    "[data-photo-tools-entries]",
+  );
+  const photoToolsViews = Array.from(
+    root.querySelectorAll<HTMLElement>("[data-photo-tools-view]"),
+  );
+  const photoToolsReturnButtons = Array.from(
+    root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
+  );
+  const ratingDialog = required<HTMLDialogElement>(
+    root,
+    "[data-rating-choices]",
+  );
+  const ratingChoicesClose = required<HTMLButtonElement>(
+    root,
+    "[data-rating-choices-close]",
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
@@ -1156,6 +1150,14 @@ export function createLibraryBrowserView(
   });
   surfaces.register("view-options", {
     dialog: viewOptionsDialog,
+    modal: () => true,
+  });
+  surfaces.register("rating", {
+    dialog: ratingDialog,
+    modal: () => true,
+  });
+  surfaces.register("photo-tools", {
+    dialog: photoToolsDialog,
     modal: () => true,
   });
   surfaces.register("album-form", {
@@ -1317,8 +1319,6 @@ export function createLibraryBrowserView(
   let gridInteractionEnabled = false;
   let decisionInteractionEnabled = false;
   let currentRating = 0;
-  let secondarySheetOpen = false;
-  let secondaryReturnFocus: HTMLElement | undefined;
   let ratingWheelHoldTimer: number | undefined;
   let ratingWheelOpen = false;
   let ratingWheelCandidate: number | undefined;
@@ -1376,6 +1376,10 @@ export function createLibraryBrowserView(
   const mobileActionHierarchy = window.matchMedia(
     "(max-width: 760px), (max-height: 480px)",
   );
+  /// True while the bounded neighbor strip is disclosed inside Photo tools
+  /// rather than shown beside the Preview: a narrow or short layout moves it
+  /// behind the Nearby Photos entry so it costs the Preview no space.
+  const stripIsDisclosed = () => mobileActionHierarchy.matches;
   // The CSS yields the strip on a short viewport so the Preview and the
   // decision controls keep their space; the view mirrors that condition so a
   // hidden strip binds no thumbnails and rebuilds when the space returns.
@@ -1390,61 +1394,122 @@ export function createLibraryBrowserView(
     photoSourceToggle.hidden = !modal;
     if (!modal) closeSources(false);
   };
-  const syncSecondarySurface = () => {
-    secondarySheet.dataset.secondaryOpen = String(
-      !mobileActionHierarchy.matches || secondarySheetOpen,
-    );
-    // Keep the lower-frequency action surface present so the established
-    // keyboard and assistive-technology paths remain available. Opening it
-    // additionally reveals the detail and zoom sections and moves focus into
-    // the requested control.
-    secondarySheet.inert = false;
-    secondarySheet.setAttribute("aria-hidden", "false");
-    previous.setAttribute("aria-hidden", String(mobileActionHierarchy.matches));
-    next.setAttribute("aria-hidden", String(mobileActionHierarchy.matches));
-    previous.tabIndex = mobileActionHierarchy.matches ? -1 : 0;
-    next.tabIndex = mobileActionHierarchy.matches ? -1 : 0;
-    secondaryClose.setAttribute(
-      "aria-hidden",
-      String(mobileActionHierarchy.matches && !secondarySheetOpen),
-    );
-    secondaryClose.tabIndex =
-      mobileActionHierarchy.matches && !secondarySheetOpen ? -1 : 0;
-    secondaryToggle.setAttribute(
-      "aria-expanded",
-      String(mobileActionHierarchy.matches && secondarySheetOpen),
-    );
-    dockRating.setAttribute(
-      "aria-expanded",
-      String(mobileActionHierarchy.matches && secondarySheetOpen),
-    );
+  /// Which Photo tools content the modal presents. Every subview replaces the
+  /// tools list and carries its own local return, so moving between them adds
+  /// no browser history entry and never opens a second modal.
+  type PhotoToolsView = "tools" | "albums" | "details" | "zoom" | "nearby";
+  let photoToolsView: PhotoToolsView = "tools";
+  /// The last neighbor facts the page model reported. A disclosure rebuilds
+  /// the strip from them, so a closed strip holds no image demand at all.
+  let filmstripModel: FilmstripViewModel | undefined;
+  const applyPhotoToolsView = () => {
+    for (const view of photoToolsViews)
+      view.hidden = view.dataset.photoToolsView !== photoToolsView;
+    photoToolsTitle.textContent =
+      photoToolsView === "tools"
+        ? "Photo tools"
+        : photoToolsView === "nearby"
+          ? "Nearby Photos"
+          : photoToolsView === "zoom"
+            ? "Preview Zoom"
+            : photoToolsView === "albums"
+              ? "Albums"
+              : "Details";
   };
-  const openSecondary = (focusRating = false) => {
-    if (!alive || !mobileActionHierarchy.matches) return;
-    secondaryReturnFocus =
+  /// True while the Nearby Photos subview is the presented content of Photo
+  /// tools. The one strip node then lives inside that disclosure; otherwise it
+  /// lives beside the Preview, which only a wide layout shows.
+  const stripInTools = () =>
+    photoToolsView === "nearby" && surfaces.isActive("photo-tools");
+  /// Places the one strip node where it is presented, and releases it
+  /// everywhere else: a strip that is not presented binds no thumbnail and
+  /// admits no window of its own.
+  const syncFilmstripHost = () => {
+    const host = stripInTools() ? filmstripTools : filmstripHost;
+    if (filmstrip.parentElement !== host) host.append(filmstrip);
+    if (!stripIsDisclosed() || stripInTools()) {
+      // The remembered facts rebuild the entries, while the live readiness
+      // fact still decides whether an activation would be admitted.
+      if (filmstripModel) {
+        const interactive = filmstripInteractive;
+        renderFilmstrip(filmstripModel);
+        filmstripInteractive = interactive;
+        applyFilmstripInteractivity();
+      }
+      return;
+    }
+    clearFilmstripCells();
+  };
+  const syncSecondarySurface = () => {
+    // The disclosure state mirrors the surface itself, so a native close
+    // request, an explicit Close, and a destination change all leave the two
+    // entries in the same state.
+    const toolsOpen = surfaces.isActive("photo-tools");
+    const ratingOpen = surfaces.isActive("rating");
+    dockMore.setAttribute("aria-expanded", String(toolsOpen));
+    dockRating.setAttribute("aria-expanded", String(ratingOpen));
+  };
+  /// Opens Photo tools on its list, or moves it to one subview. A pending
+  /// gesture never competes with the surface that takes over the pointer and
+  /// the keyboard.
+  const openPhotoTools = (view: PhotoToolsView = "tools") => {
+    if (!alive || photoView.hidden) return;
+    resetGestures();
+    photoToolsView = view;
+    applyPhotoToolsView();
+    // A move between subviews keeps the invoker that opened the surface, so
+    // closing it still returns focus to the More entry rather than to a
+    // control the modal itself holds.
+    if (!surfaces.isActive("photo-tools"))
+      surfaces.open(
+        "photo-tools",
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : undefined,
+      );
+    syncFilmstripHost();
+    syncSecondarySurface();
+    photoToolsClose.focus();
+  };
+  /// Leaves a Photo tools subview for its list, which is a local return and
+  /// not a browser history entry.
+  const returnToPhotoTools = () => {
+    if (!alive || !surfaces.isActive("photo-tools")) return;
+    photoToolsView = "tools";
+    applyPhotoToolsView();
+    syncFilmstripHost();
+    photoToolsClose.focus();
+  };
+  const closePhotoTools = (restoreFocus = true) => {
+    if (!alive) return;
+    photoToolsView = "tools";
+    applyPhotoToolsView();
+    surfaces.close("photo-tools", restoreFocus);
+    syncFilmstripHost();
+    syncSecondarySurface();
+  };
+  /// Opens the explicit Rating choices. Only this surface or the Rating entry
+  /// owns explicit Rating interaction at one time; the Rating Wheel stays the
+  /// touch accelerator on the Preview.
+  const openRatingChoices = () => {
+    if (!alive || photoView.hidden) return;
+    resetGestures();
+    surfaces.open(
+      "rating",
       document.activeElement instanceof HTMLElement
         ? document.activeElement
-        : secondaryToggle;
-    secondarySheetOpen = true;
+        : undefined,
+    );
     syncSecondarySurface();
-    if (focusRating) {
-      const current = ratings.querySelector<HTMLButtonElement>(
-        `[data-rating-value="${currentRating}"]`,
-      );
-      (current ?? ratings.querySelector<HTMLButtonElement>("button"))?.focus();
-    } else secondaryClose.focus();
+    const current = ratings.querySelector<HTMLButtonElement>(
+      `[data-rating-value="${currentRating}"]`,
+    );
+    (current ?? ratings.querySelector<HTMLButtonElement>("button"))?.focus();
   };
-  const closeSecondary = (restoreFocus = true) => {
+  const closeRatingChoices = (restoreFocus = true) => {
     if (!alive) return;
-    secondarySheetOpen = false;
+    surfaces.close("rating", restoreFocus);
     syncSecondarySurface();
-    if (restoreFocus) {
-      const target = secondaryReturnFocus;
-      secondaryReturnFocus = undefined;
-      if (target?.isConnected && (!("disabled" in target) || !target.disabled))
-        target.focus();
-      else secondaryToggle.focus();
-    }
   };
   /// The disclosure's expanded state always mirrors the surface itself, so a
   /// native close request and an explicit Close leave it in the same state.
@@ -1460,8 +1525,8 @@ export function createLibraryBrowserView(
     // A pending gesture must never compete with the surface that takes over
     // the pointer and the keyboard.
     resetGestures();
-    secondarySheetOpen = false;
-    syncSecondarySurface();
+    closePhotoTools(false);
+    closeRatingChoices(false);
     surfaces.open(
       "sources",
       document.activeElement instanceof HTMLElement
@@ -1482,10 +1547,10 @@ export function createLibraryBrowserView(
   const onSourceViewportChange = () => {
     if (!alive) return;
     syncSourcesExpanded();
-    if (!mobileActionHierarchy.matches) secondarySheetOpen = false;
     syncSourceLayout();
     presentConnection();
     syncSecondarySurface();
+    syncFilmstripHost();
   };
   const cellBox = () => GRID_THUMBNAIL_SIZE_STEPS[thumbnailSize];
   /// The column and row pitch of the virtualized layout: one cell box plus
@@ -1567,8 +1632,8 @@ export function createLibraryBrowserView(
     sortSelect.value = draftOrder;
     filterSelect.value = draftFilter;
     resetGestures();
-    secondarySheetOpen = false;
-    syncSecondarySurface();
+    closePhotoTools(false);
+    closeRatingChoices(false);
     surfaces.open(
       "view-options",
       document.activeElement instanceof HTMLElement
@@ -1766,36 +1831,22 @@ export function createLibraryBrowserView(
   const measurableImage = () => Boolean(loadedPreviewImage());
   const syncZoomControls = () => {
     const enabled = alive && measurableImage();
-    for (const button of [
-      zoomFit,
-      zoomOut,
-      zoomIn,
-      zoom100,
-      secondaryZoomFit,
-      secondaryZoomOut,
-      secondaryZoomIn,
-      secondaryZoom100,
-    ])
+    for (const button of [zoomFit, zoomOut, zoomIn, zoom100])
       button.disabled = !enabled;
     zoomSlider.disabled = !enabled;
-    secondaryZoomSlider.disabled = !enabled;
   };
   const applyZoom = () => {
     if (!alive) return;
     preview.dataset.zoomState = zoomManual ? "manual" : "fit";
     zoomFit.setAttribute("aria-pressed", String(!zoomManual));
-    secondaryZoomFit.setAttribute("aria-pressed", String(!zoomManual));
     const image = loadedPreviewImage();
     const scale = currentScale();
     if (!image || !imageNaturalWidth || !imageNaturalHeight || scale <= 0) {
       // Without measurable pixels there is no percentage to report: the
       // presentation returns to Fit instead of keeping a stale manual value.
       zoomLevel.textContent = ZOOM_LEVEL_UNMEASURED;
-      secondaryZoomLevel.textContent = ZOOM_LEVEL_UNMEASURED;
       zoomSlider.value = String(MIN_ZOOM_PERCENT);
-      secondaryZoomSlider.value = String(MIN_ZOOM_PERCENT);
       zoomSlider.setAttribute("aria-valuetext", "Fit");
-      secondaryZoomSlider.setAttribute("aria-valuetext", "Fit");
       syncZoomControls();
       return;
     }
@@ -1809,11 +1860,8 @@ export function createLibraryBrowserView(
     // reports it truthfully while the slider keeps the value it can hold.
     const sliderPercent = clamp(percent, MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
     zoomLevel.textContent = `${percent}%`;
-    secondaryZoomLevel.textContent = `${percent}%`;
     zoomSlider.value = String(sliderPercent);
-    secondaryZoomSlider.value = String(sliderPercent);
     zoomSlider.setAttribute("aria-valuetext", `${sliderPercent}%`);
-    secondaryZoomSlider.setAttribute("aria-valuetext", `${sliderPercent}%`);
     syncZoomControls();
   };
   const applyFit = () => {
@@ -2950,13 +2998,19 @@ export function createLibraryBrowserView(
   };
   const renderFilmstrip = (model: FilmstripViewModel) => {
     if (!alive || photoView.hidden) return;
-    // A strip the CSS hides on a short viewport, or one a source without
-    // neighbors hides, must not bind thumbnails either: presenting entries
-    // for a hidden surface is the work the strip promises never to start.
-    if (shortViewport.matches || model.cells.length <= 1) {
+    filmstripModel = model;
+    // A strip that is not presented — a source without neighbors, or a closed
+    // Nearby Photos disclosure — binds no thumbnails either: presenting
+    // entries for a hidden surface is the work the strip promises never to
+    // start. A compact layout discloses the strip inside Photo tools; a wide
+    // layout shows it beside the Preview.
+    const presented =
+      (!stripIsDisclosed() || stripInTools()) && model.cells.length > 1;
+    if (!presented || model.cells.length <= 1) {
       clearFilmstripCells();
       return;
     }
+    filmstrip.hidden = false;
     filmstripInteractive = model.interactive;
     // The Photographer keeps their place when the strip rebuilds around a
     // new current Photo: focus follows the current entry like the Grid's
@@ -3286,15 +3340,6 @@ export function createLibraryBrowserView(
     metadataIso.textContent = model.iso === undefined ? "—" : String(model.iso);
     metadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
     metadataFocalLength.textContent = model.focalLength ?? "—";
-    secondaryMetadataCaptureTime.textContent =
-      model.captureTime === undefined
-        ? "—"
-        : formatCaptureTime(model.captureTime);
-    secondaryMetadataAperture.textContent = model.aperture ?? "—";
-    secondaryMetadataIso.textContent =
-      model.iso === undefined ? "—" : String(model.iso);
-    secondaryMetadataShutterSpeed.textContent = model.shutterSpeed ?? "—";
-    secondaryMetadataFocalLength.textContent = model.focalLength ?? "—";
   };
   const presentReviewImage = (
     url: string,
@@ -3353,6 +3398,9 @@ export function createLibraryBrowserView(
     previewSource.textContent = isLimited
       ? `${sourceLabel(source)} · limited detail`
       : sourceLabel(source);
+    // The Preview Source fact and the detail-limit explanation are one
+    // statement: a limited derivative names the resolution it came from.
+    detailLimit.hidden = !isLimited;
     if (isLimited) previewSource.title = LIMITED_PREVIEW_DETAIL;
     else previewSource.removeAttribute("title");
   };
@@ -3360,8 +3408,6 @@ export function createLibraryBrowserView(
   const renderPhotoShell = (model: PhotoShellViewModel) => {
     if (!alive) return undefined;
     resetGestures();
-    secondarySheetOpen = false;
-    syncSecondarySurface();
     photoTitle.textContent = model.sourceName;
     currentPhotoId = model.photoId;
     photoSurface = {};
@@ -3584,15 +3630,6 @@ export function createLibraryBrowserView(
     // the native dialog's own close request, handled by the modal-surface
     // cancel listener, so no branch here re-implements it.
     if (surfaces.blocking()) return;
-    if (
-      event.key === "Escape" &&
-      compactSources.matches &&
-      secondarySheetOpen
-    ) {
-      event.preventDefault();
-      closeSecondary();
-      return;
-    }
     const modifier = event.ctrlKey || event.metaKey;
     if (modifier && !event.shiftKey && event.key.toLowerCase() === "z") {
       event.preventDefault();
@@ -3846,6 +3883,16 @@ export function createLibraryBrowserView(
   // cleanup, so the disclosure state is synced from both events.
   sourceDialog.addEventListener("cancel", syncSourcesExpanded);
   sourceDialog.addEventListener("close", syncSourcesExpanded);
+  // A Photo tools dismissal — explicit Close, Escape, a scrim activation, or a
+  // platform close request — returns the modal to its list and releases the
+  // neighbor strip, and both entries report their closed state again.
+  photoToolsDialog.addEventListener("close", () => {
+    photoToolsView = "tools";
+    applyPhotoToolsView();
+    syncFilmstripHost();
+    syncSecondarySurface();
+  });
+  ratingDialog.addEventListener("close", syncSecondarySurface);
   shortViewport.addEventListener("change", onShortViewportChange);
   sourceToggle.addEventListener("click", () => openSources());
   photoSourceToggle.addEventListener("click", () => openSources());
@@ -3909,17 +3956,13 @@ export function createLibraryBrowserView(
   );
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
-  previous.addEventListener("click", () => send({ kind: "previous" }));
-  next.addEventListener("click", () => send({ kind: "next" }));
-  undo.addEventListener("click", () => send({ kind: "undo" }));
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));
-  dockRating.addEventListener("click", () => openSecondary(true));
-  secondaryToggle.addEventListener("click", () =>
-    secondarySheetOpen ? closeSecondary() : openSecondary(),
-  );
-  secondaryClose.addEventListener("click", () => closeSecondary());
-  secondaryClear.addEventListener("click", () =>
+  dockRating.addEventListener("click", () => openRatingChoices());
+  dockMore.addEventListener("click", () => openPhotoTools("tools"));
+  ratingChoicesClose.addEventListener("click", () => closeRatingChoices());
+  photoToolsClose.addEventListener("click", () => closePhotoTools());
+  photoToolsClear.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
       field: "selectionState",
@@ -3927,7 +3970,22 @@ export function createLibraryBrowserView(
       advance: false,
     }),
   );
-  secondaryUndo.addEventListener("click", () => send({ kind: "undo" }));
+  photoToolsUndo.addEventListener("click", () => send({ kind: "undo" }));
+  photoToolsEntries.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+      "[data-photo-tools-entry]",
+    );
+    if (!button) return;
+    // Sources is its own supporting surface: Photo tools closes for it, and
+    // closing Sources returns focus to the entry that opened it.
+    if (button.dataset.photoToolsEntry === "sources") {
+      openSources();
+      return;
+    }
+    openPhotoTools(button.dataset.photoToolsEntry as PhotoToolsView);
+  });
+  for (const button of photoToolsReturnButtons)
+    button.addEventListener("click", () => returnToPhotoTools());
   stage.addEventListener("dblclick", toggleDetail);
   zoomFit.addEventListener("click", applyFit);
   zoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
@@ -3935,13 +3993,6 @@ export function createLibraryBrowserView(
   zoom100.addEventListener("click", () => applyManualZoom(100));
   zoomSlider.addEventListener("input", () =>
     applyManualZoom(Number(zoomSlider.value)),
-  );
-  secondaryZoomFit.addEventListener("click", applyFit);
-  secondaryZoomOut.addEventListener("click", () => zoomBy(1 / ZOOM_STEP));
-  secondaryZoomIn.addEventListener("click", () => zoomBy(ZOOM_STEP));
-  secondaryZoom100.addEventListener("click", () => applyManualZoom(100));
-  secondaryZoomSlider.addEventListener("input", () =>
-    applyManualZoom(Number(secondaryZoomSlider.value)),
   );
   preview.addEventListener("wheel", wheelZoom, { passive: false });
   preview.addEventListener("contextmenu", onPreviewContextMenu);
@@ -3954,27 +4005,11 @@ export function createLibraryBrowserView(
   zoomControls.addEventListener("pointerup", (event) =>
     event.stopPropagation(),
   );
-  select.addEventListener("click", () =>
-    send({
-      kind: "photo-mutation",
-      field: "selectionState",
-      value: "selected",
-      advance: true,
-    }),
-  );
   dockSelect.addEventListener("click", () =>
     send({
       kind: "photo-mutation",
       field: "selectionState",
       value: "selected",
-      advance: true,
-    }),
-  );
-  reject.addEventListener("click", () =>
-    send({
-      kind: "photo-mutation",
-      field: "selectionState",
-      value: "rejected",
       advance: true,
     }),
   );
@@ -3984,14 +4019,6 @@ export function createLibraryBrowserView(
       field: "selectionState",
       value: "rejected",
       advance: true,
-    }),
-  );
-  clear.addEventListener("click", () =>
-    send({
-      kind: "photo-mutation",
-      field: "selectionState",
-      value: "undecided",
-      advance: false,
     }),
   );
   ratings.addEventListener("click", (event) => {
@@ -4093,6 +4120,8 @@ export function createLibraryBrowserView(
   );
   syncSourceLayout();
   syncSourcesExpanded();
+  applyPhotoToolsView();
+  syncFilmstripHost();
   syncSecondarySurface();
   presentViewOptionsFlag();
 
@@ -4134,11 +4163,7 @@ export function createLibraryBrowserView(
     },
     setConnection(isConnected, sourceRetryVisible, photoRetryVisible) {
       if (!alive) return;
-      if (!isConnected) {
-        resetGestures();
-        secondarySheetOpen = false;
-        syncSecondarySurface();
-      }
+      if (!isConnected) resetGestures();
       connectionState = isConnected;
       presentConnection();
       retry.hidden = !sourceRetryVisible;
@@ -4273,26 +4298,20 @@ export function createLibraryBrowserView(
       )
         resetGestures();
       for (const button of [
-        select,
-        reject,
         dockSelect,
         dockReject,
         ...Array.from(ratings.querySelectorAll<HTMLButtonElement>("button")),
       ])
         button.disabled = !model.decisionEnabled;
-      clear.disabled = !model.clearEnabled;
-      secondaryClear.disabled = !model.clearEnabled;
+      photoToolsClear.disabled = !model.clearEnabled;
       dockRating.disabled = !model.decisionEnabled;
       back.disabled = !model.backEnabled;
       refresh.disabled = !model.refreshEnabled;
       retry.disabled = !model.recoveryEnabled;
       retryPhoto.disabled = !model.recoveryEnabled;
-      previous.disabled = !model.previousEnabled;
-      next.disabled = !model.nextEnabled;
       dockPrevious.disabled = !model.previousEnabled;
       dockNext.disabled = !model.nextEnabled;
-      undo.disabled = !model.undoEnabled;
-      secondaryUndo.disabled = !model.undoEnabled;
+      photoToolsUndo.disabled = !model.undoEnabled;
       const wasStripInteractive = filmstripInteractive;
       filmstripInteractive = model.filmstripEnabled;
       const heldElement = document.activeElement as HTMLElement | null;
@@ -4315,8 +4334,8 @@ export function createLibraryBrowserView(
       const returnFocus = surfaces.isActive("sources");
       cancelGridRender();
       resetGestures();
-      secondarySheetOpen = false;
-      syncSecondarySurface();
+      closePhotoTools(false);
+      closeRatingChoices(false);
       stage.replaceChildren();
       resetZoomForImage();
       gridView.hidden = false;
@@ -4410,8 +4429,8 @@ export function createLibraryBrowserView(
     closeTransientSurfaces() {
       if (!alive) return;
       resetGestures();
-      secondarySheetOpen = false;
-      syncSecondarySurface();
+      closePhotoTools(false);
+      closeRatingChoices(false);
       // A destination change supersedes every supporting surface: the Album
       // form's draft is discarded and the surfaces close without returning
       // focus, because the destination render owns focus next.
@@ -4442,8 +4461,8 @@ export function createLibraryBrowserView(
     showGrid(index) {
       if (!alive) return;
       resetGestures();
-      secondarySheetOpen = false;
-      syncSecondarySurface();
+      closePhotoTools(false);
+      closeRatingChoices(false);
       resetZoomForImage();
       photoView.hidden = true;
       gridView.hidden = false;
@@ -4465,12 +4484,14 @@ export function createLibraryBrowserView(
     enterPhoto() {
       if (!alive) return;
       resetGestures();
-      secondarySheetOpen = false;
-      syncSecondarySurface();
+      // Photo View's own surfaces stay open across a Photo change: leaving the
+      // Grid, a source change, and a destination change close them, so a
+      // re-render of the Photo the tools describe never dismisses them.
       gridView.hidden = true;
       photoView.hidden = false;
       photoView.scrollTop = 0;
       syncSourceLayout();
+      syncFilmstripHost();
       presentConnection();
       photoView.focus();
       resetZoomForImage();
