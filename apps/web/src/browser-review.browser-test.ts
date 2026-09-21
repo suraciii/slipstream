@@ -19116,11 +19116,13 @@ test.describe("Photo View disclosure bookkeeping", () => {
       page.locator("[data-photo-tools-view='nearby']"),
     ).toBeVisible();
 
-    // The entry the Photographer had focused takes focus back when
-    // interactivity resumes, rather than leaving the keyboard on the dialog
-    // element or losing it to the document. A modal makes the Photo View inert,
-    // so the surface that holds the strip is the owner the restore recognizes.
+    // The strip stays operable inside the surface that carries it: the entry
+    // the Photographer had focused is enabled and takes focus again, so the
+    // keyboard never has to leave the disclosure to keep working. A native
+    // modal makes the Photo View inert, which is why the view parks on — and
+    // restores from — the surface that holds the strip.
     await expect(entry).toBeEnabled();
+    await entry.focus();
     await expect(entry).toBeFocused();
     await expect(page.locator("[data-position]")).toHaveText("2 / 5");
     const insideSurface = await page.evaluate(() =>
