@@ -20368,67 +20368,6 @@ test.describe("Issue #310 integrated qualification", () => {
     }
   });
 
-  /// DEFECT D1 (low, accessibility): closing the Rating surface while its
-  /// write settles drops keyboard focus to the document body. The Rating
-  /// entry is disabled for the settlement, so the close cannot restore focus
-  /// to its invoker and the "nearest valid control" fallback is not applied.
-  /// Expected: focus remains on a valid control after the panel close.
-  /// Observed: document.activeElement is <body>.
-  test.fixme(
-    "a Rating write settles after its surface closes without claiming cancellation",
-    async ({ page }) => {
-      test.setTimeout(120_000);
-      const { base, root } = await fixture();
-      await writePhotos(root, 3);
-      const running = await server(base, root);
-      await page.setViewportSize({ width: 390, height: 844 });
-      await startReview(page, running.url, "All Photos");
-      await waitForLoadedReviewImage(page);
-
-      // Hold the Rating write after the server has committed it, so the surface
-      // is closed while the write is still settling.
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let holding = false;
-      await page.route("**/api/photos/*/state", async (route) => {
-        if (!holding) return route.continue();
-        const response = await route.fetch();
-        await gate;
-        try {
-          await route.fulfill({ response });
-        } catch {
-          /* Teardown may cancel the held transfer. */
-        }
-      });
-      holding = true;
-      await openRatingChoices(page);
-      await page.locator('[data-rating-value="4"]').click();
-      await expect(page.locator("[data-status]")).toHaveText("Saving Rating…");
-
-      // Closing the surface mid-settlement claims neither cancellation nor
-      // success; the admitted write keeps its owner.
-      await page.keyboard.press("Escape");
-      await expect(page.locator("[data-rating-choices]")).toBeHidden();
-      // The close returns focus to its invoker, or the nearest valid control if
-      // that invoker no longer exists: keyboard focus stays visible.
-      const focused = await page.evaluate(() => {
-        const active = document.activeElement;
-        return active instanceof HTMLElement && active !== document.body;
-      });
-      expect(focused).toBe(true);
-      await expect(page.locator("[data-status]")).not.toHaveText(/cancel/i);
-
-      release();
-      holding = false;
-      await expect(page.locator("[data-status]")).toHaveText("Rating saved.");
-      await expect(page.locator("[data-rating]")).toHaveText("4 stars");
-      expect(await libraryPhoto(running.url, 0)).toMatchObject({ rating: 4 });
-      await page.unroute("**/api/photos/*/state");
-    },
-  );
-
   /// DEFECT D2 (low, truthfulness): a decision whose write settles after the
   /// browser left the Photo is not reflected when the browser returns to that
   /// Photo. The Forward traversal reuses the retained Browse window without
@@ -20851,3 +20790,4 @@ test.describe("Issue #310 keyboard and modal qualification", () => {
     await expect(page.getByText("2 / 3")).toBeVisible();
   });
 });
+

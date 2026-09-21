@@ -32,6 +32,32 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
+/// True when a control can take focus now: it is laid out and enabled, so
+/// focusing it never lands on the document body.
+const canTakeFocus = (element: HTMLElement): boolean =>
+  element.offsetParent !== null && !element.matches(":disabled");
+
+/// The nearest valid control for a close whose invoker is gone or cannot take
+/// focus, as the close-restoration contract requires. The search starts at the
+/// invoker and widens through its enclosing regions, so it stops at the closest
+/// control the Photographer can still use; a region that is itself focusable
+/// takes the focus when no control inside it can.
+const nearestValidControl = (
+  from: HTMLElement | undefined,
+): HTMLElement | undefined => {
+  for (
+    let scope: HTMLElement | null | undefined = from;
+    scope;
+    scope = scope.parentElement
+  ) {
+    const control =
+      scope.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ?? undefined;
+    if (control && canTakeFocus(control)) return control;
+    if (scope.tabIndex < 0 && canTakeFocus(scope)) return scope;
+  }
+  return undefined;
+};
+
 type ModalSurfaceRegistration = Readonly<{
   dialog: HTMLDialogElement;
   /// True while this surface presents as a modal rather than an inline
@@ -81,14 +107,20 @@ export function createModalSurfaces(): ModalSurfaces {
 
   /// Returns focus to the invoker, opening the surface that holds it again
   /// when that surface presents as a modal and was closed for another one.
+  /// An invoker that is gone or cannot take focus — a control disabled while
+  /// its admitted write settles — falls back to the nearest valid control, so
+  /// focus never lands on the document body.
   const focusInvoker = (invoker: HTMLElement | undefined): void => {
-    if (!invoker || !invoker.isConnected) return;
     for (const [kind, registration] of registrations) {
-      if (!registration.dialog.contains(invoker)) continue;
+      if (!invoker || !registration.dialog.contains(invoker)) continue;
       if (!isOpen(kind) && registration.modal()) open(kind);
       break;
     }
-    invoker.focus();
+    if (invoker?.isConnected && canTakeFocus(invoker)) {
+      invoker.focus();
+      return;
+    }
+    nearestValidControl(invoker)?.focus();
   };
 
   const cleanup = (
