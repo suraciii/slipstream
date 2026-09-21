@@ -19107,33 +19107,28 @@ test.describe("Photo View disclosure bookkeeping", () => {
     await expect(entry).toBeFocused();
 
     // Activating the entry navigates, which makes the strip non-interactive
-    // while the navigation owns the Photo. The surface that holds the strip
-    // takes the parked focus, because a modal makes the Photo View inert.
+    // while the navigation owns the Photo. The disclosure survives it, because
+    // a Photo change never dismisses the surface that describes the Photo.
     await entry.click();
     await expect(page.getByText("2 / 5")).toBeVisible();
-    // The disclosure survived the navigation, and focus is inside it rather
-    // than lost to the document.
     await expect(page.locator("[data-photo-tools]")).toBeVisible();
     await expect(
       page.locator("[data-photo-tools-view='nearby']"),
     ).toBeVisible();
-    // Focus settles inside the surface that holds the strip: the disclosure
-    // survives the navigation and the keyboard never escapes to the document.
-    await expect
-      .poll(() =>
-        page.evaluate(() =>
-          document
-            .querySelector("[data-photo-tools]")!
-            .contains(document.activeElement),
-        ),
-      )
-      .toBe(true);
 
-    // When interactivity resumes, the entry the Photographer had focused takes
-    // focus back instead of leaving it on the dialog element.
+    // The entry the Photographer had focused takes focus back when
+    // interactivity resumes, rather than leaving the keyboard on the dialog
+    // element or losing it to the document. A modal makes the Photo View inert,
+    // so the surface that holds the strip is the owner the restore recognizes.
     await expect(entry).toBeEnabled();
     await expect(entry).toBeFocused();
     await expect(page.locator("[data-position]")).toHaveText("2 / 5");
+    const insideSurface = await page.evaluate(() =>
+      document
+        .querySelector("[data-photo-tools]")!
+        .contains(document.activeElement),
+    );
+    expect(insideSurface).toBe(true);
   });
 });
 
