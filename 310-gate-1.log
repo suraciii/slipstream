@@ -228,8 +228,8 @@ $ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- 
     Checking moxcms v0.8.1
    Compiling libsqlite3-sys v0.38.2
    Compiling lcms2-sys v4.0.7
-   Compiling slipstream-core v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-core)
-   Compiling slipstream-compat v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-compat)
+   Compiling slipstream-core v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-core)
+   Compiling slipstream-compat v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-compat)
    Compiling serde_derive v1.0.228
    Compiling tokio-macros v2.7.2
    Compiling foreign-types-macros v0.2.4
@@ -242,7 +242,7 @@ $ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- 
     Checking hyper-util v0.1.20
     Checking axum v0.8.9
     Checking rusqlite v0.40.2
-    Checking slipstream-server v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-server)
+    Checking slipstream-server v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-server)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.29s
    Compiling itoa v1.0.18
    Compiling pin-project-lite v0.2.17
@@ -302,8 +302,8 @@ $ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- 
    Compiling moxcms v0.8.1
    Compiling lcms2-sys v4.0.7
    Compiling libsqlite3-sys v0.38.2
-   Compiling slipstream-core v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-core)
-   Compiling slipstream-compat v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-compat)
+   Compiling slipstream-core v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-core)
+   Compiling slipstream-compat v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-compat)
    Compiling lcms2 v6.1.1
    Compiling hyper v1.11.0
    Compiling tower v0.5.3
@@ -311,7 +311,7 @@ $ cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- 
    Compiling axum v0.8.9
    Compiling image v0.25.10
    Compiling rusqlite v0.40.2
-   Compiling slipstream-server v0.0.0 (/home/szf/repos/slipstream-issue-310/crates/slipstream-server)
+   Compiling slipstream-server v0.0.0 (/home/<user>/repos/slipstream-issue-310/crates/slipstream-server)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 11.51s
      Running unittests src/lib.rs (target/debug/deps/slipstream_compat-28e776891e26c1d4)
 

@@ -954,8 +954,8 @@ Running 290 tests using 1 worker
       526 |     () =>
       527 |       Boolean(document.querySelector("[data-stage] img")) ||
       528 |       document.body.innerText.includes("Preview unavailable"),
-        at startReview (/home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:525:14)
-        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:2044:3
+        at startReview (/home/<user>/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:525:14)
+        at /home/<user>/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:2044:3
 
     Error Context: test-results/browser-review.browser-tes-92288-or-keeps-stepping-monotonic/error-context.md
 
