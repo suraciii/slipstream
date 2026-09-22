@@ -212,6 +212,45 @@ they must not retain full-frame intermediate arrays across attempts. Process
 exit remains the final reclamation boundary. Reduced live bytes do not imply an
 equal immediate reduction in RSS; resource acceptance measures the actual peak.
 
+### Ordered Lifetimes and Output Encoding
+
+The lifetime plan must mirror the existing declared-order topology walk,
+including skipped nodes, overwritten tap names, callbacks, and its first
+post-node collection check. Planning uses tap metadata, not image values.
+An earlier tap value is needed only until its last consumer before a replacement
+write. Release expired dispatcher references before the next node starts;
+return the requested collection before pruning its storage. Aliased views retain
+their backing arrays through ordinary ownership. Caller input remains borrowed,
+and dropping an internal reference does not transfer or revoke caller ownership.
+Cold numerical compilation can leave cyclic traceback frames that own completed
+stage arrays. The runtime must reclaim these cycles after expiring dispatcher
+references at each stage handoff, before another stage allocates. On return, it
+first retains the collected result, drops the remaining dispatcher ownership,
+reclaims cycles, then returns that result. It must not alter process-global GC
+enablement or thresholds. Whole-run measurements include this reclamation cost;
+node computation timings may continue to exclude it, while reclamation time is
+reported separately.
+
+Same-profile display encoding must batch the exact qualified color-library
+operation, including its matrix and transfer-function order. It must not replace
+that operation with a superficially equivalent transfer-function formula. It
+uses the same nonempty contiguous native float64 layout as output-gamut
+conversion. Finished JPEG conversion admits native float32 or float64 RGB and
+normalizes strided layouts only within the current row batch. It rejects empty
+or unsupported inputs before opening the output file. Finished JPEG conversion preserves clipping, scaling, and integer truncation.
+It writes consecutive full-width row batches using bounded numeric workspace,
+retaining the source samples and identical encoder settings, ICC, and geometry.
+The numeric allowance must admit at least one row before creating the file.
+Native encoder storage is a separate, measured stage requirement; scanline IO
+must not be described as proof that the codec uses constant memory. Failed open,
+write, or close operations must fail the Export rather than publish a partial
+artifact.
+
+Finite-value checks and pixel identity hashing must also use bounded chunks.
+Pixel digests retain the exact C-order sample bytes of the existing identity,
+including non-contiguous inputs through bounded traversal. Qualification must
+report observer/harness changes separately when comparing aggregate peaks.
+
 ### Spatial and Stochastic Operations
 
 Grain, halation, diffusion, blur, and sharpening must retain the qualified image
