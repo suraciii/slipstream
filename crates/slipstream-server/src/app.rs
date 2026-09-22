@@ -1648,6 +1648,20 @@ impl Application {
         self.albums().await
     }
 
+    pub async fn create_album_checked(
+        &self,
+        name: String,
+    ) -> Result<slipstream_core::AlbumCreationResult, LibraryError> {
+        self.library.create_album_checked(name).await
+    }
+
+    pub async fn mutate_album_checked(
+        &self,
+        mutation: slipstream_core::CheckedAlbumMutation,
+    ) -> Result<slipstream_core::CheckedAlbumMutationResult, LibraryError> {
+        self.library.mutate_album_checked(mutation).await
+    }
+
     pub async fn add_album_members(
         &self,
         album_id: &str,

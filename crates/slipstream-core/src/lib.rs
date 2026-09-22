@@ -39,9 +39,10 @@ pub use derivative::{
     Derivative, DerivativeError, DerivativeProfile, DerivativeTarget, process_jpeg,
 };
 pub use domain::{
-    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
-    AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
-    AlbumQueryFilter, AlbumRecord, AlbumSummary, CaptureTimeBound, DiscoveredOriginal,
+    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,
+    AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
+    AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, CaptureTimeBound,
+    CheckedAlbumMutation, CheckedAlbumMutationResult, DiscoveredOriginal,
     MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory, OriginalFacts, OriginalFingerprint,
     OriginalKind, OriginalRecord, OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership,
     PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
@@ -59,7 +60,7 @@ pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
 };
-pub use persistence::MutationError;
+pub use persistence::{AlbumWriteError, MutationError};
 pub use preview::{
     DEFAULT_PREVIEW_QUEUE_CAPACITY, DEFAULT_PREVIEW_WAITER_CAPACITY, DEFAULT_PREVIEW_WORKERS,
     PreviewFacts, PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult,

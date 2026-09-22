@@ -3,18 +3,19 @@ use super::{
     admission::StateDatabaseLock, validate_canonical_schema,
 };
 use crate::{
-    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
-    AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
-    AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact,
-    CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, LibraryRoot,
-    MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory, OriginalFacts, OriginalFingerprint,
-    OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership, PhotoQuery,
-    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
-    PhotoRead, PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
-    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
-    ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
+    ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,
+    AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
+    AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations,
+    CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
+    CheckedAlbumMutationResult, DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
+    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
+    OriginalScanError, PhotoAlbumMembership, PhotoQuery, PhotoQueryCandidate, PhotoQueryError,
+    PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord,
+    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation, ScanLimits,
+    ScanSnapshot, SelectionState, UnavailablePhotoRecord,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -174,6 +175,78 @@ impl fmt::Display for MutationError {
 
 impl std::error::Error for MutationError {}
 
+/// Detailed refusal or storage outcome for checked Album creation and changes.
+/// Identity-bearing variants let the HTTP owner map the domain result without
+/// parsing display text or issuing a racy follow-up read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AlbumWriteError {
+    Invalid,
+    AlbumNotFound {
+        album_id: String,
+    },
+    PhotoNotFound {
+        photo_id: String,
+    },
+    VersionConflict {
+        album_id: String,
+        current_version: String,
+    },
+    NameConflict {
+        name: String,
+        album_id: String,
+    },
+    MembershipConflict {
+        album_id: String,
+        current_version: String,
+    },
+    LimitExceeded {
+        limit: usize,
+        actual: usize,
+    },
+    Persistence,
+    Saturated,
+    Closed,
+}
+
+impl fmt::Display for AlbumWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => formatter.write_str("Album write request is not valid"),
+            Self::AlbumNotFound { .. } => formatter.write_str("Album was not found"),
+            Self::PhotoNotFound { .. } => formatter.write_str("Photo was not found"),
+            Self::VersionConflict { .. } => {
+                formatter.write_str("Album version conflicts with current state")
+            }
+            Self::NameConflict { .. } => formatter.write_str("Album name already exists"),
+            Self::MembershipConflict { .. } => {
+                formatter.write_str("Album order does not match current membership")
+            }
+            Self::LimitExceeded { .. } => formatter.write_str("Album write exceeds its limit"),
+            Self::Persistence => formatter.write_str("Album write could not be persisted"),
+            Self::Saturated => formatter.write_str("SQLite persistence queue is saturated"),
+            Self::Closed => formatter.write_str("SQLite persistence is closed"),
+        }
+    }
+}
+
+impl std::error::Error for AlbumWriteError {}
+
+fn album_write_error_from_persistence(error: PersistenceError) -> AlbumWriteError {
+    match error {
+        PersistenceError::Saturated => AlbumWriteError::Saturated,
+        PersistenceError::Closed => AlbumWriteError::Closed,
+        _ => AlbumWriteError::Persistence,
+    }
+}
+
+fn album_write_error_from_mutation(error: MutationError) -> AlbumWriteError {
+    match error {
+        MutationError::Saturated => AlbumWriteError::Saturated,
+        MutationError::Closed => AlbumWriteError::Closed,
+        _ => AlbumWriteError::Persistence,
+    }
+}
+
 fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
     match error {
         PersistenceError::Saturated => MutationError::Saturated,
@@ -291,6 +364,110 @@ fn normalize_album_membership_mutation(
     })
 }
 
+fn normalize_album_name(name: String) -> Result<String, AlbumWriteError> {
+    let name = name.trim().to_owned();
+    if name.is_empty() || name.chars().count() > 120 {
+        Err(AlbumWriteError::Invalid)
+    } else {
+        Ok(name)
+    }
+}
+
+fn normalize_checked_album_mutation(
+    mutation: CheckedAlbumMutation,
+) -> Result<CheckedAlbumMutation, AlbumWriteError> {
+    let validate_target = |album_id: &str, expected_version: &str| {
+        if album_id.trim().is_empty() || expected_version.is_empty() {
+            Err(AlbumWriteError::Invalid)
+        } else {
+            Ok(())
+        }
+    };
+    let validate_photo_ids = |photo_ids: &[String]| {
+        if photo_ids.len() > ALBUM_MEMBERSHIP_BATCH_MAX {
+            return Err(AlbumWriteError::LimitExceeded {
+                limit: ALBUM_MEMBERSHIP_BATCH_MAX,
+                actual: photo_ids.len(),
+            });
+        }
+        if photo_ids.is_empty()
+            || photo_ids.iter().any(|photo_id| photo_id.trim().is_empty())
+            || photo_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != photo_ids.len()
+        {
+            Err(AlbumWriteError::Invalid)
+        } else {
+            Ok(())
+        }
+    };
+    match mutation {
+        CheckedAlbumMutation::Rename {
+            album_id,
+            name,
+            expected_version,
+        } => {
+            validate_target(&album_id, &expected_version)?;
+            Ok(CheckedAlbumMutation::Rename {
+                album_id,
+                name: normalize_album_name(name)?,
+                expected_version,
+            })
+        }
+        CheckedAlbumMutation::Delete {
+            album_id,
+            expected_version,
+        } => {
+            validate_target(&album_id, &expected_version)?;
+            Ok(CheckedAlbumMutation::Delete {
+                album_id,
+                expected_version,
+            })
+        }
+        CheckedAlbumMutation::AddMembers {
+            album_id,
+            photo_ids,
+            expected_version,
+        } => {
+            validate_target(&album_id, &expected_version)?;
+            validate_photo_ids(&photo_ids)?;
+            Ok(CheckedAlbumMutation::AddMembers {
+                album_id,
+                photo_ids,
+                expected_version,
+            })
+        }
+        CheckedAlbumMutation::RemoveMembers {
+            album_id,
+            photo_ids,
+            expected_version,
+        } => {
+            validate_target(&album_id, &expected_version)?;
+            validate_photo_ids(&photo_ids)?;
+            Ok(CheckedAlbumMutation::RemoveMembers {
+                album_id,
+                photo_ids,
+                expected_version,
+            })
+        }
+        CheckedAlbumMutation::Reorder {
+            album_id,
+            photo_ids,
+            expected_version,
+        } => {
+            validate_target(&album_id, &expected_version)?;
+            validate_photo_ids(&photo_ids)?;
+            Ok(CheckedAlbumMutation::Reorder {
+                album_id,
+                photo_ids,
+                expected_version,
+            })
+        }
+    }
+}
+
 fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), MutationError> {
     if mutation.expected_current.is_some_and(|expected| {
         std::mem::discriminant(&expected) != std::mem::discriminant(&mutation.value)
@@ -404,6 +581,14 @@ enum Command {
     MutateAlbumMembership(
         AlbumMembershipMutation,
         oneshot::Sender<Result<AlbumMembershipResult, MutationError>>,
+    ),
+    CreateAlbum(
+        String,
+        oneshot::Sender<Result<AlbumCreationResult, AlbumWriteError>>,
+    ),
+    MutateAlbumChecked(
+        CheckedAlbumMutation,
+        oneshot::Sender<Result<CheckedAlbumMutationResult, AlbumWriteError>>,
     ),
     MutatePhotoState(
         PhotoStateMutation,
@@ -902,6 +1087,48 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub async fn create_album_checked(
+        &self,
+        name: String,
+    ) -> Result<AlbumCreationResult, AlbumWriteError> {
+        let receive = self.create_album_checked_receiver(name)?;
+        receive.await.unwrap_or(Err(AlbumWriteError::Persistence))
+    }
+
+    pub(crate) fn create_album_checked_receiver(
+        &self,
+        name: String,
+    ) -> Result<oneshot::Receiver<Result<AlbumCreationResult, AlbumWriteError>>, AlbumWriteError>
+    {
+        let name = normalize_album_name(name)?;
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::CreateAlbum(name, send))
+            .map_err(album_write_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub async fn mutate_album_checked(
+        &self,
+        mutation: CheckedAlbumMutation,
+    ) -> Result<CheckedAlbumMutationResult, AlbumWriteError> {
+        let receive = self.mutate_album_checked_receiver(mutation)?;
+        receive.await.unwrap_or(Err(AlbumWriteError::Persistence))
+    }
+
+    pub(crate) fn mutate_album_checked_receiver(
+        &self,
+        mutation: CheckedAlbumMutation,
+    ) -> Result<
+        oneshot::Receiver<Result<CheckedAlbumMutationResult, AlbumWriteError>>,
+        AlbumWriteError,
+    > {
+        let mutation = normalize_checked_album_mutation(mutation)?;
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::MutateAlbumChecked(mutation, send))
+            .map_err(album_write_error_from_persistence)?;
+        Ok(receive)
+    }
+
     pub async fn mutate_photo_state(
         &self,
         mutation: PhotoStateMutation,
@@ -1171,6 +1398,21 @@ fn owner_main(
                 {
                     let _ = versions.advance_album(&result.album_id);
                 }
+                let _ = reply.send(result);
+            }
+            Command::CreateAlbum(name, reply) => {
+                let result =
+                    create_album_checked(&state, &database_name, &mut connection, &versions, name);
+                let _ = reply.send(result);
+            }
+            Command::MutateAlbumChecked(mutation, reply) => {
+                let result = mutate_album_checked(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &mut versions,
+                    mutation,
+                );
                 let _ = reply.send(result);
             }
             Command::MutatePhotoState(mutation, reply) => {
@@ -3867,6 +4109,7 @@ fn album_browse_target(
 struct AlbumVersionState {
     name: String,
     ordered_photo_ids: Vec<String>,
+    saved_photo_id: Option<String>,
 }
 
 fn album_version_state(
@@ -3889,9 +4132,18 @@ fn album_version_state(
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| PersistenceError::Storage)?;
+    let saved_photo_id = connection
+        .query_row(
+            "SELECT photo_id FROM album_progress WHERE album_id=?",
+            [album_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
     Ok(Some(AlbumVersionState {
         name,
         ordered_photo_ids,
+        saved_photo_id,
     }))
 }
 
@@ -3961,6 +4213,312 @@ fn album_version_plan(
         advance,
         deleted,
     })
+}
+
+fn conflicting_album_id(
+    connection: &Connection,
+    name: &str,
+    except_album_id: Option<&str>,
+) -> Result<Option<String>, AlbumWriteError> {
+    let existing = connection
+        .query_row(
+            "SELECT id FROM albums WHERE name=? COLLATE NOCASE",
+            [name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| AlbumWriteError::Persistence)?;
+    Ok(existing.filter(|album_id| Some(album_id.as_str()) != except_album_id))
+}
+
+fn require_checked_photos(
+    connection: &Connection,
+    photo_ids: &[String],
+) -> Result<(), AlbumWriteError> {
+    for photo_id in photo_ids {
+        let exists = connection
+            .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
+            .optional()
+            .map_err(|_| AlbumWriteError::Persistence)?;
+        if exists.is_none() {
+            return Err(AlbumWriteError::PhotoNotFound {
+                photo_id: photo_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn create_album_checked(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    versions: &MutationVersions,
+    name: String,
+) -> Result<AlbumCreationResult, AlbumWriteError> {
+    if let Some(album_id) = conflicting_album_id(connection, &name, None)? {
+        return Err(AlbumWriteError::NameConflict { name, album_id });
+    }
+    let result = mutate_album(
+        state,
+        database_name,
+        connection,
+        AlbumMutation::Create { name: name.clone() },
+    )
+    .map_err(album_write_error_from_mutation)?;
+    Ok(AlbumCreationResult {
+        album: AlbumSummary {
+            album_version: versions.album(&result.album_id),
+            id: result.album_id,
+            name,
+            photo_count: 0,
+            has_saved_position: false,
+        },
+    })
+}
+
+fn mutate_album_checked(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    versions: &mut MutationVersions,
+    mutation: CheckedAlbumMutation,
+) -> Result<CheckedAlbumMutationResult, AlbumWriteError> {
+    let identity = match &mutation {
+        CheckedAlbumMutation::Rename {
+            album_id,
+            expected_version,
+            ..
+        }
+        | CheckedAlbumMutation::Delete {
+            album_id,
+            expected_version,
+        }
+        | CheckedAlbumMutation::AddMembers {
+            album_id,
+            expected_version,
+            ..
+        }
+        | CheckedAlbumMutation::RemoveMembers {
+            album_id,
+            expected_version,
+            ..
+        }
+        | CheckedAlbumMutation::Reorder {
+            album_id,
+            expected_version,
+            ..
+        } => (album_id.clone(), expected_version.clone()),
+    };
+    let (album_id, expected_version) = (&identity.0, &identity.1);
+    let Some(mut summary) =
+        read_album(connection, versions, album_id).map_err(|_| AlbumWriteError::Persistence)?
+    else {
+        return Err(AlbumWriteError::AlbumNotFound {
+            album_id: album_id.clone(),
+        });
+    };
+    // The guard is deliberately checked before classifying an otherwise
+    // idempotent request. A changed-away-and-back Album still conflicts.
+    if summary.album_version != *expected_version {
+        return Err(AlbumWriteError::VersionConflict {
+            album_id: album_id.clone(),
+            current_version: summary.album_version,
+        });
+    }
+    let current = album_version_state(connection, album_id)
+        .map_err(|_| AlbumWriteError::Persistence)?
+        .ok_or_else(|| AlbumWriteError::AlbumNotFound {
+            album_id: album_id.clone(),
+        })?;
+
+    match mutation {
+        CheckedAlbumMutation::Rename { name, .. } => {
+            if let Some(conflicting_id) = conflicting_album_id(connection, &name, Some(album_id))? {
+                return Err(AlbumWriteError::NameConflict {
+                    name,
+                    album_id: conflicting_id,
+                });
+            }
+            let renamed = current.name != name;
+            if renamed && !versions.can_advance_album(album_id) {
+                return Err(AlbumWriteError::Persistence);
+            }
+            mutate_album(
+                state,
+                database_name,
+                connection,
+                AlbumMutation::Rename {
+                    album_id: album_id.clone(),
+                    name: name.clone(),
+                },
+            )
+            .map_err(album_write_error_from_mutation)?;
+            if renamed {
+                versions
+                    .advance_album(album_id)
+                    .map_err(album_write_error_from_mutation)?;
+            }
+            summary.name = name;
+            summary.album_version = versions.album(album_id);
+            Ok(CheckedAlbumMutationResult::Renamed {
+                album: summary,
+                renamed,
+            })
+        }
+        CheckedAlbumMutation::Delete { .. } => {
+            mutate_album(
+                state,
+                database_name,
+                connection,
+                AlbumMutation::Delete {
+                    album_id: album_id.clone(),
+                },
+            )
+            .map_err(album_write_error_from_mutation)?;
+            versions.album.remove(album_id);
+            Ok(CheckedAlbumMutationResult::Deleted {
+                album_id: album_id.clone(),
+            })
+        }
+        CheckedAlbumMutation::AddMembers { photo_ids, .. } => {
+            require_checked_photos(connection, &photo_ids)?;
+            let existing = current
+                .ordered_photo_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let added_photo_ids = photo_ids
+                .iter()
+                .filter(|photo_id| !existing.contains(photo_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let already_member_photo_ids = photo_ids
+                .iter()
+                .filter(|photo_id| existing.contains(photo_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !added_photo_ids.is_empty() && !versions.can_advance_album(album_id) {
+                return Err(AlbumWriteError::Persistence);
+            }
+            mutate_album_membership(
+                state,
+                database_name,
+                connection,
+                AlbumMembershipMutation::Add {
+                    album_id: album_id.clone(),
+                    photo_ids,
+                },
+            )
+            .map_err(album_write_error_from_mutation)?;
+            if !added_photo_ids.is_empty() {
+                versions
+                    .advance_album(album_id)
+                    .map_err(album_write_error_from_mutation)?;
+            }
+            summary.photo_count += added_photo_ids.len();
+            summary.album_version = versions.album(album_id);
+            Ok(CheckedAlbumMutationResult::Added {
+                album: summary,
+                added_photo_ids,
+                already_member_photo_ids,
+            })
+        }
+        CheckedAlbumMutation::RemoveMembers { photo_ids, .. } => {
+            require_checked_photos(connection, &photo_ids)?;
+            let existing = current
+                .ordered_photo_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let removed_photo_ids = photo_ids
+                .iter()
+                .filter(|photo_id| existing.contains(photo_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let already_absent_photo_ids = photo_ids
+                .iter()
+                .filter(|photo_id| !existing.contains(photo_id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !removed_photo_ids.is_empty() && !versions.can_advance_album(album_id) {
+                return Err(AlbumWriteError::Persistence);
+            }
+            mutate_album_membership(
+                state,
+                database_name,
+                connection,
+                AlbumMembershipMutation::RemoveAdded {
+                    album_id: album_id.clone(),
+                    photo_ids,
+                },
+            )
+            .map_err(album_write_error_from_mutation)?;
+            if !removed_photo_ids.is_empty() {
+                versions
+                    .advance_album(album_id)
+                    .map_err(album_write_error_from_mutation)?;
+            }
+            let saved_photo_id = current
+                .saved_photo_id
+                .filter(|saved| !removed_photo_ids.iter().any(|removed| removed == saved));
+            summary.photo_count -= removed_photo_ids.len();
+            summary.has_saved_position = saved_photo_id.is_some();
+            summary.album_version = versions.album(album_id);
+            Ok(CheckedAlbumMutationResult::Removed {
+                album: summary,
+                removed_photo_ids,
+                already_absent_photo_ids,
+                saved_photo_id,
+            })
+        }
+        CheckedAlbumMutation::Reorder { photo_ids, .. } => {
+            require_checked_photos(connection, &photo_ids)?;
+            if current.ordered_photo_ids.len() > ALBUM_MEMBERSHIP_BATCH_MAX {
+                return Err(AlbumWriteError::LimitExceeded {
+                    limit: ALBUM_MEMBERSHIP_BATCH_MAX,
+                    actual: current.ordered_photo_ids.len(),
+                });
+            }
+            let current_ids = current
+                .ordered_photo_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let requested_ids = photo_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+            if current_ids != requested_ids {
+                return Err(AlbumWriteError::MembershipConflict {
+                    album_id: album_id.clone(),
+                    current_version: summary.album_version,
+                });
+            }
+            let reordered = current.ordered_photo_ids != photo_ids;
+            if reordered && !versions.can_advance_album(album_id) {
+                return Err(AlbumWriteError::Persistence);
+            }
+            mutate_album(
+                state,
+                database_name,
+                connection,
+                AlbumMutation::Reorder {
+                    album_id: album_id.clone(),
+                    photo_ids: photo_ids.clone(),
+                },
+            )
+            .map_err(album_write_error_from_mutation)?;
+            if reordered {
+                versions
+                    .advance_album(album_id)
+                    .map_err(album_write_error_from_mutation)?;
+            }
+            summary.album_version = versions.album(album_id);
+            Ok(CheckedAlbumMutationResult::Reordered {
+                album: summary,
+                ordered_photo_ids: photo_ids,
+                reordered,
+            })
+        }
+    }
 }
 
 fn mutation_error_from_sqlite(error: rusqlite::Error) -> MutationError {
@@ -5919,6 +6477,11 @@ mod tests {
             .unwrap()
             .unwrap()
             .decision_version;
+        let album = persistence
+            .create_album_checked("Epoch".to_owned())
+            .await
+            .unwrap()
+            .album;
         persistence.shutdown().unwrap();
 
         let reopened_state =
@@ -5933,6 +6496,27 @@ mod tests {
             .unwrap()
             .decision_version;
         assert_ne!(first, second);
+        let reopened_album = reopened
+            .album_receiver(&album.id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_ne!(album.album_version, reopened_album.album_version);
+        assert_eq!(
+            reopened
+                .mutate_album_checked(CheckedAlbumMutation::Rename {
+                    album_id: album.id.clone(),
+                    name: album.name,
+                    expected_version: album.album_version,
+                })
+                .await,
+            Err(AlbumWriteError::VersionConflict {
+                album_id: album.id,
+                current_version: reopened_album.album_version,
+            })
+        );
     }
 
     #[test]
@@ -6862,6 +7446,386 @@ mod tests {
                 .is_none()
         );
         persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_album_changes_are_guarded_atomic_and_identity_bearing() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                    discovered("three.JPG", OriginalKind::Jpeg, 3, 3.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let created = persistence
+            .create_album_checked("  Picks  ".to_owned())
+            .await
+            .unwrap();
+        let album_id = created.album.id.clone();
+        assert_eq!(created.album.name, "Picks");
+        assert_eq!(created.album.photo_count, 0);
+        assert!(!created.album.has_saved_position);
+        assert_eq!(
+            persistence.create_album_checked("pIcKs".to_owned()).await,
+            Err(AlbumWriteError::NameConflict {
+                name: "pIcKs".to_owned(),
+                album_id: album_id.clone(),
+            })
+        );
+
+        let initial_version = created.album.album_version;
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::AddMembers {
+                    album_id: album_id.clone(),
+                    photo_ids: (0..=ALBUM_MEMBERSHIP_BATCH_MAX)
+                        .map(|index| format!("photo-{index}"))
+                        .collect(),
+                    expected_version: initial_version.clone(),
+                })
+                .await,
+            Err(AlbumWriteError::LimitExceeded {
+                limit: ALBUM_MEMBERSHIP_BATCH_MAX,
+                actual: ALBUM_MEMBERSHIP_BATCH_MAX + 1,
+            })
+        );
+        let unchanged = persistence
+            .mutate_album_checked(CheckedAlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Picks".to_owned(),
+                expected_version: initial_version.clone(),
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Renamed { album, renamed } = unchanged else {
+            panic!("expected rename result");
+        };
+        assert!(!renamed);
+        assert_eq!(album.album_version, initial_version);
+
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::AddMembers {
+                    album_id: album_id.clone(),
+                    photo_ids: vec![ids[0].clone(), "missing".to_owned()],
+                    expected_version: initial_version.clone(),
+                })
+                .await,
+            Err(AlbumWriteError::PhotoNotFound {
+                photo_id: "missing".to_owned(),
+            })
+        );
+        let after_refusal = persistence
+            .album_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_refusal.album_version, initial_version);
+        assert_eq!(after_refusal.photo_count, 0);
+
+        let added = persistence
+            .mutate_album_checked(CheckedAlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[0].clone(), ids[1].clone()],
+                expected_version: initial_version.clone(),
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Added {
+            album,
+            added_photo_ids,
+            already_member_photo_ids,
+        } = added
+        else {
+            panic!("expected add result");
+        };
+        assert_eq!(added_photo_ids, vec![ids[0].clone(), ids[1].clone()]);
+        assert!(already_member_photo_ids.is_empty());
+        assert_eq!(album.photo_count, 2);
+        let added_version = album.album_version;
+        assert_ne!(added_version, initial_version);
+
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::AddMembers {
+                    album_id: album_id.clone(),
+                    photo_ids: vec![ids[0].clone()],
+                    expected_version: initial_version,
+                })
+                .await,
+            Err(AlbumWriteError::VersionConflict {
+                album_id: album_id.clone(),
+                current_version: added_version.clone(),
+            })
+        );
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: ids[1].clone(),
+            })
+            .await
+            .unwrap();
+
+        let removed = persistence
+            .mutate_album_checked(CheckedAlbumMutation::RemoveMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[1].clone(), ids[2].clone()],
+                expected_version: added_version,
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Removed {
+            album,
+            removed_photo_ids,
+            already_absent_photo_ids,
+            saved_photo_id,
+        } = removed
+        else {
+            panic!("expected remove result");
+        };
+        assert_eq!(removed_photo_ids, vec![ids[1].clone()]);
+        assert_eq!(already_absent_photo_ids, vec![ids[2].clone()]);
+        assert_eq!(saved_photo_id, None);
+        assert!(!album.has_saved_position);
+        let removed_version = album.album_version;
+
+        let added = persistence
+            .mutate_album_checked(CheckedAlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[2].clone(), ids[0].clone()],
+                expected_version: removed_version,
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Added {
+            album,
+            added_photo_ids,
+            already_member_photo_ids,
+        } = added
+        else {
+            panic!("expected add result");
+        };
+        assert_eq!(added_photo_ids, vec![ids[2].clone()]);
+        assert_eq!(already_member_photo_ids, vec![ids[0].clone()]);
+        let reordered = persistence
+            .mutate_album_checked(CheckedAlbumMutation::Reorder {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[2].clone(), ids[0].clone()],
+                expected_version: album.album_version,
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Reordered {
+            album,
+            ordered_photo_ids,
+            reordered,
+        } = reordered
+        else {
+            panic!("expected reorder result");
+        };
+        assert!(reordered);
+        assert_eq!(ordered_photo_ids, vec![ids[2].clone(), ids[0].clone()]);
+        let reordered_version = album.album_version;
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::Reorder {
+                    album_id: album_id.clone(),
+                    photo_ids: vec![ids[0].clone()],
+                    expected_version: reordered_version.clone(),
+                })
+                .await,
+            Err(AlbumWriteError::MembershipConflict {
+                album_id: album_id.clone(),
+                current_version: reordered_version.clone(),
+            })
+        );
+
+        let renamed = persistence
+            .mutate_album_checked(CheckedAlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Final".to_owned(),
+                expected_version: reordered_version,
+            })
+            .await
+            .unwrap();
+        let CheckedAlbumMutationResult::Renamed { album, renamed } = renamed else {
+            panic!("expected rename result");
+        };
+        assert!(renamed);
+        assert_eq!(album.name, "Final");
+        let observed_final_version = album.album_version;
+        persistence
+            .mutate_album(AlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Away".to_owned(),
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_album(AlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Final".to_owned(),
+            })
+            .await
+            .unwrap();
+        let final_version = persistence
+            .album_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .album_version;
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::Rename {
+                    album_id: album_id.clone(),
+                    name: "Final".to_owned(),
+                    expected_version: observed_final_version,
+                })
+                .await,
+            Err(AlbumWriteError::VersionConflict {
+                album_id: album_id.clone(),
+                current_version: final_version.clone(),
+            })
+        );
+
+        let delete_target = persistence
+            .create_album_checked("Delete me".to_owned())
+            .await
+            .unwrap()
+            .album;
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::Delete {
+                    album_id: delete_target.id.clone(),
+                    expected_version: delete_target.album_version,
+                })
+                .await
+                .unwrap(),
+            CheckedAlbumMutationResult::Deleted {
+                album_id: delete_target.id.clone(),
+            }
+        );
+        assert!(
+            persistence
+                .album_receiver(&delete_target.id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+
+        let sidecar = path.with_file_name("library.sqlite-wal");
+        fs::write(&sidecar, b"blocked").unwrap();
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::Rename {
+                    album_id: album_id.clone(),
+                    name: "Blocked".to_owned(),
+                    expected_version: final_version.clone(),
+                })
+                .await,
+            Err(AlbumWriteError::Persistence)
+        );
+        assert_eq!(
+            persistence
+                .album_receiver(&album_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .album_version,
+            final_version
+        );
+    }
+
+    #[tokio::test]
+    async fn checked_reorder_refuses_a_large_album_without_mutation() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let originals = (0..=ALBUM_MEMBERSHIP_BATCH_MAX)
+            .map(|index| {
+                discovered(
+                    &format!("photo-{index:03}.JPG"),
+                    OriginalKind::Jpeg,
+                    index as u64 + 1,
+                    index as f64 + 1.0,
+                )
+            })
+            .collect();
+        let snapshot = persistence.apply_scan(originals, Vec::new()).await.unwrap();
+        let ids = photo_ids(&snapshot);
+        let album = persistence
+            .create_album_checked("Large".to_owned())
+            .await
+            .unwrap()
+            .album;
+        persistence
+            .mutate_album(AlbumMutation::AddFolderMembers {
+                album_id: album.id.clone(),
+                photo_ids: ids.clone(),
+            })
+            .await
+            .unwrap();
+        let current = persistence
+            .album_receiver(&album.id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persistence
+                .mutate_album_checked(CheckedAlbumMutation::Reorder {
+                    album_id: album.id.clone(),
+                    photo_ids: ids[..ALBUM_MEMBERSHIP_BATCH_MAX].to_vec(),
+                    expected_version: current.album_version.clone(),
+                })
+                .await,
+            Err(AlbumWriteError::LimitExceeded {
+                limit: ALBUM_MEMBERSHIP_BATCH_MAX,
+                actual: ALBUM_MEMBERSHIP_BATCH_MAX + 1,
+            })
+        );
+        let after = persistence
+            .album_receiver(&album.id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.album_version, current.album_version);
+        assert_eq!(after.photo_count, ids.len());
+        assert_eq!(
+            persistence.list_albums().await.unwrap()[0]
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
     }
 
     #[tokio::test]

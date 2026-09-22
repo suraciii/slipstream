@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   createServer,
@@ -17,7 +17,7 @@ import {
   chmod,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
 
 import {
   expect,
@@ -239,8 +239,8 @@ async function browseOrderedIds(
   return ids;
 }
 
-async function createAlbum(url: string, name = "Review") {
-  const photos = await browseIds(url);
+async function createAlbum(url: string, name = "Review", photoIds?: string[]) {
+  const photos = photoIds ?? (await browseIds(url));
   const created = (await (await post(url, "/api/albums", { name })).json()) as {
     albums: Array<{ id: string; name: string }>;
   };
@@ -250,6 +250,29 @@ async function createAlbum(url: string, name = "Review") {
       photoIds: photos.slice(offset, offset + 100),
     });
   return { albumId: album.id };
+}
+
+/// Runs one compiled CLI client command against a real service, mirroring the
+/// server-binary resolution browser-server.ts already uses.
+function cli(server: string, invocation: string[]) {
+  const binary = resolve(
+    process.env.SLIPSTREAM_CLI_BINARY ?? "target/debug/slipstream",
+  );
+  const completed = spawnSync(binary, ["--server", server, ...invocation], {
+    encoding: "utf8",
+  });
+  if (completed.error)
+    throw new Error(`CLI client unavailable: ${completed.error}`);
+  if (completed.stderr)
+    throw new Error(`unexpected CLI stderr: ${completed.stderr}`);
+  const envelope = JSON.parse(completed.stdout) as {
+    status: string;
+    data?: Record<string, unknown>;
+    error?: unknown;
+  };
+  if (envelope.status !== "ok")
+    throw new Error(`CLI command failed: ${JSON.stringify(envelope.error)}`);
+  return envelope;
 }
 function progressResponse(page: Page, albumId: string, status = 200) {
   return page.waitForResponse(
@@ -18241,6 +18264,143 @@ test.describe("browser navigation", () => {
     // The requested filter is preserved by the fallback.
     expect(url.searchParams.get("selection")).toBe("undecided");
     expect(url.searchParams.get("source")).toBe("album");
+  });
+
+  test("a CLI-created Album opens in the Web with its ordered members and decisions", async ({
+    page,
+  }) => {
+    const { base, root } = await fixture();
+    const source = await jpeg();
+    // Capture Times order the selected Photos differently from filename and
+    // insertion order, so the opened Grid proves the CLI query supplied it.
+    await writeFile(
+      join(root, "one.jpg"),
+      withCaptureTime(source, "2026:03:04 10:00:00"),
+    );
+    await writeFile(
+      join(root, "two.jpg"),
+      withCaptureTime(source, "2026:01:02 10:00:00"),
+    );
+    await writeFile(
+      join(root, "three.jpg"),
+      withCaptureTime(source, "2026:02:03 10:00:00"),
+    );
+    await writeFile(
+      join(root, "four.jpg"),
+      withCaptureTime(source, "2026:04:05 10:00:00"),
+    );
+    await writeFile(
+      join(root, "five.jpg"),
+      withCaptureTime(source, "2026:05:06 10:00:00"),
+    );
+    await writeFile(
+      join(root, "six.jpg"),
+      withCaptureTime(source, "2026:06:07 10:00:00"),
+    );
+    const running = await server(base, root);
+    // Fixture setup only: the source Album and the pre-existing decisions the
+    // query filters for. The organization workflow itself uses the CLI alone.
+    const ids = await browseIds(running.url);
+    expect(ids).toHaveLength(6);
+    // The Library lists Capture Time order: two, three, one, four, five, six.
+    const [twoId, threeId, oneId, fourId] = ids;
+    // The source Album is seeded in filename order (one, two, three, four,
+    // five, six), deliberately not Capture Time order, so only the CLI query's
+    // --order capture-time-asc can produce the asserted sequence.
+    const { albumId: sourceAlbumId } = await createAlbum(
+      running.url,
+      "Source picks",
+      [oneId!, twoId!, threeId!, fourId!, ids[4]!, ids[5]!],
+    );
+    const decisions = [
+      { id: twoId, selectionState: "selected", rating: 4 },
+      { id: threeId, selectionState: "selected", rating: 5 },
+      { id: oneId, selectionState: "selected", rating: 5 },
+      { id: fourId, selectionState: "selected", rating: 4 },
+      { id: ids[4], selectionState: "rejected", rating: 3 },
+    ];
+    for (const decision of decisions) {
+      for (const [field, value] of [
+        ["selectionState", decision.selectionState],
+        ["rating", decision.rating],
+      ] as const) {
+        const response = await post(
+          running.url,
+          `/api/photos/${decision.id}/state`,
+          { field, value },
+        );
+        expect(response.ok).toBe(true);
+      }
+    }
+
+    const queried = cli(running.url, [
+      "photos",
+      "list",
+      "--album",
+      sourceAlbumId,
+      "--selection",
+      "selected",
+      "--rating-min",
+      "4",
+      "--order",
+      "capture-time-asc",
+      "--limit",
+      "60",
+    ]);
+    const orderedIds = (
+      queried.data as { items: Array<{ id: string }> }
+    ).items.map((item) => item.id);
+    // Capture Time order — not filename order (four, one, three, two) and not
+    // the seeded Album order (one, two, three, four).
+    expect(orderedIds).toEqual([twoId, threeId, oneId, fourId]);
+
+    const created = cli(running.url, [
+      "albums",
+      "create",
+      "--name",
+      "CLI 精选",
+    ]);
+    const album = (
+      created.data as {
+        album: {
+          id: string;
+          albumVersion: string;
+          webUrl: string;
+        };
+      }
+    ).album;
+    const membersPath = join(base, "members.json");
+    await writeFile(membersPath, JSON.stringify({ photoIds: orderedIds }));
+    const added = cli(running.url, [
+      "albums",
+      "add",
+      album.id,
+      "--input",
+      membersPath,
+      "--if-version",
+      album.albumVersion,
+    ]);
+    expect((added.data as { addedPhotoIds: string[] }).addedPhotoIds).toEqual(
+      orderedIds,
+    );
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(album.webUrl);
+    await expect(page.getByText("Ready · 4 Photos")).toBeVisible();
+    await waitForGridFrame(page);
+    await expectGridOrder(page, orderedIds);
+    expect(new URL(page.url()).search).toBe(
+      `?source=album&albumId=${album.id}`,
+    );
+    const cell = (index: number) =>
+      page.locator(`[data-photo-index="${index}"]`);
+    for (const [index, rating] of [4, 5, 5, 4].entries()) {
+      await expect(cell(index).locator(".cell-state.selected")).toHaveText("✓");
+      await expect(cell(index)).toHaveAttribute(
+        "aria-label",
+        new RegExp(`${rating} stars`),
+      );
+    }
   });
 
   test("an invalid address is explained and replaced once with All Photos", async ({

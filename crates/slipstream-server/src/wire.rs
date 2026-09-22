@@ -96,6 +96,110 @@ impl From<slipstream_core::AlbumSummary> for CliAlbumSummaryWire {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct CliAlbumCreationWire {
+    pub album: CliAlbumSummaryWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumRenameWire {
+    pub album: CliAlbumSummaryWire,
+    pub renamed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumDeleteWire {
+    pub album_id: String,
+    pub deleted: bool,
+    pub original_files_changed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumAddWire {
+    pub album: CliAlbumSummaryWire,
+    pub added_photo_ids: Vec<String>,
+    pub already_member_photo_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumRemoveWire {
+    pub album: CliAlbumSummaryWire,
+    pub removed_photo_ids: Vec<String>,
+    pub already_absent_photo_ids: Vec<String>,
+    pub saved_photo_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumReorderWire {
+    pub album: CliAlbumSummaryWire,
+    pub ordered_photo_ids: Vec<String>,
+    pub reordered: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum CliAlbumChangeWire {
+    Rename(CliAlbumRenameWire),
+    Delete(CliAlbumDeleteWire),
+    Add(CliAlbumAddWire),
+    Remove(CliAlbumRemoveWire),
+    Reorder(CliAlbumReorderWire),
+}
+
+impl From<slipstream_core::CheckedAlbumMutationResult> for CliAlbumChangeWire {
+    fn from(value: slipstream_core::CheckedAlbumMutationResult) -> Self {
+        match value {
+            slipstream_core::CheckedAlbumMutationResult::Renamed { album, renamed } => {
+                Self::Rename(CliAlbumRenameWire {
+                    album: album.into(),
+                    renamed,
+                })
+            }
+            slipstream_core::CheckedAlbumMutationResult::Deleted { album_id } => {
+                Self::Delete(CliAlbumDeleteWire {
+                    album_id,
+                    deleted: true,
+                    original_files_changed: false,
+                })
+            }
+            slipstream_core::CheckedAlbumMutationResult::Added {
+                album,
+                added_photo_ids,
+                already_member_photo_ids,
+            } => Self::Add(CliAlbumAddWire {
+                album: album.into(),
+                added_photo_ids,
+                already_member_photo_ids,
+            }),
+            slipstream_core::CheckedAlbumMutationResult::Removed {
+                album,
+                removed_photo_ids,
+                already_absent_photo_ids,
+                saved_photo_id,
+            } => Self::Remove(CliAlbumRemoveWire {
+                album: album.into(),
+                removed_photo_ids,
+                already_absent_photo_ids,
+                saved_photo_id,
+            }),
+            slipstream_core::CheckedAlbumMutationResult::Reordered {
+                album,
+                ordered_photo_ids,
+                reordered,
+            } => Self::Reorder(CliAlbumReorderWire {
+                album: album.into(),
+                ordered_photo_ids,
+                reordered,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct MissingItemWire {
     pub id: String,
     pub state: &'static str,
