@@ -209,6 +209,22 @@ class Qualification:
         self.results.append(receipt)
         return receipt
 
+    def blocked_recovery(self, intent):
+        def recovered():
+            try:
+                capability = self.request('reconcile')['result']
+                receipt = capability['active']
+                if receipt is None:
+                    return None
+                assert (receipt['incarnation'], receipt['sequence']) == (intent['incarnation'], intent['sequence'])
+                if (capability['availability'] == 'blocked' and
+                        receipt['state'] == 'blocked' and receipt['cleanup'] == 'uncertain'):
+                    return receipt
+                return None
+            except (FileNotFoundError, ConnectionRefusedError):
+                return None
+        return await_condition(recovered)
+
     def run(self, workload, outcome):
         intent = self.intent(workload)
         response = self.request('start', **intent)
@@ -287,12 +303,7 @@ class Qualification:
             case.stop(crash=True); case.disarm()
             case.log = (case.root/'launcher.log').open('ab')
             case.process = subprocess.Popen([str(case.launcher),'--config',str(case.root/'config.json')],stdout=case.log,stderr=subprocess.STDOUT)
-            def blocked():
-                try:
-                    return case.request('reconcile')['result']['availability'] == 'blocked'
-                except (FileNotFoundError, ConnectionRefusedError):
-                    return False
-            await_condition(blocked)
+            case.blocked_recovery(intent)
             after = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
             assert after['manager_pending'] == 'slice-stop' and not after['stop_confirmed']
             assert after['receipt']['outcome'] == 'completed'
@@ -333,12 +344,7 @@ class Qualification:
                 original = directory.lstat()
                 case.log = (case.root/'launcher.log').open('ab')
                 case.process = subprocess.Popen([str(case.launcher),'--config',str(case.root/'config.json')],stdout=case.log,stderr=subprocess.STDOUT)
-                def blocked():
-                    try:
-                        return case.request('reconcile')['result']['availability'] == 'blocked'
-                    except (FileNotFoundError, ConnectionRefusedError):
-                        return False
-                await_condition(blocked)
+                case.blocked_recovery(intent)
                 after = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
                 assert after['receipt']['outcome'] == 'completed' and after['receipt']['cleanup'] == 'uncertain'
                 assert after['stop_confirmed'] and after['manager_pending'] is None

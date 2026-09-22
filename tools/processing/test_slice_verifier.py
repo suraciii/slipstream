@@ -4,11 +4,28 @@ import errno
 import tempfile
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock
 
 import verify
 
 
 class SliceObservations(unittest.TestCase):
+    def test_blocked_availability_waits_for_exact_recovered_receipt(self):
+        case = verify.Qualification.__new__(verify.Qualification)
+        intent = dict(incarnation='a'*32, sequence=7)
+        pending = dict(**intent, state='settling', cleanup='pending')
+        partial = dict(**intent, state='blocked', cleanup='pending')
+        blocked = dict(**intent, state='blocked', cleanup='uncertain')
+        case.request = Mock(side_effect=[{'result': {'availability': 'blocked', 'active': receipt}}
+                                        for receipt in [None, pending, partial, blocked]])
+        with patch.object(verify.time, 'sleep'):
+            self.assertEqual(case.blocked_recovery(intent), blocked)
+        self.assertEqual(case.request.call_args_list, [unittest.mock.call('reconcile')]*4)
+        case.request = Mock(return_value={'result': {'availability': 'blocked',
+                                                    'active': dict(blocked, sequence=8)}})
+        with self.assertRaises(AssertionError):
+            case.blocked_recovery(intent)
+
     def test_complete_absence_and_foreign_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             unit = 'independent-observation.slice'
