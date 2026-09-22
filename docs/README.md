@@ -23,5 +23,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Support and Release
 
+- [Installed Web Application](installed-web-app.md): online installation, launch, and supported deployment
+
 - [0.1 Support and Release Contract](0.1-support-and-release.md): supported environment, file and camera boundary, recovery, limitations, rollback-artifact retention, and 0.1.0 release notes
 - [Deployment](deployment.md): image, host storage, and supported Compose operator contract

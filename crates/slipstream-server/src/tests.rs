@@ -425,6 +425,126 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn installation_resources_revalidate_and_never_fall_back_to_html() {
+    let base = unique_base();
+    let root = base.join("web");
+    fs::create_dir_all(root.join("icons")).unwrap();
+    fs::create_dir_all(base.join("originals")).unwrap();
+    fs::write(root.join("index.html"), b"<main>web</main>").unwrap();
+    fs::write(
+        root.join("manifest.webmanifest"),
+        b"{\"name\":\"Slipstream\"}",
+    )
+    .unwrap();
+    fs::write(root.join("icons/app.png"), b"icon bytes").unwrap();
+    fs::write(root.join("public.txt"), b"mutable public file").unwrap();
+    let application = Application::open(&test_config(&base, root.clone(), 3000))
+        .await
+        .unwrap();
+    let app = Router::new().fallback(static_web).with_state(HttpState {
+        application: Arc::clone(&application),
+        web_root: Arc::new(open_web_root(root.clone())),
+    });
+    for (path, content_type, expected) in [
+        (
+            "/manifest.webmanifest",
+            "application/manifest+json",
+            "{\"name\":\"Slipstream\"}",
+        ),
+        ("/icons/app.png", "image/png", "icon bytes"),
+        (
+            "/public.txt",
+            "application/octet-stream",
+            "mutable public file",
+        ),
+        (
+            "/review/session",
+            "text/html; charset=utf-8",
+            "<main>web</main>",
+        ),
+    ] {
+        for method in ["GET", "HEAD"] {
+            let response = tower::ServiceExt::oneshot(
+                app.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(
+                response.headers()[header::CONTENT_LENGTH],
+                expected.len().to_string()
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                bytes.as_ref(),
+                if method == "HEAD" {
+                    b""
+                } else {
+                    expected.as_bytes()
+                }
+            );
+        }
+    }
+    // Stable metadata URLs must return the new deployment, not an immutable old body.
+    fs::write(root.join("manifest.webmanifest"), b"{\"name\":\"Updated\"}").unwrap();
+    let response = tower::ServiceExt::oneshot(
+        app.clone(),
+        Request::builder()
+            .uri("/manifest.webmanifest")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"{\"name\":\"Updated\"}"
+    );
+    fs::remove_file(root.join("manifest.webmanifest")).unwrap();
+    for path in ["/manifest.webmanifest", "/icons/missing.png"] {
+        for method in ["GET", "HEAD"] {
+            let response = tower::ServiceExt::oneshot(
+                app.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+            let bytes = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                bytes.as_ref(),
+                if method == "HEAD" {
+                    b"".as_slice()
+                } else {
+                    b"Not found".as_slice()
+                }
+            );
+        }
+    }
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 fn substitute_protocol_captures(
     value: &serde_json::Value,
     album_id: &str,
