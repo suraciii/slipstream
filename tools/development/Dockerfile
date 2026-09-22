@@ -18,15 +18,21 @@ ADD --checksum=sha256:b2aca043227bb76f7f09eef4466cd8f9410f0cd5832ae2f4d045b80cb1
 RUN mkdir /opt/spektrafilm \
     && tar -xzf /opt/spektrafilm.tar.gz --strip-components=1 -C /opt/spektrafilm \
     && rm /opt/spektrafilm.tar.gz
-COPY patches/0001-bounded-output-gamut.patch /opt/patches/
+COPY patches/0001-bounded-output-gamut.patch \
+     patches/0002-buffer-lifetimes-and-output.patch /opt/patches/
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch \
     && patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0001-bounded-output-gamut.patch \
+    && patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0002-buffer-lifetimes-and-output.patch \
     && dpkg-query -W > /opt/os-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 COPY bounded_gamut.py /opt/spektrafilm/src/spektrafilm/utils/bounded_gamut.py
+COPY bounded_output.py /opt/spektrafilm/src/spektrafilm/utils/bounded_output.py
 COPY film.py probe.py bundle.py /opt/probe/
-COPY engine_checks/test_bounded_gamut.py engine_checks/run.py \
+COPY engine_checks/test_bounded_gamut.py engine_checks/test_buffer_lifetimes.py \
+     engine_checks/run.py engine_checks/output_scratch_probe.py \
+     engine_checks/cold_lifetime_probe.py \
+     engine_checks/pipeline_reference_probe.py \
      engine_checks/scratch_probe.py engine_checks/requirements.lock \
      engine_checks/0001-current-grain-contract.patch /opt/engine_checks/
 COPY Dockerfile /opt/development-Dockerfile

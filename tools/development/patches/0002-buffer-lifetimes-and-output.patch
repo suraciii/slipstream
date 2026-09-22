@@ -1,0 +1,215 @@
+--- a/src/spektrafilm/runtime/pipeline.py
++++ b/src/spektrafilm/runtime/pipeline.py
+@@ -117,6 +117,7 @@
+             return run_topology(
+                 self._topology, inject, collect, image,
+                 on_fire=self._record_node_timing,
++                on_reclaim=self._record_reclaim_timing,
+             )
+         finally:
+             self._last_elapsed_time = perf_counter() - start
+@@ -192,10 +193,13 @@
+         ]
+ 
+     def _preprocess(self, image):
+-        image = np.double(np.array(image)[:, :, 0:3])
++        image = np.array(np.asarray(image)[:, :, 0:3], dtype=np.float64, copy=True, order="C")
+         image = self._filming_stage.auto_exposure(image)
+         image = self._resize_service.crop_and_rescale(image)
+         return image
+ 
++    def _record_reclaim_timing(self, elapsed: float) -> None:
++        self.timings["memory.reclaim"] = self.timings.get("memory.reclaim", 0.0) + elapsed
++
+     def _record_node_timing(self, node: Node, elapsed: float) -> None:
+         self.timings[node.label] = self.timings.get(node.label, 0.0) + elapsed
+--- a/src/spektrafilm/runtime/stages/scanning.py
++++ b/src/spektrafilm/runtime/stages/scanning.py
+@@ -12,6 +12,7 @@
+ from spektrafilm.utils.conversions import density_to_light
+ from spektrafilm.utils.gamut_compression import compress_rgb
+ from spektrafilm.utils.bounded_gamut import compress_rgb_bounded, plan_gamut_workspace
++from spektrafilm.utils.bounded_output import encode_rgb_bounded
+ 
+ 
+ class ScanningStage:
+@@ -78,6 +79,7 @@
+             use_lut=use_lut,
+         )
+         xyz = 10 ** log_xyz
++        del log_xyz
+         xyz = self._color_reference_service.black_white_xyz_correction(xyz)
+         illuminant_xyz = contract("k,kl->l", scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
+         illuminant_xy = colour.XYZ_to_xy(illuminant_xyz)
+@@ -88,6 +90,7 @@
+             apply_cctf_encoding=False,
+             illuminant=illuminant_xy,
+         )
++        del xyz
+         # Output gamut compression. Compresses chromaticities the
+         # simulation reached that fall outside the output primaries
+         # cube; for perceptual algorithms (oklch / oklrab / jzazbz /
+@@ -142,6 +145,11 @@
+ 
+     def _apply_cctf_encoding(self, rgb: np.ndarray) -> np.ndarray:
+         if self._io.output_cctf_encoding:
++            if self._output_gamut_workspace_bytes is not None:
++                return encode_rgb_bounded(
++                    rgb, output_color_space=self._io.output_color_space,
++                    workspace_bytes=self._output_gamut_workspace_bytes,
++                )
+             rgb = colour.RGB_to_RGB(
+                 rgb,
+                 self._io.output_color_space,
+--- a/src/spektrafilm/runtime/topology.py
++++ b/src/spektrafilm/runtime/topology.py
+@@ -4,6 +4,7 @@
+ """
+ from __future__ import annotations
+ 
++import gc
+ from dataclasses import dataclass
+ from time import perf_counter
+ from typing import Any, Callable
+@@ -63,6 +64,7 @@
+     image: Any,
+     *,
+     on_fire: Callable[[Node, float], None] | None = None,
++    on_reclaim: Callable[[float], None] | None = None,
+ ) -> Any:
+     """Walk ``topology`` in declared order, firing every node whose reads
+     are satisfied. Stops as soon as ``collect`` is in state and returns it.
+@@ -71,8 +73,35 @@
+     node fires; the dispatcher in :class:`SimulationPipeline` uses it to
+     record per-node timings.
+     """
++    def reclaim():
++        started = perf_counter()
++        gc.collect()
++        if on_reclaim is not None:
++            on_reclaim(perf_counter() - started)
++
++    # Plan the same declared-order walk without holding image values. Preserve
++    # the existing first post-fire collection check, including inject==collect.
++    available = {inject}
++    selected = []
++    for node in topology:
++        if all(k in available for k in node.reads):
++            selected.append(node)
++            available.update(node.writes)
++            if collect in available:
++                break
++    needed = {collect}
++    live_after = []
++    for node in reversed(selected):
++        live_after.append(needed.copy())
++        # A replacement write ends the old tap value's lifetime even when a
++        # later reader needs the new value under the same name.
++        needed.difference_update(node.writes)
++        needed.update(node.reads)
++    live_after.reverse()
++
+     state: dict[str, Any] = {inject: image}
+-    for node in topology:
++    del image
++    for node, retained in zip(selected, live_after):
+         if all(k in state for k in node.reads):
+             t0 = perf_counter()
+             node.fire(state)
+@@ -80,7 +109,16 @@
+             if on_fire is not None:
+                 on_fire(node, elapsed)
+             if collect in state:
+-                return state[collect]
++                result = state[collect]
++                state.clear()
++                # Cold JIT traceback cycles can still own completed frames.
++                reclaim()
++                return result
++            for key in tuple(state):
++                if key not in retained:
++                    del state[key]
++            # Pruning references alone does not reclaim cold compiler cycles.
++            reclaim()
+     raise RuntimeError(
+         f"no node path reaches tap {collect!r} from {inject!r}"
+     )
+--- a/src/spektrafilm/utils/io.py
++++ b/src/spektrafilm/utils/io.py
+@@ -9,6 +9,9 @@
+ import numpy as np
+ import OpenImageIO as oiio
+ import scipy.interpolate
++from spektrafilm.utils.bounded_output import (
++    JPEG_WORKSPACE_BYTES, jpeg_row_batches, plan_jpeg_workspace,
++)
+ 
+ ################################################################################
+ # Image metadata
+@@ -211,7 +214,9 @@
+             raise Exception("Failed to read image data from " + filename)
+         
+         # Convert the raw data to a NumPy array and reshape it
+-        np_pixels = np.array(pixels)
++        # The pinned OIIO binding returns independently owned capsule storage.
++        # Keep that owner through the ndarray instead of copying every sample.
++        np_pixels = pixels
+         np_pixels = np_pixels.reshape(spec.height, spec.width, spec.nchannels)
+         
+         if spec.format == oiio.TypeDesc("uint16"):
+@@ -230,6 +235,7 @@
+     *,
+     color_space: str | None = None,
+     cctf_encoding: bool = True,
++    jpeg_workspace_bytes: int = JPEG_WORKSPACE_BYTES,
+ ):
+     """Save a 3-channel image to disk via OpenImageIO.
+ 
+@@ -290,10 +296,10 @@
+         spec = oiio.ImageSpec(width, height, nchannels, oiio.TypeDesc("uint8"))
+         data_to_write = img_uint8
+     elif ext in {"jpg", "jpeg"}:
+-        img_uint8 = np.clip(image_data, 0, 1) * 255.0
+-        img_uint8 = img_uint8.astype(np.uint8)
++        # Validate the minimum full-row workspace before creating a file.
++        jpeg_plan = plan_jpeg_workspace(image_data, jpeg_workspace_bytes)
+         spec = oiio.ImageSpec(width, height, nchannels, oiio.TypeDesc("uint8"))
+-        data_to_write = img_uint8
++        data_to_write = None
+     elif ext=="exr" and bit_depth==16:
+         # Convert the image data to 16-bit half precision.
+         # Note: numpy's float16 is used here; OpenImageIO accepts "half" for 16-bit floats.
+@@ -341,11 +347,19 @@
+         raise IOError("Could not create output image: " + filename)
+     
+     try:
+-        out.open(filename, spec)
+-        # Write the image data; write_image accepts the NumPy array directly.
+-        out.write_image(data_to_write)
+-    finally:
++        if not out.open(filename, spec):
++            raise IOError("Could not open output image: " + out.geterror())
++        if ext in {"jpg", "jpeg"}:
++            for first, last, pixels in jpeg_row_batches(image_data, jpeg_plan):
++                if not out.write_scanlines(first, last, 0, pixels):
++                    raise IOError("Could not write output image: " + out.geterror())
++        elif not out.write_image(data_to_write):
++            raise IOError("Could not write output image: " + out.geterror())
++    except BaseException:
+         out.close()
++        raise
++    if not out.close():
++        raise IOError("Could not close output image: " + out.geterror())
+ 
+ ################################################################################
+ # Neutral filter values
+--- a/src/spektrafilm/model/density_curves.py
++++ b/src/spektrafilm/model/density_curves.py
+@@ -20,7 +20,6 @@
+     if np.size(gamma_factor)==1:
+         gamma_factor = [gamma_factor, gamma_factor, gamma_factor]
+     gamma_factor = np.array(gamma_factor)
+-    density_cmy = np.zeros((log_exposure_rgb.shape[0], log_exposure_rgb.shape[1], 3))
+     # for channel in np.arange(3):
+     #     sel = ~np.isnan(density_curves[:,channel])
+     #     density_cmy[:,:,channel] = np.interp(log_exposure_rgb[:,:,channel],

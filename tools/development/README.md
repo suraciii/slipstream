@@ -99,11 +99,22 @@ processing; the unchanged upstream call without this argument is retained only
 as the numerical reference and is not a fallback from a rejected bounded call.
 Parameter updates preserve the captured workspace allowance.
 
+It then applies `patches/0002-buffer-lifetimes-and-output.patch` with zero fuzz.
+This patch releases expired taps along the existing ordered topology, including
+cyclic frames left by cold numerical compilation. Collection happens at stage
+handoffs and after retaining the final result; it preserves caller and view
+ownership and does not change global GC settings. `memory.reclaim` reports this
+time separately from node computation. Whole-run elapsed time includes both.
+The patch also removes the redundant preprocessing, image-loading, and unused
+density allocations and batches display encoding and JPEG conversion.
+
 `/opt/processing-bundle.json` records the source archive and commit, numerical
 dependency versions and lock digest, native package inventory, complete profile
 asset tree digest, patch digest, and modified source/adapter digests. Each probe
 emits this identity and saves it with the complete Film Recipe. The inspected
 container image ID remains the identity of the complete tested filesystem.
+The manifest records patches in application order and includes the additional
+`bounded_output.py` engine module.
 
 The local `cam16ucs-srgb-f64-v1` workspace model admits only the fixed CAM16-UCS
 compression recipe, sRGB output, and nonempty C-contiguous native float64 RGB
@@ -150,3 +161,41 @@ camera completion must still run under the same hard limit as its baseline and
 verify geometry, ICC, output identity, and enabled effects. Where the unbounded
 full-size reference fails, small-image exactness and full-size completion remain
 two distinct claims.
+
+## Display encoding, JPEG, and observers
+
+`srgb-cctf-f64-v1` uses the same nonempty native float64 contiguous RGB layout
+and owns a separate 24-byte-per-pixel destination. Its numerical scratch model
+is 4 MiB plus 256 bytes per batch pixel, capped at 262,144 pixels. It calls the
+original same-profile `colour.RGB_to_RGB` operation in each batch, retaining
+the matrix operation and transfer-function arithmetic.
+
+`jpeg-uint8-rows-v1` accepts native float32 or float64 RGB, including strided
+input. Its scratch model is 1 MiB plus 64 bytes per batch pixel, capped at
+262,144 pixels. The default numeric allowance is 17 MiB. The model must admit
+one full-width row before a file is opened. Conversion retains the original
+clip, multiply, and uint8 truncation sequence; OIIO receives consecutive
+scanline batches with the original ICC and encoder settings. Failed open,
+write, and close operations propagate. This numerical model excludes native
+encoder storage, which still requires whole-stage measurement and admission.
+
+The OIIO float32 input now retains the storage returned by `read_image` instead
+of copying it. The pinned v3.1.17.0 binding [allocates an independent buffer](https://github.com/AcademySoftwareFoundation/OpenImageIO/blob/v3.1.17.0/src/python/py_imageinput.cpp#L26)
+and [attaches its deleter to the ndarray through a capsule](https://github.com/AcademySoftwareFoundation/OpenImageIO/blob/v3.1.17.0/src/python/py_oiio.h#L504).
+Closing the image reader does not release that buffer. Regression checks use
+the returned pixels after closing, unlinking the file, and collecting garbage.
+
+The harness now checks finite samples and hashes exact C-order bytes in bounded
+chunks of at most 786,432 samples, including strided arrays. It no longer
+creates a whole-image Boolean mask or `tobytes` copy. Peak comparisons must
+disclose this observer change separately from engine buffer savings. The
+optional checks cover cold and warm stage ownership, views, injection and
+collection, callback failures, exact CCTF and JPEG arithmetic, actual encoded
+bytes and ICC, IO failures, and fresh-process numeric scratch allocations.
+
+Complete-pipeline references run in separate fresh processes with an explicitly
+empty JIT cache, then with the compiled cache from that first process. The
+pinned upstream engine has different pre-encoding float64 results between
+these cache contexts; each test uses the exact reference for its own context.
+JPEG identity is also checked. A cache policy is part of qualification, and
+these checks do not authorize cross-attempt cache reuse in production.

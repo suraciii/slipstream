@@ -10,6 +10,8 @@ from spektrafilm.utils.bounded_gamut import (
     MAX_WORKSPACE_BYTES, plan_gamut_workspace,
 )
 
+from spektrafilm.utils.bounded_output import c_order_chunks, samples_are_finite
+
 from bundle import load_bundle
 
 SEED = 327
@@ -63,10 +65,13 @@ def make_simulator(*, gamut_workspace_bytes=MAX_WORKSPACE_BYTES):
 def render(simulator, pixels):
     reset_random_state()
     result = simulator.process(pixels)
-    if not np.isfinite(result).all():
+    if not samples_are_finite(result):
         raise RuntimeError("Film processing returned non-finite samples")
     return result
 
 
 def pixel_digest(pixels):
-    return hashlib.sha256(pixels.tobytes()).hexdigest()
+    digest = hashlib.sha256()
+    for chunk in c_order_chunks(pixels):
+        digest.update(memoryview(chunk).cast("B"))
+    return digest.hexdigest()
