@@ -101,6 +101,14 @@ fn lost_controller(error: &io::Error) -> bool {
         .get_ref()
         .is_some_and(|cause| cause.is::<LostController>())
 }
+fn ensure_before_deadline(deadline: u64) -> io::Result<()> {
+    if now().map_err(|_| bad("clock"))? >= deadline {
+        // The armed absolute timer uses the same exit. As PID 1, exiting also
+        // terminates descendants even if timer delivery has not occurred yet.
+        std::process::exit(76);
+    }
+    Ok(())
+}
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     // SAFETY: getpid reads the current namespace identity. This worker must never run as a host process.
@@ -300,9 +308,7 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
     let staging_us = micros(stage_started).saturating_sub(staging_reclaim_us);
     control(staging::send(channel.as_raw_fd(), &offer.ack(), &[]))?;
     let (permit, rights): (film::Permit, Vec<OwnedFd>) = loop {
-        if now().map_err(|_| bad("clock"))? >= deadline {
-            return Err(bad("execution deadline"));
-        }
+        ensure_before_deadline(deadline)?;
         if let Some(packet) = control(staging::receive(channel.as_raw_fd()))? {
             break packet;
         }
@@ -653,9 +659,7 @@ fn engine(
     let mut status = None;
     let mut no_children = false;
     while !eof || !no_children {
-        if now().map_err(|_| bad("clock"))? >= deadline {
-            return Err(bad("deadline"));
-        }
+        ensure_before_deadline(deadline)?;
         if !eof {
             let mut buffer = [0u8; 4096];
             // SAFETY: read endpoint and stack buffer are valid for this nonblocking read.
@@ -786,6 +790,26 @@ fn deadline_timer(deadline_ms: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_observed_absolute_deadline_exits_76_without_waiting_for_timer_delivery() {
+        const CHILD: &str = "SLIPSTREAM_TEST_EXPIRED_FILM_DEADLINE";
+        if std::env::var_os(CHILD).is_some() {
+            ensure_before_deadline(1).unwrap();
+            panic!("an expired absolute deadline returned");
+        }
+        ensure_before_deadline(u64::MAX).unwrap();
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::an_observed_absolute_deadline_exits_76_without_waiting_for_timer_delivery",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(76));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+    }
     #[test]
     fn native_resource_errors_survive_io_wrapping_without_invented_content_details() {
         for (errno, outcome) in [
