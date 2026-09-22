@@ -56,6 +56,19 @@ def await_condition(probe, seconds=10):
     raise AssertionError("condition did not become true within its fixed deadline")
 
 
+def assert_attempt_absent(parent, unit):
+    assert not Path('/sys/fs/cgroup', parent, unit).exists()
+    assert not command('systemctl', '--system', 'list-units', '--all', '--plain',
+                       '--no-legend', '--no-pager', unit)
+    directories = command('systemctl', '--system', 'show', '--property=UnitPath', '--value').split()
+    assert directories and '/run/systemd/transient' in directories
+    for directory in directories:
+        assert Path(directory).is_absolute()
+        for name in [unit, unit + '.d']:
+            path = Path(directory, name)
+            assert not os.path.lexists(path), path
+
+
 class Qualification:
     def __init__(self, arguments):
         self.arguments = arguments
@@ -161,7 +174,7 @@ class Qualification:
         assert receipt['cleanup'] == 'complete'
         assert receipt['evidence']['populated'] is False
         runtime = receipt['runtime']
-        assert not Path('/sys/fs/cgroup', self.parent, runtime['attempt_unit']).exists()
+        assert_attempt_absent(self.parent, runtime['attempt_unit'])
         assert not (self.root/'attempts'/runtime['launch_id']).exists()
         if runtime['container_id']:
             assert not command('docker', 'ps', '-aq', '--no-trunc', '--filter', 'id='+runtime['container_id'])
@@ -227,6 +240,97 @@ class Qualification:
         evidence['after'] = receipt
         (self.output/(phase+'-'+workload+'-'+str(intent['sequence'])+'.json')).write_text(json.dumps(evidence, indent=2))
         self.run('probe-success', 'completed')
+
+    def pending_slice_stop(self):
+        arguments = argparse.Namespace(**vars(self.arguments))
+        arguments.output = str(self.output / 'pending-slice-stop')
+        case = Qualification(arguments)
+        try:
+            case.start()
+            intent = case.intent('probe-success')
+            case.arm(intent, 'after-slice-stop-intent')
+            case.request('start', **intent)
+            marker = case.marker()
+            before = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
+            assert before['manager_pending'] == 'slice-stop' and not before['stop_confirmed']
+            assert before['receipt']['outcome'] == 'completed'
+            unit = before['receipt']['runtime']['attempt_unit']
+            group = Path('/sys/fs/cgroup', case.parent, unit)
+            inode = group.stat().st_ino
+            case.stop(crash=True); case.disarm()
+            case.log = (case.root/'launcher.log').open('ab')
+            case.process = subprocess.Popen([str(case.launcher),'--config',str(case.root/'config.json')],stdout=case.log,stderr=subprocess.STDOUT)
+            def blocked():
+                try:
+                    return case.request('reconcile')['result']['availability'] == 'blocked'
+                except (FileNotFoundError, ConnectionRefusedError):
+                    return False
+            await_condition(blocked)
+            after = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
+            assert after['manager_pending'] == 'slice-stop' and not after['stop_confirmed']
+            assert after['receipt']['outcome'] == 'completed'
+            assert after['receipt']['cleanup'] == 'uncertain'
+            assert group.stat().st_ino == inode
+            assert command('systemctl','show',unit,'--property=InvocationID','--value') == before['unit_invocation']
+            (case.output/'blocked-proof.json').write_text(json.dumps(dict(marker=marker,before=before,after=after),indent=2))
+        finally:
+            # Explicit verifier-owned cleanup is separate from the blocked receipt.
+            case.cleanup()
+
+    def foreign_configuration_after_stop(self):
+        for symbolic in [False, True]:
+            arguments = argparse.Namespace(**vars(self.arguments))
+            arguments.output = str(self.output / ('foreign-after-stop-' + str(symbolic).lower()))
+            case = Qualification(arguments)
+            directory = None
+            created_inode = None
+            try:
+                case.start()
+                intent = case.intent('probe-success')
+                case.arm(intent, 'after-slice-stop')
+                case.request('start', **intent)
+                marker = case.marker()
+                before = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
+                assert before['stop_confirmed'] and before['manager_pending'] is None
+                unit = before['receipt']['runtime']['attempt_unit']
+                assert_attempt_absent(case.parent, unit)
+                case.stop(crash=True); case.disarm()
+                directory = Path('/run/systemd/system.control', unit + '.d')
+                if symbolic:
+                    directory.symlink_to('unavailable-foreign-target')
+                else:
+                    directory.mkdir()
+                created_inode = directory.lstat().st_ino
+                if not symbolic:
+                    (directory/'foreign.conf').write_text('[Slice]\nMemoryMax=67108864\n')
+                original = directory.lstat()
+                case.log = (case.root/'launcher.log').open('ab')
+                case.process = subprocess.Popen([str(case.launcher),'--config',str(case.root/'config.json')],stdout=case.log,stderr=subprocess.STDOUT)
+                def blocked():
+                    try:
+                        return case.request('reconcile')['result']['availability'] == 'blocked'
+                    except (FileNotFoundError, ConnectionRefusedError):
+                        return False
+                await_condition(blocked)
+                after = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
+                assert after['receipt']['outcome'] == 'completed' and after['receipt']['cleanup'] == 'uncertain'
+                assert after['stop_confirmed'] and after['manager_pending'] is None
+                assert not Path('/sys/fs/cgroup',case.parent,unit).exists()
+                assert directory.lstat().st_ino == original.st_ino
+                if symbolic:
+                    assert directory.readlink() == Path('unavailable-foreign-target')
+                else:
+                    assert (directory/'foreign.conf').read_text() == '[Slice]\nMemoryMax=67108864\n'
+                (case.output/'blocked-proof.json').write_text(json.dumps(dict(marker=marker,before=before,after=after,symbolic=symbolic),indent=2))
+            finally:
+                case.stop()
+                # Remove only the exact foreign fixture created by this verifier.
+                if created_inode is not None:
+                    assert directory.lstat().st_ino == created_inode
+                    if directory.is_symlink(): directory.unlink()
+                    elif directory.exists():
+                        (directory/'foreign.conf').unlink(missing_ok=True); directory.rmdir()
+                case.cleanup()
 
     def web_request(self, path, body=None):
         request=urllib.request.Request(self.url+path, data=None if body is None else json.dumps(body).encode(),
@@ -619,6 +723,8 @@ class Qualification:
         self.crash('after-exit','probe-storage-full')
         self.crash('after-exit','probe-exit-137')
         self.stopped_recovery_crash()
+        self.pending_slice_stop()
+        self.foreign_configuration_after_stop()
         self.orphan_deadline()
         self.foreign_provisioning()
         self.foreign_identity()

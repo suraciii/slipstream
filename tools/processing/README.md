@@ -75,6 +75,11 @@ from unrelated host-wide OOM or interference by another privileged host actor.
 The Web/control process and launcher must both remain outside processing caps.
 
 Each attempt gets a retained systemd slice and a fresh unprivileged container.
+The attempt slice is transient and keeps its accounting until terminal evidence
+is durable. Settlement confirms removal of the loaded unit, cgroup and all exact
+unit configuration without requesting a global systemd reload. The host must
+provide `busctl` from systemd. Unsettled legacy nontransient slices remain blocked
+for operator reconciliation; the launcher does not migrate their configuration.
 The blocked bootstrap is already charged to its capped container and ancestors.
 The host freezes the exact container, verifies its identity and process liveness,
 places its bootstrap in the group-OOM leaf, and reads back limits before release.

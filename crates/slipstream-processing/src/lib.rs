@@ -4,6 +4,7 @@ mod backend;
 mod faults;
 mod journal;
 pub mod protocol;
+mod slice;
 mod transport;
 
 pub use journal::Executor;
