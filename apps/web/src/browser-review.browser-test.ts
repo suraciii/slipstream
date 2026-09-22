@@ -6945,7 +6945,7 @@ test("the membership panel lists the current Photo's Albums across sources and r
   // The Photo address preserves the destination across a reload, so the
   // reloaded document reopens the same Photo in the same Album.
   await page.reload();
-  await expect(page.getByText("Library ready", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
   await expect(page.locator("[data-review]")).toBeVisible();
   await expect(page.getByText("1 / 1")).toBeVisible();
   await openPhotoToolsView(page, "albums");
