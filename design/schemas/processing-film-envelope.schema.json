@@ -1,0 +1,909 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Qualified Film fixture admission",
+  "description": "Version 3 public/config/grant syntax; unchanged version 2 internal exchanges/results are referenced without changing their authority. Strict lexical and cross-record rules are defined in processing-film-envelope.md.",
+  "$defs": {
+    "Sha256": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Sha256"
+    },
+    "Id": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Id"
+    },
+    "U64": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/U64"
+    },
+    "Image": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Image"
+    },
+    "AbsolutePath": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/AbsolutePath"
+    },
+    "Catalogue": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Catalogue"
+    },
+    "Fixture": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Fixture"
+    },
+    "Workload": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Workload"
+    },
+    "Limits": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Limits"
+    },
+    "Runtime": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Runtime"
+    },
+    "Evidence": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Evidence"
+    },
+    "MissingTerm": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/MissingTerm"
+    },
+    "GamutPlan": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/GamutPlan"
+    },
+    "CctfPlan": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/CctfPlan"
+    },
+    "JpegPlan": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/JpegPlan"
+    },
+    "Phase": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/Phase"
+    },
+    "WorkerResult": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/WorkerResult"
+    },
+    "StageOffer": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/StageOffer"
+    },
+    "StageAck": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/StageAck"
+    },
+    "EnginePermit": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/EnginePermit"
+    },
+    "EngineStarted": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/EngineStarted"
+    },
+    "ProducerResult": {
+      "$ref": "processing-film-measurement.schema.json#/$defs/ProducerResult"
+    },
+    "PositiveBytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "LocalImage": {
+      "type": "string",
+      "minLength": 71,
+      "maxLength": 71,
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
+    },
+    "Environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "machine",
+        "kernel_release",
+        "page_bytes",
+        "cpu_sha256",
+        "manager_sha256"
+      ],
+      "properties": {
+        "machine": {
+          "const": "x86_64"
+        },
+        "kernel_release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[!-~]+$",
+          "not": {
+            "pattern": "[\\r\\n]"
+          }
+        },
+        "page_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "cpu_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "manager_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "UnknownCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_id", "status"],
+      "properties": {
+        "fixture_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "status": {
+          "const": "unknown"
+        }
+      }
+    },
+    "QualifiedCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture_id",
+        "status",
+        "empirical_ceiling_bytes",
+        "safety_reserve_bytes",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "fixture_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "status": {
+          "const": "qualified"
+        },
+        "empirical_ceiling_bytes": {
+          "$ref": "#/$defs/PositiveBytes"
+        },
+        "safety_reserve_bytes": {
+          "$ref": "#/$defs/PositiveBytes"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "Envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "formula",
+        "inventory",
+        "catalogue_sha256",
+        "image",
+        "launcher_sha256",
+        "environment",
+        "cases"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "formula": {
+          "const": "film-total-envelope-v1"
+        },
+        "inventory": {
+          "const": "film-known-storage-local-v1"
+        },
+        "catalogue_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "image": {
+          "$ref": "#/$defs/LocalImage"
+        },
+        "launcher_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/UnknownCase"
+              },
+              {
+                "$ref": "#/$defs/QualifiedCase"
+              }
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 16
+        }
+      }
+    },
+    "Config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "mode",
+        "instance",
+        "root",
+        "socket",
+        "peer_uid",
+        "image",
+        "memory_bytes",
+        "receipt_retention_seconds",
+        "catalogue_sha256",
+        "envelope_sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "mode": {
+          "const": "film-qualified-fixtures"
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/instance"
+        },
+        "root": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/root"
+        },
+        "socket": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/socket"
+        },
+        "peer_uid": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/peer_uid"
+        },
+        "image": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/image"
+        },
+        "memory_bytes": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/memory_bytes"
+        },
+        "receipt_retention_seconds": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/receipt_retention_seconds"
+        },
+        "catalogue_sha256": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Config/properties/catalogue_sha256"
+        },
+        "envelope_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "Reconcile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op"],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Reconcile/properties/instance"
+        },
+        "op": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Reconcile/properties/op"
+        }
+      }
+    },
+    "Inspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op", "incarnation", "sequence"],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Inspect/properties/instance"
+        },
+        "op": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Inspect/properties/op"
+        },
+        "incarnation": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Inspect/properties/incarnation"
+        },
+        "sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Inspect/properties/sequence"
+        }
+      }
+    },
+    "Cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op", "incarnation", "sequence"],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Cancel/properties/instance"
+        },
+        "op": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Cancel/properties/op"
+        },
+        "incarnation": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Cancel/properties/incarnation"
+        },
+        "sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Cancel/properties/sequence"
+        }
+      }
+    },
+    "Start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "instance",
+        "op",
+        "incarnation",
+        "sequence",
+        "policy",
+        "bundle",
+        "catalogue",
+        "envelope",
+        "workload"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/instance"
+        },
+        "op": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/op"
+        },
+        "incarnation": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/incarnation"
+        },
+        "sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/sequence"
+        },
+        "policy": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/policy"
+        },
+        "bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/bundle"
+        },
+        "catalogue": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/catalogue"
+        },
+        "envelope": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "workload": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Start/properties/workload"
+        }
+      }
+    },
+    "Request": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Reconcile"
+        },
+        {
+          "$ref": "#/$defs/Start"
+        },
+        {
+          "$ref": "#/$defs/Inspect"
+        },
+        {
+          "$ref": "#/$defs/Cancel"
+        }
+      ]
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formula",
+        "inventory",
+        "width",
+        "height",
+        "envelope_sha256",
+        "evidence_sha256",
+        "environment_sha256",
+        "known_required_bytes",
+        "source_cache_bytes",
+        "storage_reserve_bytes",
+        "empirical_ceiling_bytes",
+        "safety_reserve_bytes",
+        "required_bytes",
+        "attempt_limit_bytes",
+        "missing",
+        "gamut",
+        "cctf",
+        "jpeg"
+      ],
+      "properties": {
+        "formula": {
+          "const": "film-total-envelope-v1"
+        },
+        "inventory": {
+          "const": "film-known-storage-local-v1"
+        },
+        "width": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Fixture/properties/width"
+        },
+        "height": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Fixture/properties/height"
+        },
+        "envelope_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "environment_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "known_required_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "source_cache_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "storage_reserve_bytes": {
+          "const": 4294967296
+        },
+        "empirical_ceiling_bytes": {
+          "$ref": "#/$defs/PositiveBytes"
+        },
+        "safety_reserve_bytes": {
+          "$ref": "#/$defs/PositiveBytes"
+        },
+        "required_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "attempt_limit_bytes": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Limits/properties/memory_bytes"
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MissingTerm"
+          },
+          "minItems": 58,
+          "maxItems": 58
+        },
+        "gamut": {
+          "$ref": "#/$defs/GamutPlan"
+        },
+        "cctf": {
+          "$ref": "#/$defs/CctfPlan"
+        },
+        "jpeg": {
+          "$ref": "#/$defs/JpegPlan"
+        }
+      }
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incarnation",
+        "sequence",
+        "workload",
+        "policy",
+        "bundle",
+        "catalogue",
+        "envelope",
+        "manifest",
+        "state",
+        "phase",
+        "cancellation_requested",
+        "accepted_at_unix_ms",
+        "deadline_unix_ms",
+        "outcome",
+        "detail",
+        "runtime",
+        "limits",
+        "evidence",
+        "plan",
+        "result",
+        "cleanup",
+        "qualification_failure"
+      ],
+      "properties": {
+        "incarnation": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/incarnation"
+        },
+        "sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/sequence"
+        },
+        "workload": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/workload"
+        },
+        "policy": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/policy"
+        },
+        "bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/bundle"
+        },
+        "catalogue": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/catalogue"
+        },
+        "envelope": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "manifest": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/manifest"
+        },
+        "state": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/state"
+        },
+        "phase": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/phase"
+        },
+        "cancellation_requested": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/cancellation_requested"
+        },
+        "accepted_at_unix_ms": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/accepted_at_unix_ms"
+        },
+        "deadline_unix_ms": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/deadline_unix_ms"
+        },
+        "outcome": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/outcome"
+        },
+        "detail": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/detail"
+        },
+        "runtime": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/runtime"
+        },
+        "limits": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/limits"
+        },
+        "evidence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/evidence"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        },
+        "result": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/result"
+        },
+        "cleanup": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Receipt/properties/cleanup"
+        },
+        "qualification_failure": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/QualificationFailure"
+            }
+          ]
+        }
+      }
+    },
+    "Capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "capability",
+        "instance",
+        "incarnation",
+        "next_sequence",
+        "policy",
+        "bundle",
+        "catalogue",
+        "envelope",
+        "availability",
+        "active"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/kind"
+        },
+        "capability": {
+          "const": "film-qualified-fixtures-only"
+        },
+        "instance": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/instance"
+        },
+        "incarnation": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/incarnation"
+        },
+        "next_sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/next_sequence"
+        },
+        "policy": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/policy"
+        },
+        "bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/bundle"
+        },
+        "catalogue": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Capability/properties/catalogue"
+        },
+        "envelope": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "availability": {
+          "enum": ["available", "blocked", "unqualified"]
+        },
+        "active": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
+          ]
+        }
+      }
+    },
+    "ReceiptResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "receipt"],
+      "properties": {
+        "kind": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/ReceiptResult/properties/kind"
+        },
+        "receipt": {
+          "$ref": "#/$defs/Receipt"
+        }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid-request",
+            "unauthorized",
+            "wrong-instance",
+            "unavailable",
+            "incompatible-policy",
+            "incompatible-bundle",
+            "conflict",
+            "busy",
+            "expired",
+            "unknown-attempt",
+            "stale-incarnation",
+            "capacity",
+            "uncertain",
+            "incompatible-catalogue",
+            "unknown-fixture",
+            "unsupported-fixture",
+            "incompatible-envelope",
+            "outside-envelope",
+            "unqualified-envelope",
+            "resource-budget"
+          ]
+        }
+      }
+    },
+    "Response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "result"],
+          "properties": {
+            "version": {
+              "const": 3
+            },
+            "result": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Capability"
+                },
+                {
+                  "$ref": "#/$defs/ReceiptResult"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "error"],
+          "properties": {
+            "version": {
+              "const": 3
+            },
+            "error": {
+              "$ref": "#/$defs/Error"
+            }
+          }
+        }
+      ]
+    },
+    "EngineGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "launch_id",
+        "manifest",
+        "bundle",
+        "numerical_bundle",
+        "recipe",
+        "procedure",
+        "fixture",
+        "input_icc_sha256",
+        "output_icc_sha256",
+        "plan"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "kind": {
+          "const": "film-qualified-grant"
+        },
+        "launch_id": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/launch_id"
+        },
+        "manifest": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/manifest"
+        },
+        "bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/bundle"
+        },
+        "numerical_bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/numerical_bundle"
+        },
+        "recipe": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/recipe"
+        },
+        "procedure": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/procedure"
+        },
+        "fixture": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/fixture"
+        },
+        "input_icc_sha256": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/input_icc_sha256"
+        },
+        "output_icc_sha256": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/EngineGrant/properties/output_icc_sha256"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      }
+    },
+    "CanonicalManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture",
+        "recipe",
+        "catalogue",
+        "envelope",
+        "procedure",
+        "bundle",
+        "policy",
+        "plan"
+      ],
+      "properties": {
+        "fixture": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/fixture"
+        },
+        "recipe": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/recipe"
+        },
+        "catalogue": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/catalogue"
+        },
+        "envelope": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "procedure": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/procedure"
+        },
+        "bundle": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/bundle"
+        },
+        "policy": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/CanonicalManifest/properties/policy"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      }
+    },
+    "PolicyIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "resolved_image"],
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/Config"
+        },
+        "resolved_image": {
+          "$ref": "#/$defs/LocalImage"
+        }
+      }
+    },
+    "BundleIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "image", "numerical_bundle"],
+      "properties": {
+        "profile": {
+          "const": "slipstream-film-qualified-fixtures-v1"
+        },
+        "image": {
+          "$ref": "#/$defs/LocalImage"
+        },
+        "numerical_bundle": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "QualificationFailure": {
+      "enum": ["peak-exceeded", "processing-oom", "allocation-failed"]
+    },
+    "Invalidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "envelope",
+        "fixture_id",
+        "reason",
+        "incarnation",
+        "sequence"
+      ],
+      "properties": {
+        "envelope": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "fixture_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "reason": {
+          "$ref": "#/$defs/QualificationFailure"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "$ref": "processing-film-measurement.schema.json#/$defs/Inspect/properties/sequence"
+        }
+      }
+    },
+    "Invalidations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Invalidation"
+      },
+      "maxItems": 256
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Config"
+    },
+    {
+      "$ref": "#/$defs/Envelope"
+    },
+    {
+      "$ref": "#/$defs/Request"
+    },
+    {
+      "$ref": "#/$defs/Response"
+    },
+    {
+      "$ref": "#/$defs/EngineGrant"
+    },
+    {
+      "$ref": "#/$defs/CanonicalManifest"
+    },
+    {
+      "$ref": "#/$defs/PolicyIdentity"
+    },
+    {
+      "$ref": "#/$defs/BundleIdentity"
+    }
+  ]
+}

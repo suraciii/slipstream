@@ -374,6 +374,11 @@ limit to obtain evidence. This authority is the fixed profile, not an admission
 bypass flag or automatic fallback. Ordinary Film remains subject to the separate
 qualified admission contract.
 
+[Qualified Film Memory Envelope](processing-film-envelope.md) owns a distinct
+version-3 operator fixture authority. It preserves this measurement profile and
+its diagnostics; a version-2 measurement result or `fits-model` prediction cannot
+authorize that profile's execution.
+
 ## Fresh Process and Result Handoff
 
 The packaged native worker is PID 1 and invokes only
