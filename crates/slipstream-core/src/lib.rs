@@ -26,12 +26,13 @@ pub use cache::{
     CacheDirectory, CacheError, CachedDerivative, DEFAULT_QUEUE_CAPACITY, DEFAULT_WAITER_CAPACITY,
     DEFAULT_WORKERS, DERIVATIVE_ALGORITHM_VERSION, DerivativeFailure, DerivativeFailureKind,
     DerivativeIdentity, DerivativePriority, DerivativeResult, DerivativeScheduler,
-    DerivativeSchedulerOptions, DerivativeSource, NativeWorkBudget, derivative_cache_key,
-    manifest_identity,
+    DerivativeSchedulerOptions, DerivativeSource, NativeWorkBudget, NativeWorkPermit,
+    derivative_cache_key, manifest_identity,
 };
 pub use capture::{
     CaptureFact, CaptureInspectionError, CaptureMetadataState, CaptureReviewMetadata,
-    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, inspect_review_metadata,
+    CaptureTimeField, MAXIMUM_CAPTURE_METADATA_BYTES, capture_source_revision,
+    inspect_review_metadata,
 };
 pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
 pub use derivative::{
@@ -40,14 +41,15 @@ pub use derivative::{
 pub use domain::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
     AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
-    AlbumRecord, AlbumSummary, DiscoveredOriginal, MAXIMUM_FOLDER_ALBUM_PHOTOS,
-    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership, PhotoRecord,
-    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchItem,
-    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
-    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot,
-    SelectionState,
+    AlbumQueryFilter, AlbumRecord, AlbumSummary, CaptureTimeBound, DiscoveredOriginal,
+    MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory, OriginalFacts, OriginalFingerprint,
+    OriginalKind, OriginalRecord, OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership,
+    PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
+    PhotoQuerySource, PhotoRead, PhotoRecord, PhotoStateBatchApplied,
+    PhotoStateBatchChangedElsewhere, PhotoStateBatchItem, PhotoStateBatchMissing,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot, SelectionState,
 };
 pub use identity::{InvalidModificationTime, original_id, source_revision, standalone_photo_id};
 pub use library::{

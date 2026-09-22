@@ -6,9 +6,10 @@ mod schema;
 
 pub use crate::domain::{
     AlbumBrowseMember, AlbumBrowseTarget, AlbumMember, AlbumMembershipMutation,
-    AlbumMembershipResult, AlbumMutation, AlbumMutationResult, AlbumRecord, AlbumSummary,
-    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
-    PreviewSeed, PreviewSeedResult, ScanSnapshot, SelectionState,
+    AlbumMembershipResult, AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord,
+    AlbumSummary, PhotoQuery, PhotoQueryError, PhotoRead, PhotoStateField, PhotoStateMutation,
+    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
+    ScanSnapshot, SelectionState,
 };
 pub use admission::{DatabaseName, StateDirectory, StateError, StateFileIdentity};
 pub(crate) use owner::expand_library_binding;

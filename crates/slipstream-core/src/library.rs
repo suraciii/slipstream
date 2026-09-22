@@ -1,9 +1,11 @@
 use crate::{
     AlbumBrowseTarget, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
-    AlbumMutationResult, AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact, LibraryRoot,
-    NativeWorkBudget, OriginalCapability, PhotoAlbumMembership, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
-    PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult, ScanSnapshot,
+    AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations,
+    CaptureFact, LibraryRoot, NativeWorkBudget, NativeWorkPermit, OriginalCapability,
+    PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
+    PreviewSeed, PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult,
+    ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
@@ -150,6 +152,7 @@ pub enum LibraryError {
     State(StateError),
     Persistence(PersistenceError),
     Mutation(MutationError),
+    Query(PhotoQueryError),
     ScanBusy,
     Closed,
     ScannerStopped,
@@ -163,6 +166,7 @@ impl fmt::Display for LibraryError {
             Self::State(error) => error.fmt(formatter),
             Self::Persistence(error) => error.fmt(formatter),
             Self::Mutation(error) => error.fmt(formatter),
+            Self::Query(error) => error.fmt(formatter),
             Self::ScanBusy => formatter.write_str("Photo Library scan is busy"),
             Self::Closed => formatter.write_str("Photo Library is closed"),
             Self::ScannerStopped => {
@@ -194,6 +198,11 @@ impl From<PersistenceError> for LibraryError {
 impl From<MutationError> for LibraryError {
     fn from(value: MutationError) -> Self {
         Self::Mutation(value)
+    }
+}
+impl From<PhotoQueryError> for LibraryError {
+    fn from(value: PhotoQueryError) -> Self {
+        Self::Query(value)
     }
 }
 
@@ -397,6 +406,13 @@ impl Library {
         self.native_work.clone()
     }
 
+    /// Attempts immediate admission to this Library's shared native-work
+    /// capacity. Callers must obtain the permit before scheduling blocking
+    /// work and retain it until that work has completed.
+    pub fn try_admit_native_work(&self) -> Option<NativeWorkPermit> {
+        self.native_work.try_acquire()
+    }
+
     pub(crate) fn snapshot_blocking(&self) -> Result<ScanSnapshot, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
@@ -512,6 +528,105 @@ impl Library {
         receive
             .await
             .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads one current Album summary and its mutation guard in one owner
+    /// operation. `None` means the Album no longer exists.
+    pub async fn album(&self, album_id: &str) -> Result<Option<AlbumSummary>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.album_receiver(album_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads current Album facts for fixed query IDs, preserving input order
+    /// and returning `None` placeholders for deleted Albums.
+    pub async fn albums_by_id(
+        &self,
+        album_ids: Vec<String>,
+    ) -> Result<Vec<Option<AlbumSummary>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.albums_by_id_receiver(album_ids)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Creates one bounded, fixed Album-ID membership for server-retained
+    /// pagination. Current summaries are read separately with `albums_by_id`.
+    pub async fn create_album_query(
+        &self,
+        filter: AlbumQueryFilter,
+        maximum_results: usize,
+    ) -> Result<Vec<String>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .create_album_query_receiver(filter, maximum_results)
+        }?;
+        receive
+            .await
+            .map_err(|_| LibraryError::Persistence(PersistenceError::OwnerStopped))?
+            .map_err(Into::into)
+    }
+
+    /// Reads one current Photo and its decision mutation guard in one owner
+    /// operation. `None` means the Photo no longer exists.
+    pub async fn photo(&self, photo_id: &str) -> Result<Option<PhotoRead>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.photo_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads current decision facts and versions for fixed Published Photo
+    /// facts, preserving input order and returning `None` placeholders for
+    /// Photos absent from that publication or current persistence.
+    pub async fn photos_by_id(
+        &self,
+        photo_ids: Vec<String>,
+        projection: Arc<PhotoQueryProjection>,
+    ) -> Result<Vec<Option<PhotoRead>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .photos_by_id_receiver(photo_ids, projection)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Evaluates source, filters, and ordering in the serialized owner and
+    /// returns only a bounded fixed ID membership. The caller retains and
+    /// pages these IDs, then asks `photos_by_id` for current facts.
+    pub async fn create_photo_query(
+        &self,
+        query: PhotoQuery,
+        projection: Arc<PhotoQueryProjection>,
+        maximum_results: usize,
+    ) -> Result<Vec<String>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .create_photo_query_receiver(query, projection, maximum_results)
+        }?;
+        receive
+            .await
+            .map_err(|_| LibraryError::Persistence(PersistenceError::OwnerStopped))?
             .map_err(Into::into)
     }
 
@@ -1047,6 +1162,24 @@ mod tests {
         fs::create_dir(base.0.join("originals")).unwrap();
         let config = config(&base);
         (base, config)
+    }
+
+    #[test]
+    fn library_native_admission_shares_the_owner_budget() {
+        let (_base, config) = fixture();
+        let library = Library::open(config).unwrap();
+        let first = library.try_admit_native_work().expect("first slot");
+        let second = library.try_admit_native_work().expect("second slot");
+        assert!(library.try_admit_native_work().is_none());
+        assert!(library.native_work_budget().try_acquire().is_none());
+        drop(first);
+        let shared = library
+            .native_work_budget()
+            .try_acquire()
+            .expect("owner slot released");
+        assert!(library.try_admit_native_work().is_none());
+        drop((second, shared));
+        library.shutdown().unwrap();
     }
 
     fn raw_capture_fixture(value: &str) -> Vec<u8> {
