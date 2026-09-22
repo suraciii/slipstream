@@ -172,6 +172,23 @@ bounded traversal. Verify one-pixel batches, boundaries on either side of a full
 batch, odd dimensions, short final batches, and supported non-contiguous inputs
 or their explicit rejection.
 
+The initial adapter supports only the pinned CAM16-UCS compression settings,
+viewing conditions, and sRGB output profile. It admits nonempty C-contiguous
+native float64 RGB arrays with shape `(..., 3)`. It rejects other compression
+settings, output spaces, dtypes, empty inputs, and strided layouts before
+allocating the destination. It must not fall back to an unbounded transform. Flattening must remain a view. One owned destination
+requires 24 bytes per pixel; caller-owned input remains unchanged, including
+read-only input. The caller reserves the destination and all other live stage
+data separately before granting this transform its temporary workspace.
+
+A versioned transform model maps a positive workspace byte allowance to a batch
+size in the qualified range. Its fixed term covers cold color-table construction
+and its per-pixel term covers simultaneous transform temporaries, including the
+returned batch. An allowance below the one-pixel requirement fails before image
+allocation. This allowance is a local algorithm contract, not total-attempt
+admission or a substitute for the kernel limit. The complete workspace planner
+must include library headroom and account for both the input and destination.
+
 Apply the same principle to eligible transfer-function encoding and numeric
 output conversion. Fuse or reuse buffers only where operation order, rounding,
 aliasing, and downstream ownership remain correct. IO buffers and the final

@@ -3,3 +3,15 @@
 !requirements.lock
 !film.py
 !probe.py
+!bounded_gamut.py
+!bundle.py
+!patches/
+patches/**
+!patches/0001-bounded-output-gamut.patch
+!engine_checks/
+engine_checks/**
+!engine_checks/test_bounded_gamut.py
+!engine_checks/run.py
+!engine_checks/scratch_probe.py
+!engine_checks/requirements.lock
+!engine_checks/0001-current-grain-contract.patch
