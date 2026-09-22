@@ -891,15 +891,31 @@ impl Backend {
 
     fn verify_unit(&self, record: &Record) -> Result<PathBuf> {
         let path = self.parent_path().join(record.unit());
-        crate::slice::verify(
-            record.unit(),
-            &path,
-            record
-                .unit_invocation
-                .as_deref()
-                .ok_or(ErrorCode::Uncertain)?,
-            record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+        verify_slice_phase(
+            record.manager_pending,
             record.stop_confirmed,
+            || {
+                crate::slice::verify(
+                    record.unit(),
+                    &path,
+                    record
+                        .unit_invocation
+                        .as_deref()
+                        .ok_or(ErrorCode::Uncertain)?,
+                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+                )
+            },
+            || {
+                crate::slice::wait_absent(
+                    record.unit(),
+                    &path,
+                    record
+                        .unit_invocation
+                        .as_deref()
+                        .ok_or(ErrorCode::Uncertain)?,
+                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+                )
+            },
         )?;
         Ok(path)
     }
@@ -1086,6 +1102,18 @@ impl Backend {
         }
         Ok(())
     }
+}
+
+fn verify_slice_phase(
+    pending: Option<ManagerPhase>,
+    stop_confirmed: bool,
+    active: impl FnOnce() -> Result<()>,
+    stopped: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if pending == Some(ManagerPhase::SliceStop) || (stop_confirmed && pending.is_some()) {
+        return Err(ErrorCode::Uncertain);
+    }
+    if stop_confirmed { stopped() } else { active() }
 }
 
 fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
@@ -1388,6 +1416,62 @@ mod tests {
                 "/usr/bin/true",
                 &[],
                 Instant::now() - Duration::from_millis(1)
+            ),
+            Err(ErrorCode::Uncertain)
+        );
+    }
+
+    #[test]
+    fn confirmed_stop_routes_only_to_read_only_convergence_and_pending_always_blocks() {
+        let active = std::cell::Cell::new(0);
+        let stopped = std::cell::Cell::new(0);
+        for stop_confirmed in [false, true] {
+            assert_eq!(
+                verify_slice_phase(
+                    None,
+                    stop_confirmed,
+                    || {
+                        active.set(active.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        stopped.set(stopped.get() + 1);
+                        Ok(())
+                    }
+                ),
+                Ok(())
+            );
+            for pending in [ManagerPhase::SliceStop]
+                .into_iter()
+                .chain(stop_confirmed.then_some(ManagerPhase::Start))
+            {
+                assert_eq!(
+                    verify_slice_phase(
+                        Some(pending),
+                        stop_confirmed,
+                        || panic!("pending cannot validate an active replacement"),
+                        || panic!("pending cannot infer stop from absence")
+                    ),
+                    Err(ErrorCode::Uncertain)
+                );
+            }
+        }
+        assert_eq!((active.get(), stopped.get()), (1, 1));
+        assert_eq!(
+            verify_slice_phase(
+                Some(ManagerPhase::CreateReturned),
+                false,
+                || Ok(()),
+                || panic!("lost create response still uses active ownership")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify_slice_phase(
+                None,
+                true,
+                || panic!("completed stop cannot require live properties"),
+                || Err(ErrorCode::Uncertain)
             ),
             Err(ErrorCode::Uncertain)
         );

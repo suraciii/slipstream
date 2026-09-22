@@ -39,8 +39,8 @@ with socket.socket(socket.AF_UNIX) as stream:
 print(json.dumps(dict(response=response,uid=os.getuid(),cgroup=pathlib.Path('/proc/self/cgroup').read_text())))
 """
 
-def command(*arguments, check=True):
-    result = subprocess.run(arguments, capture_output=True, text=True, timeout=15)
+def command(*arguments, check=True, timeout=15):
+    result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout)
     if check and result.returncode:
         raise AssertionError((arguments, result.returncode, result.stderr[-4096:]))
     return result.stdout.strip()
@@ -56,17 +56,44 @@ def await_condition(probe, seconds=10):
     raise AssertionError("condition did not become true within its fixed deadline")
 
 
-def assert_attempt_absent(parent, unit):
-    assert not Path('/sys/fs/cgroup', parent, unit).exists()
-    assert not command('systemctl', '--system', 'list-units', '--all', '--plain',
-                       '--no-legend', '--no-pager', unit)
-    directories = command('systemctl', '--system', 'show', '--property=UnitPath', '--value').split()
+def attempt_absent(parent, unit, deadline):
+    def present(path):
+        try:
+            path.lstat()
+            return True
+        except FileNotFoundError:
+            return False
+
+    def remaining():
+        value = deadline - time.monotonic()
+        assert value > 0, 'attempt absence observation expired'
+        return value
+    loaded = command('systemctl', '--system', 'list-units', '--all', '--plain',
+                     '--no-legend', '--no-pager', unit, timeout=remaining())
+    directories = command('systemctl', '--system', 'show', '--property=UnitPath', '--value',
+                          timeout=remaining()).split()
     assert directories and '/run/systemd/transient' in directories
+    missing = not loaded and not present(Path('/sys/fs/cgroup', parent, unit))
     for directory in directories:
         assert Path(directory).is_absolute()
         for name in [unit, unit + '.d']:
             path = Path(directory, name)
-            assert not os.path.lexists(path), path
+            missing = not present(path) and missing
+    remaining()
+    return missing
+
+
+def assert_attempt_absent(parent, unit):
+    assert attempt_absent(parent, unit, time.monotonic() + 5)
+
+
+def wait_attempt_absent(parent, unit):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if attempt_absent(parent, unit, deadline):
+            return
+        time.sleep(min(.025, max(0, deadline - time.monotonic())))
+    raise AssertionError('attempt did not unload within its fixed observation deadline')
 
 
 class Qualification:
@@ -293,7 +320,7 @@ class Qualification:
                 before = json.loads((case.root/'registry.json').read_text())['records'][str(intent['sequence'])]
                 assert before['stop_confirmed'] and before['manager_pending'] is None
                 unit = before['receipt']['runtime']['attempt_unit']
-                assert_attempt_absent(case.parent, unit)
+                wait_attempt_absent(case.parent, unit)
                 case.stop(crash=True); case.disarm()
                 directory = Path('/run/systemd/system.control', unit + '.d')
                 if symbolic:

@@ -215,9 +215,13 @@ fn invocation_path(invocation: &str, deadline: Instant) -> Result<String> {
 }
 
 fn present(path: &Path) -> Result<bool> {
+    Ok(metadata(path)?.is_some())
+}
+
+fn metadata(path: &Path) -> Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(ErrorCode::Uncertain),
     }
 }
@@ -271,12 +275,8 @@ fn configuration(name: &str, deadline: Instant) -> Result<Vec<PathBuf>> {
     for directory in unit_paths(deadline)? {
         for filename in [name.to_owned(), format!("{name}.d")] {
             let path = directory.join(filename);
-            if present(&path)? {
-                if fs::symlink_metadata(&path)
-                    .map_err(|_| ErrorCode::Uncertain)?
-                    .file_type()
-                    .is_symlink()
-                {
+            if let Some(metadata) = metadata(&path)? {
+                if metadata.file_type().is_symlink() {
                     return Err(ErrorCode::Uncertain);
                 }
                 found.push(path);
@@ -364,7 +364,7 @@ pub(crate) fn create(name: &str, group: &Path, limits: &Limits) -> Result<(Strin
             }
             if current.active == "active" {
                 let inode = fs::metadata(group).map_err(|_| ErrorCode::Uncertain)?.ino();
-                verify(name, group, &current.invocation, inode, false)?;
+                verify(name, group, &current.invocation, inode)?;
                 return Ok((current.invocation, inode));
             }
             if current.active != "activating" {
@@ -375,13 +375,7 @@ pub(crate) fn create(name: &str, group: &Path, limits: &Limits) -> Result<(Strin
     }
 }
 
-pub(crate) fn verify(
-    name: &str,
-    group: &Path,
-    invocation: &str,
-    inode: u64,
-    stop_confirmed: bool,
-) -> Result<()> {
+pub(crate) fn verify(name: &str, group: &Path, invocation: &str, inode: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let path = invocation_path(invocation, deadline)?;
     let current = state(&path, deadline)?;
@@ -400,11 +394,7 @@ pub(crate) fn verify(
         "v",
     )?;
     if !current.matches(name, invocation)
-        || if stop_confirmed {
-            !matches!(current.active.as_str(), "inactive" | "deactivating")
-        } else {
-            current.active != "active"
-        }
+        || current.active != "active"
         || control["type"] != "s"
         || control["data"]
             != group
@@ -443,11 +433,18 @@ pub(crate) fn wait_absent(name: &str, group: &Path, invocation: &str, inode: u64
         {
             return Err(ErrorCode::Uncertain);
         }
-        if present(group)? && fs::metadata(group).map_err(|_| ErrorCode::Uncertain)?.ino() != inode
+        let group_metadata = metadata(group)?;
+        if group_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.ino() != inode)
         {
             return Err(ErrorCode::Uncertain);
         }
-        if found.is_none() && config.is_empty() && !present(group)? && Instant::now() < deadline {
+        if found.is_none()
+            && config.is_empty()
+            && group_metadata.is_none()
+            && Instant::now() < deadline
+        {
             return Ok(());
         }
         if found.is_some() {
@@ -581,13 +578,20 @@ mod tests {
     }
 
     #[test]
-    fn even_dangling_symlink_is_present_configuration() {
+    fn single_metadata_observation_preserves_symlinks_and_normal_disappearance() {
         let path =
             std::env::temp_dir().join(format!("slipstream-slice-link-{}", std::process::id()));
         std::os::unix::fs::symlink("unavailable-target", &path).unwrap();
+        assert!(metadata(&path).unwrap().unwrap().file_type().is_symlink());
         assert_eq!(present(&path), Ok(true));
         fs::remove_file(&path).unwrap();
-        assert_eq!(present(&path), Ok(false));
+        assert!(metadata(&path).unwrap().is_none());
+        fs::write(&path, b"owned transient fragment").unwrap();
+        let observed = metadata(&path).unwrap().unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(observed.is_file());
+        assert!(observed.ino() > 0);
+        assert!(metadata(&path).unwrap().is_none());
     }
 
     #[test]
