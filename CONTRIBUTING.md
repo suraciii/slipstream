@@ -140,6 +140,14 @@ SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 
 `test:raw` runs every native, service, and browser real-camera scenario serially and fails clearly when `SLIPSTREAM_RAW_SAMPLE` is absent or does not identify the configured sample. Each scenario compares the operated Original's SHA-256 digest and stable filesystem metadata before and after its read, LibRaw, or Preview workflow. A scenario that copies the sample into an isolated Library checks both that copy and the source sample.
 
+The opt-in [development qualification harness](tools/development/README.md)
+exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
+It requires an explicit local RAW fixture and writes private evidence outside the
+repository. Its host-side failure and cancellation regressions run with
+`bun run test:development-runner` and are included in `test:fast` and `verify`.
+Successful probes do not establish processing support beyond their recorded
+checks; the governing qualification Issues own acceptance.
+
 ## Server startup
 
 Build the workspace, then configure one Library and application-owned state locations with absolute paths. The Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:
