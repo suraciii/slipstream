@@ -31,12 +31,13 @@
     "test:raw-contract": "bun test tools/raw-gate-contract.test.ts",
     "test:raw-discovery": "bun run test:raw -- --list",
     "test:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked -- --test-threads=1",
-    "test:fast": "bun run check:album-language && bun run test:license && bun run test:container-input && bun run test:docker-context && bun run test:compose-storage && bun run test:workflow && bun run test:worktree-preflight && bun run test:raw-contract && bun run test:rust && bun run test:raw-discovery && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser",
+    "test:fast": "bun run check:album-language && bun run test:license && bun run test:container-input && bun run test:docker-context && bun run test:compose-storage && bun run test:workflow && bun run test:worktree-preflight && bun run test:raw-contract && bun run test:development-runner && bun run test:rust && bun run test:raw-discovery && bun run --cwd apps/web test:unit && bun run lint && bun run typecheck && bun run test:browser",
     "test:license": "bun test tools/license-contract.test.ts",
     "test:workflow": "bun test tools/workflow-contract.test.ts",
     "test:worktree-preflight": "bun test tools/worktree-preflight.test.ts",
     "typecheck": "bun run --workspaces --if-present typecheck",
-    "verify": "bun run format:check && bun run test:fast && bun run build"
+    "verify": "bun run format:check && bun run test:fast && bun run build",
+    "test:development-runner": "python3 -m unittest discover -s tools/development -p 'test_*.py' -v"
   },
   "devDependencies": {
     "@eslint/js": "9.34.0",
