@@ -21,6 +21,8 @@ typedef struct SlipstreamPreviewResult {
   int32_t candidate_index;
   uint32_t width;
   uint32_t height;
+  // Standard EXIF orientation 1..8, or 0 when no container fallback applies.
+  int32_t container_orientation;
   uint8_t *bytes;
   uint64_t length;
 } SlipstreamPreviewResult;

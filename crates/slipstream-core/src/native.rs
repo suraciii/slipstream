@@ -10,6 +10,7 @@ struct NativeResult {
     candidate_index: i32,
     width: u32,
     height: u32,
+    container_orientation: i32,
     bytes: *mut u8,
     length: u64,
 }
@@ -87,6 +88,9 @@ pub struct NativePreview {
     pub candidate_index: Option<u32>,
     pub width: u32,
     pub height: u32,
+    /// Standard EXIF orientation supplied by the containing RAW, if any.
+    /// JPEG Originals and RAW containers with unknown transforms use `None`.
+    pub container_orientation: Option<u8>,
     pub jpeg: Vec<u8>,
 }
 
@@ -145,6 +149,15 @@ fn take_result(
         return Err(NativePreviewError::Internal);
     }
     let candidate_index = (result.candidate_index >= 0).then_some(result.candidate_index as u32);
+    let container_orientation = match result.container_orientation {
+        0 => None,
+        value @ 1..=8 => Some(value as u8),
+        _ => {
+            // SAFETY: release an allocation returned with an invalid ABI value.
+            unsafe { slipstream_preview_result_free(result) };
+            return Err(NativePreviewError::Internal);
+        }
+    };
     let width = result.width;
     let height = result.height;
     // SAFETY: a successful shim call owns `length` initialized bytes until the matching free call.
@@ -155,6 +168,7 @@ fn take_result(
         candidate_index,
         width,
         height,
+        container_orientation,
         jpeg,
     })
 }
@@ -164,6 +178,7 @@ fn empty_result() -> NativeResult {
         candidate_index: -1,
         width: 0,
         height: 0,
+        container_orientation: 0,
         bytes: std::ptr::null_mut(),
         length: 0,
     }
@@ -306,9 +321,12 @@ mod tests {
     use super::*;
     use crate::{
         LibraryRoot, RelativeOriginalPath,
-        test_support::{original_snapshot, raw_sample},
+        test_support::{generated_dng, generated_dng_candidates, original_snapshot, raw_sample},
     };
-    use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+    use image::{
+        DynamicImage, ExtendedColorType,
+        codecs::jpeg::{JpegDecoder, JpegEncoder},
+    };
     use std::{
         fs,
         io::Cursor,
@@ -324,6 +342,74 @@ mod tests {
             .encode(&pixels, width, height, ExtendedColorType::Rgb8)
             .unwrap();
         bytes
+    }
+
+    fn directional_jpeg() -> Vec<u8> {
+        const COLORS: [[u8; 3]; 4] = [[230, 20, 20], [20, 220, 20], [20, 20, 230], [230, 220, 20]];
+        let (width, height) = (120_usize, 80_usize);
+        let mut pixels = vec![0; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                let quadrant = usize::from(x >= width / 2) + 2 * usize::from(y >= height / 2);
+                let offset = (y * width + x) * 3;
+                pixels[offset..offset + 3].copy_from_slice(&COLORS[quadrant]);
+            }
+        }
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode(
+                &pixels,
+                width as u32,
+                height as u32,
+                ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        jpeg
+    }
+
+    fn insert_exif_orientation(jpeg: &[u8], orientation: Option<u16>) -> Vec<u8> {
+        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+        if let Some(value) = orientation {
+            exif =
+                b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0"
+                    .to_vec();
+            exif[24..26].copy_from_slice(&value.to_le_bytes());
+        }
+        let length = u16::try_from(exif.len() + 2).unwrap();
+        let mut result = jpeg[..2].to_vec();
+        result.extend_from_slice(&[0xff, 0xe1]);
+        result.extend_from_slice(&length.to_be_bytes());
+        result.extend_from_slice(&exif);
+        result.extend_from_slice(&jpeg[2..]);
+        result
+    }
+
+    fn corner_directions(jpeg: &[u8]) -> [usize; 4] {
+        const COLORS: [[i32; 3]; 4] = [[230, 20, 20], [20, 220, 20], [20, 20, 230], [230, 220, 20]];
+        let decoded = DynamicImage::from_decoder(JpegDecoder::new(Cursor::new(jpeg)).unwrap())
+            .unwrap()
+            .to_rgb8();
+        [
+            (decoded.width() / 4, decoded.height() / 4),
+            (decoded.width() * 3 / 4, decoded.height() / 4),
+            (decoded.width() / 4, decoded.height() * 3 / 4),
+            (decoded.width() * 3 / 4, decoded.height() * 3 / 4),
+        ]
+        .map(|(x, y)| {
+            let pixel = decoded.get_pixel(x, y).0.map(i32::from);
+            COLORS
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, color)| {
+                    pixel
+                        .iter()
+                        .zip(color.iter())
+                        .map(|(actual, expected)| (actual - expected).pow(2))
+                        .sum::<i32>()
+                })
+                .unwrap()
+                .0
+        })
     }
 
     fn with_capability<T>(
@@ -355,10 +441,107 @@ mod tests {
         let valid = with_capability("valid.JPG", &jpeg(13, 7), inspect_matching_jpeg).unwrap();
         assert_eq!((valid.width, valid.height), (13, 7));
         assert_eq!(valid.candidate_index, None);
+        assert_eq!(valid.container_orientation, None);
         assert!(matches!(
             with_capability("invalid.JPG", b"not jpeg", inspect_matching_jpeg),
             Err(PreviewError::Native(NativePreviewError::Malformed))
         ));
+    }
+
+    #[test]
+    fn generated_raw_container_exposes_embedded_jpeg_and_orientation() {
+        let source = jpeg(120, 80);
+        let raw = generated_dng(&source, 6);
+        let preview = with_capability("generated.DNG", &raw, extract_embedded_jpeg).unwrap();
+        assert_eq!(preview.candidate_index, Some(0));
+        assert_eq!((preview.width, preview.height), (120, 80));
+        assert_eq!(preview.container_orientation, Some(6));
+        assert_eq!(preview.jpeg, source);
+    }
+
+    #[test]
+    fn generated_raw_selects_largest_complete_jpeg_and_falls_back() {
+        let small = jpeg(60, 40);
+        let large = jpeg(120, 80);
+        let raw = generated_dng_candidates(&[(60, 40, &small), (120, 80, &large)], 1);
+        let selected = with_capability("largest.DNG", &raw, extract_embedded_jpeg).unwrap();
+        assert_eq!(selected.candidate_index, Some(1));
+        assert_eq!((selected.width, selected.height), (120, 80));
+
+        let truncated = &large[..large.len() - 7];
+        let raw = generated_dng_candidates(&[(120, 80, truncated), (60, 40, &small)], 1);
+        let fallback = with_capability("fallback.DNG", &raw, extract_embedded_jpeg).unwrap();
+        assert_eq!(fallback.candidate_index, Some(1));
+        assert_eq!((fallback.width, fallback.height), (60, 40));
+        assert_eq!(fallback.jpeg, small);
+    }
+
+    #[test]
+    fn generated_raw_extraction_to_derivative_preserves_orientation_precedence() {
+        let source = directional_jpeg();
+        let expected_corners = [
+            [0, 1, 2, 3],
+            [1, 0, 3, 2],
+            [3, 2, 1, 0],
+            [2, 3, 0, 1],
+            [0, 2, 1, 3],
+            [2, 0, 3, 1],
+            [3, 1, 2, 0],
+            [1, 3, 0, 2],
+        ];
+        for orientation in 1..=8_u16 {
+            let raw = generated_dng(&source, orientation);
+            let preview = with_capability("direction.DNG", &raw, extract_embedded_jpeg).unwrap();
+            // The generated candidate records tflip=0. The container transform
+            // must still cross the extraction boundary.
+            assert_eq!(preview.container_orientation, Some(orientation as u8));
+            if orientation == 6 {
+                // This is the prior pipeline behavior: JPEG-only normalization
+                // loses the portrait container transform and stays landscape.
+                let legacy =
+                    crate::process_jpeg(&preview.jpeg, crate::DerivativeTarget::Thumbnail512)
+                        .unwrap();
+                assert_eq!((legacy.width, legacy.height), (120, 80));
+                assert_ne!(corner_directions(&legacy.jpeg), expected_corners[5]);
+            }
+            for target in [
+                crate::DerivativeTarget::Thumbnail512,
+                crate::DerivativeTarget::Review2560,
+            ] {
+                let derivative = crate::derivative::process_jpeg_with_orientation(
+                    &preview.jpeg,
+                    preview.container_orientation,
+                    target,
+                )
+                .unwrap();
+                let expected_dimensions = if orientation >= 5 {
+                    (80, 120)
+                } else {
+                    (120, 80)
+                };
+                assert_eq!((derivative.width, derivative.height), expected_dimensions);
+                assert_eq!(
+                    corner_directions(&derivative.jpeg),
+                    expected_corners[orientation as usize - 1]
+                );
+            }
+        }
+
+        for (jpeg, expected) in [
+            (insert_exif_orientation(&source, None), [2, 0, 3, 1]),
+            (insert_exif_orientation(&source, Some(9)), [2, 0, 3, 1]),
+            (insert_exif_orientation(&source, Some(1)), [0, 1, 2, 3]),
+        ] {
+            let raw = generated_dng(&jpeg, 6);
+            let preview = with_capability("precedence.DNG", &raw, extract_embedded_jpeg).unwrap();
+            let derivative = crate::derivative::process_jpeg_with_orientation(
+                &preview.jpeg,
+                preview.container_orientation,
+                crate::DerivativeTarget::Thumbnail512,
+            )
+            .unwrap();
+            assert_eq!(corner_directions(&derivative.jpeg), expected);
+        }
     }
 
     #[test]
@@ -408,6 +591,7 @@ mod tests {
         let preview = extract_embedded_jpeg(&capability).unwrap();
         assert_eq!(preview.candidate_index, Some(2));
         assert_eq!((preview.width, preview.height), (9504, 6336));
+        assert_eq!(preview.container_orientation, Some(6));
         assert_eq!(original_snapshot(&path), before);
         let mut decoder = image::ImageReader::new(Cursor::new(preview.jpeg));
         decoder.set_format(image::ImageFormat::Jpeg);

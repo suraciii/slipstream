@@ -912,13 +912,19 @@ fn process_job(
         target: job.target,
     };
     let generated = if job.retry {
-        inner
-            .scheduler
-            .retry(identity, inspected.preview.jpeg, job.priority())?
+        inner.scheduler.retry_with_orientation(
+            identity,
+            inspected.preview.jpeg,
+            inspected.preview.container_orientation,
+            job.priority(),
+        )?
     } else {
-        inner
-            .scheduler
-            .generate(identity, inspected.preview.jpeg, job.priority())?
+        inner.scheduler.generate_with_orientation(
+            identity,
+            inspected.preview.jpeg,
+            inspected.preview.container_orientation,
+            job.priority(),
+        )?
     };
     match generated {
         DerivativeResult::Ready(ready) if ready.stale => Ok(PreviewRequestResult::Stale(
@@ -1249,7 +1255,7 @@ mod tests {
     use super::*;
     use crate::{
         LibraryConfig, ScanLimits,
-        test_support::{original_snapshot, raw_sample},
+        test_support::{generated_dng, original_snapshot, raw_sample},
     };
     use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
     use std::{
@@ -1298,14 +1304,18 @@ mod tests {
     }
 
     fn fixture(jpeg_original: Option<&[u8]>) -> Fixture {
+        fixture_with_original(jpeg_original.map(|bytes| ("one.JPG", bytes)))
+    }
+
+    fn fixture_with_original(original: Option<(&str, &[u8])>) -> Fixture {
         let base = std::env::temp_dir().join(format!(
             "slipstream-preview-service-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(base.join("originals")).unwrap();
-        if let Some(bytes) = jpeg_original {
-            fs::write(base.join("originals/one.JPG"), bytes).unwrap();
+        if let Some((name, bytes)) = original {
+            fs::write(base.join("originals").join(name), bytes).unwrap();
         }
         let config = LibraryConfig {
             library_root: base.join("originals"),
@@ -1366,6 +1376,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn raw_container_orientation_reaches_both_cached_derivative_targets() {
+        let raw = generated_dng(&jpeg(120, 80), 6);
+        let fixture = fixture_with_original(Some(("portrait.DNG", &raw)));
+        let id = photo_id(&fixture.library);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for target in [DerivativeTarget::Thumbnail512, DerivativeTarget::Review2560] {
+            let result = runtime
+                .block_on(
+                    fixture
+                        .service
+                        .request(id.clone(), target, DerivativePriority::Current),
+                )
+                .unwrap();
+            let PreviewRequestResult::Current(ready) = result else {
+                panic!("expected generated RAW derivative")
+            };
+            assert_eq!(ready.source, PreviewSource::RawEmbeddedJpeg);
+            assert_eq!(ready.embedded_candidate_identity.as_deref(), Some("0"));
+            assert_eq!((ready.width, ready.height), (80, 120));
+            assert!(ready.generated);
+        }
+        let snapshot = runtime.block_on(fixture.library.snapshot()).unwrap();
+        let photo = snapshot.photos.iter().find(|photo| photo.id == id).unwrap();
+        assert_eq!(
+            (photo.preview_width, photo.preview_height),
+            (Some(80), Some(120))
+        );
     }
 
     #[test]
@@ -1472,7 +1512,7 @@ mod tests {
             .scheduler()
             .cache()
             .root()
-            .join("rust-vips-v1")
+            .join("rust-vips-v2")
             .join(format!("{}.jpg", first.cache_key));
 
         fs::remove_file(&path).unwrap();
@@ -1829,6 +1869,7 @@ mod tests {
             panic!("expected a RAW embedded Preview")
         };
         assert_eq!(raw_ready.source, PreviewSource::RawEmbeddedJpeg);
+        assert_eq!((raw_ready.width, raw_ready.height), (1707, 2560));
 
         // The corrupt JPEG Photo is independently unavailable.
         let jpeg_result = runtime
@@ -1913,7 +1954,7 @@ mod tests {
         };
         assert_eq!(ready.source, PreviewSource::RawEmbeddedJpeg);
         assert_eq!(ready.embedded_candidate_identity.as_deref(), Some("2"));
-        assert_eq!((ready.width, ready.height), (2560, 1707));
+        assert_eq!((ready.width, ready.height), (1707, 2560));
         service.shutdown().unwrap();
         library.shutdown().unwrap();
         assert_eq!(original_snapshot(&copied_raw), copied_before);
