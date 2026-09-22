@@ -128,7 +128,7 @@ must preserve the captured intent and resolve the conflict explicitly.
 
 After Export acceptance, subsequent edits may advance the Photo's recipe. They
 must not mutate the captured snapshot. Cancellation, polling, reconnect and
-download address the Export identity, not the current Photo settings.
+download address the Export identity, not the current Edit Recipe.
 
 Request-identity retention must cover the documented reconciliation window.
 Expired receipts must produce an explicit outcome instead of treating an
