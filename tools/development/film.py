@@ -6,6 +6,11 @@ from dataclasses import asdict
 import numba
 import numpy as np
 from spektrafilm import Simulator, digest_params, init_params
+from spektrafilm.utils.bounded_gamut import (
+    MAX_WORKSPACE_BYTES, plan_gamut_workspace,
+)
+
+from bundle import load_bundle
 
 SEED = 327
 
@@ -23,7 +28,9 @@ def reset_random_state():
     seed_numba(SEED)
 
 
-def make_simulator():
+def make_simulator(*, gamut_workspace_bytes=MAX_WORKSPACE_BYTES):
+    # A fixed probe allocation, not an admitted total-attempt resource plan.
+    plan_gamut_workspace(1, gamut_workspace_bytes)
     params = init_params("kodak_portra_400", "kodak_portra_endura")
     params.camera.auto_exposure = False
     params.camera.exposure_compensation_ev = 0.0
@@ -48,7 +55,9 @@ def make_simulator():
         )
     }
     manifest.update(film="kodak_portra_400", paper="kodak_portra_endura", seed=SEED)
-    return Simulator(params), manifest
+    manifest["processing_bundle"] = load_bundle()
+    manifest["gamut_workspace_allowance_bytes"] = gamut_workspace_bytes
+    return Simulator(params, output_gamut_workspace_bytes=gamut_workspace_bytes), manifest
 
 
 def render(simulator, pixels):

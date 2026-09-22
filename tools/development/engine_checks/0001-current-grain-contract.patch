@@ -1,0 +1,34 @@
+--- a/tests/test_lut_mode.py
++++ b/tests/test_lut_mode.py
+@@ -71,7 +71,7 @@
+     return img
+ 
+ 
+-def test_lut_mode_digest_disables_every_dangerous_effect():
++def test_lut_mode_digest_disables_every_dangerous_effect(monkeypatch):
+     """The param-level guard: digesting with lut_mode must zero/deactivate
+     every spatial, stochastic, and image-global knob even when they were on."""
+     p = _lut_mode_params()
+@@ -92,7 +92,21 @@
+     assert p.film_render.dir_couplers.diffusion_size_um == 0
+     assert p.film_render.grain.blur == 0.0
+     assert p.film_render.grain.blur_dye_clouds_um == 0.0
+-    assert p.film_render.grain.mult_usm_amount == 0.0
++    # micro_structure replaced the retired mult_usm_amount parameter. Its
++    # spatial/stochastic implementation must remain unreachable in LUT mode.
++    from spektrafilm.model import grain as grain_model
++    p.film_render.grain.micro_structure = (0.2, 30)
++    def unexpected_grain(*args, **kwargs):
++        raise AssertionError("LUT mode reached spatial or stochastic grain")
++    for name in ("interp_density_cmy_layers", "apply_grain_to_density",
++                 "apply_grain_to_density_layers", "add_micro_structure"):
++        monkeypatch.setattr(grain_model, name, unexpected_grain)
++    density = np.full((2, 3, 3), 0.18)
++    result = grain_model.apply_grain(
++        density, 0.001, p.film_render.grain, None, None, "negative",
++    )
++    assert result is density
++    np.testing.assert_array_equal(result, np.full((2, 3, 3), 0.18))
+     assert p.print_render.glare.blur == 0
+     # stochastic
+     assert p.film_render.grain.active is False

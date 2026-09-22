@@ -21,6 +21,7 @@ import OpenImageIO as oiio
 import tifffile
 
 from film import make_simulator, pixel_digest, render, reset_random_state
+from bundle import load_bundle
 
 WORK = Path("/work")
 RAW = Path("/input") / os.environ["PROBE_RAW_NAME"]
@@ -282,7 +283,7 @@ def main():
     (WORK / "config/color/out").mkdir(parents=True)
     shutil.copyfile(ICC, WORK / "config/color/out/linear-prophoto.icc")
     oiio.attribute("threads", 4)
-    emit("runtime", python=sys.version.split()[0],
+    emit("runtime", processing_bundle=load_bundle(), python=sys.version.split()[0],
          packages={d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},
          darktable=subprocess.check_output(["darktable-cli", "--version"], text=True).splitlines()[0])
     raw_probe(args.mode == "full")
