@@ -27,9 +27,10 @@ def bundle_identity():
         Path("/opt/probe/probe.py"), Path("/opt/probe/bundle.py"),
         Path("/opt/patches/0001-bounded-output-gamut.patch"),
         Path("/opt/patches/0002-buffer-lifetimes-and-output.patch"),
+        Path("/opt/patches/0003-pre-grain-reclamation.patch"),
         *[ROOT / "src/spektrafilm" / path for path in (
             "utils/bounded_gamut.py", "utils/bounded_output.py", "utils/io.py",
-            "model/density_curves.py",
+            "model/density_curves.py", "model/grain.py",
             "runtime/process.py", "runtime/topology.py",
             "runtime/pipeline.py", "runtime/stages/scanning.py",
         )],
@@ -38,7 +39,8 @@ def bundle_identity():
         "schema": 1,
         "source_commit": SOURCE_COMMIT,
         "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
-        "patches": ["0001-bounded-output-gamut.patch", "0002-buffer-lifetimes-and-output.patch"],
+        "patches": ["0001-bounded-output-gamut.patch", "0002-buffer-lifetimes-and-output.patch",
+                    "0003-pre-grain-reclamation.patch"],
         "files_sha256": {str(path): digest(path) for path in files},
         "profile_assets_sha256": hashlib.sha256(
             json.dumps(assets, sort_keys=True, separators=(",", ":")).encode()

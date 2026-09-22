@@ -22,6 +22,8 @@ print(json.dumps({"test_patch_sha256": hashlib.sha256(
 ).hexdigest()}), flush=True)
 run("/opt/engine_checks/test_bounded_gamut.py")
 run("/opt/engine_checks/test_buffer_lifetimes.py")
+run("/opt/engine_checks/test_pre_grain_reclamation.py")
+run("/opt/engine_checks/pre_grain_lifetime_probe.py")
 with tempfile.TemporaryDirectory(prefix="reference-jit-", dir="/work") as cache:
     for state in ("cold", "loaded"):
         run("/opt/engine_checks/pipeline_reference_probe.py", state,

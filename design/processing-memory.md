@@ -237,6 +237,17 @@ enablement or thresholds. Whole-run measurements include this reclamation cost;
 node computation timings may continue to exclude it, while reclamation time is
 reported separately.
 
+For sublayer grain processing, retain the interpolated layer densities and
+reclaim completed interpolation compiler cycles before particle sampling
+allocates its buffers. This handoff must preserve every live caller, layer, and
+view owner, and it must not depend on automatic collection occurring at a useful
+time. Skipped grain and non-sublayer paths retain their existing behavior.
+Reclamation must not change interpolation execution or random-state ownership.
+A node duration that includes this work is inclusive elapsed time, not measured
+computation-only time. Use the existing
+[measurement timing contract](processing-film-measurement.md)
+when reporting separate computation and reclamation observations.
+
 Same-profile display encoding must batch the exact qualified color-library
 operation, including its matrix and transfer-function order. It must not replace
 that operation with a superficially equivalent transfer-function formula. It

@@ -10,10 +10,13 @@
 patches/**
 !patches/0001-bounded-output-gamut.patch
 !patches/0002-buffer-lifetimes-and-output.patch
+!patches/0003-pre-grain-reclamation.patch
 !engine_checks/
 engine_checks/**
 !engine_checks/test_bounded_gamut.py
 !engine_checks/test_buffer_lifetimes.py
+!engine_checks/test_pre_grain_reclamation.py
+!engine_checks/pre_grain_lifetime_probe.py
 !engine_checks/run.py
 !engine_checks/output_scratch_probe.py
 !engine_checks/cold_lifetime_probe.py

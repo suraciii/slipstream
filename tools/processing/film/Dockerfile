@@ -6,7 +6,7 @@ RUN cargo build --locked --release --package slipstream-processing --bin slipstr
 
 # build.py checks this retained local parent against its immutable image ID;
 # its complete numerical source/package inventory is checked below as well.
-FROM slipstream:344-buffer-lifetimes AS adapter-source
+FROM slipstream:358-pre-grain-reclaim AS adapter-source
 COPY tools/processing/film/requirements.lock /opt/film-measurement/requirements.lock
 RUN uv --no-cache pip install --python /opt/runtime/bin/python --target /opt/film-validator-deps \
     --require-hashes --no-compile-bytecode -r /opt/film-measurement/requirements.lock
@@ -19,7 +19,7 @@ FROM adapter-source AS film
 COPY --from=build /src/target/release/slipstream-processing-film-worker /usr/local/bin/slipstream-processing-film-worker
 COPY LICENSE THIRD-PARTY-NOTICES.md RUST-LICENSES.html /usr/share/doc/slipstream/
 RUN /opt/runtime/bin/python /opt/film-measurement/package.py
-LABEL slipstream.processing.film.numerical_bundle="0bf4af15d4f5323d060d4e6543e0e97d1a2fe6014d27c1cd81db440e4f46a152" \
+LABEL slipstream.processing.film.numerical_bundle="eeaae45f9cd198d8362cc9b5262e8da53b36ef11d5eefc3441bb0beb5b7aa649" \
       slipstream.processing.film.recipe="a2dabe2581df7ed97b2af2ffe9bd4a80e579e0f49fd9627af49d86267a33ea7d" \
       slipstream.processing.film.input_icc_sha256="7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe" \
       slipstream.processing.film.output_icc_sha256="b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21" \

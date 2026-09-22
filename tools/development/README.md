@@ -108,6 +108,15 @@ time separately from node computation. Whole-run elapsed time includes both.
 The patch also removes the redundant preprocessing, image-loading, and unused
 density allocations and batches display encoding and JPEG conversion.
 
+`patches/0003-pre-grain-reclamation.patch` then reclaims completed interpolation
+compiler cycles after retaining the layer densities and before grain sampling.
+It preserves the existing interpolation, random state, borrowed inputs and
+skipped branches. This collection is inside the grain node's elapsed duration;
+`memory.reclaim` continues to report only the separate topology handoffs.
+The cold ownership check reports the new collection's observed duration and
+inclusive render time separately. These diagnostic timings are not a native
+peak measurement or a supported resource envelope.
+
 `/opt/processing-bundle.json` records the source archive and commit, numerical
 dependency versions and lock digest, native package inventory, complete profile
 asset tree digest, patch digest, and modified source/adapter digests. Each probe

@@ -10,8 +10,8 @@ import sys
 ROOT = Path("/opt/film-measurement")
 EXTRAS = Path("/opt/film-validator-deps")
 BUNDLE = ROOT / "bundle.json"
-NUMERICAL_SHA256 = "0bf4af15d4f5323d060d4e6543e0e97d1a2fe6014d27c1cd81db440e4f46a152"
-NUMERICAL_PARENT_IMAGE = "sha256:10aa79ce1148ba8aec83f6f68e6d39ba7edaa88f2369f21fac65d4784f4b495d"
+NUMERICAL_SHA256 = "eeaae45f9cd198d8362cc9b5262e8da53b36ef11d5eefc3441bb0beb5b7aa649"
+NUMERICAL_PARENT_IMAGE = "sha256:b5b140a7646139d654734801c3b4289d6098b626002c6b2732c47573df206972"
 
 
 def file_hash(path):

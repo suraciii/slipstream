@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 
-PARENT = "sha256:10aa79ce1148ba8aec83f6f68e6d39ba7edaa88f2369f21fac65d4784f4b495d"
-PARENT_TAG = "slipstream:344-buffer-lifetimes"
+PARENT = "sha256:b5b140a7646139d654734801c3b4289d6098b626002c6b2732c47573df206972"
+PARENT_TAG = "slipstream:358-pre-grain-reclaim"
 ROOT = Path(__file__).resolve().parents[3]
 
 

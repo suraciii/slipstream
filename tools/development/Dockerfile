@@ -26,10 +26,13 @@ RUN apt-get update \
     && patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0002-buffer-lifetimes-and-output.patch \
     && dpkg-query -W > /opt/os-packages.txt \
     && rm -rf /var/lib/apt/lists/*
+COPY patches/0003-pre-grain-reclamation.patch /opt/patches/
+RUN patch --batch --fuzz=0 -p1 -d /opt/spektrafilm < /opt/patches/0003-pre-grain-reclamation.patch
 COPY bounded_gamut.py /opt/spektrafilm/src/spektrafilm/utils/bounded_gamut.py
 COPY bounded_output.py /opt/spektrafilm/src/spektrafilm/utils/bounded_output.py
 COPY film.py probe.py bundle.py /opt/probe/
 COPY engine_checks/test_bounded_gamut.py engine_checks/test_buffer_lifetimes.py \
+     engine_checks/test_pre_grain_reclamation.py engine_checks/pre_grain_lifetime_probe.py \
      engine_checks/run.py engine_checks/output_scratch_probe.py \
      engine_checks/cold_lifetime_probe.py \
      engine_checks/pipeline_reference_probe.py \
