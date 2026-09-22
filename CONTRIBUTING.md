@@ -151,6 +151,15 @@ change. Its host-side failure and cancellation regressions run with
 Successful probes do not establish processing support beyond their recorded
 checks; the governing qualification Issues own acceptance.
 
+The independent [processing isolation qualifier](tools/processing/README.md)
+exercises the actual host Rust launcher, pinned native fixture container,
+systemd/cgroup limits, bounded storage, and durable recovery. Run its focused
+non-root coverage with `cargo test --locked -p slipstream-processing`; workspace
+Rust checks include it. Its opt-in kernel verifier requires root and explicit
+local worker/Web image IDs. It uses only a private synthetic Library and is not
+part of the daemon-free `verify` gate. Passing fixture qualification does not
+enable photo editing or qualify an image engine's memory envelope.
+
 ## Server startup
 
 Build the workspace, then configure one Library and application-owned state locations with absolute paths. The Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:

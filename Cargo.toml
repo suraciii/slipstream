@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server"]
+members = ["crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server", "crates/slipstream-processing"]
 resolver = "2"
 
 [workspace.package]

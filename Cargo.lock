@@ -640,6 +640,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "slipstream-processing"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "slipstream-server"
 version = "0.0.0"
 dependencies = [
