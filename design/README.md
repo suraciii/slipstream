@@ -9,6 +9,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Photo Development Architecture](photo-development.md): recipe ownership, headless processing, concurrency, export snapshots, source safety, and recovery
 - [Development Color Pipeline](development-color.md): RAW interpretation, linear TIFF handoff, fixed film simulation, display separation, and reproducibility
 - [Processing Executor](processing-executor.md): private host launcher, restricted execution authority, retained accounting, and restart settlement
+- [Film Resource Measurement](processing-film-measurement.md): closed operator fixtures, sealed inputs, fixed resource terms, exact references, and descriptor-only evidence
 - [Processing Memory](processing-memory.md): task memory isolation, deployment budgets, engine workspace planning, buffer ownership, and resource-failure recovery
 
 ## Foundations

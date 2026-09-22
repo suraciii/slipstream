@@ -1,0 +1,1863 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Slipstream Film measurement syntax",
+  "description": "Normative closed syntax. Parser and semantic checks in processing-film-measurement.md remain required.",
+  "$defs": {
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "U64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "Image": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:/-]*@)?sha256:[0-9a-f]{64}$"
+    },
+    "AbsolutePath": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "pattern": "^/[^\\u0000\\uD800-\\uDFFF]*$"
+    },
+    "Config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "mode",
+        "instance",
+        "root",
+        "socket",
+        "peer_uid",
+        "image",
+        "memory_bytes",
+        "receipt_retention_seconds",
+        "catalogue_sha256",
+        "resource_model_sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "mode": {
+          "const": "film-measurement"
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "root": {
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "socket": {
+          "$ref": "#/$defs/AbsolutePath"
+        },
+        "peer_uid": {
+          "const": 0
+        },
+        "image": {
+          "$ref": "#/$defs/Image"
+        },
+        "memory_bytes": {
+          "enum": [
+            8589934592, 12884901888, 17179869184, 25769803776, 34359738368
+          ]
+        },
+        "receipt_retention_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800
+        },
+        "catalogue_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_model_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "Tiff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "bytes", "sha256"],
+      "properties": {
+        "kind": {
+          "const": "development-tiff"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        },
+        "sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "Synthetic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "generator", "pattern", "seed"],
+      "properties": {
+        "kind": {
+          "const": "synthetic-rgb"
+        },
+        "generator": {
+          "const": "linear-rgb-f32-v1"
+        },
+        "pattern": {
+          "enum": [
+            "dark",
+            "bright",
+            "red",
+            "green",
+            "blue",
+            "gradient",
+            "noise"
+          ]
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_pixels_sha256",
+        "film_pixels_sha256",
+        "jpeg_sha256",
+        "jpeg_bytes",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "input_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "film_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "jpeg_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "jpeg_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "Fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "width", "height", "source", "reference"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Id"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9568
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9568
+        },
+        "source": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Tiff"
+            },
+            {
+              "$ref": "#/$defs/Synthetic"
+            }
+          ]
+        },
+        "reference": {
+          "$ref": "#/$defs/Reference"
+        }
+      }
+    },
+    "Catalogue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "numerical_bundle",
+        "recipe",
+        "procedure",
+        "reference_image",
+        "input_icc_sha256",
+        "output_icc_sha256",
+        "fixtures"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "numerical_bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "recipe": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "procedure": {
+          "const": "film-once-empty-cache-v1"
+        },
+        "reference_image": {
+          "$ref": "#/$defs/Image"
+        },
+        "input_icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "output_icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "fixtures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Fixture"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        }
+      }
+    },
+    "Stage": {
+      "enum": [
+        "staging",
+        "decode",
+        "initialization",
+        "preprocess",
+        "exposure",
+        "development",
+        "printing",
+        "scan",
+        "gamut",
+        "cctf",
+        "jpeg",
+        "validation"
+      ]
+    },
+    "Term": {
+      "enum": [
+        "owned-arrays",
+        "runtime",
+        "native",
+        "allocator-retention",
+        "kernel"
+      ]
+    },
+    "Bound": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "const": "unknown"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "bytes", "evidence_sha256"],
+          "properties": {
+            "status": {
+              "const": "qualified"
+            },
+            "bytes": {
+              "$ref": "#/$defs/U64"
+            },
+            "evidence_sha256": {
+              "$ref": "#/$defs/Sha256"
+            }
+          }
+        }
+      ]
+    },
+    "StageBounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "runtime",
+        "native",
+        "allocator_retention",
+        "kernel"
+      ],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/Stage"
+        },
+        "runtime": {
+          "$ref": "#/$defs/Bound"
+        },
+        "native": {
+          "$ref": "#/$defs/Bound"
+        },
+        "allocator_retention": {
+          "$ref": "#/$defs/Bound"
+        },
+        "kernel": {
+          "$ref": "#/$defs/Bound"
+        }
+      }
+    },
+    "ModelCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_id", "stages"],
+      "properties": {
+        "fixture_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageBounds"
+          },
+          "minItems": 12,
+          "maxItems": 12
+        }
+      }
+    },
+    "ResourceModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "catalogue_sha256",
+        "numerical_bundle",
+        "formula",
+        "cases"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "catalogue_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "numerical_bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "formula": {
+          "const": "film-live-storage-v1"
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelCase"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        }
+      }
+    },
+    "Reconcile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op"],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "op": {
+          "const": "reconcile"
+        }
+      }
+    },
+    "Workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "fixture_id"],
+      "properties": {
+        "kind": {
+          "const": "film-fixture"
+        },
+        "fixture_id": {
+          "$ref": "#/$defs/Id"
+        }
+      }
+    },
+    "Start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "instance",
+        "op",
+        "incarnation",
+        "sequence",
+        "policy",
+        "bundle",
+        "catalogue",
+        "resource_model",
+        "workload"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "op": {
+          "const": "start"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "policy": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "catalogue": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_model": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload"
+        }
+      }
+    },
+    "Inspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op", "incarnation", "sequence"],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "op": {
+          "const": "inspect"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "Cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "instance", "op", "incarnation", "sequence"],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "op": {
+          "const": "cancel"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "Request": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Reconcile"
+        },
+        {
+          "$ref": "#/$defs/Start"
+        },
+        {
+          "$ref": "#/$defs/Inspect"
+        },
+        {
+          "$ref": "#/$defs/Cancel"
+        }
+      ]
+    },
+    "Limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_bytes",
+        "swap_bytes",
+        "cpu_quota_us",
+        "cpu_period_us",
+        "tasks",
+        "storage_bytes",
+        "storage_inodes"
+      ],
+      "properties": {
+        "memory_bytes": {
+          "enum": [
+            8589934592, 12884901888, 17179869184, 25769803776, 34359738368
+          ]
+        },
+        "swap_bytes": {
+          "const": 0
+        },
+        "cpu_quota_us": {
+          "const": 400000
+        },
+        "cpu_period_us": {
+          "const": 100000
+        },
+        "tasks": {
+          "const": 256
+        },
+        "storage_bytes": {
+          "const": 4294967296
+        },
+        "storage_inodes": {
+          "const": 4096
+        }
+      }
+    },
+    "Runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["launch_id", "container_id", "attempt_unit"],
+      "properties": {
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "container_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Sha256"
+            }
+          ]
+        },
+        "attempt_unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9_.-]+\\.slice$"
+        }
+      }
+    },
+    "Events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "oom",
+        "oom_kill",
+        "oom_group_kill",
+        "local_oom",
+        "local_oom_kill",
+        "local_oom_group_kill"
+      ],
+      "properties": {
+        "oom": {
+          "$ref": "#/$defs/U64"
+        },
+        "oom_kill": {
+          "$ref": "#/$defs/U64"
+        },
+        "oom_group_kill": {
+          "$ref": "#/$defs/U64"
+        },
+        "local_oom": {
+          "$ref": "#/$defs/U64"
+        },
+        "local_oom_kill": {
+          "$ref": "#/$defs/U64"
+        },
+        "local_oom_group_kill": {
+          "$ref": "#/$defs/U64"
+        }
+      }
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "peak_bytes",
+        "exit_code",
+        "docker_oom_killed",
+        "attempt_before",
+        "attempt_after",
+        "parent_before",
+        "parent_after",
+        "populated"
+      ],
+      "properties": {
+        "peak_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          ]
+        },
+        "docker_oom_killed": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        },
+        "attempt_before": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Events"
+            }
+          ]
+        },
+        "attempt_after": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Events"
+            }
+          ]
+        },
+        "parent_before": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Events"
+            }
+          ]
+        },
+        "parent_after": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Events"
+            }
+          ]
+        },
+        "populated": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        }
+      }
+    },
+    "MissingTerm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "term"],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/Stage"
+        },
+        "term": {
+          "$ref": "#/$defs/Term"
+        }
+      }
+    },
+    "Prediction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "known_required_bytes",
+            "known_terms_exceed_limit",
+            "missing"
+          ],
+          "properties": {
+            "status": {
+              "const": "unqualified"
+            },
+            "known_required_bytes": {
+              "$ref": "#/$defs/U64"
+            },
+            "known_terms_exceed_limit": {
+              "type": "boolean"
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MissingTerm"
+              },
+              "minItems": 1,
+              "maxItems": 60
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "required_bytes"],
+          "properties": {
+            "status": {
+              "const": "fits-model"
+            },
+            "required_bytes": {
+              "$ref": "#/$defs/U64"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "required_bytes"],
+          "properties": {
+            "status": {
+              "const": "exceeds-model"
+            },
+            "required_bytes": {
+              "$ref": "#/$defs/U64"
+            }
+          }
+        }
+      ]
+    },
+    "LocalPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "allowance_bytes",
+        "scratch_bytes",
+        "batch_pixels",
+        "destination_bytes"
+      ],
+      "properties": {
+        "model": {
+          "enum": [
+            "cam16ucs-srgb-f64-v1",
+            "srgb-cctf-f64-v1",
+            "jpeg-uint8-rows-v1"
+          ]
+        },
+        "allowance_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "scratch_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "batch_pixels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "destination_bytes": {
+          "$ref": "#/$defs/U64"
+        }
+      }
+    },
+    "GamutPlan": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/LocalPlan"
+        },
+        {
+          "properties": {
+            "model": {
+              "const": "cam16ucs-srgb-f64-v1"
+            }
+          }
+        }
+      ]
+    },
+    "CctfPlan": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/LocalPlan"
+        },
+        {
+          "properties": {
+            "model": {
+              "const": "srgb-cctf-f64-v1"
+            }
+          }
+        }
+      ]
+    },
+    "JpegPlan": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/LocalPlan"
+        },
+        {
+          "properties": {
+            "model": {
+              "const": "jpeg-uint8-rows-v1"
+            }
+          }
+        }
+      ]
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formula",
+        "width",
+        "height",
+        "source_cache_bytes",
+        "storage_reserve_bytes",
+        "prediction",
+        "gamut",
+        "cctf",
+        "jpeg"
+      ],
+      "properties": {
+        "formula": {
+          "const": "film-live-storage-v1"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "source_cache_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "storage_reserve_bytes": {
+          "const": 4294967296
+        },
+        "prediction": {
+          "$ref": "#/$defs/Prediction"
+        },
+        "gamut": {
+          "$ref": "#/$defs/GamutPlan"
+        },
+        "cctf": {
+          "$ref": "#/$defs/CctfPlan"
+        },
+        "jpeg": {
+          "$ref": "#/$defs/JpegPlan"
+        }
+      }
+    },
+    "Phase": {
+      "enum": [
+        "preparing",
+        "staging",
+        "sealed",
+        "engine",
+        "validating",
+        "execution-finished"
+      ]
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_pixels_sha256",
+        "film_pixels_sha256",
+        "jpeg_sha256",
+        "jpeg_bytes",
+        "width",
+        "height",
+        "icc_sha256",
+        "reference_evidence_sha256"
+      ],
+      "properties": {
+        "input_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "film_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "jpeg_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "jpeg_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "reference_evidence_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "StageTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "elapsed_us", "reclaim_us"],
+      "properties": {
+        "stage": {
+          "$ref": "#/$defs/Stage"
+        },
+        "elapsed_us": {
+          "$ref": "#/$defs/U64"
+        },
+        "reclaim_us": {
+          "$ref": "#/$defs/U64"
+        }
+      }
+    },
+    "WorkerSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "outcome",
+        "launch_id",
+        "manifest",
+        "plan_sha256",
+        "artifact",
+        "execution_us",
+        "stages"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "film-measurement-result"
+        },
+        "outcome": {
+          "const": "completed"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "artifact": {
+          "$ref": "#/$defs/Artifact"
+        },
+        "execution_us": {
+          "$ref": "#/$defs/U64"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StageTiming"
+          },
+          "minItems": 0,
+          "maxItems": 12
+        }
+      }
+    },
+    "WorkerFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "outcome",
+        "detail",
+        "phase",
+        "launch_id",
+        "manifest",
+        "plan_sha256",
+        "execution_us"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "film-measurement-result"
+        },
+        "outcome": {
+          "enum": [
+            "allocation-failed",
+            "storage-full",
+            "deadline",
+            "engine-failed"
+          ]
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "source-mismatch",
+                "unsupported-input",
+                "plan-rejected",
+                "artifact-invalid",
+                "output-limit"
+              ]
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "execution_us": {
+          "$ref": "#/$defs/U64"
+        }
+      }
+    },
+    "WorkerResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WorkerSuccess"
+        },
+        {
+          "$ref": "#/$defs/WorkerFailure"
+        }
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incarnation",
+        "sequence",
+        "workload",
+        "policy",
+        "bundle",
+        "catalogue",
+        "resource_model",
+        "manifest",
+        "state",
+        "phase",
+        "cancellation_requested",
+        "accepted_at_unix_ms",
+        "deadline_unix_ms",
+        "outcome",
+        "detail",
+        "runtime",
+        "limits",
+        "evidence",
+        "plan",
+        "result",
+        "cleanup"
+      ],
+      "properties": {
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload"
+        },
+        "policy": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "catalogue": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_model": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "state": {
+          "enum": ["accepted", "running", "settling", "settled", "blocked"]
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "cancellation_requested": {
+          "type": "boolean"
+        },
+        "accepted_at_unix_ms": {
+          "$ref": "#/$defs/U64"
+        },
+        "deadline_unix_ms": {
+          "$ref": "#/$defs/U64"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "completed",
+                "allocation-failed",
+                "oom",
+                "storage-full",
+                "cancelled",
+                "deadline",
+                "engine-failed",
+                "interrupted",
+                "unknown"
+              ]
+            }
+          ]
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "source-mismatch",
+                "unsupported-input",
+                "plan-rejected",
+                "artifact-invalid",
+                "output-limit"
+              ]
+            }
+          ]
+        },
+        "runtime": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Runtime"
+            }
+          ]
+        },
+        "limits": {
+          "$ref": "#/$defs/Limits"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Evidence"
+            }
+          ]
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/WorkerResult"
+            }
+          ]
+        },
+        "cleanup": {
+          "enum": ["pending", "complete", "uncertain"]
+        }
+      }
+    },
+    "Capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "capability",
+        "instance",
+        "incarnation",
+        "next_sequence",
+        "policy",
+        "bundle",
+        "catalogue",
+        "resource_model",
+        "availability",
+        "active"
+      ],
+      "properties": {
+        "kind": {
+          "const": "capability"
+        },
+        "capability": {
+          "const": "film-measurement-only"
+        },
+        "instance": {
+          "$ref": "#/$defs/Id"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "next_sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "policy": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "catalogue": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_model": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "availability": {
+          "enum": ["available", "blocked"]
+        },
+        "active": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Receipt"
+            }
+          ]
+        }
+      }
+    },
+    "ReceiptResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "receipt"],
+      "properties": {
+        "kind": {
+          "const": "receipt"
+        },
+        "receipt": {
+          "$ref": "#/$defs/Receipt"
+        }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid-request",
+            "unauthorized",
+            "wrong-instance",
+            "unavailable",
+            "incompatible-policy",
+            "incompatible-bundle",
+            "conflict",
+            "busy",
+            "expired",
+            "unknown-attempt",
+            "stale-incarnation",
+            "capacity",
+            "uncertain",
+            "incompatible-catalogue",
+            "incompatible-resource-model",
+            "unknown-fixture",
+            "unsupported-fixture"
+          ]
+        }
+      }
+    },
+    "Response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "result"],
+          "properties": {
+            "version": {
+              "const": 2
+            },
+            "result": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Capability"
+                },
+                {
+                  "$ref": "#/$defs/ReceiptResult"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "error"],
+          "properties": {
+            "version": {
+              "const": 2
+            },
+            "error": {
+              "$ref": "#/$defs/Error"
+            }
+          }
+        }
+      ]
+    },
+    "EngineGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "launch_id",
+        "manifest",
+        "bundle",
+        "numerical_bundle",
+        "recipe",
+        "procedure",
+        "fixture",
+        "input_icc_sha256",
+        "output_icc_sha256",
+        "plan"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "film-measurement-grant"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "numerical_bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "recipe": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "procedure": {
+          "const": "film-once-empty-cache-v1"
+        },
+        "fixture": {
+          "$ref": "#/$defs/Fixture"
+        },
+        "input_icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "output_icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      }
+    },
+    "CanonicalManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixture",
+        "recipe",
+        "catalogue",
+        "resource_model",
+        "procedure",
+        "bundle",
+        "policy",
+        "plan"
+      ],
+      "properties": {
+        "fixture": {
+          "$ref": "#/$defs/Fixture"
+        },
+        "recipe": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "catalogue": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "resource_model": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "procedure": {
+          "const": "film-once-empty-cache-v1"
+        },
+        "bundle": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "policy": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      }
+    },
+    "PolicyIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "resolved_image"],
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/Config"
+        },
+        "resolved_image": {
+          "$ref": "#/$defs/Image"
+        }
+      }
+    },
+    "StageOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "launch_id",
+        "source",
+        "source_bytes",
+        "source_sha256",
+        "destination_device",
+        "destination_inode",
+        "result_device",
+        "result_inode",
+        "grant_sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "stage-offer"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "source": {
+          "enum": ["development-tiff", "synthetic-rgb"]
+        },
+        "source_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Sha256"
+            }
+          ]
+        },
+        "destination_device": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/U64"
+            }
+          ]
+        },
+        "destination_inode": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/U64"
+            }
+          ]
+        },
+        "result_device": {
+          "$ref": "#/$defs/U64"
+        },
+        "result_inode": {
+          "$ref": "#/$defs/U64"
+        },
+        "grant_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "StageAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "launch_id",
+        "source_bytes",
+        "source_sha256",
+        "destination_device",
+        "destination_inode",
+        "grant_sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "staged"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_bytes": {
+          "$ref": "#/$defs/U64"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Sha256"
+            }
+          ]
+        },
+        "destination_device": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/U64"
+            }
+          ]
+        },
+        "destination_inode": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/U64"
+            }
+          ]
+        },
+        "grant_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "EnginePermit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "launch_id", "grant_sha256"],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "engine-permit"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "grant_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "EngineStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "launch_id", "grant_sha256"],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "engine-started"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "grant_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "PixelObservations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_pixels_sha256",
+        "film_pixels_sha256",
+        "width",
+        "height",
+        "icc_sha256"
+      ],
+      "properties": {
+        "input_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "film_pixels_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9568
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9568
+        },
+        "icc_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "ProducerTiming": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/StageTiming"
+        },
+        {
+          "properties": {
+            "stage": {
+              "enum": [
+                "decode",
+                "initialization",
+                "preprocess",
+                "exposure",
+                "development",
+                "printing",
+                "scan",
+                "gamut",
+                "cctf",
+                "jpeg"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ProducerSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "outcome",
+        "launch_id",
+        "manifest",
+        "plan_sha256",
+        "pixels",
+        "stages"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "film-producer-result"
+        },
+        "outcome": {
+          "const": "produced"
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "pixels": {
+          "$ref": "#/$defs/PixelObservations"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProducerTiming"
+          },
+          "minItems": 0,
+          "maxItems": 10
+        }
+      }
+    },
+    "ProducerFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "outcome",
+        "detail",
+        "launch_id",
+        "manifest",
+        "plan_sha256"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "film-producer-result"
+        },
+        "outcome": {
+          "enum": ["allocation-failed", "storage-full", "engine-failed"]
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "source-mismatch",
+                "unsupported-input",
+                "plan-rejected",
+                "artifact-invalid",
+                "output-limit"
+              ]
+            }
+          ]
+        },
+        "launch_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest": {
+          "$ref": "#/$defs/Sha256"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/Sha256"
+        }
+      }
+    },
+    "ProducerResult": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ProducerSuccess"
+        },
+        {
+          "$ref": "#/$defs/ProducerFailure"
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Config"
+    },
+    {
+      "$ref": "#/$defs/Catalogue"
+    },
+    {
+      "$ref": "#/$defs/ResourceModel"
+    },
+    {
+      "$ref": "#/$defs/Request"
+    },
+    {
+      "$ref": "#/$defs/Response"
+    },
+    {
+      "$ref": "#/$defs/WorkerResult"
+    },
+    {
+      "$ref": "#/$defs/EngineGrant"
+    },
+    {
+      "$ref": "#/$defs/StageOffer"
+    },
+    {
+      "$ref": "#/$defs/StageAck"
+    },
+    {
+      "$ref": "#/$defs/EnginePermit"
+    },
+    {
+      "$ref": "#/$defs/EngineStarted"
+    },
+    {
+      "$ref": "#/$defs/ProducerResult"
+    }
+  ]
+}

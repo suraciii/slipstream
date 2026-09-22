@@ -11,7 +11,9 @@ source access, Export lifecycle, and publication. This specification owns the
 private execution boundary. The
 [qualification protocol](processing-executor-protocol.md) defines its initial
 closed fixture interface and operator configuration; it does not enable RAW
-or Film workloads.
+or Film workloads. [Film Resource Measurement](processing-film-measurement.md)
+defines a separate administrator-only image measurement profile under this same
+execution boundary; it does not enable ordinary Film admission.
 
 ## Ownership
 
