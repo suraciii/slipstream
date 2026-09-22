@@ -97,9 +97,10 @@ class QualifiedFilmQualification(FILM.FilmQualification):
     def boundary_snapshot(self):
         """Observe the complete no-effect contract around a refused Start."""
         registry = self.root / 'registry.json'
+        registry_data = registry.read_bytes()
         attempts = self.root / 'attempts'
         parent = Path('/sys/fs/cgroup', self.parent)
-        return dict(registry=digest(registry.read_bytes()),
+        return dict(registry=digest(registry_data), registry_state=json.loads(registry_data),
                     attempts=sorted(str(path.relative_to(attempts))
                                     for path in attempts.rglob('*')) if attempts.exists() else [],
                     cgroups=sorted(str(path.relative_to(parent))
@@ -114,13 +115,48 @@ class QualifiedFilmQualification(FILM.FilmQualification):
         intent = dict(self.intent(fixture_id), **changed)
         before = self.boundary_snapshot()
         response = self.request('start', **intent)
+        after = self.boundary_snapshot()
+        # Keep the differing ownership evidence even when the assertion stops
+        # this verifier and its finally block removes the private runtime.
+        path = self.output / ('refusal-boundary-' + str(len(self.refusals) + 1) + '.json')
+        with path.open('x') as evidence:
+            json.dump(dict(intent=intent, response=response, before=before, after=after),
+                      evidence, indent=2)
         assert response['error']['code'] == expected, response
-        assert self.boundary_snapshot() == before, 'refused Start changed execution ownership'
+        assert after == before, 'refused Start changed execution ownership'
         capability = self.request('reconcile')['result']
         assert capability['next_sequence'] == intent['sequence'], capability
         self.refusals.append(dict(intent=intent, response=response, unchanged=before))
         (self.output / 'refusals.json').write_text(json.dumps(self.refusals, indent=2))
         return response
+
+    def await_recovered_start_boundary(self, fixture_id):
+        """Distinguish completed recovery from its initial blocked capability.
+
+        A wrong policy is rejected after ownership recovery permits new Start
+        validation, but before the current environment is checked. It cannot
+        create an attempt. A mismatched environment remains blocked on both
+        sides of recovery, so that capability alone is not a recovery barrier.
+        """
+        intent = dict(self.intent(fixture_id))
+        expected_policy = intent['policy']
+        intent['policy'] = '0' * 64 if expected_policy != '0' * 64 else '1' * 64
+        observations = []
+
+        def recovered():
+            response = self.request('start', **intent)
+            observations.append(response)
+            code = response.get('error', {}).get('code')
+            assert code in ('unavailable', 'incompatible-policy'), response
+            return code == 'incompatible-policy'
+
+        try:
+            await_condition(recovered)
+        finally:
+            path = self.output / ('recovery-probes-' + str(intent['sequence']) + '.json')
+            with path.open('x') as evidence:
+                json.dump(dict(expected_policy=expected_policy, intent=intent,
+                               responses=observations), evidence, indent=2)
 
     def terminal(self, intent):
         receipt = super().terminal(intent)
@@ -261,6 +297,7 @@ class QualifiedFilmQualification(FILM.FilmQualification):
                 assert envelope['environment'] != original_envelope['environment']
                 self.switch_envelope(data, envelope, 'blocked')
                 assert self.request('start', **intent)['result']['receipt'] == receipt
+                self.await_recovered_start_boundary(fixture_id)
                 self.refused(fixture_id, 'unavailable')
                 self.switch_envelope(original_data, original_envelope, current_availability)
                 assert self.request('start', **intent)['result']['receipt'] == receipt

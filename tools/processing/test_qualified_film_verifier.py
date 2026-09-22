@@ -67,6 +67,9 @@ class QualifiedVerifierTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, 'ownership'):
                     probe.refused('a' * 32, 'resource-budget')
                 self.assertFalse((Path(directory) / 'refusals.json').exists())
+                evidence = json.loads((Path(directory) / 'refusal-boundary-1.json').read_text())
+                self.assertEqual(evidence['before'], before)
+                self.assertEqual(evidence['after'], after)
         with tempfile.TemporaryDirectory() as directory:
             probe = self.fake_refusal(Path(directory))
             probe.boundary_snapshot = Mock(side_effect=[before, dict(before)])
@@ -74,6 +77,55 @@ class QualifiedVerifierTests(unittest.TestCase):
                                          {'result': {'next_sequence': 8}}]
             with self.assertRaises(AssertionError):
                 probe.refused('a' * 32, 'resource-budget')
+
+    def test_mismatched_environment_waits_for_recovery_without_accepting_a_start(self):
+        for original_policy in ['a' * 64, '0' * 64]:
+            with self.subTest(policy=original_policy), tempfile.TemporaryDirectory() as directory:
+                probe = self.fake_refusal(Path(directory))
+                intent = dict(sequence=2, policy=original_policy, envelope='e' * 64,
+                              workload={'fixture_id': 'a' * 32})
+                probe.intent.return_value = intent
+                responses = [{'error': {'code': 'unavailable'}},
+                             {'error': {'code': 'unavailable'}},
+                             {'error': {'code': 'incompatible-policy'}}]
+                probe.request.side_effect = responses
+
+                def delayed_recovery(ready):
+                    self.assertFalse(ready())
+                    self.assertFalse(ready())
+                    self.assertTrue(ready())
+
+                with patch.object(verifier, 'await_condition', side_effect=delayed_recovery):
+                    probe.await_recovered_start_boundary('a' * 32)
+                self.assertEqual(probe.request.call_count, 3)
+                for call in probe.request.call_args_list:
+                    self.assertEqual(call.args, ('start',))
+                    self.assertEqual(call.kwargs['sequence'], 2)
+                    self.assertNotEqual(call.kwargs['policy'], original_policy)
+                    self.assertEqual(call.kwargs['envelope'], intent['envelope'])
+                    self.assertEqual(call.kwargs['workload'], intent['workload'])
+                evidence = json.loads((Path(directory) / 'recovery-probes-2.json').read_text())
+                self.assertEqual(evidence['responses'], responses)
+
+    def test_recovery_probe_keeps_unexpected_results_and_existing_deadline_failure(self):
+        for response in [{'result': {'receipt': 'unexpected acceptance'}},
+                         {'error': {'code': 'unknown-attempt'}},
+                         {'error': {'code': 'unavailable'}}]:
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as directory:
+                probe = self.fake_refusal(Path(directory))
+                probe.intent.return_value = dict(sequence=2, policy='a' * 64)
+                probe.request.return_value = response
+                probe.request.side_effect = None
+
+                def bounded_wait(ready):
+                    self.assertFalse(ready())
+                    raise AssertionError('condition did not become true within its fixed deadline')
+
+                with patch.object(verifier, 'await_condition', side_effect=bounded_wait):
+                    with self.assertRaises(AssertionError):
+                        probe.await_recovered_start_boundary('a' * 32)
+                evidence = json.loads((Path(directory) / 'recovery-probes-2.json').read_text())
+                self.assertEqual(evidence['responses'], [response])
 
     def test_v3_requests_do_not_reuse_measurement_authority(self):
         probe = verifier.QualifiedFilmQualification.__new__(verifier.QualifiedFilmQualification)
