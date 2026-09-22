@@ -8,6 +8,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 - [Photo Development Architecture](photo-development.md): recipe ownership, headless processing, concurrency, export snapshots, source safety, and recovery
 - [Development Color Pipeline](development-color.md): RAW interpretation, linear TIFF handoff, fixed film simulation, display separation, and reproducibility
+- [Processing Memory](processing-memory.md): task memory isolation, deployment budgets, engine workspace planning, buffer ownership, and resource-failure recovery
 
 ## Foundations
 
