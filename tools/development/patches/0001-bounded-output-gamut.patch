@@ -1,0 +1,93 @@
+--- a/src/spektrafilm/runtime/process.py
++++ b/src/spektrafilm/runtime/process.py
+@@ -16,8 +16,13 @@
+     They can be refreshed with update_params or soft_update, which delegate to the internal pipeline.
+     """
+ 
+-    def __init__(self, params: RuntimePhotoParams):
+-        self._pipeline = SimulationPipeline(params) # should stay private
++    def __init__(self, params: RuntimePhotoParams, *, output_gamut_workspace_bytes=None):
++        if output_gamut_workspace_bytes is None:
++            self._pipeline = SimulationPipeline(params)
++        else:
++            self._pipeline = SimulationPipeline(
++                params, output_gamut_workspace_bytes=output_gamut_workspace_bytes,
++            )
+ 
+     def process(self, image):
+         """Process the input image through the simulation pipeline and return the final result."""
+--- a/src/spektrafilm/runtime/pipeline.py
++++ b/src/spektrafilm/runtime/pipeline.py
+@@ -27,7 +27,8 @@
+     and returns the value at the requested ``collect`` tap.
+     """
+ 
+-    def __init__(self, params, update_params=False):
++    def __init__(self, params, update_params=False, *, output_gamut_workspace_bytes=None):
++        self._output_gamut_workspace_bytes = output_gamut_workspace_bytes
+         self._params = copy.deepcopy(params)
+ 
+         self.camera = self._params.camera
+@@ -88,6 +89,7 @@
+             self.settings,
+             self._lut_service,
+             self._color_reference_service,
++            output_gamut_workspace_bytes=output_gamut_workspace_bytes,
+         )
+ 
+         # timing communication
+@@ -136,7 +138,8 @@
+ 
+     def update(self, params):
+         """Update params and re-initialize stages that depend on them."""
+-        self.__init__(params, update_params=True)
++        self.__init__(params, update_params=True,
++                      output_gamut_workspace_bytes=self._output_gamut_workspace_bytes)
+ 
+     def soft_update(self,
+                     exposure_compensation_ev=None,
+--- a/src/spektrafilm/runtime/stages/scanning.py
++++ b/src/spektrafilm/runtime/stages/scanning.py
+@@ -11,6 +11,7 @@
+ from spektrafilm.model.illuminants import standard_illuminant
+ from spektrafilm.utils.conversions import density_to_light
+ from spektrafilm.utils.gamut_compression import compress_rgb
++from spektrafilm.utils.bounded_gamut import compress_rgb_bounded, plan_gamut_workspace
+ 
+ 
+ class ScanningStage:
+@@ -25,7 +26,12 @@
+         settings_params,
+         lut_service,
+         color_reference_service,
++        *,
++        output_gamut_workspace_bytes=None,
+     ):
++        if output_gamut_workspace_bytes is not None:
++            plan_gamut_workspace(1, output_gamut_workspace_bytes)
++        self._output_gamut_workspace_bytes = output_gamut_workspace_bytes
+         self._film = film
+         self._film_render = film_render_params
+         self._print = print_profile
+@@ -91,10 +97,17 @@
+         # With both in place the output is in [0, 1] without a
+         # downstream clip; see n100 / n110 for the design and b40 for
+         # the smoothness analysis.
+-        rgb = compress_rgb(
+-            rgb, self._io.output_gamut_compress,
+-            output_color_space=self._io.output_color_space,
+-        )
++        if self._output_gamut_workspace_bytes is None:
++            rgb = compress_rgb(
++                rgb, self._io.output_gamut_compress,
++                output_color_space=self._io.output_color_space,
++            )
++        else:
++            rgb = compress_rgb_bounded(
++                rgb, self._io.output_gamut_compress,
++                output_color_space=self._io.output_color_space,
++                workspace_bytes=self._output_gamut_workspace_bytes,
++            )
+         return rgb
+ 
+     def _return_callable_cmy_to_log_xyz(self):

@@ -142,8 +142,11 @@ SLIPSTREAM_RAW_SAMPLE=/absolute/path/to/sample.ARW bun run test:raw
 
 The opt-in [development qualification harness](tools/development/README.md)
 exercises pinned darktable and Spektrafilm processes in an isolated CPU container.
-It requires an explicit local RAW fixture and writes private evidence outside the
-repository. Its host-side failure and cancellation regressions run with
+Real-camera probes require an explicit local RAW fixture and write private
+evidence outside the repository. The documented `engine-checks` image target
+uses synthetic inputs to check the pinned engine patch, exact image equivalence,
+and transform workspace model without a camera. Run it after an engine or bundle
+change. Its host-side failure and cancellation regressions run with
 `bun run test:development-runner` and are included in `test:fast` and `verify`.
 Successful probes do not establish processing support beyond their recorded
 checks; the governing qualification Issues own acceptance.

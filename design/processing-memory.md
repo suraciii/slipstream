@@ -61,14 +61,15 @@ the current policy when dispatched, without changing its captured image intent.
 
 ## Enforcement Boundary
 
-The supported Linux implementation uses cgroup v2 memory control. The Rust
-process supervisor owns the delegated processing subtree. The control service
-and supervisor must be outside the entire processing parent subtree, not merely
-outside an attempt leaf. Every shared finite ancestor must include qualified
-control-service and deployment headroom. A finite aggregate processing parent and a
-fresh child cgroup for each attempt provide an explicit ownership and accounting
-boundary. Controller nodes and process leaves must obey the cgroup v2 hierarchy
-rules; the supervisor must not manipulate a manager-owned ancestor.
+The supported Linux implementation uses cgroup v2 memory control through the
+operator-owned host launcher defined in [Processing Executor](processing-executor.md).
+The Rust control service and launcher remain outside the entire finite
+processing subtree. A fresh retained attempt slice accounts for the complete
+container, including bootstrap charges, while a protected workload leaf groups
+engine descendants for OOM termination. The executor contract owns manager
+boundaries, placement, private transport, and retained terminal accounting.
+Every shared finite ancestor must include qualified control-service and
+deployment headroom.
 
 Before a processing executable can allocate image data, its attempt must have:
 
@@ -106,18 +107,18 @@ deployment checks must distinguish these conditions from a task's own limit.
 
 ## Deployment Contract
 
-An operator-provisioned cgroup v2 subtree with the required controllers and
-restricted delegation is the selected execution mechanism. Startup must verify
-actual ownership, controller availability, effective ancestor limits, and
-permission to create, place, observe, terminate, and remove an owned test
-workload. Successfully writing a configuration value is insufficient.
+The selected execution mechanism is an operator-owned host launcher and a fresh
+pinned processing container per attempt, as defined by
+[Processing Executor](processing-executor.md). Supported Linux packaging uses
+systemd slices and Docker's systemd cgroup driver. The Web receives only the
+private bounded launcher socket, not Docker credentials, root privilege, or
+controller-write access. The worker receives none of those capabilities.
 
-Container deployments must provision and qualify this delegation explicitly.
-The supported setup must document the container namespace, UID mapping,
-controller ownership, and writable mount boundary. Giving the Web service an
-unrestricted Docker socket, a host-wide writable cgroup mount, or privileged
-container access is not the selected solution. Engine processes must not inherit
-the supervisor's controller-write capability.
+Startup must verify effective ancestor limits and permission to create, place,
+observe, terminate, and remove an owned test workload. Operator tooling must
+exercise the same container UID, namespace, retained accounting, finite storage,
+and controller boundaries used by real processing. Successfully writing a
+configuration value or opening a socket is insufficient.
 
 A deployment without this verified boundary must report processing unavailable
 and keep ordinary Library operations available. It must not fall back to an
@@ -171,6 +172,23 @@ validate a qualified contiguous layout, budget the normalization copy, or use
 bounded traversal. Verify one-pixel batches, boundaries on either side of a full
 batch, odd dimensions, short final batches, and supported non-contiguous inputs
 or their explicit rejection.
+
+The initial adapter supports only the pinned CAM16-UCS compression settings,
+viewing conditions, and sRGB output profile. It admits nonempty C-contiguous
+native float64 RGB arrays with shape `(..., 3)`. It rejects other compression
+settings, output spaces, dtypes, empty inputs, and strided layouts before
+allocating the destination. It must not fall back to an unbounded transform. Flattening must remain a view. One owned destination
+requires 24 bytes per pixel; caller-owned input remains unchanged, including
+read-only input. The caller reserves the destination and all other live stage
+data separately before granting this transform its temporary workspace.
+
+A versioned transform model maps a positive workspace byte allowance to a batch
+size in the qualified range. Its fixed term covers cold color-table construction
+and its per-pixel term covers simultaneous transform temporaries, including the
+returned batch. An allowance below the one-pixel requirement fails before image
+allocation. This allowance is a local algorithm contract, not total-attempt
+admission or a substitute for the kernel limit. The complete workspace planner
+must include library headroom and account for both the input and destination.
 
 Apply the same principle to eligible transfer-function encoding and numeric
 output conversion. Fuse or reuse buffers only where operation order, rounding,
@@ -293,13 +311,19 @@ Cooperative checks cannot stop opaque native allocations. A process address-spac
 limit measures a different resource and does not aggregate independent child
 processes. Neither replaces the selected workload boundary.
 
-### Deferred: Independently Managed Processing Containers
+### Selected: Restricted Host Launcher and Fresh Containers
 
-A separate container per attempt can provide the required isolation but adds a
-launcher authority and deployment/IPC lifecycle. It is an alternative if bounded
-cgroup delegation cannot be supported by the qualified packaging. Such a change
-requires an explicit revision of the execution and deployment contract; it must
-not silently introduce Docker control into the Web process.
+The host launcher enforces and observes each attempt outside its OOM boundary.
+Its operational journal does not own the Library or Export lifecycle. Retained
+systemd accounting closes the terminal-evidence gap when Docker removes a scope.
+[Processing Executor](processing-executor.md) defines the authority and lifecycle.
+
+### Rejected: Writable Delegation Inside the Web Container
+
+Safe in-container delegation would require additional migration authority,
+controller ownership, and engine identity separation. The supported Web image
+remains unprivileged and has no writable controller mount. An unavailable
+launcher cannot silently fall back to this different execution mechanism.
 
 ## References
 
