@@ -1,15 +1,15 @@
 use crate::{
-    AlbumBrowseTarget, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
-    AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations,
-    CaptureFact, LibraryRoot, NativeWorkBudget, NativeWorkPermit, OriginalCapability,
-    PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection, PhotoRead,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
-    PreviewSeed, PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult,
-    ScanSnapshot,
+    AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
+    AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
+    AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult, LibraryRoot,
+    NativeWorkBudget, NativeWorkPermit, OriginalCapability, PhotoAlbumMembership, PhotoQuery,
+    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
+    PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
-        DatabaseName, MutationError, Persistence, PersistenceError, StateDirectory, StateError,
-        expand_library_binding,
+        AlbumWriteError, DatabaseName, MutationError, Persistence, PersistenceError,
+        StateDirectory, StateError, expand_library_binding,
     },
 };
 use std::{
@@ -152,6 +152,7 @@ pub enum LibraryError {
     State(StateError),
     Persistence(PersistenceError),
     Mutation(MutationError),
+    AlbumWrite(AlbumWriteError),
     Query(PhotoQueryError),
     ScanBusy,
     Closed,
@@ -166,6 +167,7 @@ impl fmt::Display for LibraryError {
             Self::State(error) => error.fmt(formatter),
             Self::Persistence(error) => error.fmt(formatter),
             Self::Mutation(error) => error.fmt(formatter),
+            Self::AlbumWrite(error) => error.fmt(formatter),
             Self::Query(error) => error.fmt(formatter),
             Self::ScanBusy => formatter.write_str("Photo Library scan is busy"),
             Self::Closed => formatter.write_str("Photo Library is closed"),
@@ -198,6 +200,11 @@ impl From<PersistenceError> for LibraryError {
 impl From<MutationError> for LibraryError {
     fn from(value: MutationError) -> Self {
         Self::Mutation(value)
+    }
+}
+impl From<AlbumWriteError> for LibraryError {
+    fn from(value: AlbumWriteError) -> Self {
+        Self::AlbumWrite(value)
     }
 }
 impl From<PhotoQueryError> for LibraryError {
@@ -687,6 +694,39 @@ impl Library {
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Creates an Album and returns its first process-epoch mutation version.
+    pub async fn create_album_checked(
+        &self,
+        name: String,
+    ) -> Result<AlbumCreationResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.create_album_checked_receiver(name)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(AlbumWriteError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Applies one atomic, version-checked Album mutation and returns the
+    /// identity-bearing facts needed by a machine client response.
+    pub async fn mutate_album_checked(
+        &self,
+        mutation: CheckedAlbumMutation,
+    ) -> Result<CheckedAlbumMutationResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.mutate_album_checked_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(AlbumWriteError::Persistence))
             .map_err(Into::into)
     }
 

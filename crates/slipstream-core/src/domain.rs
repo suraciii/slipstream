@@ -504,6 +504,71 @@ pub struct AlbumMutationResult {
     pub already_member_count: usize,
 }
 
+/// A version-checked Album change for machine clients. Existing browser
+/// mutations remain separate so they cannot accidentally bypass this guard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedAlbumMutation {
+    Rename {
+        album_id: String,
+        name: String,
+        expected_version: String,
+    },
+    Delete {
+        album_id: String,
+        expected_version: String,
+    },
+    AddMembers {
+        album_id: String,
+        photo_ids: Vec<String>,
+        expected_version: String,
+    },
+    RemoveMembers {
+        album_id: String,
+        photo_ids: Vec<String>,
+        expected_version: String,
+    },
+    Reorder {
+        album_id: String,
+        photo_ids: Vec<String>,
+        expected_version: String,
+    },
+}
+
+/// Confirmed facts from one checked Album commit. Every summary and version is
+/// from the same serialized owner operation as the mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedAlbumMutationResult {
+    Renamed {
+        album: AlbumSummary,
+        renamed: bool,
+    },
+    Deleted {
+        album_id: String,
+    },
+    Added {
+        album: AlbumSummary,
+        added_photo_ids: Vec<String>,
+        already_member_photo_ids: Vec<String>,
+    },
+    Removed {
+        album: AlbumSummary,
+        removed_photo_ids: Vec<String>,
+        already_absent_photo_ids: Vec<String>,
+        saved_photo_id: Option<String>,
+    },
+    Reordered {
+        album: AlbumSummary,
+        ordered_photo_ids: Vec<String>,
+        reordered: bool,
+    },
+}
+
+/// Confirmed creation result, including the first process-epoch Album version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlbumCreationResult {
+    pub album: AlbumSummary,
+}
+
 /// The largest number of Photo identities admitted by one ordinary Album
 /// membership batch. The browser uses the same bound for its compensation
 /// record, so a retry cannot grow into an unbounded SQLite transaction.

@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant) -> ExitCode {
+async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant) -> u8 {
     let exit_code = result.exit_code;
     let (result_send, result_receive) = mpsc::sync_channel(1);
     let (completion_send, mut completion_receive) = tokio::sync::oneshot::channel();
@@ -19,7 +19,9 @@ async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant)
             .recv()
             .map_err(|_| io::Error::other("command result publisher stopped"))
             .and_then(|result: InvocationResult| {
-                io::stdout().lock().write_all(result.stdout.as_bytes())
+                let mut stdout = io::stdout().lock();
+                stdout.write_all(result.stdout.as_bytes())?;
+                stdout.flush()
             });
         let _ = completion_send.send(write_result);
     });
@@ -34,12 +36,12 @@ async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant)
         let scheduling_settlement = std::time::Instant::now() + Duration::from_millis(25);
         while std::time::Instant::now() < scheduling_settlement {
             match completion_receive.try_recv() {
-                Ok(result) => return ExitCode::from(if result.is_ok() { exit_code } else { 6 }),
+                Ok(result) => return if result.is_ok() { exit_code } else { 6 },
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     std::thread::yield_now();
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return ExitCode::from(6);
+                    return 6;
                 }
             }
         }
@@ -48,7 +50,7 @@ async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant)
 
     tokio::select! {
         completion = &mut completion_receive => {
-            ExitCode::from(if completion.is_ok_and(|result| result.is_ok()) { exit_code } else { 6 })
+            if completion.is_ok_and(|result| result.is_ok()) { exit_code } else { 6 }
         }
         _ = tokio::time::sleep_until(deadline) => {
             std::process::exit(if exit_code == 130 { 130 } else { 6 });
@@ -80,11 +82,13 @@ async fn main() -> ExitCode {
             let preferences = parse_error_preferences(&arguments);
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(preferences.timeout_seconds);
-            return publish_until(
-                invalid_invocation(preferences.output, error.to_string()),
-                deadline,
-            )
-            .await;
+            return ExitCode::from(
+                publish_until(
+                    invalid_invocation(preferences.output, error.to_string()),
+                    deadline,
+                )
+                .await,
+            );
         }
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
@@ -94,5 +98,10 @@ async fn main() -> ExitCode {
         Err(env::VarError::NotUnicode(_)) => Some(String::new()),
     };
     let result = invoke_until(cli, server_environment.as_deref(), deadline).await;
-    publish_until(result, deadline).await
+    let exit_code = publish_until(result, deadline).await;
+    // Terminal exit bounds executable teardown. Returning through the async
+    // runtime's destructor would join a still-blocked input worker held open
+    // on `--input -`, outliving the whole-command deadline the published
+    // envelope just reported.
+    std::process::exit(i32::from(exit_code))
 }
