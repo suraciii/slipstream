@@ -8,6 +8,8 @@ This reference owns exact configuration, framing, fields, and fixed fixture
 behavior. Implementations must validate the examples and reject unsupported
 syntax. Photo workloads remain unavailable until their source, bundle, resource,
 and artifact contracts are independently qualified.
+[Film Resource Measurement](processing-film-measurement.md) owns the separate
+version-2 operator measurement syntax; it does not change this native protocol.
 
 ## Operator Configuration
 
