@@ -50,7 +50,8 @@ def identity():
         if any(path.suffix in (".nbc", ".nbi") for path in Path(location).rglob("*")):
             raise RuntimeError("Packaged compiler cache is forbidden")
     files = [ROOT / name for name in (
-        "adapter.py", "contract.py", "package.py", "schema.json", "requirements.lock", "Dockerfile",
+        "adapter.py", "contract.py", "package.py", "schema.json", "envelope-schema.json",
+        "requirements.lock", "Dockerfile",
     )]
     files.append(Path("/usr/local/bin/slipstream-processing-film-worker"))
     extra_files = [path for path in sorted(EXTRAS.rglob("*")) if path.is_file()]

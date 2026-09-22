@@ -16,12 +16,34 @@ import numpy as np
 
 import adapter
 from contract import ContractError
-from test_contract import grant
+from test_contract import grant, qualified_grant
 from spektrafilm.utils.bounded_gamut import plan_gamut_workspace
 from spektrafilm.utils.bounded_output import plan_cctf_workspace, plan_jpeg_workspace
 
 
 class AdapterTests(unittest.TestCase):
+    def test_qualified_grant_reuses_producer_and_hashes_its_complete_plan(self):
+        value = qualified_grant()
+        adapter.check_plans(value)
+        produced = {"outcome": "produced", "stages": [], "pixels": {
+            "input_pixels_sha256": "5" * 64, "film_pixels_sha256": "6" * 64,
+            "width": 19, "height": 17, "icc_sha256": adapter.OUTPUT_ICC,
+        }}
+        with patch.object(adapter, "read_grant", return_value=value), \
+             patch.object(adapter, "produce", return_value=produced) as producer, \
+             patch.object(adapter, "write_producer") as writer, \
+             patch.object(adapter.sys, "argv", ["adapter.py"]):
+            self.assertEqual(adapter.main(), 0)
+        producer.assert_called_once_with(value)
+        result = writer.call_args.args[0]
+        self.assertEqual(result["version"], 2)
+        self.assertEqual(result["kind"], "film-producer-result")
+        self.assertEqual(result["plan_sha256"], adapter.digest(value["plan"]))
+        self.assertNotEqual(result["plan_sha256"], adapter.digest(grant()["plan"]))
+        changed = copy.deepcopy(value["plan"])
+        changed["evidence_sha256"] = "d" * 64
+        self.assertNotEqual(result["plan_sha256"], adapter.digest(changed))
+
     def test_opaque_codec_error_requires_real_storage_exhaustion_evidence(self):
         adapter.sys.path.insert(0, "/opt/probe")
         import film
@@ -182,7 +204,10 @@ class AdapterTests(unittest.TestCase):
                     self.assertEqual(asdict(calculate()), case["expected"])
 
     def test_grant_plan_mismatch_rejected_before_frame_allocation(self):
-        value = grant()
+        for value in (grant(), qualified_grant()):
+            self.assert_local_plan_rejections(value)
+
+    def assert_local_plan_rejections(self, value):
         with patch.object(np, "empty", side_effect=AssertionError("frame allocation")):
             adapter.check_plans(value)
             for name in ("gamut", "cctf", "jpeg"):

@@ -13,6 +13,7 @@ RUN uv --no-cache pip install --python /opt/runtime/bin/python --target /opt/fil
 COPY tools/processing/film/adapter.py tools/processing/film/contract.py \
      tools/processing/film/package.py tools/processing/film/Dockerfile /opt/film-measurement/
 COPY design/schemas/processing-film-measurement.schema.json /opt/film-measurement/schema.json
+COPY design/schemas/processing-film-envelope.schema.json /opt/film-measurement/envelope-schema.json
 RUN /opt/runtime/bin/python /opt/probe/bundle.py --verify
 
 FROM adapter-source AS film
@@ -33,6 +34,7 @@ COPY tools/processing/film/test_contract.py tools/processing/film/test_adapter.p
      tools/processing/film/local-plan-vectors.json tools/processing/film/references.json \
      /opt/film-checks/
 COPY design/schemas/processing-film-measurement-canonical-vectors.json /opt/film-checks/canonical-vectors.json
+COPY design/schemas/processing-film-envelope-vectors.json /opt/film-checks/envelope-vectors.json
 ENV PYTHONPATH=/opt/film-measurement:/opt/spektrafilm/src
 ENTRYPOINT ["/opt/runtime/bin/python", "-m", "unittest", "discover", "-s", "/opt/film-checks", "-v"]
 

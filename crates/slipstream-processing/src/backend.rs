@@ -54,6 +54,32 @@ fn observed_exit(state: &serde_json::Value) -> Result<Option<u8>> {
         .ok_or(ErrorCode::Uncertain)
 }
 
+fn checked_setup_observation(
+    record: &mut Record,
+    persist: &mut impl FnMut(&Record) -> Result<()>,
+    observation: Result<bool>,
+) -> Result<()> {
+    // An unavailable read or a bootstrap exit is not positive evidence of
+    // tampering. Only an observed unequal placement/limit invalidates context.
+    if observation? {
+        return Ok(());
+    }
+    if let Some(captured) = record.film.as_mut()
+        && captured.grant.plan.qualified().is_some()
+    {
+        captured.qualification_observation_valid = Some(false);
+        persist(record)?;
+    }
+    Err(ErrorCode::Unavailable)
+}
+
+fn storage_matches(stat: &libc::statfs, limits: &Limits) -> bool {
+    stat.f_type == 0x01021994
+        && stat.f_bsize > 0
+        && stat.f_blocks.checked_mul(stat.f_bsize as u64) == Some(limits.storage_bytes)
+        && stat.f_files == limits.storage_inodes
+}
+
 impl Backend {
     fn docker(&self, args: &[String]) -> Result<String> {
         let mut fixed = vec![
@@ -73,11 +99,17 @@ impl Backend {
     }
 
     fn worker(&self) -> &'static str {
-        if self.config.version == 2 {
+        if matches!(self.config.version, 2 | 3) {
             crate::film::WORKER
         } else {
             WORKER
         }
+    }
+
+    pub fn environment(&self) -> Result<crate::qualified::Environment> {
+        let version = self.docker(&strings(&["version", "--format", "{{json .Server}}"]))?;
+        let runtimes = self.docker(&strings(&["info", "--format", "{{json .Runtimes}}"]))?;
+        crate::environment::observe(&version, &runtimes)
     }
 
     pub fn verify_film_image(&self, image: &str, catalogue: &crate::film::Catalogue) -> Result<()> {
@@ -336,8 +368,9 @@ impl Backend {
             crate::slice::create(record.unit(), &expected, &record.receipt.limits)?;
         record.unit_invocation = Some(invocation);
         record.cgroup_inode = Some(inode);
-        self.read_limits(&expected, record.receipt.limits.memory_bytes)?;
         record.manager_pending = None;
+        let limits = self.limits_match(&expected, record.receipt.limits.memory_bytes);
+        checked_setup_observation(record, &mut persist, limits)?;
         record.receipt.evidence = Some(Evidence {
             peak_bytes: 0,
             exit_code: None,
@@ -459,6 +492,9 @@ impl Backend {
                 ),
             ]));
         }
+        if self.config.version == 3 {
+            args.extend(strings(&["--runtime", "runc"]));
+        }
         args.extend(strings(&[
             &record.image_id,
             record.receipt.workload.name(),
@@ -498,12 +534,10 @@ impl Backend {
             return Err(ErrorCode::Unavailable);
         }
         let scope = process_cgroup(live.pid)?;
-        if scope.parent() != Some(expected.as_path())
-            || scope.file_name().and_then(|value| value.to_str())
-                != Some(&format!("docker-{}.scope", record.container_id()?))
-        {
-            return Err(ErrorCode::Uncertain);
-        }
+        let placed = scope.parent() == Some(expected.as_path())
+            && scope.file_name().and_then(|value| value.to_str())
+                == Some(&format!("docker-{}.scope", record.container_id()?));
+        checked_setup_observation(record, &mut persist, Ok(placed))?;
         if !read(&scope.join("cgroup.events"))?
             .lines()
             .any(|line| line == "frozen 1")
@@ -524,20 +558,19 @@ impl Backend {
         // SAFETY: successful pidfd_open returns a fresh descriptor owned by this call.
         let pidfd = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
         let proc_path = PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
-        if read(&proc_path.join("cgroup"))?
-            != format!(
+        let placed = read(&proc_path.join("cgroup"))?
+            == format!(
                 "0::{}",
                 scope
                     .strip_prefix(CGROUP)
                     .map_err(|_| ErrorCode::Uncertain)?
                     .display()
             )
-            .replace("0::", "0::/")
-        {
-            return Err(ErrorCode::Uncertain);
-        }
+            .replace("0::", "0::/");
+        checked_setup_observation(record, &mut persist, Ok(placed))?;
         pidfd_alive(&pidfd)?;
-        self.read_limits(&scope, record.receipt.limits.memory_bytes)?;
+        let limits = self.limits_match(&scope, record.receipt.limits.memory_bytes);
+        checked_setup_observation(record, &mut persist, limits)?;
         let leaf = scope.join("workload");
         fs::create_dir(&leaf).map_err(|_| ErrorCode::Unavailable)?;
         write(&leaf.join("cgroup.procs"), &live.pid.to_string())?;
@@ -558,13 +591,12 @@ impl Backend {
         ] {
             write(&leaf.join(key), &value)?;
         }
-        self.read_limits(&leaf, record.receipt.limits.memory_bytes)?;
-        if read(&leaf.join("memory.oom.group"))? != "1"
-            || read(&leaf.join("cgroup.procs"))? != live.pid.to_string()
-            || process_cgroup(live.pid)? != leaf
-        {
-            return Err(ErrorCode::Unavailable);
-        }
+        let limits = self.limits_match(&leaf, record.receipt.limits.memory_bytes);
+        checked_setup_observation(record, &mut persist, limits)?;
+        let placed = read(&leaf.join("memory.oom.group"))? == "1"
+            && read(&leaf.join("cgroup.procs"))? == live.pid.to_string()
+            && process_cgroup(live.pid)? == leaf;
+        checked_setup_observation(record, &mut persist, Ok(placed))?;
         self.owned_container(record, record.container_id()?)?;
         Ok(gate)
     }
@@ -596,19 +628,23 @@ impl Backend {
     }
 
     fn read_limits(&self, path: &Path, memory: u64) -> Result<()> {
-        if read(&path.join("memory.max"))? != memory.to_string()
-            || read(&path.join("memory.swap.max"))? != "0"
-            || read(&path.join("cpu.max"))?
-                != format!(
+        if self.limits_match(path, memory)? {
+            Ok(())
+        } else {
+            Err(ErrorCode::Unavailable)
+        }
+    }
+
+    fn limits_match(&self, path: &Path, memory: u64) -> Result<bool> {
+        Ok(read(&path.join("memory.max"))? == memory.to_string()
+            && read(&path.join("memory.swap.max"))? == "0"
+            && read(&path.join("cpu.max"))?
+                == format!(
                     "{} {}",
                     self.config.limits().cpu_quota_us,
                     self.config.limits().cpu_period_us
                 )
-            || read(&path.join("pids.max"))? != self.config.limits().tasks.to_string()
-        {
-            return Err(ErrorCode::Unavailable);
-        }
-        Ok(())
+            && read(&path.join("pids.max"))? == self.config.limits().tasks.to_string())
     }
 
     fn owned_container(&self, record: &Record, id: &str) -> Result<Value> {
@@ -644,6 +680,7 @@ impl Backend {
             || value["HostConfig"]["NetworkMode"] != "none"
             || value["HostConfig"]["PidMode"] != ""
             || value["HostConfig"]["CgroupnsMode"] != "private"
+            || (self.config.version == 3 && value["HostConfig"]["Runtime"] != "runc")
             || value["HostConfig"]["CapDrop"] != serde_json::json!(["ALL"])
             || !value["HostConfig"]["CapAdd"].is_null()
             || value["HostConfig"]["SecurityOpt"] != serde_json::json!(["no-new-privileges:true"])
@@ -719,6 +756,41 @@ impl Backend {
         }
         self.read_limits(&leaf, record.receipt.limits.memory_bytes)
     }
+
+    pub fn verify_film_limits(&self, record: &Record) -> Result<()> {
+        let attempt = self.verify_unit(record)?;
+        let scope = attempt.join(format!("docker-{}.scope", record.container_id()?));
+        let leaf = scope.join("workload");
+        for path in [&attempt, &scope, &leaf] {
+            self.read_limits(path, record.receipt.limits.memory_bytes)?;
+        }
+        let storage = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(self.workspace(record).join("work"))
+            .map_err(|_| ErrorCode::Unavailable)?;
+        let info = read(Path::new(&format!(
+            "/proc/self/fdinfo/{}",
+            storage.as_raw_fd()
+        )))?;
+        let observed: Vec<_> = info
+            .lines()
+            .filter_map(|line| line.strip_prefix("mnt_id:").map(str::trim))
+            .collect();
+        if observed.len() != 1 || observed[0].parse::<u64>().ok() != record.mount_id {
+            return Err(ErrorCode::Uncertain);
+        }
+        // SAFETY: storage owns an open directory on the exact captured mount;
+        // fstatfs writes a correctly sized C structure and does not mutate it.
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(storage.as_raw_fd(), &mut stat) } != 0 {
+            return Err(ErrorCode::Unavailable);
+        }
+        if !storage_matches(&stat, &record.receipt.limits) {
+            return Err(ErrorCode::Unavailable);
+        }
+        self.audit_film_storage(record)
+    }
     pub fn pause_film(
         &self,
         record: &mut Record,
@@ -772,7 +844,11 @@ impl Backend {
             (
                 "input/input.tif",
                 captured.snapshot.as_ref(),
-                captured.grant.fixture.source_bytes(),
+                if captured.phase == crate::film::Phase::Preparing {
+                    0
+                } else {
+                    captured.grant.fixture.source_bytes()
+                },
             ),
         ] {
             if let Some(expected) = expected {
@@ -1329,6 +1405,36 @@ fn pidfd_alive(pidfd: &OwnedFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_capacity_checks_type_bytes_and_inodes_without_requiring_free_space() {
+        // SAFETY: statfs is a C POD value; this synthetic observation is never
+        // passed to the kernel and only its initialized count fields are read.
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        let limits = crate::film::limits(8 << 30);
+        stat.f_type = 0x01021994;
+        stat.f_bsize = 4096;
+        stat.f_blocks = limits.storage_bytes / 4096;
+        stat.f_files = limits.storage_inodes;
+        assert!(storage_matches(&stat, &limits));
+        for (field, value) in [
+            ("type", 0),
+            ("bytes", 1),
+            ("inodes", 1),
+            ("block-size", 0),
+            ("overflow", u64::MAX),
+        ] {
+            let mut changed = stat;
+            match field {
+                "type" => changed.f_type = value as _,
+                "bytes" | "overflow" => changed.f_blocks = value,
+                "inodes" => changed.f_files = value,
+                "block-size" => changed.f_bsize = value as _,
+                _ => unreachable!(),
+            }
+            assert!(!storage_matches(&changed, &limits), "{field}");
+        }
+    }
     #[test]
     fn created_or_never_started_containers_have_no_observed_execution_exit() {
         let mut state = serde_json::json!({"Status":"created", "StartedAt":"0001-01-01T00:00:00Z", "ExitCode":0});
@@ -1364,6 +1470,82 @@ mod tests {
         assert_eq!(
             require_unlimited_ancestor(&root, false),
             Err(ErrorCode::Unavailable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn observed_setup_drift_is_persisted_but_missing_limits_and_bootstrap_exits_are_not_tampering()
+    {
+        let root =
+            std::env::temp_dir().join(format!("slipstream-setup-limits-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let backend = Backend {
+            config: Config {
+                version: 3,
+                mode: "film-qualified-fixtures".into(),
+                instance: "0".repeat(32),
+                root: root.to_string_lossy().into_owned(),
+                socket: "/test.sock".into(),
+                peer_uid: 0,
+                image: format!("sha256:{}", "1".repeat(64)),
+                memory_bytes: 8 << 30,
+                receipt_retention_seconds: 1,
+            },
+        };
+        let mut record = crate::journal::tests::qualified_record(1);
+        let mut persisted = Vec::new();
+        let mut save = |record: &Record| {
+            persisted.push(serde_json::to_vec(record).unwrap());
+            Ok(())
+        };
+        let absent = backend.limits_match(&root, 8 << 30);
+        assert!(absent.is_err());
+        assert!(checked_setup_observation(&mut record, &mut save, absent).is_err());
+        assert_eq!(
+            record
+                .film
+                .as_ref()
+                .unwrap()
+                .qualification_observation_valid,
+            Some(true)
+        );
+        for (key, value) in [
+            ("memory.max", (8u64 << 30).to_string()),
+            ("memory.swap.max", "0".into()),
+            ("cpu.max", "400000 100000".into()),
+            ("pids.max", crate::film::limits(8 << 30).tasks.to_string()),
+        ] {
+            fs::write(root.join(key), value).unwrap();
+        }
+        let unchanged = backend.limits_match(&root, 8 << 30);
+        assert_eq!(unchanged, Ok(true));
+        checked_setup_observation(&mut record, &mut save, unchanged).unwrap();
+        assert_eq!(
+            record
+                .film
+                .as_ref()
+                .unwrap()
+                .qualification_observation_valid,
+            Some(true)
+        );
+        fs::write(root.join("memory.max"), (7u64 << 30).to_string()).unwrap();
+        let drift = backend.limits_match(&root, 8 << 30);
+        assert_eq!(drift, Ok(false));
+        assert_eq!(
+            checked_setup_observation(&mut record, &mut save, drift),
+            Err(ErrorCode::Unavailable)
+        );
+        assert_eq!(persisted.len(), 1);
+        let recovered: Record = serde_json::from_slice(&persisted[0]).unwrap();
+        assert_eq!(
+            recovered.film.unwrap().qualification_observation_valid,
+            Some(false)
+        );
+        let mut record = crate::journal::tests::qualified_record(1);
+        assert_eq!(
+            checked_setup_observation(&mut record, &mut |_| Err(ErrorCode::Uncertain), Ok(false)),
+            Err(ErrorCode::Uncertain)
         );
         fs::remove_dir_all(root).unwrap();
     }

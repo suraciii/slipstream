@@ -183,7 +183,10 @@ impl Fixture {
                 generator,
                 pattern,
                 seed,
-            } if generator != "linear-rgb-f32-v1" || (*pattern != Pattern::Noise && *seed != 0) => {
+            } if generator != "linear-rgb-f32-v1"
+                || *seed > u32::MAX as u64
+                || (*pattern != Pattern::Noise && *seed != 0) =>
+            {
                 return Err(ErrorCode::InvalidRequest);
             }
             _ => {}
@@ -683,7 +686,7 @@ pub struct CanonicalManifest {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct EngineGrant {
+pub struct EngineGrant<P = Plan> {
     pub version: u8,
     pub kind: String,
     pub launch_id: String,
@@ -695,12 +698,50 @@ pub struct EngineGrant {
     pub fixture: Fixture,
     pub input_icc_sha256: String,
     pub output_icc_sha256: String,
-    pub plan: Plan,
+    pub plan: P,
 }
-impl EngineGrant {
-    pub fn validate(&self) -> Result<()> {
-        if self.version != 2
-            || self.kind != "film-measurement-grant"
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExecutionPlan {
+    Measurement(Plan),
+    Qualified(crate::qualified::Plan),
+}
+pub type RuntimeGrant = EngineGrant<ExecutionPlan>;
+
+impl ExecutionPlan {
+    pub fn measurement(&self) -> Option<&Plan> {
+        match self {
+            Self::Measurement(plan) => Some(plan),
+            Self::Qualified(_) => None,
+        }
+    }
+    pub fn qualified(&self) -> Option<&crate::qualified::Plan> {
+        match self {
+            Self::Qualified(plan) => Some(plan),
+            Self::Measurement(_) => None,
+        }
+    }
+}
+impl<P> EngineGrant<P> {
+    pub fn map_plan<Q>(self, convert: impl FnOnce(P) -> Q) -> EngineGrant<Q> {
+        EngineGrant {
+            version: self.version,
+            kind: self.kind,
+            launch_id: self.launch_id,
+            manifest: self.manifest,
+            bundle: self.bundle,
+            numerical_bundle: self.numerical_bundle,
+            recipe: self.recipe,
+            procedure: self.procedure,
+            fixture: self.fixture,
+            input_icc_sha256: self.input_icc_sha256,
+            output_icc_sha256: self.output_icc_sha256,
+            plan: convert(self.plan),
+        }
+    }
+    fn validate_header(&self, version: u8, kind: &str) -> Result<()> {
+        if self.version != version
+            || self.kind != kind
             || !hex(&self.launch_id, 32)
             || self.procedure != PROCEDURE
             || [
@@ -717,27 +758,44 @@ impl EngineGrant {
             return Err(ErrorCode::InvalidRequest);
         }
         self.fixture.validate()?;
-        let n = geometry(self.fixture.width, self.fixture.height)?;
-        if self.plan.formula != FORMULA
-            || self.plan.width != self.fixture.width
-            || self.plan.height != self.fixture.height
-            || self.plan.source_cache_bytes != self.fixture.source_bytes()
-            || self.plan.storage_reserve_bytes != STORAGE
-            || self.plan.gamut
-                != local_plan(
-                    "cam16ucs-srgb-f64-v1",
-                    n,
-                    self.fixture.width,
-                    GAMUT_ALLOWANCE,
-                )?
-            || self.plan.cctf
-                != local_plan("srgb-cctf-f64-v1", n, self.fixture.width, GAMUT_ALLOWANCE)?
-            || self.plan.jpeg
-                != local_plan("jpeg-uint8-rows-v1", n, self.fixture.width, JPEG_ALLOWANCE)?
+        Ok(())
+    }
+}
+impl EngineGrant<Plan> {
+    pub fn validate(&self) -> Result<()> {
+        self.validate_header(2, "film-measurement-grant")?;
+        self.plan.validate(&self.fixture)
+    }
+}
+impl RuntimeGrant {
+    pub fn validate(&self) -> Result<()> {
+        match &self.plan {
+            ExecutionPlan::Measurement(plan) => {
+                self.validate_header(2, "film-measurement-grant")?;
+                plan.validate(&self.fixture)
+            }
+            ExecutionPlan::Qualified(plan) => {
+                self.validate_header(3, "film-qualified-grant")?;
+                plan.validate(&self.fixture)
+            }
+        }
+    }
+}
+impl Plan {
+    fn validate(&self, fixture: &Fixture) -> Result<()> {
+        let n = geometry(fixture.width, fixture.height)?;
+        if self.formula != FORMULA
+            || self.width != fixture.width
+            || self.height != fixture.height
+            || self.source_cache_bytes != fixture.source_bytes()
+            || self.storage_reserve_bytes != STORAGE
+            || self.gamut != local_plan("cam16ucs-srgb-f64-v1", n, fixture.width, GAMUT_ALLOWANCE)?
+            || self.cctf != local_plan("srgb-cctf-f64-v1", n, fixture.width, GAMUT_ALLOWANCE)?
+            || self.jpeg != local_plan("jpeg-uint8-rows-v1", n, fixture.width, JPEG_ALLOWANCE)?
         {
             return Err(ErrorCode::InvalidRequest);
         }
-        if let Prediction::Unqualified { missing, .. } = &self.plan.prediction {
+        if let Prediction::Unqualified { missing, .. } = &self.prediction {
             let keys: BTreeSet<_> = missing
                 .iter()
                 .map(|entry| format!("{:?}:{:?}", entry.stage, entry.term))
@@ -908,7 +966,7 @@ impl WorkerResult {
             Self::Failure(v) => v.detail,
         }
     }
-    pub fn validate(&self, grant: &EngineGrant) -> Result<()> {
+    pub fn validate<P: Serialize>(&self, grant: &EngineGrant<P>) -> Result<()> {
         let (version, kind, launch, manifest, plan) = match self {
             Self::Success(v) => (
                 v.version,
@@ -1012,7 +1070,11 @@ fn image(value: &str) -> bool {
     id.is_some_and(|id| hex(id, 64))
 }
 
-fn metadata_file<T: DeserializeOwned>(path: &Path, limit: usize, expected: &str) -> Result<T> {
+pub(crate) fn metadata_file<T: DeserializeOwned>(
+    path: &Path,
+    limit: usize,
+    expected: &str,
+) -> Result<T> {
     let file = File::options()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
@@ -1154,8 +1216,11 @@ pub struct FileIdentity {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Captured {
     pub catalogue: String,
+    // The historical internal key remains readable for v2 registries. The
+    // validated grant variant selects component-model or qualified-envelope
+    // identity; v3 public receipts always name it `envelope`.
     pub resource_model: String,
-    pub grant: EngineGrant,
+    pub grant: RuntimeGrant,
     pub phase: Phase,
     pub stage_release_intent: bool,
     pub engine_release_intent: bool,
@@ -1165,8 +1230,49 @@ pub(crate) struct Captured {
     pub result: Option<WorkerResult>,
     #[serde(deserialize_with = "required")]
     pub detail: Option<Detail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_failure: Option<crate::qualified::QualificationFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_observation_valid: Option<bool>,
 }
 impl Captured {
+    pub fn qualified_receipt(
+        &self,
+        common: &crate::protocol::Receipt,
+    ) -> crate::qualified::Receipt {
+        crate::qualified::Receipt {
+            incarnation: common.incarnation.clone(),
+            sequence: common.sequence,
+            workload: Workload {
+                kind: "film-fixture".into(),
+                fixture_id: self.grant.fixture.id.clone(),
+            },
+            policy: common.policy.clone(),
+            bundle: common.bundle.clone(),
+            catalogue: self.catalogue.clone(),
+            envelope: self.resource_model.clone(),
+            manifest: self.grant.manifest.clone(),
+            state: common.state,
+            phase: self.phase,
+            cancellation_requested: common.cancellation_requested,
+            accepted_at_unix_ms: common.accepted_at_unix_ms,
+            deadline_unix_ms: common.deadline_unix_ms,
+            outcome: common.outcome,
+            detail: self.detail,
+            runtime: common.runtime.clone(),
+            limits: common.limits.clone(),
+            evidence: common.evidence.clone(),
+            plan: self
+                .grant
+                .plan
+                .qualified()
+                .expect("validated qualified capture")
+                .clone(),
+            result: self.result.clone(),
+            cleanup: common.cleanup,
+            qualification_failure: self.qualification_failure,
+        }
+    }
     pub fn receipt(&self, common: &crate::protocol::Receipt) -> Receipt {
         Receipt {
             incarnation: common.incarnation.clone(),
@@ -1190,14 +1296,19 @@ impl Captured {
             runtime: common.runtime.clone(),
             limits: common.limits.clone(),
             evidence: common.evidence.clone(),
-            plan: self.grant.plan.clone(),
+            plan: self
+                .grant
+                .plan
+                .measurement()
+                .expect("validated measurement capture")
+                .clone(),
             result: self.result.clone(),
             cleanup: common.cleanup,
         }
     }
 }
 
-fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+pub(crate) fn required<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
 ) -> std::result::Result<Option<T>, D::Error> {
     Option::deserialize(d)
@@ -1212,7 +1323,7 @@ pub(crate) fn test_grant() -> EngineGrant {
         source: Source::SyntheticRgb {
             generator: "linear-rgb-f32-v1".into(),
             pattern: Pattern::Noise,
-            seed: u64::MAX,
+            seed: u32::MAX as u64,
         },
         reference: Reference {
             input_pixels_sha256: "b".repeat(64),
@@ -1253,6 +1364,88 @@ pub(crate) fn test_grant() -> EngineGrant {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+    #[test]
+    fn shared_runtime_grant_preserves_each_authority_and_full_plan_hash() {
+        let measurement = test_grant();
+        let original = canonical(&measurement).unwrap();
+        let runtime = measurement.clone().map_plan(ExecutionPlan::Measurement);
+        assert_eq!(original, canonical(&runtime).unwrap());
+        runtime.validate().unwrap();
+        let fixture = measurement.fixture.clone();
+        let qualified = crate::qualified::Plan::calculate(
+            &fixture,
+            &crate::qualified::Case::Qualified {
+                fixture_id: fixture.id.clone(),
+                empirical_ceiling_bytes: 1 << 30,
+                safety_reserve_bytes: 1 << 20,
+                evidence_sha256: "a".repeat(64),
+            },
+            &"b".repeat(64),
+            &"c".repeat(64),
+            8 << 30,
+        )
+        .unwrap();
+        let mut grant = measurement
+            .clone()
+            .map_plan(|_| ExecutionPlan::Qualified(qualified));
+        grant.version = 3;
+        grant.kind = "film-qualified-grant".into();
+        grant.validate().unwrap();
+        let bytes = canonical(&grant).unwrap();
+        assert!(parse::<EngineGrant>(&bytes, FRAME).is_err());
+        let parsed: RuntimeGrant = parse(&bytes, FRAME).unwrap();
+        assert_eq!(parsed, grant);
+        assert_eq!(hash(&parsed.plan).unwrap(), hash(&grant.plan).unwrap());
+        assert_ne!(
+            hash(&parsed.plan).unwrap(),
+            hash(&measurement.plan).unwrap()
+        );
+        let mut changed = grant.clone();
+        changed.version = 2;
+        assert_eq!(changed.validate(), Err(ErrorCode::InvalidRequest));
+        let mut changed = grant.clone();
+        changed.kind = "film-measurement-grant".into();
+        assert_eq!(changed.validate(), Err(ErrorCode::InvalidRequest));
+        let mut changed = grant.clone();
+        if let ExecutionPlan::Qualified(plan) = &mut changed.plan {
+            plan.known_required_bytes -= 1;
+        }
+        assert_eq!(changed.validate(), Err(ErrorCode::InvalidRequest));
+        let mut result = WorkerResult::Failure(WorkerFailure {
+            version: 2,
+            kind: "film-measurement-result".into(),
+            outcome: Outcome::EngineFailed,
+            detail: None,
+            phase: Phase::Engine,
+            launch_id: grant.launch_id.clone(),
+            manifest: grant.manifest.clone(),
+            plan_sha256: hash(&grant.plan).unwrap(),
+            execution_us: 1,
+        });
+        result.validate(&grant).unwrap();
+        if let WorkerResult::Failure(failure) = &mut result {
+            failure.plan_sha256 = hash(&measurement.plan).unwrap();
+        }
+        assert_eq!(result.validate(&grant), Err(ErrorCode::InvalidRequest));
+    }
+    #[test]
+    fn synthetic_seed_matches_the_bounded_catalogue_contract() {
+        let mut fixture = test_grant().fixture;
+        fixture.validate().unwrap();
+        if let Source::SyntheticRgb { seed, .. } = &mut fixture.source {
+            *seed = u32::MAX as u64 + 1;
+        }
+        assert_eq!(fixture.validate(), Err(ErrorCode::InvalidRequest));
+        if let Source::SyntheticRgb { seed, pattern, .. } = &mut fixture.source {
+            *seed = 1;
+            *pattern = Pattern::Gradient;
+        }
+        assert_eq!(fixture.validate(), Err(ErrorCode::InvalidRequest));
+        if let Source::SyntheticRgb { seed, .. } = &mut fixture.source {
+            *seed = 0;
+        }
+        fixture.validate().unwrap();
+    }
     #[test]
     fn canonical_encoding_matches_shared_reviewed_vectors() {
         let vectors: serde_json::Value = serde_json::from_str(include_str!(

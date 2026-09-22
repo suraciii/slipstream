@@ -63,7 +63,7 @@ impl Config {
     }
 
     pub(crate) fn limits(&self) -> Limits {
-        if self.version == 2 {
+        if matches!(self.version, 2 | 3) {
             crate::film::limits(self.memory_bytes)
         } else {
             Limits::new(self.memory_bytes)
@@ -220,6 +220,10 @@ pub enum ErrorCode {
     Uncertain,
     IncompatibleCatalogue,
     IncompatibleResourceModel,
+    IncompatibleEnvelope,
+    OutsideEnvelope,
+    UnqualifiedEnvelope,
+    ResourceBudget,
     UnknownFixture,
     UnsupportedFixture,
 }
@@ -276,6 +280,8 @@ pub enum ResultBody {
     },
     #[serde(untagged)]
     Film(Box<crate::film::ResultBody>),
+    #[serde(untagged)]
+    Qualified(Box<crate::qualified::ResultBody>),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]

@@ -75,17 +75,17 @@ pub fn serve(executor: Arc<Executor>) -> Result<(), ErrorCode> {
                     return Err(ErrorCode::Unauthorized);
                 }
                 let bytes = frame(&mut stream, REQUEST_BYTES)?;
-                if executor.is_film() {
-                    executor.handle_film(crate::film::Request::parse(&bytes)?, pid)
-                } else {
-                    executor.cancel(Request::parse(&bytes)?, pid)
+                match executor.config().version {
+                    3 => executor.handle_qualified(crate::qualified::Request::parse(&bytes)?, pid),
+                    2 => executor.handle_film(crate::film::Request::parse(&bytes)?, pid),
+                    _ => executor.cancel(Request::parse(&bytes)?, pid),
                 }
             })();
             let mut response = Response::from(result);
             if executor.is_film() {
                 match &mut response {
                     Response::Result { version, .. } | Response::Error { version, .. } => {
-                        *version = 2
+                        *version = executor.config().version
                     }
                 }
             }
