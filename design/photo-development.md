@@ -34,8 +34,10 @@ objects remain behind processing adapters.
 ## Application Boundary
 
 The existing Rust modular monolith must own development lifecycle. Native
-processing must run in supervised child processes: darktable-cli for development
-and a narrow Python entry point calling the Spektrafilm runtime for simulation.
+processing must run in fresh supervised attempt containers: darktable-cli for
+development and a narrow Python entry point calling the Spektrafilm runtime for
+simulation. [Processing Executor](processing-executor.md) owns the private host
+launcher, execution receipts, and retained resource boundary.
 The Python process must not expose an independent public API or start the GUI.
 
 The processing capability must be opt-in and report engine, bundle, input and
@@ -48,7 +50,7 @@ headless processing. Qualification must run without display variables and GPU
 device access. Installation of GUI dependencies is not proof that a display is
 required, nor proof that every native import is headless-safe.
 
-The first execution model uses isolated processes per job. A persistent worker
+The first execution model uses a fresh container and engine processes per attempt. A persistent worker
 may replace repeated startup only after measured startup/JIT cost justifies it
 and equivalent reset, resource, cancellation and source-safety semantics are
 proven. It must not silently become an additional service-owned Library.
@@ -160,13 +162,13 @@ once against the actual completion state; it cannot undo an already successful
 publication.
 
 Queued work must survive restart. During startup, reconcile unfinished running
-work and owned child processes. Mark interrupted work failed with an actionable
+work and launcher-owned execution receipts. Mark interrupted work failed with an actionable
 reason unless its fully validated published artifact can be recovered. Do not
 blindly repeat an expensive interrupted operation or claim success from a
 partial output. Explicit retry creates a new attempt on the captured snapshot
 and validates source/bundle availability again.
 
-Each attempt owns its temporary files and process group. Write to temporary
+Each attempt owns its temporary files and isolated workload subtree. Write to temporary
 output, validate its type, dimensions, profile and expected identity, then
 atomically publish. Database/artifact recovery must handle a crash between file
 publication and state commit by validating and reconciling the recorded attempt.

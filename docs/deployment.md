@@ -1,11 +1,42 @@
 # Deployment
 
-Slipstream ships as one Docker image containing the Rust server, the built Web
+The Library service ships as one Docker image containing the Rust server, the built Web
 application, native runtime libraries, and `curl` for the `/healthz` check.
 There is no Node, Bun, Sharp, or Node-API runtime in the image. This guide
 defines the supported Linux-local Docker deployment contract. Backup,
 acceptance, and rollback step-by-step procedures are operator material and live
 with the deployment, not in this repository.
+
+## Optional Photo Processing
+
+Photo processing requires a separate digest-pinned engine image and an
+operator-owned host launcher. The supported host must provide cgroup v2,
+systemd, and a local Docker daemon using the systemd cgroup driver. The launcher
+is a privileged component trusted by the operator. The Web container receives
+only its private Unix socket; it must not receive the Docker socket, host root
+privilege, or a writable cgroup mount.
+
+The operator must configure an explicit finite processing allocation, a
+qualified control-service allowance, bounded private workspace storage, and
+finite receipt retention. The launcher and Library service must remain outside
+the entire processing allocation. The launcher must retain accounting until
+attempt settlement and reconcile unfinished ownership on restart.
+
+Enabling this capability requires operator tooling to exercise the same launch,
+limit, OOM, cancellation, restart, storage-exhaustion, and cleanup path used by
+real processing. Verify Library operations during a contained processing failure
+and a successful subsequent attempt. A healthy engine image or an open launcher
+socket alone does not establish readiness. Missing or unqualified processing
+must leave ordinary Library operations available. Processing capability and
+source/bundle availability must be reported separately from `/healthz`.
+
+[Processing Executor](../design/processing-executor.md) defines the private
+execution contract. The
+[qualification protocol reference](../design/processing-executor-protocol.md)
+defines the explicit fixture-only launcher configuration and command. This mode
+must report photo processing unavailable. Processing opt-in must be explicit in the supported operator
+entry point; alternate Compose overrides and a privileged Web container are not
+supported ways to enable it.
 
 ## Configuration
 
