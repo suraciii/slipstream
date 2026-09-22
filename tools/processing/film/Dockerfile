@@ -20,7 +20,7 @@ COPY --from=build /src/target/release/slipstream-processing-film-worker /usr/loc
 COPY LICENSE THIRD-PARTY-NOTICES.md RUST-LICENSES.html /usr/share/doc/slipstream/
 RUN /opt/runtime/bin/python /opt/film-measurement/package.py
 LABEL slipstream.processing.film.numerical_bundle="eeaae45f9cd198d8362cc9b5262e8da53b36ef11d5eefc3441bb0beb5b7aa649" \
-      slipstream.processing.film.recipe="a2dabe2581df7ed97b2af2ffe9bd4a80e579e0f49fd9627af49d86267a33ea7d" \
+      slipstream.processing.film.recipe="b1429da34fb4cd8ef08d1140da946f8a23ee8b68de1d66a58bd3797242527dd9" \
       slipstream.processing.film.input_icc_sha256="7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe" \
       slipstream.processing.film.output_icc_sha256="b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21" \
       slipstream.processing.film.procedure="film-once-empty-cache-v1"

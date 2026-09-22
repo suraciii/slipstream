@@ -22,6 +22,22 @@ from spektrafilm.utils.bounded_output import plan_cctf_workspace, plan_jpeg_work
 
 
 class AdapterTests(unittest.TestCase):
+    def test_packaged_recipe_matches_real_simulator_manifest(self):
+        adapter.sys.path.insert(0, "/opt/probe")
+        from film import make_simulator
+        from contract import NUMERICAL_BUNDLE
+
+        _, recipe = make_simulator()
+        packaged_bundle = Path("/opt/processing-bundle.json").read_bytes()
+        self.assertEqual(hashlib.sha256(packaged_bundle).hexdigest(), NUMERICAL_BUNDLE)
+        self.assertEqual(recipe["processing_bundle"], json.loads(packaged_bundle))
+        adapter.check_recipe(recipe)
+
+        changed = copy.deepcopy(recipe)
+        changed["camera"]["exposure_compensation_ev"] = 1.0
+        with self.assertRaises(ContractError):
+            adapter.check_recipe(changed)
+
     def test_opaque_codec_error_requires_real_storage_exhaustion_evidence(self):
         adapter.sys.path.insert(0, "/opt/probe")
         import film
