@@ -7826,7 +7826,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
         .scheduler()
         .cache()
         .root()
-        .join("rust-vips-v1")
+        .join("rust-vips-v2")
         .join(format!("{key}.jpg"));
     fs::write(&cache_path, marker_complete_corrupt_jpeg(90, 45)).unwrap();
     let repaired = send(

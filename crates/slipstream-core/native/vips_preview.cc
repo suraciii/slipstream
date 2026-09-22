@@ -1,6 +1,8 @@
 #include "vips_preview.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -83,6 +85,25 @@ void RemoveOrientation(VipsImage *image) {
   vips_image_remove(image, "exif-Orientation");
 }
 
+int ValidJpegExifOrientation(VipsImage *image) {
+  // Do not use vips_image_get_orientation(): it returns 1 when orientation is
+  // absent or out of range, which would incorrectly suppress the RAW fallback.
+  for (const char *field : {"exif-ifd0-Orientation", "exif-Orientation"}) {
+    if (vips_image_get_typeof(image, field) == 0) continue;
+    const char *text = nullptr;
+    if (vips_image_get_string(image, field, &text) != 0 || text == nullptr)
+      continue;
+    errno = 0;
+    char *end = nullptr;
+    const long value = std::strtol(text, &end, 10);
+    while (end != nullptr && std::isspace(static_cast<unsigned char>(*end))) ++end;
+    const bool complete = end != nullptr && (*end == '\0' || *end == '(');
+    if (errno == 0 && end != text && complete && value >= 1 && value <= 8)
+      return static_cast<int>(value);
+  }
+  return 0;
+}
+
 bool PixelCountWithin(const VipsImage *image, std::uint64_t maximum_pixels) {
   const auto width = static_cast<std::uint64_t>(vips_image_get_width(image));
   const auto height = static_cast<std::uint64_t>(vips_image_get_height(image));
@@ -133,12 +154,14 @@ extern "C" int32_t slipstream_vips_initialize() noexcept {
 }
 
 extern "C" int32_t slipstream_vips_process_jpeg(
-    const std::uint8_t *bytes, size_t length, std::uint32_t target_long_edge,
-    std::uint64_t maximum_input_bytes, std::uint64_t maximum_pixels,
-    std::uint64_t maximum_output_bytes, SlipstreamVipsResult *result) noexcept {
+    const std::uint8_t *bytes, size_t length, std::int32_t container_orientation,
+    std::uint32_t target_long_edge, std::uint64_t maximum_input_bytes,
+    std::uint64_t maximum_pixels, std::uint64_t maximum_output_bytes,
+    SlipstreamVipsResult *result) noexcept {
   ResetResult(result);
   if (result == nullptr || bytes == nullptr || length == 0 || target_long_edge == 0 ||
-      maximum_input_bytes == 0 || maximum_pixels == 0 || maximum_output_bytes == 0)
+      maximum_input_bytes == 0 || maximum_pixels == 0 || maximum_output_bytes == 0 ||
+      container_orientation < 0 || container_orientation > 8)
     return SLIPSTREAM_VIPS_INTERNAL_ERROR;
   if (static_cast<std::uint64_t>(length) > maximum_input_bytes ||
       static_cast<std::uint64_t>(length) > kMaximumInputBytes)
@@ -188,6 +211,14 @@ extern "C" int32_t slipstream_vips_process_jpeg(
     input = decoded;
   }
 
+  const int jpeg_orientation = ValidJpegExifOrientation(input);
+  // Remove libvips' synthesized direction (including its default for invalid
+  // EXIF), then install exactly the direction selected by precedence.
+  RemoveOrientation(input);
+  const int selected_orientation =
+      jpeg_orientation != 0 ? jpeg_orientation : container_orientation;
+  if (selected_orientation != 0)
+    vips_image_set_int(input, VIPS_META_ORIENTATION, selected_orientation);
   if (vips_autorot(input, &upright, nullptr) != 0 || upright == nullptr) {
     cleanup();
     return ErrorStatus();

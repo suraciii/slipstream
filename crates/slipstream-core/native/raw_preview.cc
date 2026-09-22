@@ -161,13 +161,14 @@ void ResetResult(SlipstreamPreviewResult *result) {
   result->candidate_index = -1;
   result->width = 0;
   result->height = 0;
+  result->container_orientation = 0;
   result->bytes = nullptr;
   result->length = 0;
 }
 
 SlipstreamPreviewStatus CopyResult(const std::vector<std::uint8_t> &bytes,
                                    std::uint32_t width, std::uint32_t height,
-                                   int candidate,
+                                   int candidate, int container_orientation,
                                    SlipstreamPreviewResult *result) {
   if (bytes.empty() || bytes.size() > std::numeric_limits<std::uint64_t>::max()) {
     return SLIPSTREAM_PREVIEW_INTERNAL_ERROR;
@@ -178,6 +179,7 @@ SlipstreamPreviewStatus CopyResult(const std::vector<std::uint8_t> &bytes,
   result->candidate_index = candidate;
   result->width = width;
   result->height = height;
+  result->container_orientation = container_orientation;
   result->bytes = owned;
   result->length = bytes.size();
   return SLIPSTREAM_PREVIEW_OK;
@@ -227,6 +229,20 @@ struct LibRawCloser {
 };
 using LibRawHandle = std::unique_ptr<libraw_data_t, LibRawCloser>;
 
+int ExifOrientationForLibRawFlip(int flip) {
+  switch (flip) {
+  case 0: return 1;
+  case 1: return 2;
+  case 2: return 4;
+  case 3: return 3;
+  case 4: return 5;
+  case 5: return 8;
+  case 6: return 6;
+  case 7: return 7;
+  default: return 0;
+  }
+}
+
 struct Selection {
   int index = -1;
   std::uint32_t width = 0;
@@ -270,7 +286,7 @@ extern "C" int32_t slipstream_inspect_jpeg_fd(
     if (!DecodeJpeg(bytes.data(), bytes.size(), maximum_bytes, maximum_pixels,
                     width, height))
       return SLIPSTREAM_PREVIEW_MALFORMED;
-    return CopyResult(bytes, width, height, -1, result);
+    return CopyResult(bytes, width, height, -1, 0, result);
   } catch (const std::bad_alloc &) {
     return SLIPSTREAM_PREVIEW_RESOURCE_LIMIT;
   } catch (...) {
@@ -309,6 +325,9 @@ extern "C" int32_t slipstream_extract_embedded_jpeg_fd(
       return StatusForLibRawError(open_error);
     }
 
+    // Capture the decoded container transform from this metadata open. Candidate
+    // tflip is deliberately not an orientation authority.
+    const int container_orientation = ExifOrientationForLibRawFlip(raw->sizes.flip);
     Selection selection;
     SlipstreamPreviewStatus strongest_failure = SLIPSTREAM_PREVIEW_NO_USABLE_PREVIEW;
     const int count = std::clamp(raw->thumbs_list.thumbcount, 0,
@@ -349,7 +368,7 @@ extern "C" int32_t slipstream_extract_embedded_jpeg_fd(
       return SLIPSTREAM_PREVIEW_NO_USABLE_PREVIEW;
     }
     return CopyResult(selection.bytes, selection.width, selection.height,
-                      selection.index, result);
+                      selection.index, container_orientation, result);
   } catch (const std::bad_alloc &) {
     if (duplicate >= 0) close(duplicate);
     return SLIPSTREAM_PREVIEW_RESOURCE_LIMIT;

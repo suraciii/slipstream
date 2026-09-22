@@ -124,7 +124,7 @@ mod tests {
         );
         assert_eq!(
             contract["algorithmVersionGate"]["selectedRustVersion"],
-            "rust-vips-v1"
+            "rust-vips-v2"
         );
         assert_eq!(contract["targets"], serde_json::json!([512, 2560]));
         assert_eq!(

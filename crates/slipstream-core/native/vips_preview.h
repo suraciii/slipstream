@@ -32,9 +32,10 @@ typedef struct SlipstreamVipsResult {
 
 int32_t slipstream_vips_initialize(void) noexcept;
 int32_t slipstream_vips_process_jpeg(
-    const uint8_t *bytes, size_t length, uint32_t target_long_edge,
-    uint64_t maximum_input_bytes, uint64_t maximum_pixels,
-    uint64_t maximum_output_bytes, SlipstreamVipsResult *result) noexcept;
+    const uint8_t *bytes, size_t length, int32_t container_orientation,
+    uint32_t target_long_edge, uint64_t maximum_input_bytes,
+    uint64_t maximum_pixels, uint64_t maximum_output_bytes,
+    SlipstreamVipsResult *result) noexcept;
 void slipstream_vips_result_free(SlipstreamVipsResult *result) noexcept;
 
 #ifdef __cplusplus

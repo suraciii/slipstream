@@ -10025,6 +10025,11 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await expect(page.locator("[data-source]")).toContainText(
     "RAW embedded JPEG",
   );
+  const rawGeometry = await previewImageGeometry(page);
+  expect([rawGeometry.naturalWidth, rawGeometry.naturalHeight]).toEqual([
+    2560, 1707,
+  ]);
+  expect(rawGeometry.width).toBeGreaterThan(rawGeometry.height);
   await page.keyboard.press("d");
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",

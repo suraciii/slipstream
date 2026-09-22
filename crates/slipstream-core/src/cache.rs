@@ -5,7 +5,10 @@
 
 use crate::{
     OriginalRecord, PhotoRecord, PreviewSource,
-    derivative::{Derivative, DerivativeError, DerivativeProfile, DerivativeTarget, process_jpeg},
+    derivative::{
+        Derivative, DerivativeError, DerivativeProfile, DerivativeTarget,
+        process_jpeg_with_orientation,
+    },
     source_revision,
 };
 use image::{ImageDecoder, codecs::jpeg::JpegDecoder};
@@ -28,19 +31,20 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-pub const DERIVATIVE_ALGORITHM_VERSION: &str = "rust-vips-v1";
+pub const DERIVATIVE_ALGORITHM_VERSION: &str = "rust-vips-v2";
 pub const DEFAULT_WORKERS: usize = 2;
 pub const DEFAULT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_WAITER_CAPACITY: usize = 64;
 pub const MAXIMUM_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 const CACHE_RECORD_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_METADATA_BYTES: u64 = 16 * 1024;
-const CACHE_NAMESPACE: &str = "rust-vips-v1";
+const CACHE_NAMESPACE: &str = "rust-vips-v2";
 const NATIVE_WORK_CAPACITY: usize = 2;
 
 type JobResult = Result<DerivativeResult, CacheError>;
-pub type DerivativeProcess =
-    dyn Fn(&[u8], DerivativeTarget) -> Result<Derivative, DerivativeError> + Send + Sync;
+pub type DerivativeProcess = dyn Fn(&[u8], Option<u8>, DerivativeTarget) -> Result<Derivative, DerivativeError>
+    + Send
+    + Sync;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -555,6 +559,7 @@ struct JobMeta {
 struct QueuedJob {
     identity: DerivativeIdentity,
     jpeg: Vec<u8>,
+    container_orientation: Option<u8>,
     key: String,
     manifest_key: String,
     generation: u64,
@@ -779,7 +784,9 @@ impl DerivativeScheduler {
             worker_count: options.workers,
             queue_capacity: options.queue_capacity,
             waiter_capacity: options.waiter_capacity,
-            process: options.process.unwrap_or_else(|| Arc::new(process_jpeg)),
+            process: options
+                .process
+                .unwrap_or_else(|| Arc::new(process_jpeg_with_orientation)),
         });
         let mut workers = inner.workers.lock().expect("worker list poisoned");
         for index in 0..inner.worker_count {
@@ -810,7 +817,20 @@ impl DerivativeScheduler {
         jpeg: Vec<u8>,
         priority: DerivativePriority,
     ) -> Result<DerivativeResult, CacheError> {
+        self.generate_with_orientation(identity, jpeg, None, priority)
+    }
+
+    pub(crate) fn generate_with_orientation(
+        &self,
+        identity: DerivativeIdentity,
+        jpeg: Vec<u8>,
+        container_orientation: Option<u8>,
+        priority: DerivativePriority,
+    ) -> Result<DerivativeResult, CacheError> {
         identity.validate()?;
+        if container_orientation.is_some_and(|value| !(1..=8).contains(&value)) {
+            return Err(CacheError::InvalidIdentity);
+        }
         let key = derivative_cache_key(&identity)?;
         let manifest_key = manifest_identity(&identity)?;
         let mut detached = Vec::new();
@@ -908,6 +928,7 @@ impl DerivativeScheduler {
                 state.queue.push_back(QueuedJob {
                     identity,
                     jpeg,
+                    container_orientation,
                     key,
                     manifest_key,
                     generation,
@@ -934,8 +955,18 @@ impl DerivativeScheduler {
         jpeg: Vec<u8>,
         priority: DerivativePriority,
     ) -> Result<DerivativeResult, CacheError> {
+        self.retry_with_orientation(identity, jpeg, None, priority)
+    }
+
+    pub(crate) fn retry_with_orientation(
+        &self,
+        identity: DerivativeIdentity,
+        jpeg: Vec<u8>,
+        container_orientation: Option<u8>,
+        priority: DerivativePriority,
+    ) -> Result<DerivativeResult, CacheError> {
         self.invalidate(&identity)?;
-        self.generate(identity, jpeg, priority)
+        self.generate_with_orientation(identity, jpeg, container_orientation, priority)
     }
 
     /// Removes the current identity's terminal failure and derivative bytes.
@@ -1155,7 +1186,7 @@ fn generate_one(inner: &SchedulerInner, job: &QueuedJob) -> Result<DerivativeRes
         .filter(|manifest| manifest_is_for_photo_target(manifest, &job.identity));
     let process_result = {
         let _permit = inner.native_work.acquire();
-        (inner.process)(&job.jpeg, job.identity.target)
+        (inner.process)(&job.jpeg, job.container_orientation, job.identity.target)
     };
     let processed = match process_result {
         Ok(processed) => match validate_processed(&processed, job.identity.target) {
@@ -2024,7 +2055,7 @@ mod tests {
                 workers: 1,
                 queue_capacity: 64,
                 waiter_capacity: 64,
-                process: Some(Arc::new(move |_, _| {
+                process: Some(Arc::new(move |_, _, _| {
                     entered.fetch_add(1, Ordering::AcqRel);
                     Ok(Derivative {
                         width: 1,
@@ -2101,7 +2132,7 @@ mod tests {
         };
         assert_eq!(
             derivative_cache_key(&value).unwrap(),
-            "acad2bc5e18228221c45baf4436d11bec40339f95e1a7a1a0eaf3ee1480a7cad"
+            "8b7b37540802cebab1480f9efccd688e5fcd8d1afd55b6922b9d158b59f4f45c"
         );
         assert_eq!(
             manifest_identity(&value).unwrap(),
@@ -2186,7 +2217,11 @@ mod tests {
             target: DerivativeTarget::Thumbnail512,
         };
         let result = scheduler
-            .generate(raw_identity, jpeg(2, 2), DerivativePriority::Current)
+            .generate(
+                raw_identity.clone(),
+                jpeg(2, 2),
+                DerivativePriority::Current,
+            )
             .unwrap();
         let DerivativeResult::Ready(ready) = result else {
             panic!("expected a ready derivative")
@@ -2225,6 +2260,29 @@ mod tests {
             rating: 0,
         };
 
+        let manifest_path = scheduler.cache().manifest_path(&raw_identity).unwrap();
+        let mut manifest = read_manifest(&manifest_path).unwrap();
+        manifest.algorithm_version = "rust-vips-v1".to_owned();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            scheduler.cache().lookup_current_key(
+                &photo,
+                &originals,
+                DerivativeTarget::Thumbnail512,
+            ),
+            Ok(None),
+            "an old orientation algorithm must not hydrate a current URL"
+        );
+        assert_eq!(
+            scheduler
+                .cache()
+                .lookup_current(&photo, &originals, DerivativeTarget::Thumbnail512,),
+            Ok(None),
+            "old dimensions and bytes must not hydrate as current"
+        );
+
+        manifest.algorithm_version = DERIVATIVE_ALGORITHM_VERSION.to_owned();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert_eq!(
             scheduler.cache().lookup_current_key(
                 &photo,
@@ -2243,7 +2301,7 @@ mod tests {
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let started_for_job = Arc::clone(&started);
         let release_for_job = Arc::clone(&release);
-        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _, _| {
             started_for_job.0.lock().unwrap().push(bytes[0]);
             started_for_job.1.notify_all();
             if bytes[0] == 1 {
@@ -2321,7 +2379,7 @@ mod tests {
         let entered_for_process = Arc::clone(&entered);
         let release_for_process = Arc::clone(&release);
         let processed_for_process = Arc::clone(&processed);
-        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _, _| {
             processed_for_process
                 .lock()
                 .unwrap()
@@ -2395,7 +2453,7 @@ mod tests {
         let entered_for_process = Arc::clone(&entered);
         let release_for_process = Arc::clone(&release);
         let processed_for_process = Arc::clone(&processed);
-        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _, _| {
             processed_for_process
                 .lock()
                 .unwrap()
@@ -2458,7 +2516,7 @@ mod tests {
         let entered_for_process = Arc::clone(&entered);
         let release_for_process = Arc::clone(&release);
         let processed_for_process = Arc::clone(&processed);
-        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _, _| {
             processed_for_process
                 .lock()
                 .unwrap()
@@ -2529,7 +2587,7 @@ mod tests {
         let entered_for_process = Arc::clone(&entered);
         let release_for_process = Arc::clone(&release);
         let runs_for_process = Arc::clone(&runs);
-        let process: Arc<DerivativeProcess> = Arc::new(move |_, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |_, _, _| {
             let run = runs_for_process.fetch_add(1, Ordering::AcqRel);
             if run == 0 {
                 entered_for_process.wait();
@@ -2580,7 +2638,7 @@ mod tests {
 
     #[test]
     fn invalidation_detaches_old_in_flight_work_before_same_key_retry() {
-        let (scheduler, cache_path) = scheduler(Some(Arc::new(|bytes, _| {
+        let (scheduler, cache_path) = scheduler(Some(Arc::new(|bytes, _, _| {
             if bytes.first() == Some(&1) {
                 std::thread::sleep(Duration::from_millis(80));
             }
@@ -2628,7 +2686,7 @@ mod tests {
         let cache = CacheDirectory::open(&cache_path, &original_path).unwrap();
         let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let runs_for_job = Arc::clone(&runs);
-        let process: Arc<DerivativeProcess> = Arc::new(move |_, _| {
+        let process: Arc<DerivativeProcess> = Arc::new(move |_, _, _| {
             runs_for_job.fetch_add(1, Ordering::Relaxed);
             Err(DerivativeError::Malformed)
         });
@@ -2699,7 +2757,7 @@ mod tests {
         let DerivativeResult::Ready(initial) = initial else {
             panic!()
         };
-        let failing: Arc<DerivativeProcess> = Arc::new(|_, _| Err(DerivativeError::Malformed));
+        let failing: Arc<DerivativeProcess> = Arc::new(|_, _, _| Err(DerivativeError::Malformed));
         scheduler.shutdown().unwrap();
         let cache =
             CacheDirectory::open(&cache_path, cache_path.parent().unwrap().join("originals"))
@@ -2792,7 +2850,7 @@ mod tests {
 
     #[test]
     fn shutdown_rejects_admission_and_does_not_publish_queued_work() {
-        let (scheduler, cache_path) = scheduler(Some(Arc::new(|_, _| {
+        let (scheduler, cache_path) = scheduler(Some(Arc::new(|_, _, _| {
             std::thread::sleep(Duration::from_millis(30));
             Ok(Derivative {
                 width: 8,
@@ -2815,7 +2873,7 @@ mod tests {
         );
         assert!(matches!(running.join().unwrap(), Err(CacheError::Closed)));
         assert!(
-            fs::read_dir(cache_path.join("rust-vips-v1"))
+            fs::read_dir(cache_path.join(CACHE_NAMESPACE))
                 .unwrap()
                 .all(|entry| {
                     !entry
