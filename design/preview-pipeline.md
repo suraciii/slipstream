@@ -98,12 +98,36 @@ Preview processing is bounded by 128 MiB input JPEG bytes, 100 million decoded p
 orientation precedence and the behavior when neither source has a valid
 orientation.
 
-The RAW wrapper converts LibRaw's container transform into an optional standard
-EXIF orientation value, including mirrored transforms. Only EXIF values 1
-through 8 are valid; absent, malformed, or out-of-range values supply no
-orientation. LibRaw's internal flip representation must not be passed as an
-EXIF value or reduced to a guessed portrait/landscape flag. A zero candidate
-thumbnail flip alone does not establish that its pixels are already upright.
+The RAW fallback authority is `libraw_data_t.sizes.flip`, captured after a
+successful metadata open and before thumbnail extraction on the same retained
+descriptor. Slipstream consumes LibRaw's decoded container transform rather than
+independently parsing RAW orientation tags. The wrapper converts its recognized
+bit-field values to standard EXIF orientation:
+
+- `0` becomes `1` (normal);
+- `1` becomes `2` (horizontal reflection);
+- `2` becomes `4` (vertical reflection);
+- `3` becomes `3` (180-degree rotation);
+- `4` becomes `5` (transpose);
+- `5` becomes `8` (90-degree counterclockwise rotation);
+- `6` becomes `6` (90-degree clockwise rotation);
+- `7` becomes `7` (transverse reflection).
+
+Any other LibRaw value supplies no fallback. LibRaw may default absent
+orientation to `0`, which leaves encoded pixel order unchanged. This mapping
+inverts LibRaw's [TIFF orientation conversion](https://github.com/LibRaw/LibRaw/blob/0.21.5/src/metadata/tiff.cpp).
+Its internal flip representation must not be passed directly as an EXIF value
+or reduced to a portrait/landscape flag.
+
+Candidate `thumbs_list.thumblist[index].tflip` does not participate in this
+fallback, whether zero, nonzero, or unknown. It is not a reliable indication
+that the selected JPEG contains an explicit orientation: in particular, zero
+alone does not establish that its pixels are already upright. The selected
+contract uses the JPEG's own orientation and the decoded container transform,
+not a third candidate-flip precedence rule.
+
+Only JPEG EXIF orientation values 1 through 8 are valid; absent, malformed, or
+out-of-range JPEG values supply no orientation.
 
 The libvips wrapper reads the selected JPEG's orientation and applies the
 container fallback only when the JPEG has no valid value. This includes a JPEG
