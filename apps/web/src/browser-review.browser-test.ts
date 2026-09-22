@@ -19834,8 +19834,12 @@ test.describe("Issue #310 integrated qualification", () => {
     const lengthAfterApply = await historyLength(page);
     await applyViewOptions(page);
     await expect(page.locator("[data-view-options-flag]")).toBeVisible();
-    const rendered = await gridPhotoIds(page);
-    expect(rendered).toEqual(undecidedDescending.slice(0, rendered.length));
+    // Committing the view can precede asynchronous thumbnail URL hydration.
+    await expect(async () => {
+      const rendered = await gridPhotoIds(page);
+      expect(rendered.length).toBeGreaterThan(0);
+      expect(rendered).toEqual(undecidedDescending.slice(0, rendered.length));
+    }).toPass({ timeout: 5_000 });
     await expect(page.locator("[data-grid-visible-results]")).toHaveText(
       "Visible results: 127 of 130 Photos",
     );

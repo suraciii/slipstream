@@ -5183,6 +5183,61 @@ async fn recovery_http_validates_requests() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn recovery_http_reports_missing_destination_without_fingerprint() {
+    let (base, config) = recovery_http_fixture(false);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // Nothing exists at the destination: the batch must not present it as a
+    // usable mapping, and it must stay explicitly unverified.
+    let proposals = response_json(
+        post_json(
+            &router,
+            "/api/recovery/propose",
+            serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
+            Some("http://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let proposal = &proposals["proposals"][0];
+    assert_eq!(proposal["outcome"], "missing");
+    assert_eq!(proposal["verified"], false);
+    assert_eq!(proposal["toLocation"], "moved/a.JPG");
+
+    // Applying the same mapping is refused, and the refusal changes nothing.
+    // The apply path judges the candidate in its own vocabulary: absent and
+    // unreadable are both refusals.
+    let refused = post_json(
+        &router,
+        "/api/recovery/apply",
+        serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
+        Some("http://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let body = response_json(refused).await;
+    assert_eq!(body["rejections"][0]["reason"], "unreadable");
+
+    let unavailable = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/recovery/unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unavailable["unavailable"].as_array().unwrap().len(), 1);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 async fn send(router: &Router, request: Request<Body>) -> Response<Body> {
     tower::ServiceExt::oneshot(router.clone(), request)
         .await
