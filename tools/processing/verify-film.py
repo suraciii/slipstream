@@ -15,7 +15,7 @@ import select
 import stat
 import time
 
-from verify import Qualification, await_condition, command
+from verify import Qualification, assert_attempt_absent, await_condition, command
 
 
 GIB = 1024 ** 3
@@ -166,7 +166,7 @@ class FilmQualification(Qualification):
         assert receipt['cleanup'] == 'complete', receipt
         assert receipt['evidence']['populated'] is False, receipt
         runtime = receipt['runtime']
-        assert not Path('/sys/fs/cgroup', self.parent, runtime['attempt_unit']).exists()
+        assert_attempt_absent(self.parent, runtime['attempt_unit'])
         assert not (self.root / 'attempts' / runtime['launch_id']).exists()
         if runtime['container_id']:
             assert not command('docker', 'ps', '-aq', '--no-trunc',

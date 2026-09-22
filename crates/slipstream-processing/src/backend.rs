@@ -331,20 +331,13 @@ impl Backend {
     ) -> Result<Gate> {
         record.manager_pending = Some(ManagerPhase::Slice);
         persist(record)?;
-        self.configure_slice(record.unit(), record.receipt.limits.memory_bytes)?;
-        let control_group = self.property(record.unit(), "ControlGroup")?;
         let expected = self.parent_path().join(record.unit());
-        if Path::new(CGROUP).join(control_group.trim_start_matches('/')) != expected {
-            return Err(ErrorCode::Uncertain);
-        }
-        record.unit_invocation = Some(self.property(record.unit(), "InvocationID")?);
-        record.cgroup_inode = Some(
-            fs::metadata(&expected)
-                .map_err(|_| ErrorCode::Unavailable)?
-                .ino(),
-        );
-        record.manager_pending = None;
+        let (invocation, inode) =
+            crate::slice::create(record.unit(), &expected, &record.receipt.limits)?;
+        record.unit_invocation = Some(invocation);
+        record.cgroup_inode = Some(inode);
         self.read_limits(&expected, record.receipt.limits.memory_bytes)?;
+        record.manager_pending = None;
         record.receipt.evidence = Some(Evidence {
             peak_bytes: 0,
             exit_code: None,
@@ -898,12 +891,32 @@ impl Backend {
 
     fn verify_unit(&self, record: &Record) -> Result<PathBuf> {
         let path = self.parent_path().join(record.unit());
-        if Some(self.property(record.unit(), "InvocationID")?) != record.unit_invocation
-            || Some(fs::metadata(&path).map_err(|_| ErrorCode::Uncertain)?.ino())
-                != record.cgroup_inode
-        {
-            return Err(ErrorCode::Uncertain);
-        }
+        verify_slice_phase(
+            record.manager_pending,
+            record.stop_confirmed,
+            || {
+                crate::slice::verify(
+                    record.unit(),
+                    &path,
+                    record
+                        .unit_invocation
+                        .as_deref()
+                        .ok_or(ErrorCode::Uncertain)?,
+                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+                )
+            },
+            || {
+                crate::slice::wait_absent(
+                    record.unit(),
+                    &path,
+                    record
+                        .unit_invocation
+                        .as_deref()
+                        .ok_or(ErrorCode::Uncertain)?,
+                    record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+                )
+            },
+        )?;
         Ok(path)
     }
 
@@ -1013,7 +1026,14 @@ impl Backend {
         Ok(Some(value.outcome))
     }
 
-    pub fn cleanup(&self, record: &Record) -> Result<()> {
+    pub fn cleanup(
+        &self,
+        record: &mut Record,
+        mut persist: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<()> {
+        if record.manager_pending.is_some() {
+            return Err(ErrorCode::Uncertain);
+        }
         if let Some(id) = record
             .receipt
             .runtime
@@ -1055,17 +1075,45 @@ impl Backend {
         if workspace.exists() {
             fs::remove_dir_all(&workspace).map_err(|_| ErrorCode::Uncertain)?;
         }
-        if self.parent_path().join(record.unit()).exists() {
+        if record.unit_invocation.is_some() && !record.stop_confirmed {
             self.verify_unit(record)?;
+            record.manager_pending = Some(ManagerPhase::SliceStop);
+            persist(record)?;
+            crate::faults::at(&self.config, record, crate::faults::Phase::SliceStopIntent)?;
             self.systemctl(&strings(&["stop", record.unit()]))?;
+            record.stop_confirmed = true;
+            record.manager_pending = None;
+            persist(record)?;
         }
         crate::faults::at(&self.config, record, crate::faults::Phase::SliceStop)?;
-        self.systemctl(&strings(&["revert", record.unit()]))?;
-        if self.parent_path().join(record.unit()).exists() {
-            return Err(ErrorCode::Uncertain);
+        let path = self.parent_path().join(record.unit());
+        if let Some(invocation) = &record.unit_invocation {
+            if !record.stop_confirmed {
+                return Err(ErrorCode::Uncertain);
+            }
+            crate::slice::wait_absent(
+                record.unit(),
+                &path,
+                invocation,
+                record.cgroup_inode.ok_or(ErrorCode::Uncertain)?,
+            )?;
+        } else {
+            crate::slice::never_created_absent(record.unit(), &path)?;
         }
         Ok(())
     }
+}
+
+fn verify_slice_phase(
+    pending: Option<ManagerPhase>,
+    stop_confirmed: bool,
+    active: impl FnOnce() -> Result<()>,
+    stopped: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if pending == Some(ManagerPhase::SliceStop) || (stop_confirmed && pending.is_some()) {
+        return Err(ErrorCode::Uncertain);
+    }
+    if stop_confirmed { stopped() } else { active() }
 }
 
 fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
@@ -1178,6 +1226,13 @@ fn strings(values: &[&str]) -> Vec<String> {
 }
 
 fn command(program: &str, args: &[String]) -> Result<String> {
+    command_until(program, args, Instant::now() + Duration::from_secs(5))
+}
+
+pub(crate) fn command_until(program: &str, args: &[String], deadline: Instant) -> Result<String> {
+    if Instant::now() >= deadline {
+        return Err(ErrorCode::Uncertain);
+    }
     let mut child = Command::new(program)
         .args(args)
         .env_clear()
@@ -1199,7 +1254,6 @@ fn command(program: &str, args: &[String]) -> Result<String> {
             return Err(ErrorCode::Unavailable);
         }
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut output = Vec::new();
     let mut errors = Vec::new();
     let mut output_eof = false;
@@ -1330,6 +1384,7 @@ mod tests {
         let backend = Backend { config };
         for phase in [
             ManagerPhase::Slice,
+            ManagerPhase::SliceStop,
             ManagerPhase::Mount,
             ManagerPhase::Create,
             ManagerPhase::Start,
@@ -1343,6 +1398,82 @@ mod tests {
             assert_eq!(backend.discover(&mut record), Err(ErrorCode::Uncertain));
             assert_eq!(record.manager_pending, Some(phase));
             assert!(record.receipt.runtime.is_none());
+            record.receipt.outcome = Some(Outcome::Completed);
+            record.stop_confirmed = true;
+            assert_eq!(
+                backend.cleanup(&mut record, |_| panic!(
+                    "pending cleanup must not persist or execute"
+                )),
+                Err(ErrorCode::Uncertain)
+            );
         }
+    }
+
+    #[test]
+    fn expired_command_deadline_does_not_spawn_even_a_valid_program() {
+        assert_eq!(
+            command_until(
+                "/usr/bin/true",
+                &[],
+                Instant::now() - Duration::from_millis(1)
+            ),
+            Err(ErrorCode::Uncertain)
+        );
+    }
+
+    #[test]
+    fn confirmed_stop_routes_only_to_read_only_convergence_and_pending_always_blocks() {
+        let active = std::cell::Cell::new(0);
+        let stopped = std::cell::Cell::new(0);
+        for stop_confirmed in [false, true] {
+            assert_eq!(
+                verify_slice_phase(
+                    None,
+                    stop_confirmed,
+                    || {
+                        active.set(active.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        stopped.set(stopped.get() + 1);
+                        Ok(())
+                    }
+                ),
+                Ok(())
+            );
+            for pending in [ManagerPhase::SliceStop]
+                .into_iter()
+                .chain(stop_confirmed.then_some(ManagerPhase::Start))
+            {
+                assert_eq!(
+                    verify_slice_phase(
+                        Some(pending),
+                        stop_confirmed,
+                        || panic!("pending cannot validate an active replacement"),
+                        || panic!("pending cannot infer stop from absence")
+                    ),
+                    Err(ErrorCode::Uncertain)
+                );
+            }
+        }
+        assert_eq!((active.get(), stopped.get()), (1, 1));
+        assert_eq!(
+            verify_slice_phase(
+                Some(ManagerPhase::CreateReturned),
+                false,
+                || Ok(()),
+                || panic!("lost create response still uses active ownership")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            verify_slice_phase(
+                None,
+                true,
+                || panic!("completed stop cannot require live properties"),
+                || Err(ErrorCode::Uncertain)
+            ),
+            Err(ErrorCode::Uncertain)
+        );
     }
 }

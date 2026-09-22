@@ -166,8 +166,12 @@ An operator may create `arm.json` with exactly `phase`, `incarnation`, and
 The closed phases are `after-intent`, `after-slice`,
 `after-create-response`, `after-container-bound`, `after-release-intent`,
 `after-exit`, `after-evidence`, `after-container-removal`,
-`after-storage-unmount`, and `after-slice-stop`. These refer to completed
-operations; an unresolved manager request remains a separate uncertain state.
+`after-storage-unmount`, `after-slice-stop-intent`, and `after-slice-stop`.
+`after-slice-stop-intent` occurs after the pending stop fence is synchronized and
+before the manager stop call; crashing there must retain blocked ownership.
+`after-slice-stop` occurs after stop completion and its confirmed fact are
+synchronized. Other phases refer to completed operations; an unresolved manager
+request remains a separate uncertain state.
 
 At a matching phase, the launcher atomically writes `marker.json` with those
 three fields plus the exact `launch_id`, then waits for root-owned
