@@ -5,11 +5,15 @@
   "$defs": {
     "Sha256": {
       "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
     },
     "Id": {
       "type": "string",
-      "pattern": "^[0-9a-f]{32}$"
+      "pattern": "^[0-9a-f]{32}$",
+      "minLength": 32,
+      "maxLength": 32
     },
     "U64": {
       "type": "integer",
@@ -19,7 +23,10 @@
     "Image": {
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:/-]*@)?sha256:[0-9a-f]{64}$"
+      "pattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:/-]*@)?sha256:[0-9a-f]{64}$",
+      "not": {
+        "pattern": "[\\r\\n]"
+      }
     },
     "AbsolutePath": {
       "type": "string",
@@ -575,7 +582,10 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 160,
-          "pattern": "^[A-Za-z0-9_.-]+\\.slice$"
+          "pattern": "^[A-Za-z0-9_.-]+\\.slice$",
+          "not": {
+            "pattern": "[\\r\\n]"
+          }
         }
       }
     },
