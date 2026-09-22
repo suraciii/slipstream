@@ -11,7 +11,8 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Foundations
 
-- [Foundational Architecture](architecture.md): local Web deployment, file ownership, Photo identity, state ownership, and the first vertical slice
+- [Foundational Architecture](architecture.md): shared Web/CLI service boundary, file ownership, Photo identity, state ownership, and the first vertical slice
+- [Command-Line Architecture](command-line.md): thin client, bounded queries, shared mutation guards, transport uncertainty, Preview files, and Web handoff
 - [Compose Host Storage Preflight](compose-storage-preflight.md): host bind-source topology, operator entry-point ownership, and Original-safety failure boundary
 - [Photo Library Identity and Expansion](library-identity.md): stable Original File and Photo identity, content fingerprints, exact-content Location Recovery, one Library Folder, explicit ancestor expansion, failure behavior, and rejected asset-management abstractions
 - [Physical File Locations and Virtual Albums](photo-organization.md): read-only Original Folder projection, Album ownership, source semantics, bounded Folder navigation, recovery application, and the v5-to-v6 independent-Photo migration
