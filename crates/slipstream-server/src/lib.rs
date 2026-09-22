@@ -45,6 +45,7 @@ mod app;
 mod config;
 pub(crate) mod folders;
 mod http;
+mod queries;
 mod wire;
 
 pub use app::Application;

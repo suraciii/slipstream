@@ -1,4 +1,209 @@
 use super::*;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilitiesResponse {
+    pub server_version: &'static str,
+    pub supported_cli_contract_versions: [u16; 1],
+    pub limits: CapabilityLimitsWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityLimitsWire {
+    pub list_page_maximum: usize,
+    pub mutation_photo_ids_maximum: usize,
+    pub album_reorder_members_maximum: usize,
+    pub retained_query_ids_maximum: usize,
+    pub retained_query_idle_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliStatusResponse {
+    pub server_version: &'static str,
+    pub cli_contract_version: u16,
+    pub published: bool,
+    pub publication: Option<String>,
+    pub photo_count: usize,
+    pub scan: CliScanStatusWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliScanStatusWire {
+    pub state: &'static str,
+    pub publication: Option<String>,
+    pub completed: Option<usize>,
+    pub total: Option<usize>,
+    pub last_recovery: Option<ScanRecoveryWire>,
+    pub fingerprints: Option<FingerprintProgressWire>,
+}
+
+impl From<ScanStatusWire> for CliScanStatusWire {
+    fn from(value: ScanStatusWire) -> Self {
+        Self {
+            state: value.state,
+            publication: value.publication,
+            completed: value.completed,
+            total: value.total,
+            last_recovery: value.last_recovery,
+            fingerprints: value.fingerprints,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliListResponse<T: Serialize> {
+    pub items: Vec<T>,
+    pub total: usize,
+    pub next_cursor: Option<String>,
+    pub evaluated_at: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum AlbumListItemWire {
+    Present(CliAlbumSummaryWire),
+    Missing(MissingItemWire),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliAlbumSummaryWire {
+    pub id: String,
+    pub name: String,
+    pub photo_count: usize,
+    pub has_saved_position: bool,
+    pub album_version: String,
+    pub web_path: String,
+}
+
+impl From<slipstream_core::AlbumSummary> for CliAlbumSummaryWire {
+    fn from(value: slipstream_core::AlbumSummary) -> Self {
+        let web_path = format!("/?source=album&albumId={}", value.id);
+        Self {
+            id: value.id,
+            name: value.name,
+            photo_count: value.photo_count,
+            has_saved_position: value.has_saved_position,
+            album_version: value.album_version,
+            web_path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MissingItemWire {
+    pub id: String,
+    pub state: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum PhotoListItemWire {
+    Present(CliPhotoItemWire),
+    Missing(MissingItemWire),
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoItemWire {
+    pub id: String,
+    pub filename: String,
+    pub original_kind: &'static str,
+    pub original_available: bool,
+    pub selection_state: &'static str,
+    pub rating: u8,
+    pub decision_version: String,
+    pub capture_time: Option<String>,
+    pub preview: CliPreviewFactsWire,
+    pub web_path: String,
+}
+
+impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
+    fn from(value: slipstream_core::PhotoRead) -> Self {
+        let ready = value.preview_state == PreviewState::Ready;
+        let detail_limited = value
+            .preview_width
+            .zip(value.preview_height)
+            .map(|(width, height)| width.max(height) < 2560)
+            .filter(|_| ready);
+        let capture_time = (value.capture.state == slipstream_core::CaptureMetadataState::Known)
+            .then_some(value.capture.order_key)
+            .flatten();
+        let web_path = format!("/?photoId={}", value.id);
+        Self {
+            id: value.id,
+            filename: value.filename,
+            original_kind: match value.original_kind {
+                slipstream_core::OriginalKind::Raw => "raw",
+                slipstream_core::OriginalKind::Jpeg => "jpeg",
+            },
+            original_available: value.original_available,
+            selection_state: selection_state(value.selection_state),
+            rating: value.rating,
+            decision_version: value.decision_version,
+            capture_time,
+            preview: CliPreviewFactsWire {
+                state: preview_state(value.preview_state),
+                source: ready
+                    .then(|| value.preview_source.map(preview_source))
+                    .flatten(),
+                source_revision: ready.then_some(value.preview_source_revision).flatten(),
+                width: ready.then_some(value.preview_width).flatten(),
+                height: ready.then_some(value.preview_height).flatten(),
+                detail_limited,
+            },
+            web_path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPreviewFactsWire {
+    pub state: &'static str,
+    pub source: Option<&'static str>,
+    pub source_revision: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub detail_limited: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoGetWire {
+    #[serde(flatten)]
+    pub photo: CliPhotoItemWire,
+    pub metadata: CliPhotoMetadataWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoMetadataWire {
+    pub state: &'static str,
+    pub capture_time: Option<String>,
+    pub aperture: Option<String>,
+    pub shutter_speed: Option<String>,
+    pub focal_length: Option<String>,
+    pub iso: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliFolderListResponse {
+    pub items: Vec<FolderChildWire>,
+    pub total: usize,
+    pub next_cursor: Option<String>,
+    pub evaluated_at: String,
+    pub expires_at: Option<String>,
+    pub publication: String,
+    pub parent: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryOverviewResponse {

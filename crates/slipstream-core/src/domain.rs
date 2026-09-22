@@ -212,7 +212,224 @@ pub struct AlbumSummary {
     pub name: String,
     pub photo_count: usize,
     pub has_saved_position: bool,
+    /// Process-epoch mutation guard for the Album name and ordered membership.
+    pub album_version: String,
 }
+
+/// Current persisted Photo facts returned with their decision mutation guard.
+/// The guard and the guarded Selection State and Rating are read by one
+/// serialized persistence-owner command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotoRead {
+    pub id: String,
+    pub filename: String,
+    pub original_kind: OriginalKind,
+    pub original_available: bool,
+    pub selection_state: SelectionState,
+    pub rating: u8,
+    pub decision_version: String,
+    pub capture: CaptureFact,
+    pub preview_state: PreviewState,
+    pub preview_source: Option<PreviewSource>,
+    pub preview_source_revision: Option<String>,
+    pub preview_width: Option<u32>,
+    pub preview_height: Option<u32>,
+}
+
+/// A validated camera-local query boundary. It deliberately contains no
+/// timezone: persisted Capture Time ordering compares camera-local values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureTimeBound(String);
+
+impl CaptureTimeBound {
+    pub fn parse(value: impl Into<String>) -> Result<Self, PhotoQueryError> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let shape = bytes.len() == 19
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes[10] == b'T'
+            && bytes[13] == b':'
+            && bytes[16] == b':'
+            && bytes.iter().enumerate().all(|(index, byte)| {
+                matches!(index, 4 | 7 | 10 | 13 | 16) || byte.is_ascii_digit()
+            });
+        if !shape {
+            return Err(PhotoQueryError::Invalid);
+        }
+        let number = |range: std::ops::Range<usize>| {
+            value[range]
+                .parse::<u32>()
+                .map_err(|_| PhotoQueryError::Invalid)
+        };
+        let year = number(0..4)?;
+        let month = number(5..7)?;
+        let day = number(8..10)?;
+        let hour = number(11..13)?;
+        let minute = number(14..16)?;
+        let second = number(17..19)?;
+        let leap =
+            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+        let days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => return Err(PhotoQueryError::Invalid),
+        };
+        if year == 0 || day == 0 || day > days || hour > 23 || minute > 59 || second > 59 {
+            return Err(PhotoQueryError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhotoQuerySource {
+    AllPhotos,
+    Album(String),
+    /// A Library-relative Original Folder Location. The empty string denotes
+    /// the Library Folder; descendants are selected component-wise.
+    Folder(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhotoQueryOrder {
+    CaptureTimeAscending,
+    CaptureTimeDescending,
+    AlbumOrder,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoQuery {
+    pub source: PhotoQuerySource,
+    pub selection_state: Option<SelectionState>,
+    pub rating_minimum: Option<u8>,
+    pub rating_maximum: Option<u8>,
+    pub original_kind: Option<OriginalKind>,
+    pub original_available: Option<bool>,
+    pub captured_from: Option<CaptureTimeBound>,
+    pub captured_before: Option<CaptureTimeBound>,
+    pub order: PhotoQueryOrder,
+}
+
+/// Scan-owned query facts from one Published Library. The server shares one
+/// immutable projection per publication; the persistence owner combines these
+/// facts with current decisions and current Album membership.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotoQueryCandidate {
+    pub photo_id: String,
+    pub relative_path: String,
+    pub sort_path: String,
+    pub original_kind: OriginalKind,
+    pub original_available: bool,
+    pub capture: CaptureFact,
+    pub preview_state: PreviewState,
+    pub preview_source_revision: Option<String>,
+    pub preview_width: Option<u32>,
+    pub preview_height: Option<u32>,
+}
+
+impl PhotoQueryCandidate {
+    pub fn capture_order_key(&self) -> Option<&str> {
+        self.capture.order_key.as_deref()
+    }
+}
+
+#[derive(Debug)]
+pub struct PhotoQueryProjection {
+    capture_time_ascending: Vec<PhotoQueryCandidate>,
+    capture_time_descending: Vec<usize>,
+    by_id: std::collections::HashMap<String, usize>,
+}
+
+impl PhotoQueryProjection {
+    pub fn new(
+        capture_time_ascending: Vec<PhotoQueryCandidate>,
+        capture_time_descending: Vec<usize>,
+    ) -> Option<Self> {
+        if capture_time_descending.len() != capture_time_ascending.len()
+            || capture_time_descending
+                .iter()
+                .any(|index| *index >= capture_time_ascending.len())
+        {
+            return None;
+        }
+        let by_id = capture_time_ascending
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| (candidate.photo_id.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        if by_id.len() != capture_time_ascending.len()
+            || capture_time_descending
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != capture_time_ascending.len()
+        {
+            return None;
+        }
+        Some(Self {
+            capture_time_ascending,
+            capture_time_descending,
+            by_id,
+        })
+    }
+
+    pub fn ascending(&self) -> &[PhotoQueryCandidate] {
+        &self.capture_time_ascending
+    }
+
+    pub fn descending(&self) -> impl Iterator<Item = &PhotoQueryCandidate> {
+        self.capture_time_descending
+            .iter()
+            .map(|index| &self.capture_time_ascending[*index])
+    }
+
+    pub fn get(&self, photo_id: &str) -> Option<&PhotoQueryCandidate> {
+        self.by_id
+            .get(photo_id)
+            .map(|index| &self.capture_time_ascending[*index])
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AlbumQueryFilter {
+    All,
+    ExactName(String),
+    ContainsPhoto(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhotoQueryError {
+    Invalid,
+    SourceNotFound,
+    ResultLimitExceeded { limit: usize },
+    Storage,
+}
+
+impl fmt::Display for PhotoQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => formatter.write_str("Photo query is not valid"),
+            Self::SourceNotFound => formatter.write_str("Photo query source was not found"),
+            Self::ResultLimitExceeded { limit } => {
+                write!(
+                    formatter,
+                    "Photo query exceeds the retained-ID limit of {limit}"
+                )
+            }
+            Self::Storage => formatter.write_str("Photo query could not read persisted state"),
+        }
+    }
+}
+
+impl std::error::Error for PhotoQueryError {}
 
 /// One Album that contains a Photo, for the bounded per-Photo membership
 /// query. It carries Album identity only, never member lists.

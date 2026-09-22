@@ -204,6 +204,7 @@ pub enum ServerError {
     FolderNotFound,
     FileLocationWindow,
     FolderAlbumLimit,
+    QueryCapacity,
 }
 
 impl fmt::Display for ServerError {
@@ -239,6 +240,7 @@ impl fmt::Display for ServerError {
             Self::FileLocationWindow => formatter.write_str("File Location window is invalid"),
             Self::FolderAlbumLimit => formatter
                 .write_str("This Original Folder contains too many Photos for one Album operation"),
+            Self::QueryCapacity => formatter.write_str("Retained query capacity is unavailable"),
         }
     }
 }

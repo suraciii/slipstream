@@ -1,8 +1,7 @@
 use super::*;
-use crate::config::{
-    BROWSE_SNAPSHOT_IDLE, MAX_BROWSE_SNAPSHOTS, MAX_BROWSE_WINDOW, NEXT_BROWSE_NAMESPACE,
-};
+use crate::config::{MAX_BROWSE_WINDOW, NEXT_BROWSE_NAMESPACE};
 use crate::http::{is_hex_key, valid_id};
+use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
 /// The published Library plus id indices, rebuilt atomically on each snapshot
 /// replacement so bounded window requests never rescan the whole Library.
 pub(crate) struct Published {
@@ -11,10 +10,81 @@ pub(crate) struct Published {
     pub(crate) originals_by_id: std::collections::HashMap<String, usize>,
     /// Opaque publication generation for File Location coherence.
     pub(crate) publication: u64,
+    /// The evaluation time shared by all Folder windows in this publication.
+    pub(crate) evaluated_at: SystemTime,
+    /// Immutable scan-owned query facts shared by every CLI query admitted
+    /// against this publication.
+    pub(crate) photo_query_projection: Arc<slipstream_core::PhotoQueryProjection>,
     /// Folder index derived lazily from this immutable publication. Fact
     /// patches never change Original Locations, so the cache stays valid for
     /// the lifetime of this Published snapshot.
     folder_index: std::sync::OnceLock<crate::folders::FolderIndex>,
+}
+
+#[derive(Clone)]
+struct PublishedMetadataSource {
+    relative_path: slipstream_core::RelativeOriginalPath,
+    kind: slipstream_core::OriginalKind,
+    source_revision: Option<String>,
+}
+
+pub(crate) struct PublishedPhotoDetail {
+    pub(crate) photo: slipstream_core::PhotoRead,
+    metadata_source: Option<PublishedMetadataSource>,
+}
+
+#[cfg(test)]
+type MetadataInspectionTestHook = dyn Fn(&slipstream_core::RelativeOriginalPath) + Send + Sync;
+
+#[cfg(test)]
+static METADATA_INSPECTION_TEST_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<Arc<MetadataInspectionTestHook>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static METADATA_INSPECTION_TEST_HOOK_LEASE: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct MetadataInspectionTestHookGuard {
+    _lease: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn install_metadata_inspection_test_hook(
+    hook: impl Fn(&slipstream_core::RelativeOriginalPath) + Send + Sync + 'static,
+) -> MetadataInspectionTestHookGuard {
+    let lease = METADATA_INSPECTION_TEST_HOOK_LEASE
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    *METADATA_INSPECTION_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(Arc::new(hook));
+    MetadataInspectionTestHookGuard { _lease: lease }
+}
+
+#[cfg(test)]
+impl Drop for MetadataInspectionTestHookGuard {
+    fn drop(&mut self) {
+        *METADATA_INSPECTION_TEST_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+fn metadata_inspection_test_hook(path: &slipstream_core::RelativeOriginalPath) {
+    let hook = METADATA_INSPECTION_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
 }
 
 /// Allocates process-unique, monotonically increasing publication
@@ -47,12 +117,51 @@ impl Published {
             .iter()
             .enumerate()
             .map(|(position, original)| (original.id.clone(), position))
-            .collect();
+            .collect::<std::collections::HashMap<_, _>>();
+        let candidates = snapshot
+            .photos
+            .iter()
+            .map(|photo| {
+                let original = &snapshot.originals[originals_by_id[&photo.original_id]];
+                slipstream_core::PhotoQueryCandidate {
+                    photo_id: photo.id.clone(),
+                    relative_path: original.relative_path.as_str().to_owned(),
+                    sort_path: photo.sort_path.clone(),
+                    original_kind: original.kind,
+                    original_available: original.available,
+                    capture: original.capture.clone(),
+                    preview_state: photo.preview_state,
+                    preview_source_revision: photo.preview_source_revision.clone(),
+                    preview_width: photo.preview_width,
+                    preview_height: photo.preview_height,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut descending = (0..candidates.len()).collect::<Vec<_>>();
+        descending.sort_by(|a, b| {
+            let a = &candidates[*a];
+            let b = &candidates[*b];
+            a.capture_order_key()
+                .is_none()
+                .cmp(&b.capture_order_key().is_none())
+                .then_with(|| match (a.capture_order_key(), b.capture_order_key()) {
+                    (Some(a), Some(b)) => b.cmp(a),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.sort_path.cmp(&b.sort_path))
+                .then_with(|| a.photo_id.cmp(&b.photo_id))
+        });
+        let photo_query_projection = Arc::new(
+            slipstream_core::PhotoQueryProjection::new(candidates, descending)
+                .expect("Published Photos have unique identities and complete order"),
+        );
         Self {
             snapshot,
             photos_by_id,
             originals_by_id,
             publication: publication_generation(),
+            evaluated_at: SystemTime::now(),
+            photo_query_projection,
             folder_index: std::sync::OnceLock::new(),
         }
     }
@@ -70,6 +179,45 @@ impl Published {
 
     pub(crate) fn publication_value(&self) -> String {
         format!("{:016x}", self.publication)
+    }
+
+    fn photo_read_projection(
+        &self,
+        photo_ids: &[String],
+    ) -> Arc<slipstream_core::PhotoQueryProjection> {
+        let candidates = photo_ids
+            .iter()
+            .filter_map(|photo_id| {
+                let mut candidate = self.photo_query_projection.get(photo_id)?.clone();
+                let photo = &self.snapshot.photos[self.photos_by_id[photo_id]];
+                candidate.preview_state = photo.preview_state;
+                candidate.preview_source_revision = photo.preview_source_revision.clone();
+                candidate.preview_width = photo.preview_width;
+                candidate.preview_height = photo.preview_height;
+                Some(candidate)
+            })
+            .collect::<Vec<_>>();
+        let candidate_count = candidates.len();
+        Arc::new(
+            slipstream_core::PhotoQueryProjection::new(candidates, (0..candidate_count).collect())
+                .expect("a bounded Published Photo page has unique identities"),
+        )
+    }
+
+    fn photo_metadata_source(&self, photo_id: &str) -> Option<PublishedMetadataSource> {
+        let photo = self
+            .photos_by_id
+            .get(photo_id)
+            .and_then(|position| self.snapshot.photos.get(*position))?;
+        let original = self
+            .originals_by_id
+            .get(&photo.original_id)
+            .and_then(|position| self.snapshot.originals.get(*position))?;
+        Some(PublishedMetadataSource {
+            relative_path: original.relative_path.clone(),
+            kind: original.kind,
+            source_revision: original.capture.source_revision.clone(),
+        })
     }
 }
 
@@ -267,11 +415,6 @@ fn ordered_library_ids(published: &Published, order: BrowseViewOrder) -> Vec<Str
     )
 }
 
-pub(crate) struct BrowseSnapshot {
-    pub(crate) photo_ids: Vec<String>,
-    pub(crate) last_used: Instant,
-}
-
 const MAX_APPLICATION_SCAN_WAITERS: usize = 64;
 pub(crate) type ScanCycleOutcome = Result<ScanStatusWire, String>;
 
@@ -450,9 +593,10 @@ pub struct Application {
     pub(crate) preview: PreviewService,
     pub(crate) shared: Arc<SharedLibrary>,
     scan_cycle: ScanCycle,
-    pub(crate) browse_snapshots: Mutex<std::collections::HashMap<String, BrowseSnapshot>>,
+    pub(crate) retained_queries: Mutex<QueryRegistry>,
     pub(crate) browse_namespace: u128,
     pub(crate) browse_counter: AtomicU64,
+    pub(crate) cursor_signer: CursorSigner,
     pub(crate) shutdown: Mutex<bool>,
 }
 
@@ -592,9 +736,10 @@ impl Application {
             preview,
             shared,
             scan_cycle: ScanCycle::new(),
-            browse_snapshots: Mutex::new(std::collections::HashMap::new()),
+            retained_queries: Mutex::new(QueryRegistry::production()),
             browse_namespace,
             browse_counter: AtomicU64::new(0),
+            cursor_signer: CursorSigner::new(),
             shutdown: Mutex::new(false),
         });
         // Admit the startup cycle synchronously before returning the
@@ -614,63 +759,68 @@ impl Application {
         &self,
         photo_id: &str,
     ) -> Result<slipstream_core::CaptureReviewMetadata, ServerError> {
-        let candidates = {
+        let source = {
             let guard = self
                 .shared
                 .snapshot
                 .read()
                 .expect("published Library poisoned");
             let published = guard.as_ref().ok_or(ServerError::NotPublished)?;
-            let position = published
-                .photos_by_id
-                .get(photo_id)
-                .copied()
-                .ok_or(ServerError::PhotoNotFound)?;
-            let photo = published
-                .snapshot
-                .photos
-                .get(position)
-                .ok_or(ServerError::PhotoNotFound)?;
-            let mut candidates = Vec::new();
-            for id in [Some(&photo.original_id)].into_iter().flatten() {
-                let Some(position) = published.originals_by_id.get(id).copied() else {
-                    continue;
-                };
-                let Some(original) = published.snapshot.originals.get(position) else {
-                    continue;
-                };
-                candidates.push((
-                    original.relative_path.clone(),
-                    original.kind,
-                    original.facts,
-                    original.capture.state,
-                ));
+            if !published.photos_by_id.contains_key(photo_id) {
+                return Err(ServerError::PhotoNotFound);
             }
-            candidates
+            published.photo_metadata_source(photo_id)
+        };
+        self.inspect_metadata_source(source).await
+    }
+
+    async fn inspect_metadata_source(
+        &self,
+        source: Option<PublishedMetadataSource>,
+    ) -> Result<slipstream_core::CaptureReviewMetadata, ServerError> {
+        let Some(source) = source else {
+            return Ok(slipstream_core::CaptureReviewMetadata::default());
+        };
+        let Some(expected_revision) = source.source_revision else {
+            return Ok(slipstream_core::CaptureReviewMetadata::default());
+        };
+        // Admission is deliberately nonblocking and happens before a blocking
+        // task exists. Saturation therefore cannot create a Tokio blocking-task
+        // queue whose workers wait for Library-native capacity.
+        let Some(permit) = self.library.try_admit_native_work() else {
+            return Ok(slipstream_core::CaptureReviewMetadata::default());
         };
         let root = self.library_root.clone();
         tokio::task::spawn_blocking(move || {
+            // Keep admission in the worker through candidate observation,
+            // parsing, and descriptor revalidation. If the awaiting request is
+            // cancelled, this worker still owns the permit until it completes.
+            let _permit = permit;
+            #[cfg(test)]
+            metadata_inspection_test_hook(&source.relative_path);
             let Ok(root) = slipstream_core::LibraryRoot::open(root) else {
-                return Ok(slipstream_core::CaptureReviewMetadata::default());
+                return slipstream_core::CaptureReviewMetadata::default();
             };
-            let selected = candidates
-                .iter()
-                .find(|(_, _, _, state)| *state == slipstream_core::CaptureMetadataState::Known)
-                .or_else(|| candidates.first());
-            let Some((path, kind, _, _)) = selected else {
-                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            let Ok(capability) = root.original(source.relative_path.clone()) else {
+                return slipstream_core::CaptureReviewMetadata::default();
             };
-            let Ok(capability) = root.original(path.clone()) else {
-                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            let Ok(observed_facts) = capability.facts() else {
+                return slipstream_core::CaptureReviewMetadata::default();
             };
-            let Ok(facts) = capability.facts() else {
-                return Ok(slipstream_core::CaptureReviewMetadata::default());
+            let Ok(observed_revision) = slipstream_core::capture_source_revision(
+                source.relative_path.as_str(),
+                observed_facts,
+            ) else {
+                return slipstream_core::CaptureReviewMetadata::default();
             };
-            slipstream_core::inspect_review_metadata(&capability, *kind, facts)
-                .or_else(|_| Ok(slipstream_core::CaptureReviewMetadata::default()))
+            if observed_revision != expected_revision {
+                return slipstream_core::CaptureReviewMetadata::default();
+            }
+            slipstream_core::inspect_review_metadata(&capability, source.kind, observed_facts)
+                .unwrap_or_default()
         })
         .await
-        .map_err(|error| ServerError::Join(error.to_string()))?
+        .map_err(|error| ServerError::Join(error.to_string()))
     }
 
     /// One consistent read of unavailable Photos plus Album memberships for
@@ -999,6 +1149,104 @@ impl Application {
             .map_or(0, |published| published.snapshot.photos.len())
     }
 
+    pub(crate) async fn create_photo_query(
+        &self,
+        query: slipstream_core::PhotoQuery,
+        maximum_results: usize,
+    ) -> Result<Vec<String>, LibraryError> {
+        let _publication = self.shared.publication.lock().await;
+        let projection = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .map(|published| Arc::clone(&published.photo_query_projection))
+            .expect("published query admission requires a Published Library");
+        self.library
+            .create_photo_query(query, projection, maximum_results)
+            .await
+    }
+
+    pub(crate) async fn published_photos_by_id(
+        &self,
+        photo_ids: Vec<String>,
+    ) -> Result<Vec<Option<slipstream_core::PhotoRead>>, LibraryError> {
+        let _publication = self.shared.publication.lock().await;
+        let projection = self
+            .shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .map(|published| published.photo_read_projection(&photo_ids))
+            .expect("published Photo reads require a Published Library");
+        self.library.photos_by_id(photo_ids, projection).await
+    }
+
+    pub(crate) async fn published_photo_detail(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<PublishedPhotoDetail>, LibraryError> {
+        let photo_id = photo_id.to_owned();
+        let (photo, metadata_source) = {
+            let _publication = self.shared.publication.lock().await;
+            let (projection, metadata_source) = {
+                let guard = self
+                    .shared
+                    .snapshot
+                    .read()
+                    .expect("published Library poisoned");
+                let published = guard
+                    .as_ref()
+                    .expect("published Photo reads require a Published Library");
+                (
+                    published.photo_read_projection(std::slice::from_ref(&photo_id)),
+                    published.photo_metadata_source(&photo_id),
+                )
+            };
+            let photo = self
+                .library
+                .photos_by_id(vec![photo_id], projection)
+                .await?
+                .pop()
+                .flatten();
+            (photo, metadata_source)
+        };
+        Ok(photo.map(|photo| PublishedPhotoDetail {
+            photo,
+            metadata_source,
+        }))
+    }
+
+    pub(crate) async fn inspect_published_photo_detail(
+        &self,
+        detail: PublishedPhotoDetail,
+    ) -> (
+        slipstream_core::PhotoRead,
+        slipstream_core::CaptureReviewMetadata,
+    ) {
+        let metadata = if detail.photo.capture.state == slipstream_core::CaptureMetadataState::Known
+        {
+            self.inspect_metadata_source(detail.metadata_source)
+                .await
+                .unwrap_or_default()
+        } else {
+            slipstream_core::CaptureReviewMetadata::default()
+        };
+        (detail.photo, metadata)
+    }
+
+    pub(crate) fn publication_evaluated_at(&self, publication: &str) -> Option<SystemTime> {
+        self.shared
+            .snapshot
+            .read()
+            .expect("published Library poisoned")
+            .as_ref()
+            .filter(|published| published.publication_value() == publication)
+            .map(|published| published.evaluated_at)
+    }
+
     /// One bounded direct-child Folder window from the current publication.
     ///
     /// The first request may omit `publication` and binds to the current
@@ -1212,31 +1460,18 @@ impl Application {
             self.browse_namespace,
             self.browse_counter.fetch_add(1, Ordering::Relaxed)
         );
-        let mut snapshots = self
-            .browse_snapshots
-            .lock()
-            .expect("browse snapshots poisoned");
-        let now = Instant::now();
-        snapshots
-            .retain(|_, snapshot| now.duration_since(snapshot.last_used) < BROWSE_SNAPSHOT_IDLE);
-        while snapshots.len() >= MAX_BROWSE_SNAPSHOTS {
-            let Some(oldest) = snapshots
-                .iter()
-                .min_by_key(|(_, snapshot)| snapshot.last_used)
-                .map(|(token, _)| token.clone())
-            else {
-                break;
-            };
-            snapshots.remove(&oldest);
-        }
         let total = photo_ids.len();
-        snapshots.insert(
-            token.clone(),
-            BrowseSnapshot {
+        self.retained_queries
+            .lock()
+            .expect("retained queries poisoned")
+            .insert(
+                token.clone(),
+                RetainedKind::Browse,
                 photo_ids,
-                last_used: now,
-            },
-        );
+                Instant::now(),
+                SystemTime::now(),
+            )
+            .map_err(|()| ServerError::QueryCapacity)?;
         Ok(BrowseOpenResponse {
             token,
             total,
@@ -1254,32 +1489,20 @@ impl Application {
         if limit == 0 || limit > MAX_BROWSE_WINDOW {
             return Err(ServerError::BrowseLimit);
         }
-        let (ids, total) = {
-            let mut snapshots = self
-                .browse_snapshots
-                .lock()
-                .expect("browse snapshots poisoned");
-            let now = Instant::now();
-            if snapshots.get(token).is_some_and(|snapshot| {
-                now.duration_since(snapshot.last_used) >= BROWSE_SNAPSHOT_IDLE
-            }) {
-                snapshots.remove(token);
-                return Err(ServerError::BrowseNotFound);
-            }
-            let snapshot = snapshots
-                .get_mut(token)
-                .ok_or(ServerError::BrowseNotFound)?;
-            snapshot.last_used = now;
-            let total = snapshot.photo_ids.len();
-            let ids = snapshot
-                .photo_ids
-                .iter()
-                .skip(start)
-                .take(limit)
-                .cloned()
-                .collect::<Vec<_>>();
-            (ids, total)
-        };
+        let page = self
+            .retained_queries
+            .lock()
+            .expect("retained queries poisoned")
+            .page(
+                token,
+                RetainedKind::Browse,
+                start,
+                limit,
+                Instant::now(),
+                SystemTime::now(),
+            )
+            .ok_or(ServerError::BrowseNotFound)?;
+        let (ids, total) = (page.ids, page.total);
         let facts = {
             let source_guard = self
                 .shared
@@ -1364,31 +1587,19 @@ impl Application {
         token: &str,
         photo_id: &str,
     ) -> Result<BrowsePositionResponse, ServerError> {
-        let mut snapshots = self
-            .browse_snapshots
+        let position = self
+            .retained_queries
             .lock()
-            .expect("browse snapshots poisoned");
-        let now = Instant::now();
-        if snapshots
-            .get(token)
-            .is_some_and(|snapshot| now.duration_since(snapshot.last_used) >= BROWSE_SNAPSHOT_IDLE)
-        {
-            snapshots.remove(token);
-            return Err(ServerError::BrowseNotFound);
-        }
-        let snapshot = snapshots
-            .get_mut(token)
+            .expect("retained queries poisoned")
+            .position(token, photo_id, Instant::now())
             .ok_or(ServerError::BrowseNotFound)?;
-        snapshot.last_used = now;
-        Ok(BrowsePositionResponse {
-            position: snapshot.photo_ids.iter().position(|id| id == photo_id),
-        })
+        Ok(BrowsePositionResponse { position })
     }
 
     pub fn browse_close(&self, token: &str) {
-        self.browse_snapshots
+        self.retained_queries
             .lock()
-            .expect("browse snapshots poisoned")
+            .expect("retained queries poisoned")
             .remove(token);
     }
 
