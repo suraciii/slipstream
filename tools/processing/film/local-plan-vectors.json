@@ -1,0 +1,463 @@
+{
+  "version": 1,
+  "provenance": {
+    "merged_commit": "0da7574b3689a19ec36485e615f3b25f8b4f0bf5",
+    "status": "source-derived arithmetic vectors; execute against both implementations before runtime qualification",
+    "platform_max": 9223372036854775807,
+    "sources": {
+      "tools/development/bounded_gamut.py": "cf989c4dd4e7ed9109d807875cc41a2543798aedaa15ad1816f76493af461b28",
+      "tools/development/bounded_output.py": "81fa2cc81eca06ebb97a970bd1b14888e992fd38c355f101c566149091b4a4c2"
+    }
+  },
+  "cases": [
+    {
+      "id": "gamut-n1",
+      "operation": "gamut",
+      "pixel_count": 1,
+      "workspace_bytes": 603979776,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 1,
+        "workspace_allowance_bytes": 603979776,
+        "scratch_bytes": 67110912,
+        "batch_pixels": 1,
+        "destination_bytes": 24
+      }
+    },
+    {
+      "id": "gamut-n6",
+      "operation": "gamut",
+      "pixel_count": 6,
+      "workspace_bytes": 67123200,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 6,
+        "workspace_allowance_bytes": 67123200,
+        "scratch_bytes": 67121152,
+        "batch_pixels": 6,
+        "destination_bytes": 144
+      }
+    },
+    {
+      "id": "gamut-n7",
+      "operation": "gamut",
+      "pixel_count": 7,
+      "workspace_bytes": 67123200,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 7,
+        "workspace_allowance_bytes": 67123200,
+        "scratch_bytes": 67123200,
+        "batch_pixels": 7,
+        "destination_bytes": 168
+      }
+    },
+    {
+      "id": "gamut-n8",
+      "operation": "gamut",
+      "pixel_count": 8,
+      "workspace_bytes": 67123200,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 8,
+        "workspace_allowance_bytes": 67123200,
+        "scratch_bytes": 67123200,
+        "batch_pixels": 7,
+        "destination_bytes": 192
+      }
+    },
+    {
+      "id": "gamut-n262143",
+      "operation": "gamut",
+      "pixel_count": 262143,
+      "workspace_bytes": 603979776,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 262143,
+        "workspace_allowance_bytes": 603979776,
+        "scratch_bytes": 603977728,
+        "batch_pixels": 262143,
+        "destination_bytes": 6291432
+      }
+    },
+    {
+      "id": "gamut-n262144",
+      "operation": "gamut",
+      "pixel_count": 262144,
+      "workspace_bytes": 603979776,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 262144,
+        "workspace_allowance_bytes": 603979776,
+        "scratch_bytes": 603979776,
+        "batch_pixels": 262144,
+        "destination_bytes": 6291456
+      }
+    },
+    {
+      "id": "gamut-n262145",
+      "operation": "gamut",
+      "pixel_count": 262145,
+      "workspace_bytes": 603979776,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 262145,
+        "workspace_allowance_bytes": 603979776,
+        "scratch_bytes": 603979776,
+        "batch_pixels": 262144,
+        "destination_bytes": 6291480
+      }
+    },
+    {
+      "id": "gamut-minimum",
+      "operation": "gamut",
+      "pixel_count": 11,
+      "workspace_bytes": 67110912,
+      "expected": {
+        "model": "cam16ucs-srgb-f64-v1",
+        "pixel_count": 11,
+        "workspace_allowance_bytes": 67110912,
+        "scratch_bytes": 67110912,
+        "batch_pixels": 1,
+        "destination_bytes": 264
+      }
+    },
+    {
+      "id": "gamut-below-minimum",
+      "operation": "gamut",
+      "pixel_count": 11,
+      "workspace_bytes": 67110911,
+      "error": "minimum-workspace"
+    },
+    {
+      "id": "gamut-zero",
+      "operation": "gamut",
+      "pixel_count": 0,
+      "workspace_bytes": 67110912,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "gamut-bool",
+      "operation": "gamut",
+      "pixel_count": true,
+      "workspace_bytes": 67110912,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "gamut-destination-overflow",
+      "operation": "gamut",
+      "pixel_count": 384307168202282326,
+      "workspace_bytes": 67110912,
+      "error": "destination-overflow"
+    },
+    {
+      "id": "gamut-allowance-overflow",
+      "operation": "gamut",
+      "pixel_count": 1,
+      "workspace_bytes": 9223372036854775808,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "cctf-n1",
+      "operation": "cctf",
+      "pixel_count": 1,
+      "workspace_bytes": 71303168,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 1,
+        "workspace_allowance_bytes": 71303168,
+        "scratch_bytes": 4194560,
+        "batch_pixels": 1,
+        "destination_bytes": 24
+      }
+    },
+    {
+      "id": "cctf-n6",
+      "operation": "cctf",
+      "pixel_count": 6,
+      "workspace_bytes": 4196096,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 6,
+        "workspace_allowance_bytes": 4196096,
+        "scratch_bytes": 4195840,
+        "batch_pixels": 6,
+        "destination_bytes": 144
+      }
+    },
+    {
+      "id": "cctf-n7",
+      "operation": "cctf",
+      "pixel_count": 7,
+      "workspace_bytes": 4196096,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 7,
+        "workspace_allowance_bytes": 4196096,
+        "scratch_bytes": 4196096,
+        "batch_pixels": 7,
+        "destination_bytes": 168
+      }
+    },
+    {
+      "id": "cctf-n8",
+      "operation": "cctf",
+      "pixel_count": 8,
+      "workspace_bytes": 4196096,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 8,
+        "workspace_allowance_bytes": 4196096,
+        "scratch_bytes": 4196096,
+        "batch_pixels": 7,
+        "destination_bytes": 192
+      }
+    },
+    {
+      "id": "cctf-n262143",
+      "operation": "cctf",
+      "pixel_count": 262143,
+      "workspace_bytes": 71303168,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 262143,
+        "workspace_allowance_bytes": 71303168,
+        "scratch_bytes": 71302912,
+        "batch_pixels": 262143,
+        "destination_bytes": 6291432
+      }
+    },
+    {
+      "id": "cctf-n262144",
+      "operation": "cctf",
+      "pixel_count": 262144,
+      "workspace_bytes": 71303168,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 262144,
+        "workspace_allowance_bytes": 71303168,
+        "scratch_bytes": 71303168,
+        "batch_pixels": 262144,
+        "destination_bytes": 6291456
+      }
+    },
+    {
+      "id": "cctf-n262145",
+      "operation": "cctf",
+      "pixel_count": 262145,
+      "workspace_bytes": 71303168,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 262145,
+        "workspace_allowance_bytes": 71303168,
+        "scratch_bytes": 71303168,
+        "batch_pixels": 262144,
+        "destination_bytes": 6291480
+      }
+    },
+    {
+      "id": "cctf-minimum",
+      "operation": "cctf",
+      "pixel_count": 11,
+      "workspace_bytes": 4194560,
+      "expected": {
+        "model": "srgb-cctf-f64-v1",
+        "pixel_count": 11,
+        "workspace_allowance_bytes": 4194560,
+        "scratch_bytes": 4194560,
+        "batch_pixels": 1,
+        "destination_bytes": 264
+      }
+    },
+    {
+      "id": "cctf-below-minimum",
+      "operation": "cctf",
+      "pixel_count": 11,
+      "workspace_bytes": 4194559,
+      "error": "minimum-workspace"
+    },
+    {
+      "id": "cctf-zero",
+      "operation": "cctf",
+      "pixel_count": 0,
+      "workspace_bytes": 4194560,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "cctf-bool",
+      "operation": "cctf",
+      "pixel_count": true,
+      "workspace_bytes": 4194560,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "cctf-destination-overflow",
+      "operation": "cctf",
+      "pixel_count": 384307168202282326,
+      "workspace_bytes": 4194560,
+      "error": "destination-overflow"
+    },
+    {
+      "id": "cctf-allowance-overflow",
+      "operation": "cctf",
+      "pixel_count": 1,
+      "workspace_bytes": 9223372036854775808,
+      "error": "positive-platform-integer"
+    },
+    {
+      "id": "jpeg-1x1",
+      "operation": "jpeg",
+      "pixel_count": 1,
+      "workspace_bytes": 17825792,
+      "width": 1,
+      "height": 1,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 1,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 1048640,
+        "batch_pixels": 1,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-17x19",
+      "operation": "jpeg",
+      "pixel_count": 323,
+      "workspace_bytes": 17825792,
+      "width": 19,
+      "height": 17,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 323,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 1069248,
+        "batch_pixels": 323,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-512x512",
+      "operation": "jpeg",
+      "pixel_count": 262144,
+      "workspace_bytes": 17825792,
+      "width": 512,
+      "height": 512,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 262144,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 17825792,
+        "batch_pixels": 262144,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-262143x1",
+      "operation": "jpeg",
+      "pixel_count": 262143,
+      "workspace_bytes": 17825792,
+      "width": 1,
+      "height": 262143,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 262143,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 17825728,
+        "batch_pixels": 262143,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-262144x1",
+      "operation": "jpeg",
+      "pixel_count": 262144,
+      "workspace_bytes": 17825792,
+      "width": 1,
+      "height": 262144,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 262144,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 17825792,
+        "batch_pixels": 262144,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-262145x1",
+      "operation": "jpeg",
+      "pixel_count": 262145,
+      "workspace_bytes": 17825792,
+      "width": 1,
+      "height": 262145,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 262145,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 17825792,
+        "batch_pixels": 262144,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-6380x9568",
+      "operation": "jpeg",
+      "pixel_count": 61043840,
+      "workspace_bytes": 17825792,
+      "width": 9568,
+      "height": 6380,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 61043840,
+        "workspace_allowance_bytes": 17825792,
+        "scratch_bytes": 17582080,
+        "batch_pixels": 258336,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-1x262145",
+      "operation": "jpeg",
+      "pixel_count": 262145,
+      "workspace_bytes": 17825792,
+      "width": 262145,
+      "height": 1,
+      "error": "minimum-full-row"
+    },
+    {
+      "id": "jpeg-one-row-exact",
+      "operation": "jpeg",
+      "pixel_count": 323,
+      "workspace_bytes": 1049792,
+      "width": 19,
+      "height": 17,
+      "expected": {
+        "model": "jpeg-uint8-rows-v1",
+        "pixel_count": 323,
+        "workspace_allowance_bytes": 1049792,
+        "scratch_bytes": 1049792,
+        "batch_pixels": 19,
+        "destination_bytes": 0
+      }
+    },
+    {
+      "id": "jpeg-one-row-short",
+      "operation": "jpeg",
+      "pixel_count": 323,
+      "workspace_bytes": 1049791,
+      "width": 19,
+      "height": 17,
+      "error": "minimum-full-row"
+    },
+    {
+      "id": "jpeg-product-overflow",
+      "operation": "jpeg",
+      "pixel_count": 9223372036854775808,
+      "workspace_bytes": 17825792,
+      "width": 2,
+      "height": 4611686018427387904,
+      "error": "positive-platform-integer"
+    }
+  ]
+}

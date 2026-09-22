@@ -74,10 +74,21 @@ pub fn serve(executor: Arc<Executor>) -> Result<(), ErrorCode> {
                 if uid != executor.config().peer_uid {
                     return Err(ErrorCode::Unauthorized);
                 }
-                let request = Request::parse(&frame(&mut stream, REQUEST_BYTES)?)?;
-                executor.cancel(request, pid)
+                let bytes = frame(&mut stream, REQUEST_BYTES)?;
+                if executor.is_film() {
+                    executor.handle_film(crate::film::Request::parse(&bytes)?, pid)
+                } else {
+                    executor.cancel(Request::parse(&bytes)?, pid)
+                }
             })();
-            let response = Response::from(result);
+            let mut response = Response::from(result);
+            if executor.is_film() {
+                match &mut response {
+                    Response::Result { version, .. } | Response::Error { version, .. } => {
+                        *version = 2
+                    }
+                }
+            }
             if let Ok(bytes) = serde_json::to_vec(&response)
                 && bytes.len() <= RESPONSE_BYTES
             {

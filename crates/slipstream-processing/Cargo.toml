@@ -19,3 +19,7 @@ path = "src/launcher.rs"
 [[bin]]
 name = "slipstream-processing-worker"
 path = "src/worker.rs"
+
+[[bin]]
+name = "slipstream-processing-film-worker"
+path = "src/film_worker.rs"

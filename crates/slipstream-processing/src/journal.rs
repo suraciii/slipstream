@@ -42,9 +42,22 @@ pub(crate) struct Record {
     pub termination_reason: Option<Outcome>,
     pub manager_pending: Option<ManagerPhase>,
     pub settled_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub film: Option<crate::film::Captured>,
 }
 
 impl Record {
+    pub fn result_body(&self) -> ResultBody {
+        if let Some(film) = &self.film {
+            ResultBody::Film(Box::new(crate::film::ResultBody::Receipt {
+                receipt: film.receipt(&self.receipt),
+            }))
+        } else {
+            ResultBody::Receipt {
+                receipt: self.receipt.clone(),
+            }
+        }
+    }
     pub fn unit(&self) -> &str {
         &self
             .receipt
@@ -97,6 +110,8 @@ pub struct Executor {
     data: Mutex<Data>,
     image_id: String,
     bundle: String,
+    film: Option<(crate::film::Config, crate::film::Documents)>,
+    policy: String,
     _lock: File,
     _instance_claim: File,
 }
@@ -104,6 +119,18 @@ pub struct Executor {
 impl Executor {
     pub fn open(config: Config) -> Result<Arc<Self>, ErrorCode> {
         config.validate()?;
+        Self::open_common(config, None)
+    }
+
+    pub fn open_film(config: crate::film::Config) -> Result<Arc<Self>, ErrorCode> {
+        config.validate()?;
+        Self::open_common(config.authority(), Some(config))
+    }
+
+    fn open_common(
+        config: Config,
+        film_config: Option<crate::film::Config>,
+    ) -> Result<Arc<Self>, ErrorCode> {
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             return Err(ErrorCode::Unauthorized);
@@ -116,6 +143,9 @@ impl Executor {
                 .ok_or(ErrorCode::Unavailable)?,
             0,
         )?;
+        let film = film_config
+            .map(|c| crate::film::Documents::load(&c).map(|d| (c, d)))
+            .transpose()?;
         let instance_claim = claim_instance(&config)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -142,13 +172,29 @@ impl Executor {
             let path = root.join(name);
             prepare_private_directory(&path)?;
         }
+        crate::faults::validate_mode(&config)?;
         let backend = Backend {
             config: config.clone(),
         };
         let image_id = backend.image()?;
-        let bundle = digest(&serde_json::to_vec(&(PROFILE, &image_id)).expect("bundle identity"));
+        let (bundle, policy) = if let Some((film_config, documents)) = &film {
+            backend.verify_film_image(&image_id, &documents.catalogue)?;
+            (
+                crate::film::hash(&(
+                    crate::film::PROFILE,
+                    &image_id,
+                    &documents.catalogue.numerical_bundle,
+                ))?,
+                film_config.policy(&image_id)?,
+            )
+        } else {
+            (
+                digest(&serde_json::to_vec(&(PROFILE, &image_id)).expect("bundle identity")),
+                config.policy(),
+            )
+        };
         let registry = load(root)?.unwrap_or(Registry {
-            version: 1,
+            version: config.version,
             instance: config.instance.clone(),
             incarnation: random_id()?,
             watermark: 0,
@@ -178,6 +224,8 @@ impl Executor {
             }),
             image_id,
             bundle,
+            film,
+            policy,
             _lock: lock,
             _instance_claim: instance_claim,
         });
@@ -198,40 +246,151 @@ impl Executor {
         request: Request,
         peer_pid: u32,
     ) -> Result<ResultBody, ErrorCode> {
+        self.handle_shared(request, peer_pid, None)
+    }
+
+    pub(crate) fn is_film(&self) -> bool {
+        self.film.is_some()
+    }
+
+    pub(crate) fn handle_film(
+        self: &Arc<Self>,
+        request: crate::film::Request,
+        peer_pid: u32,
+    ) -> Result<ResultBody, ErrorCode> {
+        use crate::film::Request as F;
+        let (request, ids) = match request {
+            F::Reconcile { version, instance } => (Request::Reconcile { version, instance }, None),
+            F::Inspect {
+                version,
+                instance,
+                incarnation,
+                sequence,
+            } => (
+                Request::Inspect {
+                    version,
+                    instance,
+                    incarnation,
+                    sequence,
+                },
+                None,
+            ),
+            F::Cancel {
+                version,
+                instance,
+                incarnation,
+                sequence,
+            } => (
+                Request::Cancel {
+                    version,
+                    instance,
+                    incarnation,
+                    sequence,
+                },
+                None,
+            ),
+            F::Start {
+                version,
+                instance,
+                incarnation,
+                sequence,
+                policy,
+                bundle,
+                catalogue,
+                resource_model,
+                workload,
+            } => (
+                Request::Start {
+                    version,
+                    instance,
+                    incarnation,
+                    sequence,
+                    policy,
+                    bundle,
+                    workload: Workload::Film(workload),
+                },
+                Some((catalogue, resource_model)),
+            ),
+        };
+        let result = self.handle_shared(request.clone(), peer_pid, ids)?;
+        self.cancel_accepted(request, result)
+    }
+
+    fn handle_shared(
+        self: &Arc<Self>,
+        request: Request,
+        peer_pid: u32,
+        film_ids: Option<(String, String)>,
+    ) -> Result<ResultBody, ErrorCode> {
         if request.instance() != self.config.instance {
             return Err(ErrorCode::WrongInstance);
         }
         self.backend.check_caller(peer_pid)?;
         let mut data = self.data.lock().map_err(|_| ErrorCode::Uncertain)?;
         match request {
-            Request::Reconcile { .. } => Ok(ResultBody::Capability {
-                capability: "qualification-only".into(),
-                instance: self.config.instance.clone(),
-                incarnation: data.registry.incarnation.clone(),
-                next_sequence: data
-                    .registry
-                    .watermark
-                    .checked_add(1)
-                    .ok_or(ErrorCode::Capacity)?,
-                policy: self.config.policy(),
-                bundle: self.bundle.clone(),
-                availability: if data.available
-                    && self
-                        .backend
-                        .admission_ready(data.registry.parent_identity.as_ref())
-                        .is_ok()
-                {
-                    Availability::Available
-                } else {
-                    Availability::Blocked
-                },
-                active: data.registry.active.and_then(|sequence| {
-                    data.registry
-                        .records
-                        .get(&sequence)
-                        .map(|record| record.receipt.clone())
-                }),
-            }),
+            Request::Reconcile { .. } => {
+                if let Some((config, _)) = &self.film {
+                    return Ok(ResultBody::Film(Box::new(
+                        crate::film::ResultBody::Capability {
+                            capability: "film-measurement-only".into(),
+                            instance: self.config.instance.clone(),
+                            incarnation: data.registry.incarnation.clone(),
+                            next_sequence: data
+                                .registry
+                                .watermark
+                                .checked_add(1)
+                                .ok_or(ErrorCode::Capacity)?,
+                            policy: self.policy.clone(),
+                            bundle: self.bundle.clone(),
+                            catalogue: config.catalogue_sha256.clone(),
+                            resource_model: config.resource_model_sha256.clone(),
+                            availability: if data.available
+                                && self
+                                    .backend
+                                    .admission_ready(data.registry.parent_identity.as_ref())
+                                    .is_ok()
+                            {
+                                Availability::Available
+                            } else {
+                                Availability::Blocked
+                            },
+                            active: data
+                                .registry
+                                .active
+                                .and_then(|s| data.registry.records.get(&s))
+                                .and_then(|r| r.film.as_ref().map(|f| f.receipt(&r.receipt))),
+                        },
+                    )));
+                }
+                Ok(ResultBody::Capability {
+                    capability: "qualification-only".into(),
+                    instance: self.config.instance.clone(),
+                    incarnation: data.registry.incarnation.clone(),
+                    next_sequence: data
+                        .registry
+                        .watermark
+                        .checked_add(1)
+                        .ok_or(ErrorCode::Capacity)?,
+                    policy: self.policy.clone(),
+                    bundle: self.bundle.clone(),
+                    availability: if data.available
+                        && self
+                            .backend
+                            .admission_ready(data.registry.parent_identity.as_ref())
+                            .is_ok()
+                    {
+                        Availability::Available
+                    } else {
+                        Availability::Blocked
+                    },
+                    active: data.registry.active.and_then(|sequence| {
+                        data.registry
+                            .records
+                            .get(&sequence)
+                            .map(|record| record.receipt.clone())
+                    }),
+                })
+            }
             Request::Start {
                 incarnation,
                 sequence,
@@ -252,12 +411,15 @@ impl Executor {
                     if record.receipt.policy != policy
                         || record.receipt.bundle != bundle
                         || record.receipt.workload != workload
+                        || record
+                            .film
+                            .as_ref()
+                            .map(|f| (&f.catalogue, &f.resource_model))
+                            != film_ids.as_ref().map(|(c, m)| (c, m))
                     {
                         return Err(ErrorCode::Conflict);
                     }
-                    return Ok(ResultBody::Receipt {
-                        receipt: record.receipt.clone(),
-                    });
+                    return Ok(record.result_body());
                 }
                 if sequence <= data.registry.watermark {
                     return Err(ErrorCode::Expired);
@@ -280,7 +442,7 @@ impl Executor {
                 if data.registry.records.len() >= 256 {
                     return Err(ErrorCode::Capacity);
                 }
-                if policy != self.config.policy() {
+                if policy != self.policy {
                     return Err(ErrorCode::IncompatiblePolicy);
                 }
                 if bundle != self.bundle {
@@ -290,6 +452,64 @@ impl Executor {
                     .admission_ready(data.registry.parent_identity.as_ref())?;
                 let time = now()?;
                 let launch_id = random_id()?;
+                let film = match (&self.film, &workload, film_ids) {
+                    (None, Workload::Film(_), _) | (Some(_), _, None) => {
+                        return Err(ErrorCode::InvalidRequest);
+                    }
+                    (
+                        Some((config, documents)),
+                        Workload::Film(workload),
+                        Some((catalogue, resource_model)),
+                    ) => {
+                        if catalogue != config.catalogue_sha256 {
+                            return Err(ErrorCode::IncompatibleCatalogue);
+                        }
+                        if resource_model != config.resource_model_sha256 {
+                            return Err(ErrorCode::IncompatibleResourceModel);
+                        }
+                        let (fixture, plan) =
+                            documents.plan(&workload.fixture_id, self.config.memory_bytes)?;
+                        let manifest = crate::film::CanonicalManifest {
+                            fixture: fixture.clone(),
+                            recipe: documents.catalogue.recipe.clone(),
+                            catalogue: catalogue.clone(),
+                            resource_model: resource_model.clone(),
+                            procedure: crate::film::PROCEDURE.into(),
+                            bundle: bundle.clone(),
+                            policy: policy.clone(),
+                            plan: plan.clone(),
+                        };
+                        let grant = crate::film::EngineGrant {
+                            version: 2,
+                            kind: "film-measurement-grant".into(),
+                            launch_id: launch_id.clone(),
+                            manifest: crate::film::hash(&manifest)?,
+                            bundle: bundle.clone(),
+                            numerical_bundle: documents.catalogue.numerical_bundle.clone(),
+                            recipe: documents.catalogue.recipe.clone(),
+                            procedure: crate::film::PROCEDURE.into(),
+                            fixture,
+                            input_icc_sha256: documents.catalogue.input_icc_sha256.clone(),
+                            output_icc_sha256: documents.catalogue.output_icc_sha256.clone(),
+                            plan,
+                        };
+                        Some(crate::film::Captured {
+                            catalogue,
+                            resource_model,
+                            grant,
+                            phase: crate::film::Phase::Preparing,
+                            stage_release_intent: false,
+                            engine_release_intent: false,
+                            grant_file: None,
+                            snapshot: None,
+                            result_file: None,
+                            result: None,
+                            detail: None,
+                        })
+                    }
+                    (None, _, None) => None,
+                    _ => return Err(ErrorCode::InvalidRequest),
+                };
                 let record = Record {
                     receipt: Receipt {
                         incarnation,
@@ -300,7 +520,9 @@ impl Executor {
                         state: State::Accepted,
                         cancellation_requested: false,
                         accepted_at_unix_ms: time,
-                        deadline_unix_ms: time.checked_add(30000).ok_or(ErrorCode::Capacity)?,
+                        deadline_unix_ms: time
+                            .checked_add(if film.is_some() { 900000 } else { 30000 })
+                            .ok_or(ErrorCode::Capacity)?,
                         outcome: None,
                         runtime: Some(Runtime {
                             launch_id: launch_id.clone(),
@@ -310,7 +532,7 @@ impl Executor {
                                 self.config.instance, launch_id
                             ),
                         }),
-                        limits: Limits::new(self.config.memory_bytes),
+                        limits: self.config.limits(),
                         evidence: None,
                         cleanup: Cleanup::Pending,
                     },
@@ -323,6 +545,7 @@ impl Executor {
                     termination_reason: None,
                     manager_pending: None,
                     settled_at_unix_ms: None,
+                    film,
                 };
                 let mut next = data.registry.clone();
                 next.active = Some(sequence);
@@ -336,9 +559,7 @@ impl Executor {
                         owner.block_active();
                     }
                 });
-                Ok(ResultBody::Receipt {
-                    receipt: record.receipt,
-                })
+                Ok(record.result_body())
             }
             Request::Inspect {
                 incarnation,
@@ -365,9 +586,7 @@ impl Executor {
                         ErrorCode::UnknownAttempt
                     },
                 )?;
-                Ok(ResultBody::Receipt {
-                    receipt: record.receipt.clone(),
-                })
+                Ok(record.result_body())
             }
         }
     }
@@ -378,6 +597,14 @@ impl Executor {
         peer_pid: u32,
     ) -> Result<ResultBody, ErrorCode> {
         let result = self.handle(request.clone(), peer_pid)?;
+        self.cancel_accepted(request, result)
+    }
+
+    fn cancel_accepted(
+        &self,
+        request: Request,
+        result: ResultBody,
+    ) -> Result<ResultBody, ErrorCode> {
         let Request::Cancel { sequence, .. } = request else {
             return Ok(result);
         };
@@ -385,15 +612,13 @@ impl Executor {
         let mut next = data.registry.clone();
         let record = next.records.get_mut(&sequence).ok_or(ErrorCode::Expired)?;
         if record.receipt.state == State::Settled || record.receipt.outcome.is_some() {
-            return Ok(ResultBody::Receipt {
-                receipt: record.receipt.clone(),
-            });
+            return Ok(record.result_body());
         }
         record.receipt.cancellation_requested = true;
-        let receipt = record.receipt.clone();
+        let result = record.result_body();
         persist(Path::new(&self.config.root), &next)?;
         data.registry = next;
-        Ok(ResultBody::Receipt { receipt })
+        Ok(result)
     }
 
     pub(crate) fn config(&self) -> &Config {
@@ -529,13 +754,17 @@ impl Executor {
         let gate = self
             .backend
             .setup(&mut record, |record| self.update(record));
-        let mut gate = match gate {
+        let gate = match gate {
             Ok(gate) => gate,
             Err(_) => {
                 self.backend.discover(&mut record)?;
                 self.update(&record)?;
                 return self.settle(record, Some(Outcome::Interrupted));
             }
+        };
+        let mut gate = match gate {
+            crate::backend::Gate::Native(file) => file,
+            crate::backend::Gate::Film(session) => return self.execute_film(record, session),
         };
         let current = self.record(sequence)?;
         if current.receipt.cancellation_requested || now()? >= record.receipt.deadline_unix_ms {
@@ -584,7 +813,210 @@ impl Executor {
         }
     }
 
-    fn settle(&self, mut record: Record, requested: Option<Outcome>) -> Result<(), ErrorCode> {
+    fn interrupted(&self, record: &Record) -> Result<Option<Outcome>, ErrorCode> {
+        if self
+            .record(record.receipt.sequence)?
+            .receipt
+            .cancellation_requested
+        {
+            Ok(Some(Outcome::Cancelled))
+        } else if now()? >= record.receipt.deadline_unix_ms {
+            Ok(Some(Outcome::Deadline))
+        } else {
+            Ok(None)
+        }
+    }
+    fn film_wait<T>(
+        &self,
+        record: &Record,
+        mut poll: impl FnMut() -> Result<Option<T>, ErrorCode>,
+    ) -> Result<(Option<T>, Option<Outcome>), ErrorCode> {
+        loop {
+            if let Some(reason) = self.interrupted(record)? {
+                return Ok((None, Some(reason)));
+            }
+            if !self.backend.live(record)?.running {
+                return Ok((None, None));
+            }
+            if let Some(value) = poll()? {
+                return Ok((Some(value), None));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    fn execute_film(
+        &self,
+        mut record: Record,
+        mut session: Box<crate::staging::Session>,
+    ) -> Result<(), ErrorCode> {
+        use crate::{film, staging};
+        use std::os::fd::AsRawFd;
+        let execution = (|| -> Result<Option<Outcome>, ErrorCode> {
+            if let Some(reason) = self.interrupted(&record)? {
+                return Ok(Some(reason));
+            }
+            record
+                .film
+                .as_mut()
+                .ok_or(ErrorCode::Uncertain)?
+                .stage_release_intent = true;
+            record.released = true;
+            self.update(&record)?;
+            crate::faults::at(
+                &self.config,
+                &record,
+                crate::faults::Phase::StageReleaseIntent,
+            )?;
+            if let Some(reason) = self.interrupted(&record)? {
+                return Ok(Some(reason));
+            }
+            self.backend.release(&mut record, |r| self.update(r))?;
+            let (connected, reason) = self.film_wait(&record, || {
+                if session.started.elapsed() > Duration::from_secs(10) {
+                    return Err(ErrorCode::Uncertain);
+                }
+                let live = self.backend.live(&record)?;
+                Ok(session.accept(live.pid)?.then_some(()))
+            })?;
+            if connected.is_none() {
+                return Ok(reason);
+            }
+            {
+                let data = self.data.lock().map_err(|_| ErrorCode::Uncertain)?;
+                if data.registry.records[&record.receipt.sequence]
+                    .receipt
+                    .cancellation_requested
+                {
+                    return Ok(Some(Outcome::Cancelled));
+                }
+                if now()? >= record.receipt.deadline_unix_ms {
+                    return Ok(Some(Outcome::Deadline));
+                }
+                self.backend.verify_film_bootstrap(&record, session.pid)?;
+                if crate::faults::retain_snapshot_writer(&self.config, &record)? {
+                    session.retain_snapshot_writer()?;
+                }
+                session.offer()?;
+            }
+            record.film.as_mut().ok_or(ErrorCode::Uncertain)?.phase = film::Phase::Staging;
+            record.receipt.state = State::Running;
+            self.update(&record)?;
+            let fd = session
+                .connection
+                .as_ref()
+                .ok_or(ErrorCode::Uncertain)?
+                .as_raw_fd();
+            let (ack, reason) = self.film_wait(&record, || {
+                staging::receive::<film::StageAck>(fd).map_err(|_| ErrorCode::Uncertain)
+            })?;
+            let Some((ack, rights)) = ack else {
+                return Ok(reason);
+            };
+            if !rights.is_empty() || ack != session.offer.ack() {
+                return Err(ErrorCode::Uncertain);
+            }
+            crate::faults::at(&self.config, &record, crate::faults::Phase::StageAck)?;
+            if let Some(reason) = self.interrupted(&record)? {
+                return Ok(Some(reason));
+            }
+            let leaf = self.backend.pause_film(&mut record, |r| self.update(r))?;
+            if self.backend.live(&record)?.pid != session.pid {
+                return Err(ErrorCode::Uncertain);
+            }
+            match session.audit(&record, &leaf) {
+                Ok(()) => {}
+                Err(ErrorCode::InvalidRequest) => {
+                    record.film.as_mut().ok_or(ErrorCode::Uncertain)?.detail =
+                        Some(film::Detail::SourceMismatch);
+                    self.update(&record)?;
+                    return Ok(Some(Outcome::Interrupted));
+                }
+                Err(error) => return Err(error),
+            }
+            record.film.as_mut().ok_or(ErrorCode::Uncertain)?.phase = film::Phase::Sealed;
+            self.update(&record)?;
+            crate::faults::at(&self.config, &record, crate::faults::Phase::SnapshotSealed)?;
+            if let Some(reason) = self.interrupted(&record)? {
+                return Ok(Some(reason));
+            }
+            record
+                .film
+                .as_mut()
+                .ok_or(ErrorCode::Uncertain)?
+                .engine_release_intent = true;
+            self.update(&record)?;
+            crate::faults::at(
+                &self.config,
+                &record,
+                crate::faults::Phase::EngineReleaseIntent,
+            )?;
+            if let Some(reason) = self.interrupted(&record)? {
+                return Ok(Some(reason));
+            }
+            session.unlink_endpoint()?;
+            self.backend.release(&mut record, |r| self.update(r))?;
+            let permit = film::Permit {
+                version: 2,
+                kind: "engine-permit".into(),
+                launch_id: record.launch_id.clone(),
+                grant_sha256: session.offer.grant_sha256.clone(),
+            };
+            {
+                let data = self.data.lock().map_err(|_| ErrorCode::Uncertain)?;
+                if data.registry.records[&record.receipt.sequence]
+                    .receipt
+                    .cancellation_requested
+                {
+                    return Ok(Some(Outcome::Cancelled));
+                }
+                if now()? >= record.receipt.deadline_unix_ms {
+                    return Ok(Some(Outcome::Deadline));
+                }
+                staging::send(fd, &permit, &[]).map_err(|_| ErrorCode::Uncertain)?;
+            }
+            let (started, reason) = self.film_wait(&record, || {
+                staging::receive::<film::Permit>(fd).map_err(|_| ErrorCode::Uncertain)
+            })?;
+            let Some((started, rights)) = started else {
+                return Ok(reason);
+            };
+            if !rights.is_empty()
+                || started
+                    != (film::Permit {
+                        kind: "engine-started".into(),
+                        ..permit
+                    })
+            {
+                return Err(ErrorCode::Uncertain);
+            }
+            record.film.as_mut().ok_or(ErrorCode::Uncertain)?.phase = film::Phase::Engine;
+            self.update(&record)?;
+            drop(session.connection.take());
+            loop {
+                if !self.backend.live(&record)?.running {
+                    return Ok(None);
+                }
+                if let Some(reason) = self.interrupted(&record)? {
+                    return Ok(Some(reason));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })();
+        match execution {
+            Ok(reason) => self.settle_inner(record, reason, Some(session)),
+            Err(error) if record.manager_pending.is_some() => Err(error),
+            Err(_) => self.settle_inner(record, Some(Outcome::Interrupted), Some(session)),
+        }
+    }
+    fn settle(&self, record: Record, requested: Option<Outcome>) -> Result<(), ErrorCode> {
+        self.settle_inner(record, requested, None)
+    }
+    fn settle_inner(
+        &self,
+        mut record: Record,
+        requested: Option<Outcome>,
+        session: Option<Box<crate::staging::Session>>,
+    ) -> Result<(), ErrorCode> {
         self.verify_parent()?;
         record.receipt.state = State::Settling;
         self.update(&record)?;
@@ -595,6 +1027,7 @@ impl Executor {
                 .as_ref()
                 .is_some_and(|evidence| evidence.populated == Some(false))
         {
+            drop(session);
             self.backend.cleanup(&record)?;
             record.receipt.cleanup = Cleanup::Complete;
             record.receipt.state = State::Settled;
@@ -626,12 +1059,55 @@ impl Executor {
         crate::faults::at(&self.config, &record, crate::faults::Phase::Exit)?;
         if record.unit_invocation.is_some() {
             let evidence = self.backend.evidence(&record)?;
-            let worker = self.backend.worker_outcome(&record)?;
+            let worker = if record.film.is_some() {
+                let result = self
+                    .backend
+                    .film_result(&record, session.as_ref().map(|s| &s.result));
+                let captured = record.film.as_mut().ok_or(ErrorCode::Uncertain)?;
+                match result {
+                    Ok(result) => {
+                        captured.result = result;
+                        captured.result.as_ref().map(|r| r.outcome())
+                    }
+                    Err(ErrorCode::InvalidRequest) => {
+                        captured.detail = Some(crate::film::Detail::ArtifactInvalid);
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                self.backend.worker_outcome(&record)?
+            };
             let reason =
                 record
                     .termination_reason
                     .or(if !record.released { requested } else { None });
-            let outcome = classify(&evidence, worker, reason);
+            let mut outcome = classify(&evidence, worker, reason);
+            if let Some(film) = record.film.as_mut() {
+                if outcome != Outcome::Oom {
+                    if let Some(result) = &film.result {
+                        let expected = match result.outcome() {
+                            Outcome::Completed => 0,
+                            Outcome::AllocationFailed => 20,
+                            Outcome::StorageFull => 21,
+                            Outcome::Deadline => 76,
+                            _ => 75,
+                        };
+                        if evidence.exit_code == Some(expected) {
+                            outcome = result.outcome();
+                            film.detail = result.detail();
+                        }
+                    } else if film.detail.is_some() {
+                        outcome = Outcome::EngineFailed;
+                    }
+                }
+                if outcome == Outcome::Oom {
+                    film.detail = None;
+                }
+                if evidence.exit_code.is_some() {
+                    film.phase = crate::film::Phase::ExecutionFinished;
+                }
+            }
             record.receipt.evidence = Some(evidence);
             record.receipt.outcome = Some(outcome);
         } else {
@@ -651,6 +1127,10 @@ impl Executor {
             });
         }
         self.update(&record)?;
+        drop(session);
+        if record.film.as_ref().is_some_and(|f| f.result.is_some()) {
+            crate::faults::at(&self.config, &record, crate::faults::Phase::ValidatedResult)?;
+        }
         crate::faults::at(&self.config, &record, crate::faults::Phase::Evidence)?;
         self.backend.cleanup(&record)?;
         record.receipt.cleanup = Cleanup::Complete;
@@ -881,7 +1361,7 @@ fn persist(root: &Path, registry: &Registry) -> Result<(), ErrorCode> {
 }
 
 fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCode> {
-    if registry.version != 1
+    if registry.version != config.version
         || registry.instance != config.instance
         || !hex(&registry.incarnation, 32)
         || registry.records.len() > 257
@@ -905,6 +1385,7 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                     Outcome::Cancelled | Outcome::Deadline | Outcome::Interrupted
                 )
             })
+            || record.film.is_some() != (config.version == 2)
             || !hex(&record.launch_id, 32)
             || record.receipt.runtime.as_ref().is_none_or(|runtime| {
                 runtime.launch_id != record.launch_id
@@ -915,6 +1396,19 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                         )
                     || runtime.container_id.as_ref().is_some_and(|id| !hex(id, 64))
             })
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        if let Some(film) = &record.film
+            && (film.grant.validate().is_err()
+                || film.grant.launch_id != record.launch_id
+                || !hex(&film.catalogue, 64)
+                || !hex(&film.resource_model, 64)
+                || record.receipt.workload
+                    != Workload::Film(crate::film::Workload {
+                        kind: "film-fixture".into(),
+                        fixture_id: film.grant.fixture.id.clone(),
+                    }))
         {
             return Err(ErrorCode::Uncertain);
         }
@@ -1082,6 +1576,7 @@ mod tests {
             termination_reason: None,
             manager_pending: None,
             settled_at_unix_ms: Some(1000),
+            film: None,
         }
     }
     fn registry() -> Registry {
@@ -1149,5 +1644,171 @@ mod tests {
         let mut changed = original;
         changed.records.get_mut(&1).unwrap().receipt.cleanup = Cleanup::Pending;
         assert!(validate_registry(&changed, &config).is_err());
+    }
+    #[test]
+    fn maximal_film_receipts_fit_all_fixed_protocol_and_journal_bounds() {
+        use crate::film;
+        let mut grant = film::test_grant();
+        grant.fixture.width = 9568;
+        grant.fixture.height = 9568;
+        grant.fixture.source = film::Source::DevelopmentTiff {
+            bytes: 2 * 1024 * 1024 * 1024,
+            sha256: "e".repeat(64),
+        };
+        let case = film::ModelCase {
+            fixture_id: grant.fixture.id.clone(),
+            stages: film::STAGES
+                .iter()
+                .map(|stage| film::StageBounds {
+                    stage: *stage,
+                    runtime: film::Bound::Unknown,
+                    native: film::Bound::Unknown,
+                    allocator_retention: film::Bound::Unknown,
+                    kernel: film::Bound::Unknown,
+                })
+                .collect(),
+        };
+        grant.plan = film::plan(&grant.fixture, &case, 32 * 1024 * 1024 * 1024).unwrap();
+        // Schema maxima intentionally over-approximate the compiled planner's current known subtotal.
+        grant.plan.prediction = film::Prediction::Unqualified {
+            known_required_bytes: u64::MAX,
+            known_terms_exceed_limit: true,
+            missing: film::STAGES
+                .iter()
+                .flat_map(|stage| {
+                    [
+                        film::Term::OwnedArrays,
+                        film::Term::Runtime,
+                        film::Term::Native,
+                        film::Term::AllocatorRetention,
+                        film::Term::Kernel,
+                    ]
+                    .map(|term| film::MissingTerm {
+                        stage: *stage,
+                        term,
+                    })
+                })
+                .collect(),
+        };
+        let mut registry = registry();
+        registry.version = 2;
+        registry.watermark = u64::MAX;
+        registry.records = registry
+            .records
+            .into_values()
+            .enumerate()
+            .map(|(index, mut r)| {
+                let seq = u64::MAX - index as u64;
+                r.receipt.sequence = seq;
+                (seq, r)
+            })
+            .collect();
+        for record in registry.records.values_mut() {
+            grant.launch_id = record.launch_id.clone();
+            record.receipt.workload = Workload::Film(film::Workload {
+                kind: "film-fixture".into(),
+                fixture_id: grant.fixture.id.clone(),
+            });
+            record.receipt.limits = film::limits(32 * 1024 * 1024 * 1024);
+            record.receipt.accepted_at_unix_ms = u64::MAX - 900000;
+            record.receipt.deadline_unix_ms = u64::MAX;
+            record.receipt.runtime.as_mut().unwrap().container_id =
+                Some(format!("{:064x}", record.receipt.sequence));
+            let r = &grant.fixture.reference;
+            record.film = Some(film::Captured {
+                catalogue: "b".repeat(64),
+                resource_model: "c".repeat(64),
+                grant: grant.clone(),
+                phase: film::Phase::ExecutionFinished,
+                stage_release_intent: true,
+                engine_release_intent: true,
+                grant_file: Some(film::FileIdentity {
+                    device: u64::MAX,
+                    inode: u64::MAX,
+                }),
+                snapshot: Some(film::FileIdentity {
+                    device: u64::MAX,
+                    inode: u64::MAX,
+                }),
+                result_file: Some(film::FileIdentity {
+                    device: u64::MAX,
+                    inode: u64::MAX,
+                }),
+                detail: Some(film::Detail::UnsupportedInput),
+                result: Some(film::WorkerResult::Success(film::WorkerSuccess {
+                    version: 2,
+                    kind: "film-measurement-result".into(),
+                    outcome: Outcome::Completed,
+                    launch_id: record.launch_id.clone(),
+                    manifest: grant.manifest.clone(),
+                    plan_sha256: film::hash(&grant.plan).unwrap(),
+                    artifact: film::Artifact {
+                        input_pixels_sha256: r.input_pixels_sha256.clone(),
+                        film_pixels_sha256: r.film_pixels_sha256.clone(),
+                        jpeg_sha256: r.jpeg_sha256.clone(),
+                        jpeg_bytes: r.jpeg_bytes,
+                        width: grant.fixture.width,
+                        height: grant.fixture.height,
+                        icc_sha256: grant.output_icc_sha256.clone(),
+                        reference_evidence_sha256: r.evidence_sha256.clone(),
+                    },
+                    execution_us: u64::MAX,
+                    stages: film::STAGES
+                        .iter()
+                        .map(|stage| film::Timing {
+                            stage: *stage,
+                            elapsed_us: u64::MAX,
+                            reclaim_us: u64::MAX,
+                        })
+                        .collect(),
+                })),
+            });
+            record.receipt.outcome = Some(Outcome::Completed);
+            let events = Events {
+                oom: u64::MAX,
+                oom_kill: u64::MAX,
+                oom_group_kill: u64::MAX,
+                local_oom: u64::MAX,
+                local_oom_kill: u64::MAX,
+                local_oom_group_kill: u64::MAX,
+            };
+            record.receipt.evidence = Some(Evidence {
+                peak_bytes: u64::MAX,
+                exit_code: Some(0),
+                docker_oom_killed: Some(false),
+                attempt_before: Some(events.clone()),
+                attempt_after: Some(events.clone()),
+                parent_before: Some(events.clone()),
+                parent_after: Some(events),
+                populated: Some(false),
+            });
+        }
+        let bytes = serde_json::to_vec(&registry).unwrap();
+        let record = registry.records.get(&u64::MAX).unwrap();
+        let captured = record.film.as_ref().unwrap();
+        let grant_bytes = film::canonical(&captured.grant).unwrap();
+        let response = serde_json::to_vec(&Response::Result {
+            version: 2,
+            result: Box::new(record.result_body()),
+        })
+        .unwrap();
+        let worker = serde_json::to_vec(captured.result.as_ref().unwrap()).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(wire["result"]["kind"], "receipt");
+        assert_eq!(
+            wire["result"]["receipt"]["workload"]["kind"],
+            "film-fixture"
+        );
+        assert!(bytes.len() < 4 * 1024 * 1024, "journal {}", bytes.len());
+        assert!(grant_bytes.len() <= film::FRAME);
+        assert!(response.len() <= RESPONSE_BYTES);
+        assert!(worker.len() <= film::FRAME - 4);
+        println!(
+            "maximal Film bounds: journal256={} grant={} response={} worker={}",
+            bytes.len(),
+            grant_bytes.len(),
+            response.len(),
+            worker.len()
+        );
     }
 }

@@ -47,6 +47,7 @@ fn main() {
         std::process::exit(71);
     }
     let outcome = match workload {
+        Workload::Film(_) => std::process::exit(70),
         Workload::ProbeSuccess => {
             for path in [
                 "/sys/fs/cgroup/memory.max",

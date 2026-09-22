@@ -24,6 +24,11 @@ pub(crate) type Result<T> = std::result::Result<T, ErrorCode>;
 const CGROUP: &str = "/sys/fs/cgroup";
 const WORKER: &str = "/usr/local/bin/slipstream-processing-worker";
 
+pub(crate) enum Gate {
+    Native(File),
+    Film(Box<crate::staging::Session>),
+}
+
 #[derive(Clone)]
 pub(crate) struct Backend {
     pub config: Config,
@@ -32,8 +37,21 @@ pub(crate) struct Backend {
 pub(crate) struct Live {
     pub running: bool,
     pub pid: u32,
-    pub exit_code: u8,
+    pub exit_code: Option<u8>,
     pub oom: bool,
+}
+
+fn observed_exit(state: &serde_json::Value) -> Result<Option<u8>> {
+    let status = state["Status"].as_str().ok_or(ErrorCode::Uncertain)?;
+    let started = state["StartedAt"].as_str().ok_or(ErrorCode::Uncertain)?;
+    if !matches!(status, "exited" | "dead") || started.starts_with("0001-01-01T") {
+        return Ok(None);
+    }
+    state["ExitCode"]
+        .as_u64()
+        .and_then(|code| u8::try_from(code).ok())
+        .map(Some)
+        .ok_or(ErrorCode::Uncertain)
 }
 
 impl Backend {
@@ -52,6 +70,37 @@ impl Backend {
         let mut fixed = vec!["--system".into()];
         fixed.extend_from_slice(args);
         command("/usr/bin/systemctl", &fixed)
+    }
+
+    fn worker(&self) -> &'static str {
+        if self.config.version == 2 {
+            crate::film::WORKER
+        } else {
+            WORKER
+        }
+    }
+
+    pub fn verify_film_image(&self, image: &str, catalogue: &crate::film::Catalogue) -> Result<()> {
+        let value: Value = serde_json::from_str(&self.docker(&strings(&[
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Labels}}",
+            image,
+        ]))?)
+        .map_err(|_| ErrorCode::Unavailable)?;
+        for (key, expected) in [
+            ("numerical_bundle", &catalogue.numerical_bundle),
+            ("recipe", &catalogue.recipe),
+            ("input_icc_sha256", &catalogue.input_icc_sha256),
+            ("output_icc_sha256", &catalogue.output_icc_sha256),
+            ("procedure", &catalogue.procedure),
+        ] {
+            if value[format!("slipstream.processing.film.{key}")] != *expected {
+                return Err(ErrorCode::IncompatibleBundle);
+            }
+        }
+        Ok(())
     }
 
     pub fn image(&self) -> Result<String> {
@@ -82,7 +131,7 @@ impl Backend {
         if !id
             .strip_prefix("sha256:")
             .is_some_and(|value| hex(value, 64))
-            || image["Config"]["Entrypoint"] != serde_json::json!([WORKER])
+            || image["Config"]["Entrypoint"] != serde_json::json!([self.worker()])
         {
             return Err(ErrorCode::Unavailable);
         }
@@ -186,8 +235,8 @@ impl Backend {
             name,
             &format!("MemoryMax={memory}"),
             "MemorySwapMax=0",
-            "TasksMax=32",
-            "CPUQuota=100%",
+            &format!("TasksMax={}", self.config.limits().tasks),
+            &format!("CPUQuota={}%", self.config.limits().cpu_quota_us / 1000),
         ]))?;
         self.systemctl(&strings(&["start", name]))?;
         if self.property(name, "StopWhenUnneeded")? != "no" {
@@ -279,7 +328,7 @@ impl Backend {
         &self,
         record: &mut Record,
         mut persist: impl FnMut(&Record) -> Result<()>,
-    ) -> Result<File> {
+    ) -> Result<Gate> {
         record.manager_pending = Some(ManagerPhase::Slice);
         persist(record)?;
         self.configure_slice(record.unit(), record.receipt.limits.memory_bytes)?;
@@ -324,7 +373,13 @@ impl Backend {
                 "-t",
                 "tmpfs",
                 "-o",
-                "size=16777216,nr_inodes=64,noswap,nodev,nosuid,noexec,uid=1000,gid=1000,mode=0700",
+                &format!(
+                    "size={},nr_inodes={},noswap,nodev,nosuid,noexec,uid={},gid={},mode=0700",
+                    record.receipt.limits.storage_bytes,
+                    record.receipt.limits.storage_inodes,
+                    if record.film.is_some() { 0 } else { 1000 },
+                    if record.film.is_some() { 0 } else { 1000 }
+                ),
                 &format!("slipstream-{}", record.launch_id),
                 work.to_str().ok_or(ErrorCode::Unavailable)?,
             ]),
@@ -332,19 +387,27 @@ impl Backend {
         record.mount_id = Some(mount_identity(&work)?.ok_or(ErrorCode::Uncertain)?);
         record.manager_pending = None;
         persist(record)?;
-        let fifo = control.join("gate");
-        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
-            .map_err(|_| ErrorCode::Unavailable)?;
-        // SAFETY: path is a valid NUL-terminated pathname in a sealed owned directory.
-        if unsafe { libc::mkfifo(path.as_ptr(), 0o644) } != 0 {
-            return Err(ErrorCode::Unavailable);
-        }
-        let gate = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(&fifo)
-            .map_err(|_| ErrorCode::Unavailable)?;
+        let gate = if record.film.is_some() {
+            let session =
+                crate::staging::Session::prepare(Path::new(&self.config.root), &workspace, record)?;
+            persist(record)?;
+            Gate::Film(Box::new(session))
+        } else {
+            let fifo = control.join("gate");
+            let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
+                .map_err(|_| ErrorCode::Unavailable)?;
+            // SAFETY: path is a valid NUL-terminated pathname in a sealed owned directory.
+            if unsafe { libc::mkfifo(path.as_ptr(), 0o644) } != 0 {
+                return Err(ErrorCode::Unavailable);
+            }
+            let gate = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&fifo)
+                .map_err(|_| ErrorCode::Unavailable)?;
+            Gate::Native(gate)
+        };
         let mut args = strings(&[
             "create",
             "--pull",
@@ -380,19 +443,27 @@ impl Backend {
             "--memory-swap",
             &record.receipt.limits.memory_bytes.to_string(),
             "--pids-limit",
-            "32",
+            &record.receipt.limits.tasks.to_string(),
             "--cpus",
-            "1",
+            &(record.receipt.limits.cpu_quota_us / 100000).to_string(),
             "--mount",
             &format!(
                 "type=bind,source={},target=/control,readonly",
                 control.display()
             ),
         ]);
-        for target in ["/work", "/tmp", "/dev/shm"] {
+        for (destination, source, writable) in self
+            .mounts(record)
+            .into_iter()
+            .filter(|(target, _, _)| *target != "/control")
+        {
             args.extend(strings(&[
                 "--mount",
-                &format!("type=bind,source={},target={target}", work.display()),
+                &format!(
+                    "type=bind,source={},target={destination}{}",
+                    source.display(),
+                    if writable { "" } else { ",readonly" }
+                ),
             ]));
         }
         args.extend(strings(&[
@@ -483,8 +554,14 @@ impl Backend {
             ("memory.max", record.receipt.limits.memory_bytes.to_string()),
             ("memory.swap.max", "0".into()),
             ("memory.oom.group", "1".into()),
-            ("cpu.max", "100000 100000".into()),
-            ("pids.max", "32".into()),
+            (
+                "cpu.max",
+                format!(
+                    "{} {}",
+                    record.receipt.limits.cpu_quota_us, record.receipt.limits.cpu_period_us
+                ),
+            ),
+            ("pids.max", record.receipt.limits.tasks.to_string()),
         ] {
             write(&leaf.join(key), &value)?;
         }
@@ -528,8 +605,13 @@ impl Backend {
     fn read_limits(&self, path: &Path, memory: u64) -> Result<()> {
         if read(&path.join("memory.max"))? != memory.to_string()
             || read(&path.join("memory.swap.max"))? != "0"
-            || read(&path.join("cpu.max"))? != "100000 100000"
-            || read(&path.join("pids.max"))? != "32"
+            || read(&path.join("cpu.max"))?
+                != format!(
+                    "{} {}",
+                    self.config.limits().cpu_quota_us,
+                    self.config.limits().cpu_period_us
+                )
+            || read(&path.join("pids.max"))? != self.config.limits().tasks.to_string()
         {
             return Err(ErrorCode::Unavailable);
         }
@@ -556,7 +638,7 @@ impl Backend {
                 != record.receipt.incarnation
             || value["HostConfig"]["CgroupParent"] != record.unit()
             || value["Config"]["User"] != "1000:1000"
-            || value["Config"]["Entrypoint"] != serde_json::json!([WORKER])
+            || value["Config"]["Entrypoint"] != serde_json::json!([self.worker()])
             || value["Config"]["Cmd"]
                 != serde_json::json!([
                     record.receipt.workload.name(),
@@ -574,23 +656,19 @@ impl Backend {
             || value["HostConfig"]["SecurityOpt"] != serde_json::json!(["no-new-privileges:true"])
             || value["HostConfig"]["Memory"] != record.receipt.limits.memory_bytes
             || value["HostConfig"]["MemorySwap"] != record.receipt.limits.memory_bytes
-            || value["HostConfig"]["PidsLimit"] != 32
-            || value["HostConfig"]["NanoCpus"] != 1_000_000_000u64
+            || value["HostConfig"]["PidsLimit"] != record.receipt.limits.tasks
+            || value["HostConfig"]["NanoCpus"] != record.receipt.limits.cpu_quota_us * 10000
             || value["Config"]["Tty"] != false
             || value["Config"]["OpenStdin"] != false
         {
             return Err(ErrorCode::Uncertain);
         }
         let mounts = value["Mounts"].as_array().ok_or(ErrorCode::Uncertain)?;
-        if mounts.len() != 4 {
+        let expected_mounts = self.mounts(record);
+        if mounts.len() != expected_mounts.len() {
             return Err(ErrorCode::Uncertain);
         }
-        for (destination, source, writable) in [
-            ("/control", self.workspace(record).join("control"), false),
-            ("/work", self.workspace(record).join("work"), true),
-            ("/tmp", self.workspace(record).join("work"), true),
-            ("/dev/shm", self.workspace(record).join("work"), true),
-        ] {
+        for (destination, source, writable) in expected_mounts {
             if mounts
                 .iter()
                 .filter(|mount| {
@@ -611,6 +689,152 @@ impl Backend {
         Ok(value)
     }
 
+    fn mounts(&self, record: &Record) -> Vec<(&'static str, PathBuf, bool)> {
+        let base = self.workspace(record);
+        let storage = base.join("work");
+        let mut mounts = vec![("/control", base.join("control"), false)];
+        if record.film.is_some() {
+            mounts.extend([
+                ("/input", storage.join("input"), false),
+                ("/work", storage.join("work"), true),
+                ("/output", storage.join("output"), true),
+                ("/tmp", storage.join("work"), true),
+                ("/dev/shm", storage.join("work"), true),
+            ]);
+        } else {
+            mounts.extend([
+                ("/work", storage.clone(), true),
+                ("/tmp", storage.clone(), true),
+                ("/dev/shm", storage, true),
+            ]);
+        }
+        mounts
+    }
+    pub fn verify_film_bootstrap(&self, record: &Record, pid: u32) -> Result<()> {
+        let live = self.live(record)?;
+        let leaf = self
+            .parent_path()
+            .join(record.unit())
+            .join(format!("docker-{}.scope/workload", record.container_id()?));
+        if !live.running
+            || live.pid != pid
+            || process_cgroup(pid)? != leaf
+            || read(&leaf.join("cgroup.procs"))? != pid.to_string()
+            || read(&leaf.join("memory.oom.group"))? != "1"
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        self.read_limits(&leaf, record.receipt.limits.memory_bytes)
+    }
+    pub fn pause_film(
+        &self,
+        record: &mut Record,
+        mut persist: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<PathBuf> {
+        record.manager_pending = Some(ManagerPhase::Pause);
+        persist(record)?;
+        self.docker(&strings(&["pause", record.container_id()?]))?;
+        record.manager_pending = None;
+        persist(record)?;
+        let live = self.live(record)?;
+        let leaf = process_cgroup(live.pid)?;
+        if !live.running
+            || self.owned_container(record, record.container_id()?)?["State"]["Paused"] != true
+            || leaf
+                != self
+                    .parent_path()
+                    .join(record.unit())
+                    .join(format!("docker-{}.scope/workload", record.container_id()?))
+            || !read(
+                &leaf
+                    .parent()
+                    .ok_or(ErrorCode::Uncertain)?
+                    .join("cgroup.events"),
+            )?
+            .lines()
+            .any(|s| s == "frozen 1")
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        self.audit_film_storage(record)?;
+        Ok(leaf)
+    }
+    pub fn audit_film_storage(&self, record: &Record) -> Result<()> {
+        let captured = record.film.as_ref().ok_or(ErrorCode::Uncertain)?;
+        let storage = self.workspace(record).join("work");
+        if mount_identity(&storage)? != record.mount_id {
+            return Err(ErrorCode::Uncertain);
+        }
+        for (name, expected, length) in [
+            (
+                "input/grant.json",
+                captured.grant_file.as_ref(),
+                crate::film::canonical(&captured.grant)?.len() as u64,
+            ),
+            (
+                "native/result",
+                captured.result_file.as_ref(),
+                crate::film::FRAME as u64,
+            ),
+            (
+                "input/input.tif",
+                captured.snapshot.as_ref(),
+                captured.grant.fixture.source_bytes(),
+            ),
+        ] {
+            if let Some(expected) = expected {
+                let dir = File::open(&storage).map_err(|_| ErrorCode::Uncertain)?;
+                let file = crate::staging::safe_open(&dir, name, libc::O_RDONLY)
+                    .map_err(|_| ErrorCode::Uncertain)?;
+                let meta = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
+                if crate::staging::identity(&file).map_err(|_| ErrorCode::Uncertain)? != *expected
+                    || !meta.is_file()
+                    || meta.uid() != 0
+                    || meta.nlink() != 1
+                    || meta.mode() & 0o777 != 0o444
+                    || meta.len() != length
+                {
+                    return Err(ErrorCode::Uncertain);
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn film_result(
+        &self,
+        record: &Record,
+        held: Option<&File>,
+    ) -> Result<Option<crate::film::WorkerResult>> {
+        let captured = record.film.as_ref().ok_or(ErrorCode::Uncertain)?;
+        let Some(expected) = &captured.result_file else {
+            return Ok(None);
+        };
+        let storage = self.workspace(record).join("work");
+        if mount_identity(&storage)? != record.mount_id {
+            return Err(ErrorCode::Uncertain);
+        }
+        let reopened;
+        let file = if let Some(file) = held {
+            file
+        } else {
+            let dir = File::open(&storage).map_err(|_| ErrorCode::Uncertain)?;
+            reopened = crate::staging::safe_open(&dir, "native/result", libc::O_RDONLY)
+                .map_err(|_| ErrorCode::Uncertain)?;
+            &reopened
+        };
+        let meta = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
+        if crate::staging::identity(file).map_err(|_| ErrorCode::Uncertain)? != *expected
+            || meta.uid() != 0
+            || !meta.is_file()
+            || meta.nlink() != 1
+            || meta.mode() & 0o777 != 0o444
+            || meta.len() != crate::film::FRAME as u64
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        crate::staging::read_result(file, &captured.grant)
+    }
+
     pub fn live(&self, record: &Record) -> Result<Live> {
         let value = self.owned_container(record, record.container_id()?)?;
         Ok(Live {
@@ -621,10 +845,7 @@ impl Backend {
                 .as_u64()
                 .and_then(|pid| u32::try_from(pid).ok())
                 .ok_or(ErrorCode::Uncertain)?,
-            exit_code: value["State"]["ExitCode"]
-                .as_u64()
-                .and_then(|code| u8::try_from(code).ok())
-                .ok_or(ErrorCode::Uncertain)?,
+            exit_code: observed_exit(&value["State"])?,
             oom: value["State"]["OOMKilled"]
                 .as_bool()
                 .ok_or(ErrorCode::Uncertain)?,
@@ -729,8 +950,8 @@ impl Backend {
             peak_bytes: read(&path.join("memory.peak"))?
                 .parse()
                 .map_err(|_| ErrorCode::Uncertain)?,
-            exit_code: live.as_ref().map(|live| live.exit_code),
-            docker_oom_killed: live.map(|live| live.oom),
+            exit_code: live.as_ref().and_then(|live| live.exit_code),
+            docker_oom_killed: live.and_then(|live| live.exit_code.map(|_| live.oom)),
             attempt_before: record
                 .receipt
                 .evidence
@@ -1054,6 +1275,19 @@ fn pidfd_alive(pidfd: &OwnedFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn created_or_never_started_containers_have_no_observed_execution_exit() {
+        let mut state = serde_json::json!({"Status":"created", "StartedAt":"0001-01-01T00:00:00Z", "ExitCode":0});
+        assert_eq!(observed_exit(&state).unwrap(), None);
+        state["Status"] = "exited".into();
+        assert_eq!(observed_exit(&state).unwrap(), None);
+        state["StartedAt"] = "2026-09-22T00:00:00Z".into();
+        assert_eq!(observed_exit(&state).unwrap(), Some(0));
+        state["ExitCode"] = 137.into();
+        assert_eq!(observed_exit(&state).unwrap(), Some(137));
+        state["Status"] = "running".into();
+        assert_eq!(observed_exit(&state).unwrap(), None);
+    }
 
     #[test]
     fn mount_root_rejects_finite_limits_and_only_true_root_may_omit_memory_max() {

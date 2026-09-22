@@ -294,6 +294,16 @@ phase. A crash after release intent but before observed start retains uncertaint
 Recovery settles the interrupted attempt; it never reissues either permit,
 continues an old render, or trusts a leftover channel as authorization.
 
+Before observed `EngineStarted`, genuine loss of the fixed private controller
+connection closes every source, snapshot, native-result, and channel capability
+and terminates and reaps any spawned child. Native PID 1 remains blocked for
+settlement by the exact owner or its original absolute timer. It never reconnects,
+reissues or infers a permit, or extends a deadline. A live but nonresponsive
+controller still must meet the initial ten-second placement deadline; a lost
+connection grants no later placement or execution opportunity. Malformed,
+truncated, or schema-invalid packets remain failures and are distinct from
+transport loss.
+
 Film operator fault barriers use the native protocol's sealed operator-only
 mechanism. Its additional closed phases are `after-stage-release-intent`,
 `after-stage-ack`, `after-snapshot-sealed`, `after-engine-release-intent`, and
@@ -476,8 +486,11 @@ validated worker result, and a closed detail code. `running` begins with observe
 stage release and does not imply Python ran. `completed` requires a verified
 success result. No outcome follows merely from a zero Python exit.
 
-Source/hash drift, unsupported decoded input, plan disagreement, and invalid
-artifact produce `engine-failed` with their respective detail. Output file-size
+Source/hash drift, a confirmed failure to seal input, unsupported decoded input,
+plan disagreement, and invalid artifact produce `engine-failed` with their
+respective detail. A confirmed sealing failure uses `source-mismatch`; unavailable
+audit evidence cannot establish that detail and remains an interrupted or
+uncertain execution under the executor's settlement contract. Output file-size
 exhaustion produces `storage-full` with `output-limit`. Preflight overflow or
 unsupported contracts refuse a start; runtime allocation failure and confirmed
 cgroup OOM remain distinct. Missing model terms are a prediction, not a fabricated
@@ -530,6 +543,21 @@ mutation, retained duplicate writers, child attempts to acquire the native resul
 writer through process interfaces, output/storage exhaustion, cancellation and
 restart at both permits, and uncertain manager outcomes. All native qualification
 checks remain independently applicable.
+
+The operator can exercise writer rejection with the fixed
+`faults/retain-snapshot-writer.json` file. It follows the executor fault files'
+root ownership, permissions, no-link, regular-file, and 1024-byte restrictions
+and contains exactly `incarnation` and `sequence`. Only a matching Film TIFF
+attempt may act on it: immediately before its first permit, the launcher retains
+one duplicate of its existing snapshot writer until the sealing audit or terminal
+cleanup. The ordinary audit must reject that writer before engine release. The
+existing `after-stage-ack` barrier allows the verifier to observe the exact inode
+and writable descriptor before continuing. No public request, worker mount,
+configurable path, or reconnect exposes this fault action; it never creates a
+new source or executable authority. Restart never repeats the action or releases
+an old attempt, and every terminal path closes the duplicate before storage
+reclamation. Other modes reject the fault file. This one closed action tests the
+real audit without introducing a general fault program or alternate worker.
 
 Synthetic content/geometry coverage and private full-resolution references prove
 only their registered cases. General camera support, resource coefficients,

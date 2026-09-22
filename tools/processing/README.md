@@ -120,6 +120,92 @@ concurrent ownership, foreign identity rejection, policy reduction, receipt
 expiry, and successful subsequent attempts. Temporary fixture evidence stays
 outside the repository.
 
+## Film measurement
+
+The separate [Film measurement profile](../../design/processing-film-measurement.md)
+uses the same host launcher with version-2 documents and root-only control IPC.
+Its catalogue selects registered synthetic images or private pre-staged TIFFs.
+It compares complete output with independent references, retains bounded evidence,
+and reclaims all image bytes. It cannot publish an Export or admit ordinary Photo
+requests. Unknown resource terms remain unqualified after a successful run.
+
+Build the fixed Film worker and adapter using the exact numerical parent retained
+locally for qualification. The helper checks the parent's immutable identity
+before and after the build and verifies inherited layers; the image build checks
+the original numerical source/package inventory. A missing or changed parent is
+a build failure, not permission to select another image:
+
+```sh
+python3 tools/processing/film/build.py --target qualification --tag slipstream:film-measurement
+docker image inspect --format '{{.Id}}' slipstream:film-measurement
+```
+
+Focused adapter checks use a separate test target with generated inputs:
+
+```sh
+python3 tools/processing/film/build.py --target adapter-checks --tag slipstream:film-adapter-checks
+docker run --rm --network none --memory 4g --memory-swap 4g --cpus 4 \
+  --pids-limit 256 --read-only --tmpfs /work:rw,size=256m \
+  --tmpfs /tmp:rw,size=64m slipstream:film-adapter-checks
+```
+
+Prepare a catalogue and resource model according to the linked schema. TIFF
+fixtures use `<fixture_id>.tif` names in an explicit private directory; do not
+point this directory at Originals or a Photo Library. The verifier copies and
+validates these operator fixtures before measurement. This preparation is
+separate from the attempt's capped source copy, decode, render, and validation.
+No pre-existing source file is modified. The planner reserves source-cache bytes
+regardless of their existing residency.
+
+Run the actual Film image with an explicit experimental budget and fresh evidence
+directory. The example budget is a probe setting, not a recommended minimum:
+
+```sh
+sudo python3 tools/processing/verify-film.py \
+  --launcher /absolute/target/debug/slipstream-processing-launcher \
+  --worker-image sha256:FILM_IMAGE_ID \
+  --web-image sha256:WEB_IMAGE_ID \
+  --catalogue /absolute/private/catalogue.json \
+  --resource-model /absolute/private/resource-model.json \
+  --fixtures /absolute/private/fixtures \
+  --memory-gib 16 \
+  --output /absolute/private/film-evidence
+```
+
+Omit `--fixtures` for a wholly synthetic catalogue. `--fixture ID` selects a
+registered case and may repeat; otherwise every entry runs. A contained-failure
+experiment must explicitly name its expected outcome with `--expect-outcome`.
+The verifier never retries an OOM or increases the budget automatically.
+`--lifecycle-fixture ID` adds crash recovery before container start, at both
+permits, and after final result capture, cancellation before engine release, and
+a subsequent successful attempt.
+Use a registered fixture of at most two million pixels for these checks. A TIFF
+lifecycle case also verifies detection of a changed private source copy.
+
+`--failure-fixture ID` requires a registered TIFF of at most two million pixels.
+It verifies rejection of a retained snapshot writer, exhaustion of the shared
+tmpfs, and an injected per-file limit failure, each followed by successful work.
+These operator faults affect only the exact owned attempt. The storage probe
+fills its host-only native directory after sealing; those host-charged pages
+are storage-cap evidence and are excluded from memory qualification. The
+file-limit probe freezes the owned container, verifies the fixed Python child,
+and lowers that child's existing 512 MiB file limit to 4096 bytes before resuming.
+It establishes the resource-failure path, not natural exhaustion at 512 MiB or
+a particular choice between the kernel's EFBIG and SIGXFSZ mechanisms.
+
+The verifier checks exact output descriptors, settled cleanup, real retained
+resource evidence, and an independent synthetic Web Library. An Album rename
+must survive a Web container restart. Its worker executes the same fixed adapter
+and fresh-cache procedure used by measurement. Sparse stage timings represent
+only directly observed phases; absent inner-stage or reclaim timings are not
+invented. Whole execution time and aggregate kernel evidence remain separate.
+
+Host-side document and fixture-preparation checks run without Docker or root:
+
+```sh
+bun run test:processing-tools
+```
+
 ## Quarantine and recovery
 
 A blocked capability never means that work may run without limits. Inspect the
