@@ -4,7 +4,7 @@ Slipstream includes third-party components. Those components remain under their 
 
 ## Rust components
 
-[`RUST-LICENSES.html`](RUST-LICENSES.html) contains the notices and license texts for the Rust server's locked Linux runtime dependency graph. `Cargo.lock` identifies the exact component versions.
+[`RUST-LICENSES.html`](RUST-LICENSES.html) contains the notices and license texts for the Rust executables' locked Linux runtime dependency graph. `Cargo.lock` identifies the exact component versions.
 
 ## Web application
 

@@ -1,0 +1,21 @@
+[package]
+name = "slipstream-processing"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[[bin]]
+name = "slipstream-processing-launcher"
+path = "src/launcher.rs"
+
+[[bin]]
+name = "slipstream-processing-worker"
+path = "src/worker.rs"

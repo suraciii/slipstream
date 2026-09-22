@@ -90,14 +90,45 @@ request with its configured authority before launch. A resource limit change
 requires draining or cancelling active work; new starts must use the current
 policy. The service cannot raise the operator's allocation through a request.
 
-A launcher holds an exclusive, crash-released instance lock before it can serve
-requests or reconcile runtime objects. Its journal stores a persistent registry
+Before manager effects, a launcher holds both its journal-root lock and an
+exclusive nonblocking host-global flock on the fixed root-owned file
+`/var/lib/slipstream-processing/instances/<instance>.claim`. This bounded claim
+stores the immutable canonical journal-root binding; synchronize the file and
+parent directory before manager effects. Validate the stable root-owned namespace
+and single-link regular file without following links. Hold the same descriptor
+for the launcher lifetime and never unlink it on ordinary exit. A different root
+for that instance, a torn claim, or an existing claim with a missing operational
+registry requires quarantine even if runtime inventory is empty. A delayed old
+manager request can still complete. Never replace an existing claim or create a
+fresh journal to clear this fence. A crash between first claim synchronization
+and journal creation may conservatively require operator reconciliation and a
+fresh instance. This is a host-wide ownership claim, not a second attempt journal.
+
+A launcher holds these exclusive locks before it serves requests or reconciles
+runtime objects. Its journal stores a persistent registry
 incarnation, a monotonic admission sequence, the active slot, and attempt
 receipts. Only one launcher incarnation may change instance execution state.
 
+The aggregate boundary also has a durable manager identity. Initial provisioning
+refuses any pre-existing unbound aggregate unit or cgroup, including an empty
+one. Fence provisioning as a pending manager operation before effects; after
+confirmed fresh creation, persist its systemd InvocationID and cgroup inode
+before clearing the fence or admitting an attempt. On restart and policy change,
+verify that exact binding before any controller change or manager effect on
+owned descendants, including recovery and cleanup. The aggregate's
+own `cgroup.procs` must be empty, and every child must match the exact retained
+identity of an unsettled owned attempt. Settled receipts do not authorize a
+recreated unit or container. A missing or recreated bound aggregate, or a missing
+registry with a pre-existing aggregate, requires quarantine. Never automatically
+adopt, recreate, reconfigure, or delete an unknown boundary. A host reboot that
+loses the bound runtime identity also requires operator reconciliation; operators
+must prove all prior work stopped and preserve its journal/evidence before
+provisioning a fresh instance identity. A healthy socket alone cannot clear this
+condition.
+
 Persist and synchronize the launch intent and reserve the active slot atomically
 before any systemd or Docker creation. The intent binds the request identity,
-manifest digest, captured policy, registry incarnation, and unpredictable launch
+canonical manifest identity, captured policy, registry incarnation, and unpredictable launch
 identity. Persist the exact manager-created unit/container identities before
 releasing the bootstrap. A crash at any step leaves a recoverable intent rather
 than an unowned worker. Runtime ownership requires the journal binding together
@@ -109,8 +140,9 @@ Start is idempotent for the same admitted identity and exact manifest; a duplica
 returns its receipt, and conflicting reuse fails. A lost response is resolved by
 inspection. A replay below the admission watermark whose receipt has expired
 returns an explicit expired result. It cannot launch again. A missing or reset
-registry uses a new incarnation and rejects earlier identities; it must reconcile
-or quarantine remaining runtime objects before admission. Intentional retry
+registry cannot clear an existing instance claim. Only a genuinely new instance
+claim and registry establish a new incarnation; claimed instances with a missing
+registry remain quarantined. Intentional retry
 requires a new identity. The bounded receipt period is operator configuration;
 expiry never removes active ownership, cancellation intent, or unsettled evidence.
 

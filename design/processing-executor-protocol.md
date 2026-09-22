@@ -64,7 +64,7 @@ Reconcile returns current registry incarnation, next admission sequence, current
 }
 ```
 
-The complete immutable manifest in this increment is the closed workload kind. The launcher computes its canonical digest; do not accept a claimed digest unrelated to supplied bytes. Policy digest binds the exact validated operator policy/profile; bundle digest binds image/native worker identity. The start request cannot override either. No input descriptors are accepted for fixture workloads. Photo staging requires a separately qualified typed descriptor/size/hash contract with source-safety review; this protocol version does not accept mutable paths.
+The complete immutable manifest in this increment is the closed workload kind. The launcher stores this validated enum as the canonical manifest and compares it directly on replay; a request cannot substitute a claimed digest for the workload. Policy digest binds the exact validated operator policy/profile; bundle digest binds image/native worker identity. The start request cannot override either. No input descriptors are accepted for fixture workloads. Photo staging requires a separately qualified typed descriptor/size/hash contract with source-safety review; this protocol version does not accept mutable paths.
 
 Closed workloads:
 
@@ -76,7 +76,7 @@ Closed workloads:
 - `probe-storage-full`: bounded block writes until ENOSPC; returns explicit storage exhaustion with no host spill.
 - `probe-inodes-full`: creates empty files until the inode cap refuses allocation.
 
-Inspect/cancel have only `incarnation` and `sequence` in addition to the common envelope. Matching known starts return the same receipt; changed intent at the same identity conflicts. New starts require exactly watermark+1 and an empty settled slot. An expired sequence at/below watermark returns `expired`, never a new launch. Foreign incarnation is rejected. Persist launch intent + incremented watermark + reserved slot atomically and fsync before any systemd/Docker operation. Registry incarnation is random and persistent; fresh/missing registry means a new incarnation and fail-closed runtime reconciliation.
+Inspect/cancel have only `incarnation` and `sequence` in addition to the common envelope. Matching known starts return the same receipt; changed intent at the same identity conflicts. New starts require exactly watermark+1 and an empty settled slot. An expired sequence at/below watermark returns `expired`, never a new launch. Foreign incarnation is rejected. Persist launch intent + incremented watermark + reserved slot atomically and fsync before any systemd/Docker operation. Registry incarnation is random and persistent. A genuinely new host instance claim and registry establish a new incarnation; an existing claim with a missing registry is quarantined and cannot initialize a replacement journal.
 
 Cancellation is a durable monotonic intent before termination. A settled receipt is immutable; cancelling it returns that receipt. A duplicate start never reverses cancellation. Slot release requires known runtime termination, persisted terminal evidence, and reclaimed temporary storage.
 
@@ -150,3 +150,37 @@ Result reads are bounded and strictly validated.
 The pinned worker begins as PID 1 with fixed profile-only bootstrap arguments. It blocks on a launcher-owned read-only FIFO/control descriptor and has its own bounded startup timeout. No native allocation fixture or engine starts before the host has verified full-container accounting, workload leaf membership, controller values, and exact runtime identity and has durably recorded release intent. Release carries only a fixed token bound to that launch; invalid/EOF/timeout exits without running a workload. The worker then executes its already fixed closed workload kind; it cannot select a program or load a supplied module. No worker has a Docker/control socket or cgroup write mount.
 
 The qualification verifier separately exercises intentionally restrictive ancestor/leaf policies and asserts rejection in ordinary admission. Test-only parent-pressure arrangements are created by the operator verifier, not client overrides.
+
+## Operator Fault Barriers
+
+Qualification mode supports deterministic operator fault barriers beneath the
+sealed instance root's `faults` directory. These files are not mounted into a
+worker or exposed through IPC. The launcher rejects links, non-regular files,
+multiple hard links, non-root ownership, group/other access, and files above
+1024 bytes. No request or configuration field can select a barrier path.
+
+An operator may create `arm.json` with exactly `phase`, `incarnation`, and
+`sequence`. The incarnation and sequence must identify the intended admission.
+The closed phases are `after-intent`, `after-slice`,
+`after-create-response`, `after-container-bound`, `after-release-intent`,
+`after-exit`, `after-evidence`, `after-container-removal`,
+`after-storage-unmount`, and `after-slice-stop`. These refer to completed
+operations; an unresolved manager request remains a separate uncertain state.
+
+At a matching phase, the launcher atomically writes `marker.json` with those
+three fields plus the exact `launch_id`, then waits for root-owned
+`release.json` containing the identical four fields. The wait ends no later
+than the attempt's captured absolute deadline. Invalid files or an expired
+wait block admission; they never release an engine. A verifier can kill the
+launcher after observing the marker and inspect the real persisted/kernel
+state. Restart reconciles owned work and never resumes or releases a prior
+bootstrap merely because a barrier exists. Barrier cleanup removes only
+validated files for the matching launch. A later production mode must reject
+these barriers rather than inherit this qualification capability.
+
+Before an asynchronous manager operation can begin, its pending phase is
+durable. A lost create/start response cannot be settled from one empty runtime
+lookup: a daemon operation may still complete later. The launcher retains the
+slot and reports uncertain ownership until completion or safe settlement is
+proven. A confirmed create response may be durably recorded before the separate
+exact runtime-identity binding; this is the `after-create-response` barrier.

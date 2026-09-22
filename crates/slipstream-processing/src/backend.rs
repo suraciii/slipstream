@@ -1,0 +1,1114 @@
+use crate::{
+    journal::{ManagerPhase, ParentIdentity, Record},
+    protocol::*,
+};
+use serde_json::Value;
+use std::{
+    collections::BTreeMap,
+    fs::{self, File, OpenOptions},
+    io::Read,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            process::CommandExt,
+        },
+    },
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+pub(crate) type Result<T> = std::result::Result<T, ErrorCode>;
+const CGROUP: &str = "/sys/fs/cgroup";
+const WORKER: &str = "/usr/local/bin/slipstream-processing-worker";
+
+#[derive(Clone)]
+pub(crate) struct Backend {
+    pub config: Config,
+}
+
+pub(crate) struct Live {
+    pub running: bool,
+    pub pid: u32,
+    pub exit_code: u8,
+    pub oom: bool,
+}
+
+impl Backend {
+    fn docker(&self, args: &[String]) -> Result<String> {
+        let mut fixed = vec![
+            "--host".into(),
+            "unix:///var/run/docker.sock".into(),
+            "--config".into(),
+            format!("{}/docker-client", self.config.root),
+        ];
+        fixed.extend_from_slice(args);
+        command("/usr/bin/docker", &fixed)
+    }
+
+    fn systemctl(&self, args: &[String]) -> Result<String> {
+        let mut fixed = vec!["--system".into()];
+        fixed.extend_from_slice(args);
+        command("/usr/bin/systemctl", &fixed)
+    }
+
+    pub fn image(&self) -> Result<String> {
+        let info: Value =
+            serde_json::from_str(&self.docker(&strings(&["info", "--format", "{{json .}}"]))?)
+                .map_err(|_| ErrorCode::Unavailable)?;
+        if info["CgroupDriver"] != "systemd"
+            || info["CgroupVersion"] != "2"
+            || info["SecurityOptions"].as_array().is_none_or(|options| {
+                options.iter().any(|option| {
+                    option
+                        .as_str()
+                        .is_some_and(|text| text.contains("rootless") || text.contains("userns"))
+                })
+            })
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        let text = self.docker(&strings(&[
+            "image",
+            "inspect",
+            "--format",
+            "{{json .}}",
+            &self.config.image,
+        ]))?;
+        let image: Value = serde_json::from_str(&text).map_err(|_| ErrorCode::Unavailable)?;
+        let id = image["Id"].as_str().ok_or(ErrorCode::Unavailable)?;
+        if !id
+            .strip_prefix("sha256:")
+            .is_some_and(|value| hex(value, 64))
+            || image["Config"]["Entrypoint"] != serde_json::json!([WORKER])
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        Ok(id.to_owned())
+    }
+
+    pub fn check_caller(&self, pid: u32) -> Result<()> {
+        let parent = self.parent_path();
+        for pid in [pid, std::process::id()] {
+            let path = process_cgroup(pid)?;
+            if path.starts_with(&parent) {
+                return Err(ErrorCode::Unavailable);
+            }
+            for ancestor in parent.ancestors() {
+                if path.starts_with(ancestor) {
+                    require_unlimited_ancestor(ancestor, ancestor == Path::new(CGROUP))?;
+                }
+                if ancestor == Path::new(CGROUP) {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn parent_path(&self) -> PathBuf {
+        Path::new(CGROUP).join(self.config.parent_unit())
+    }
+
+    pub fn verify_parent(&self, identity: Option<&ParentIdentity>) -> Result<()> {
+        let path = self.parent_path();
+        if let Some(identity) = identity {
+            if fs::metadata(&path).map_err(|_| ErrorCode::Uncertain)?.ino() != identity.inode
+                || self.property(&self.config.parent_unit(), "InvocationID")? != identity.invocation
+                || !read(&path.join("cgroup.procs"))?.is_empty()
+            {
+                return Err(ErrorCode::Uncertain);
+            }
+            return Ok(());
+        }
+        // Inventory queries do not synthesize/load a unit and cannot grant ownership.
+        if path.exists()
+            || !self
+                .systemctl(&strings(&[
+                    "list-units",
+                    "--all",
+                    "--plain",
+                    "--no-legend",
+                    "--no-pager",
+                    &self.config.parent_unit(),
+                ]))?
+                .is_empty()
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        let unit_paths = self.systemctl(&strings(&["show", "--property=UnitPath", "--value"]))?;
+        if unit_paths.is_empty() {
+            return Err(ErrorCode::Unavailable);
+        }
+        for directory in unit_paths.split_whitespace() {
+            if !Path::new(directory).is_absolute() {
+                return Err(ErrorCode::Unavailable);
+            }
+            for name in [
+                self.config.parent_unit(),
+                format!("{}.d", self.config.parent_unit()),
+            ] {
+                match fs::symlink_metadata(Path::new(directory).join(name)) {
+                    Ok(_) => return Err(ErrorCode::Uncertain),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(ErrorCode::Uncertain),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn prepare_parent(&self, previous: Option<&ParentIdentity>) -> Result<ParentIdentity> {
+        self.check_caller(std::process::id())?;
+        self.verify_parent(previous)?;
+        self.configure_slice(&self.config.parent_unit(), self.config.memory_bytes)?;
+        self.read_limits(&self.parent_path(), self.config.memory_bytes)?;
+        let identity = ParentIdentity {
+            invocation: self.property(&self.config.parent_unit(), "InvocationID")?,
+            inode: fs::metadata(self.parent_path())
+                .map_err(|_| ErrorCode::Uncertain)?
+                .ino(),
+        };
+        if !hex(&identity.invocation, 32) || previous.is_some_and(|previous| previous != &identity)
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        self.verify_parent(Some(&identity))?;
+        Ok(identity)
+    }
+
+    fn configure_slice(&self, name: &str, memory: u64) -> Result<()> {
+        self.systemctl(&strings(&[
+            "set-property",
+            "--runtime",
+            name,
+            &format!("MemoryMax={memory}"),
+            "MemorySwapMax=0",
+            "TasksMax=32",
+            "CPUQuota=100%",
+        ]))?;
+        self.systemctl(&strings(&["start", name]))?;
+        if self.property(name, "StopWhenUnneeded")? != "no" {
+            return Err(ErrorCode::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub fn property(&self, unit: &str, property: &str) -> Result<String> {
+        self.systemctl(&strings(&["show", unit, "--property", property, "--value"]))
+    }
+
+    pub fn scan_unowned(&self, records: &[Record]) -> Result<()> {
+        if self.parent_path().exists() {
+            for entry in fs::read_dir(self.parent_path()).map_err(|_| ErrorCode::Uncertain)? {
+                let entry = entry.map_err(|_| ErrorCode::Uncertain)?;
+                if entry
+                    .file_type()
+                    .map_err(|_| ErrorCode::Uncertain)?
+                    .is_dir()
+                    && !records.iter().any(|record| {
+                        record.receipt.state != State::Settled
+                            && entry.file_name() == record.unit()
+                            && self.verify_unit(record).is_ok()
+                    })
+                {
+                    return Err(ErrorCode::Uncertain);
+                }
+            }
+        }
+        let names = self.systemctl(&strings(&[
+            "list-units",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+            &format!("slipstreamprocessing{}-*.slice", self.config.instance),
+        ]))?;
+        for line in names.lines() {
+            let name = line.split_whitespace().next().ok_or(ErrorCode::Uncertain)?;
+            if !records
+                .iter()
+                .any(|record| record.receipt.state != State::Settled && record.unit() == name)
+            {
+                return Err(ErrorCode::Uncertain);
+            }
+        }
+        let ids = self.docker(&strings(&[
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--quiet",
+            "--filter",
+            &format!(
+                "label=slipstream.processing.instance={}",
+                self.config.instance
+            ),
+        ]))?;
+        for id in ids.lines() {
+            if !records.iter().any(|record| {
+                record.receipt.state != State::Settled
+                    && record
+                        .receipt
+                        .runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.container_id.as_deref())
+                        == Some(id)
+            }) {
+                // A durable pre-create intent can identify a lost create response.
+                if !records.iter().any(|record| {
+                    record.manager_pending == Some(ManagerPhase::CreateReturned)
+                        && record.container_id().is_err()
+                        && self.owned_container(record, id).is_ok()
+                }) {
+                    return Err(ErrorCode::Uncertain);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn workspace(&self, record: &Record) -> PathBuf {
+        Path::new(&self.config.root)
+            .join("attempts")
+            .join(&record.launch_id)
+    }
+
+    pub fn setup(
+        &self,
+        record: &mut Record,
+        mut persist: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<File> {
+        record.manager_pending = Some(ManagerPhase::Slice);
+        persist(record)?;
+        self.configure_slice(record.unit(), record.receipt.limits.memory_bytes)?;
+        let control_group = self.property(record.unit(), "ControlGroup")?;
+        let expected = self.parent_path().join(record.unit());
+        if Path::new(CGROUP).join(control_group.trim_start_matches('/')) != expected {
+            return Err(ErrorCode::Uncertain);
+        }
+        record.unit_invocation = Some(self.property(record.unit(), "InvocationID")?);
+        record.cgroup_inode = Some(
+            fs::metadata(&expected)
+                .map_err(|_| ErrorCode::Unavailable)?
+                .ino(),
+        );
+        record.manager_pending = None;
+        self.read_limits(&expected, record.receipt.limits.memory_bytes)?;
+        record.receipt.evidence = Some(Evidence {
+            peak_bytes: 0,
+            exit_code: None,
+            docker_oom_killed: None,
+            attempt_before: Some(events(&expected)?),
+            attempt_after: None,
+            parent_before: Some(events(&self.parent_path())?),
+            parent_after: None,
+            populated: Some(false),
+        });
+        persist(record)?;
+        crate::faults::at(&self.config, record, crate::faults::Phase::Slice)?;
+        let workspace = self.workspace(record);
+        fs::create_dir(&workspace).map_err(|_| ErrorCode::Uncertain)?;
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))
+            .map_err(|_| ErrorCode::Unavailable)?;
+        let control = workspace.join("control");
+        let work = workspace.join("work");
+        fs::create_dir(&control).map_err(|_| ErrorCode::Unavailable)?;
+        fs::create_dir(&work).map_err(|_| ErrorCode::Unavailable)?;
+        record.manager_pending = Some(ManagerPhase::Mount);
+        persist(record)?;
+        command(
+            "/usr/bin/mount",
+            &strings(&[
+                "-t",
+                "tmpfs",
+                "-o",
+                "size=16777216,nr_inodes=64,noswap,nodev,nosuid,noexec,uid=1000,gid=1000,mode=0700",
+                &format!("slipstream-{}", record.launch_id),
+                work.to_str().ok_or(ErrorCode::Unavailable)?,
+            ]),
+        )?;
+        record.mount_id = Some(mount_identity(&work)?.ok_or(ErrorCode::Uncertain)?);
+        record.manager_pending = None;
+        persist(record)?;
+        let fifo = control.join("gate");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
+            .map_err(|_| ErrorCode::Unavailable)?;
+        // SAFETY: path is a valid NUL-terminated pathname in a sealed owned directory.
+        if unsafe { libc::mkfifo(path.as_ptr(), 0o644) } != 0 {
+            return Err(ErrorCode::Unavailable);
+        }
+        let gate = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&fifo)
+            .map_err(|_| ErrorCode::Unavailable)?;
+        let mut args = strings(&[
+            "create",
+            "--pull",
+            "never",
+            "--name",
+            &record.container_name(),
+            "--label",
+            &format!("slipstream.processing.instance={}", self.config.instance),
+            "--label",
+            &format!("slipstream.processing.launch={}", record.launch_id),
+            "--label",
+            &format!(
+                "slipstream.processing.incarnation={}",
+                record.receipt.incarnation
+            ),
+            "--cgroup-parent",
+            record.unit(),
+            "--cgroupns",
+            "private",
+            "--network",
+            "none",
+            "--user",
+            "1000:1000",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--log-driver",
+            "none",
+            "--memory",
+            &record.receipt.limits.memory_bytes.to_string(),
+            "--memory-swap",
+            &record.receipt.limits.memory_bytes.to_string(),
+            "--pids-limit",
+            "32",
+            "--cpus",
+            "1",
+            "--mount",
+            &format!(
+                "type=bind,source={},target=/control,readonly",
+                control.display()
+            ),
+        ]);
+        for target in ["/work", "/tmp", "/dev/shm"] {
+            args.extend(strings(&[
+                "--mount",
+                &format!("type=bind,source={},target={target}", work.display()),
+            ]));
+        }
+        args.extend(strings(&[
+            &record.image_id,
+            record.receipt.workload.name(),
+            &record.launch_id,
+            &record.receipt.deadline_unix_ms.to_string(),
+        ]));
+        record.manager_pending = Some(ManagerPhase::Create);
+        persist(record)?;
+        let id = self.docker(&args)?;
+        if !hex(&id, 64) {
+            return Err(ErrorCode::Uncertain);
+        }
+        record.manager_pending = Some(ManagerPhase::CreateReturned);
+        persist(record)?;
+        crate::faults::at(&self.config, record, crate::faults::Phase::CreateResponse)?;
+        record
+            .receipt
+            .runtime
+            .as_mut()
+            .ok_or(ErrorCode::Uncertain)?
+            .container_id = Some(id);
+        record.manager_pending = None;
+        persist(record)?;
+        crate::faults::at(&self.config, record, crate::faults::Phase::ContainerBound)?;
+        record.manager_pending = Some(ManagerPhase::Start);
+        persist(record)?;
+        self.docker(&strings(&["start", record.container_id()?]))?;
+        record.manager_pending = None;
+        persist(record)?;
+        record.manager_pending = Some(ManagerPhase::Pause);
+        persist(record)?;
+        self.docker(&strings(&["pause", record.container_id()?]))?;
+        record.manager_pending = None;
+        persist(record)?;
+        let live = self.live(record)?;
+        if !live.running || live.pid == 0 {
+            return Err(ErrorCode::Unavailable);
+        }
+        let scope = process_cgroup(live.pid)?;
+        if scope.parent() != Some(expected.as_path())
+            || scope.file_name().and_then(|value| value.to_str())
+                != Some(&format!("docker-{}.scope", record.container_id()?))
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        if !read(&scope.join("cgroup.events"))?
+            .lines()
+            .any(|line| line == "frozen 1")
+            || self.owned_container(record, record.container_id()?)?["State"]["Paused"] != true
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        // Freezing prevents the bootstrap timer and ordinary exit while placing it.
+        // pidfd and the opened proc directory detect disappearance without retargeting
+        // readback to a reused PID. External privileged interference is not qualified.
+        let process =
+            File::open(format!("/proc/{}", live.pid)).map_err(|_| ErrorCode::Uncertain)?;
+        // SAFETY: pidfd_open accepts this checked positive PID and flags zero.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, live.pid, 0) };
+        if descriptor < 0 {
+            return Err(ErrorCode::Uncertain);
+        }
+        // SAFETY: successful pidfd_open returns a fresh descriptor owned by this call.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
+        let proc_path = PathBuf::from(format!("/proc/self/fd/{}", process.as_raw_fd()));
+        if read(&proc_path.join("cgroup"))?
+            != format!(
+                "0::{}",
+                scope
+                    .strip_prefix(CGROUP)
+                    .map_err(|_| ErrorCode::Uncertain)?
+                    .display()
+            )
+            .replace("0::", "0::/")
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        pidfd_alive(&pidfd)?;
+        self.read_limits(&scope, record.receipt.limits.memory_bytes)?;
+        let leaf = scope.join("workload");
+        fs::create_dir(&leaf).map_err(|_| ErrorCode::Unavailable)?;
+        write(&leaf.join("cgroup.procs"), &live.pid.to_string())?;
+        pidfd_alive(&pidfd)?;
+        write(&scope.join("cgroup.subtree_control"), "+memory +cpu +pids")?;
+        for (key, value) in [
+            ("memory.max", record.receipt.limits.memory_bytes.to_string()),
+            ("memory.swap.max", "0".into()),
+            ("memory.oom.group", "1".into()),
+            ("cpu.max", "100000 100000".into()),
+            ("pids.max", "32".into()),
+        ] {
+            write(&leaf.join(key), &value)?;
+        }
+        self.read_limits(&leaf, record.receipt.limits.memory_bytes)?;
+        if read(&leaf.join("memory.oom.group"))? != "1"
+            || read(&leaf.join("cgroup.procs"))? != live.pid.to_string()
+            || process_cgroup(live.pid)? != leaf
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        self.owned_container(record, record.container_id()?)?;
+        Ok(gate)
+    }
+
+    pub fn release(
+        &self,
+        record: &mut Record,
+        mut persist: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<()> {
+        self.owned_container(record, record.container_id()?)?;
+        record.manager_pending = Some(ManagerPhase::Unpause);
+        persist(record)?;
+        self.docker(&strings(&["unpause", record.container_id()?]))?;
+        record.manager_pending = None;
+        persist(record)
+    }
+
+    pub fn admission_ready(&self, identity: Option<&ParentIdentity>) -> Result<()> {
+        let identity = identity.ok_or(ErrorCode::Unavailable)?;
+        if fs::metadata(self.parent_path())
+            .map_err(|_| ErrorCode::Unavailable)?
+            .ino()
+            != identity.inode
+            || !read(&self.parent_path().join("cgroup.procs"))?.is_empty()
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        self.read_limits(&self.parent_path(), self.config.memory_bytes)
+    }
+
+    fn read_limits(&self, path: &Path, memory: u64) -> Result<()> {
+        if read(&path.join("memory.max"))? != memory.to_string()
+            || read(&path.join("memory.swap.max"))? != "0"
+            || read(&path.join("cpu.max"))? != "100000 100000"
+            || read(&path.join("pids.max"))? != "32"
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        Ok(())
+    }
+
+    fn owned_container(&self, record: &Record, id: &str) -> Result<Value> {
+        if !hex(id, 64) || record.container_id().is_ok_and(|expected| expected != id) {
+            return Err(ErrorCode::Uncertain);
+        }
+        let value: Value = serde_json::from_str(&self.docker(&strings(&[
+            "inspect",
+            "--format",
+            "{{json .}}",
+            id,
+        ]))?)
+        .map_err(|_| ErrorCode::Uncertain)?;
+        if value["Id"] != id
+            || value["Image"] != record.image_id
+            || value["Name"] != format!("/{}", record.container_name())
+            || value["Config"]["Labels"]["slipstream.processing.instance"] != self.config.instance
+            || value["Config"]["Labels"]["slipstream.processing.launch"] != record.launch_id
+            || value["Config"]["Labels"]["slipstream.processing.incarnation"]
+                != record.receipt.incarnation
+            || value["HostConfig"]["CgroupParent"] != record.unit()
+            || value["Config"]["User"] != "1000:1000"
+            || value["Config"]["Entrypoint"] != serde_json::json!([WORKER])
+            || value["Config"]["Cmd"]
+                != serde_json::json!([
+                    record.receipt.workload.name(),
+                    record.launch_id,
+                    record.receipt.deadline_unix_ms.to_string()
+                ])
+            || value["HostConfig"]["LogConfig"]["Type"] != "none"
+            || value["HostConfig"]["Privileged"] != false
+            || value["HostConfig"]["ReadonlyRootfs"] != true
+            || value["HostConfig"]["NetworkMode"] != "none"
+            || value["HostConfig"]["PidMode"] != ""
+            || value["HostConfig"]["CgroupnsMode"] != "private"
+            || value["HostConfig"]["CapDrop"] != serde_json::json!(["ALL"])
+            || !value["HostConfig"]["CapAdd"].is_null()
+            || value["HostConfig"]["SecurityOpt"] != serde_json::json!(["no-new-privileges:true"])
+            || value["HostConfig"]["Memory"] != record.receipt.limits.memory_bytes
+            || value["HostConfig"]["MemorySwap"] != record.receipt.limits.memory_bytes
+            || value["HostConfig"]["PidsLimit"] != 32
+            || value["HostConfig"]["NanoCpus"] != 1_000_000_000u64
+            || value["Config"]["Tty"] != false
+            || value["Config"]["OpenStdin"] != false
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        let mounts = value["Mounts"].as_array().ok_or(ErrorCode::Uncertain)?;
+        if mounts.len() != 4 {
+            return Err(ErrorCode::Uncertain);
+        }
+        for (destination, source, writable) in [
+            ("/control", self.workspace(record).join("control"), false),
+            ("/work", self.workspace(record).join("work"), true),
+            ("/tmp", self.workspace(record).join("work"), true),
+            ("/dev/shm", self.workspace(record).join("work"), true),
+        ] {
+            if mounts
+                .iter()
+                .filter(|mount| {
+                    mount["Type"] == "bind"
+                        && mount["Destination"] == destination
+                        && mount["Source"]
+                            .as_str()
+                            .is_some_and(|value| Path::new(value) == source)
+                        && mount["RW"] == writable
+                        && mount["Propagation"] == "rprivate"
+                })
+                .count()
+                != 1
+            {
+                return Err(ErrorCode::Uncertain);
+            }
+        }
+        Ok(value)
+    }
+
+    pub fn live(&self, record: &Record) -> Result<Live> {
+        let value = self.owned_container(record, record.container_id()?)?;
+        Ok(Live {
+            running: value["State"]["Running"]
+                .as_bool()
+                .ok_or(ErrorCode::Uncertain)?,
+            pid: value["State"]["Pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .ok_or(ErrorCode::Uncertain)?,
+            exit_code: value["State"]["ExitCode"]
+                .as_u64()
+                .and_then(|code| u8::try_from(code).ok())
+                .ok_or(ErrorCode::Uncertain)?,
+            oom: value["State"]["OOMKilled"]
+                .as_bool()
+                .ok_or(ErrorCode::Uncertain)?,
+        })
+    }
+
+    pub fn discover(&self, record: &mut Record) -> Result<()> {
+        if record
+            .manager_pending
+            .is_some_and(|phase| phase != ManagerPhase::CreateReturned)
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        if record.manager_pending == Some(ManagerPhase::CreateReturned)
+            && record.container_id().is_err()
+        {
+            let ids = self.docker(&strings(&[
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--quiet",
+                "--filter",
+                &format!("label=slipstream.processing.launch={}", record.launch_id),
+            ]))?;
+            let ids: Vec<_> = ids.lines().collect();
+            match ids.as_slice() {
+                [id] => {
+                    self.owned_container(record, id)?;
+                    record
+                        .receipt
+                        .runtime
+                        .as_mut()
+                        .ok_or(ErrorCode::Uncertain)?
+                        .container_id = Some((*id).to_owned());
+                }
+                _ => return Err(ErrorCode::Uncertain),
+            }
+        }
+        let path = self.parent_path().join(record.unit());
+        if path.exists() {
+            self.verify_unit(record)?;
+        }
+        let mount = mount_identity(&self.workspace(record).join("work"))?;
+        if mount.is_some() && mount != record.mount_id {
+            return Err(ErrorCode::Uncertain);
+        }
+        record.manager_pending = None;
+        Ok(())
+    }
+
+    fn verify_unit(&self, record: &Record) -> Result<PathBuf> {
+        let path = self.parent_path().join(record.unit());
+        if Some(self.property(record.unit(), "InvocationID")?) != record.unit_invocation
+            || Some(fs::metadata(&path).map_err(|_| ErrorCode::Uncertain)?.ino())
+                != record.cgroup_inode
+        {
+            return Err(ErrorCode::Uncertain);
+        }
+        Ok(path)
+    }
+
+    pub fn stop(&self, record: &Record) -> Result<()> {
+        let Some(id) = record
+            .receipt
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_id.as_deref())
+        else {
+            return Ok(());
+        };
+        let live = self.live(record)?;
+        if live.running {
+            self.verify_unit(record)?;
+            self.docker(&strings(&["kill", "--signal", "KILL", id]))?;
+        }
+        Ok(())
+    }
+
+    pub fn evidence(&self, record: &Record) -> Result<Evidence> {
+        let path = self.verify_unit(record)?;
+        let live = if record
+            .receipt
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_id.as_ref())
+            .is_some()
+        {
+            Some(self.live(record)?)
+        } else {
+            None
+        };
+        if live.as_ref().is_some_and(|live| live.running) {
+            return Err(ErrorCode::Uncertain);
+        }
+        let populated = read(&path.join("cgroup.events"))?
+            .lines()
+            .any(|line| line == "populated 1");
+        if populated {
+            return Err(ErrorCode::Uncertain);
+        }
+        Ok(Evidence {
+            peak_bytes: read(&path.join("memory.peak"))?
+                .parse()
+                .map_err(|_| ErrorCode::Uncertain)?,
+            exit_code: live.as_ref().map(|live| live.exit_code),
+            docker_oom_killed: live.map(|live| live.oom),
+            attempt_before: record
+                .receipt
+                .evidence
+                .as_ref()
+                .and_then(|e| e.attempt_before.clone()),
+            attempt_after: Some(events(&path)?),
+            parent_before: record
+                .receipt
+                .evidence
+                .as_ref()
+                .and_then(|e| e.parent_before.clone()),
+            parent_after: Some(events(&self.parent_path())?),
+            populated: Some(false),
+        })
+    }
+
+    pub fn worker_outcome(&self, record: &Record) -> Result<Option<Outcome>> {
+        let path = self.workspace(record).join("work/result");
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(ErrorCode::Uncertain),
+        };
+        let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
+        if !metadata.is_file() || metadata.len() != 4096 {
+            return Err(ErrorCode::Uncertain);
+        }
+        let mut bytes = Vec::new();
+        file.take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ErrorCode::Uncertain)?;
+        if bytes.len() != 4096 {
+            return Err(ErrorCode::Uncertain);
+        }
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        if bytes[end..].iter().any(|byte| *byte != 0) {
+            return Err(ErrorCode::Uncertain);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ResultFile {
+            launch_id: String,
+            outcome: Outcome,
+        }
+        let value: ResultFile = match serde_json::from_slice(&bytes[..end]) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        if value.launch_id != record.launch_id {
+            return Err(ErrorCode::Uncertain);
+        }
+        Ok(Some(value.outcome))
+    }
+
+    pub fn cleanup(&self, record: &Record) -> Result<()> {
+        if let Some(id) = record
+            .receipt
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_id.as_deref())
+        {
+            // Removal is idempotent only after an immutable terminal receipt was persisted.
+            let ids = self.docker(&strings(&[
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--quiet",
+                "--filter",
+                &format!("id={id}"),
+            ]))?;
+            if !ids.is_empty() {
+                if self.live(record)?.running {
+                    return Err(ErrorCode::Uncertain);
+                }
+                self.docker(&strings(&["rm", id]))?;
+            }
+        }
+        crate::faults::at(&self.config, record, crate::faults::Phase::ContainerRemoval)?;
+        let workspace = self.workspace(record);
+        let work = workspace.join("work");
+        if let Some(current) = mount_identity(&work)? {
+            if Some(current) != record.mount_id {
+                return Err(ErrorCode::Uncertain);
+            }
+            command(
+                "/usr/bin/umount",
+                &strings(&[work.to_str().ok_or(ErrorCode::Uncertain)?]),
+            )?;
+            if mount_identity(&work)?.is_some() {
+                return Err(ErrorCode::Uncertain);
+            }
+        }
+        crate::faults::at(&self.config, record, crate::faults::Phase::StorageUnmount)?;
+        if workspace.exists() {
+            fs::remove_dir_all(&workspace).map_err(|_| ErrorCode::Uncertain)?;
+        }
+        if self.parent_path().join(record.unit()).exists() {
+            self.verify_unit(record)?;
+            self.systemctl(&strings(&["stop", record.unit()]))?;
+        }
+        crate::faults::at(&self.config, record, crate::faults::Phase::SliceStop)?;
+        self.systemctl(&strings(&["revert", record.unit()]))?;
+        if self.parent_path().join(record.unit()).exists() {
+            return Err(ErrorCode::Uncertain);
+        }
+        Ok(())
+    }
+}
+
+fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
+    match File::open(path.join("memory.max")) {
+        Ok(file) => {
+            let mut value = String::new();
+            file.take(64)
+                .read_to_string(&mut value)
+                .map_err(|_| ErrorCode::Unavailable)?;
+            if value.trim() != "max" {
+                return Err(ErrorCode::Unavailable);
+            }
+            Ok(())
+        }
+        Err(error) if allow_absent && error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(ErrorCode::Unavailable),
+    }
+}
+
+fn process_cgroup(pid: u32) -> Result<PathBuf> {
+    let text = read(&PathBuf::from(format!("/proc/{pid}/cgroup")))?;
+    let path = text.strip_prefix("0::/").ok_or(ErrorCode::Unavailable)?;
+    if path.contains('\n') || path.split('/').any(|component| component == "..") {
+        return Err(ErrorCode::Unavailable);
+    }
+    Ok(Path::new(CGROUP).join(path))
+}
+
+pub(crate) fn secure_directory(path: &Path, owner: u32) -> Result<()> {
+    if !path.is_absolute() || fs::canonicalize(path).map_err(|_| ErrorCode::Unavailable)? != path {
+        return Err(ErrorCode::Unavailable);
+    }
+    for ancestor in path.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).map_err(|_| ErrorCode::Unavailable)?;
+        if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o022 != 0 {
+            return Err(ErrorCode::Unavailable);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read(path: &Path) -> Result<String> {
+    let file = File::open(path).map_err(|_| ErrorCode::Unavailable)?;
+    let mut bytes = Vec::new();
+    file.take(RESPONSE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ErrorCode::Unavailable)?;
+    if bytes.len() > RESPONSE_BYTES {
+        return Err(ErrorCode::Unavailable);
+    }
+    String::from_utf8(bytes)
+        .map(|text| text.trim().to_owned())
+        .map_err(|_| ErrorCode::Unavailable)
+}
+
+fn write(path: &Path, value: &str) -> Result<()> {
+    fs::write(path, value).map_err(|_| ErrorCode::Unavailable)
+}
+
+fn events(path: &Path) -> Result<Events> {
+    fn counters(text: &str) -> Result<BTreeMap<&str, u64>> {
+        text.lines()
+            .map(|line| {
+                let (name, value) = line.split_once(' ').ok_or(ErrorCode::Uncertain)?;
+                Ok((name, value.parse().map_err(|_| ErrorCode::Uncertain)?))
+            })
+            .collect()
+    }
+    let all = read(&path.join("memory.events"))?;
+    let local = read(&path.join("memory.events.local"))?;
+    let all = counters(&all)?;
+    let local = counters(&local)?;
+    let get = |map: &BTreeMap<&str, u64>, key| map.get(key).copied().ok_or(ErrorCode::Uncertain);
+    Ok(Events {
+        oom: get(&all, "oom")?,
+        oom_kill: get(&all, "oom_kill")?,
+        oom_group_kill: get(&all, "oom_group_kill")?,
+        local_oom: get(&local, "oom")?,
+        local_oom_kill: get(&local, "oom_kill")?,
+        local_oom_group_kill: get(&local, "oom_group_kill")?,
+    })
+}
+
+fn mount_identity(path: &Path) -> Result<Option<u64>> {
+    let text = read(Path::new("/proc/self/mountinfo"))?;
+    for line in text.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields
+            .get(4)
+            .is_some_and(|target| Path::new(target) == path)
+        {
+            let separator = fields
+                .iter()
+                .position(|field| *field == "-")
+                .ok_or(ErrorCode::Uncertain)?;
+            if fields.get(separator + 1) != Some(&"tmpfs") {
+                return Err(ErrorCode::Uncertain);
+            }
+            return fields[0]
+                .parse()
+                .map(Some)
+                .map_err(|_| ErrorCode::Uncertain);
+        }
+    }
+    Ok(None)
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn command(program: &str, args: &[String]) -> Result<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|_| ErrorCode::Unavailable)?;
+    let mut stdout = child.stdout.take().ok_or(ErrorCode::Unavailable)?;
+    let mut stderr = child.stderr.take().ok_or(ErrorCode::Unavailable)?;
+    for descriptor in [stdout.as_raw_fd(), stderr.as_raw_fd()] {
+        // SAFETY: both pipe descriptors are live. Nonblocking reads bound the complete command lifetime.
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ErrorCode::Unavailable);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let mut output_eof = false;
+    let mut errors_eof = false;
+    let mut status = None;
+    loop {
+        let capture = |reader: &mut dyn Read, bytes: &mut Vec<u8>| -> Result<bool> {
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return Ok(true),
+                    Ok(count) => {
+                        if bytes.len() + count > RESPONSE_BYTES {
+                            return Err(ErrorCode::Uncertain);
+                        }
+                        bytes.extend_from_slice(&buffer[..count]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Ok(false);
+                    }
+                    Err(_) => return Err(ErrorCode::Uncertain),
+                }
+            }
+        };
+        let captured: Result<()> = (|| {
+            if !output_eof {
+                output_eof = capture(&mut stdout, &mut output)?;
+            }
+            if !errors_eof {
+                errors_eof = capture(&mut stderr, &mut errors)?;
+            }
+            Ok(())
+        })();
+        if captured.is_err() || Instant::now() >= deadline {
+            // This is our unreaped direct child, never a discovered/recycled engine PID.
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(ErrorCode::Uncertain);
+        }
+        if status.is_none() {
+            status = child.try_wait().map_err(|_| ErrorCode::Uncertain)?;
+        }
+        if output_eof
+            && errors_eof
+            && let Some(status) = status
+        {
+            if !status.success() {
+                return Err(ErrorCode::Unavailable);
+            }
+            return String::from_utf8(output)
+                .map(|text| text.trim().to_owned())
+                .map_err(|_| ErrorCode::Unavailable);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn pidfd_alive(pidfd: &OwnedFd) -> Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: descriptor is a live pidfd and the single pollfd buffer is valid.
+    if unsafe { libc::poll(&mut descriptor, 1, 0) } != 0 || descriptor.revents != 0 {
+        return Err(ErrorCode::Uncertain);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_root_rejects_finite_limits_and_only_true_root_may_omit_memory_max() {
+        let root =
+            std::env::temp_dir().join(format!("slipstream-cgroup-root-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        assert_eq!(require_unlimited_ancestor(&root, true), Ok(()));
+        assert_eq!(
+            require_unlimited_ancestor(&root, false),
+            Err(ErrorCode::Unavailable)
+        );
+        fs::write(root.join("memory.max"), "max\n").unwrap();
+        assert_eq!(require_unlimited_ancestor(&root, true), Ok(()));
+        assert_eq!(require_unlimited_ancestor(&root, false), Ok(()));
+        fs::write(root.join("memory.max"), "67108864\n").unwrap();
+        assert_eq!(
+            require_unlimited_ancestor(&root, true),
+            Err(ErrorCode::Unavailable)
+        );
+        assert_eq!(
+            require_unlimited_ancestor(&root, false),
+            Err(ErrorCode::Unavailable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unresolved_manager_effects_quarantine_before_any_runtime_lookup() {
+        let config = Config {
+            version: 1,
+            mode: "qualification".into(),
+            instance: "0".repeat(32),
+            root: "/does-not-exist".into(),
+            socket: "/does-not-exist.sock".into(),
+            peer_uid: 0,
+            image: format!("sha256:{}", "1".repeat(64)),
+            memory_bytes: 64 * 1024 * 1024,
+            receipt_retention_seconds: 1,
+        };
+        let backend = Backend { config };
+        for phase in [
+            ManagerPhase::Slice,
+            ManagerPhase::Mount,
+            ManagerPhase::Create,
+            ManagerPhase::Start,
+            ManagerPhase::Pause,
+            ManagerPhase::Unpause,
+        ] {
+            let mut record:Record=serde_json::from_value(serde_json::json!({
+                "receipt":{"incarnation":"11111111111111111111111111111111","sequence":1,"workload":"probe-success","policy":"2".repeat(64),"bundle":"3".repeat(64),"state":"accepted","cancellation_requested":false,"accepted_at_unix_ms":0,"deadline_unix_ms":30000,"outcome":null,"runtime":null,"limits":Limits::new(64*1024*1024),"evidence":null,"cleanup":"pending"},
+                "launch_id":"4".repeat(32),"image_id":format!("sha256:{}","5".repeat(64)),"unit_invocation":null,"cgroup_inode":null,"mount_id":null,"released":false,"termination_reason":null,"manager_pending":phase,"settled_at_unix_ms":null
+            })).unwrap();
+            assert_eq!(backend.discover(&mut record), Err(ErrorCode::Uncertain));
+            assert_eq!(record.manager_pending, Some(phase));
+            assert!(record.receipt.runtime.is_none());
+        }
+    }
+}
