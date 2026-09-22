@@ -27,7 +27,7 @@ Slipstream is in initial product definition.
 - Read the governing Issue and affected specifications before implementing a change.
 - Keep this file limited to repository-wide rules. Put scoped guidance beside the files it governs.
 - Keep Product and Design Specs limited to durable target behavior, boundaries, decisions, and contracts.
-- Put temporary measurements, probes, implementation progress, and one-off evidence in the governing Issue or change review, not in Specs or `CONTEXT.md`.
+- Keep delivery plans, dependencies, and implementation tracking in GitHub Issues, not repository files. Keep temporary measurements, probes, and one-off evidence in the governing Issue or change review, not in Specs or `CONTEXT.md`.
 - Define each rule in one authoritative document. Link to it instead of copying it.
 
 ## Spec-First Development

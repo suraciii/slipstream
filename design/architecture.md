@@ -1,10 +1,10 @@
 # Foundational Architecture
 
-Slipstream needs the smallest server-owned application boundary that lets one Photographer review an existing Photo Library from a browser, group Photos, and retain selection decisions while Original Files remain unchanged.
+Slipstream needs the smallest server-owned application boundary that lets one Photographer and their own external Agent review an existing Photo Library, group Photos, and retain selection decisions while Original Files remain unchanged.
 
 ## Design Drivers
 
-- The primary interface is a browser on a phone, tablet, or desktop.
+- The Web supports visual use on a phone, tablet, or desktop; the CLI supports direct and delegated programmatic use through the same service.
 - Original Files may be large RAW files on local storage or a mounted network share.
 - Browsers cannot display most RAW formats directly.
 - The first product needs camera-produced Previews, not a general RAW development engine.
@@ -19,7 +19,7 @@ Three kinds of state have separate owners:
 2. SQLite owns Photo identity, Albums, Selection State, Rating, saved Album position, and derivative metadata.
 3. The browser owns transient gesture, zoom, navigation, and one-level undo state.
 
-No layer may become the only owner of another layer's state.
+No layer may become the only owner of another layer's state. The CLI owns only invocation-local input, output, and local Preview downloads. It does not own Library state, browsing positions, or an Agent runtime. [Command-Line Architecture](command-line.md) defines the machine-client boundary.
 
 ## Application Model
 
@@ -59,7 +59,7 @@ The Library Folder is a location and discovery boundary, not Photo Library ident
 
 ### Library Browser Scope
 
-The Library Browser is the primary interface. It opens `All Photos`, one read-only Original Folder, or one Album in a progressively loaded Grid View and opens one current Photo in Photo View.
+The Library Browser is the visual interface. It opens `All Photos`, one read-only Original Folder, or one Album in a progressively loaded Grid View and opens one current Photo in Photo View.
 
 The implementation creates a hidden ephemeral Browse Snapshot when a source opens. Library and Original Folder Snapshots own Capture Time order, while Album Snapshots own explicit membership order. A Snapshot retains only ordered Photo IDs; bounded windows query current Photo facts. [`photo-organization.md`](photo-organization.md) defines physical and virtual organization, [`capture-time-ordering.md`](capture-time-ordering.md) defines metadata authority, rescan behavior, and deterministic ties, and [`library-browsing.md`](library-browsing.md) defines scalable loading and cache behavior.
 
@@ -105,11 +105,11 @@ Selection State and Rating update in one database transaction per Photo mutation
 
 The first architecture does not write XMP sidecars. Export or synchronization requires a later design because it introduces a second writable source of metadata.
 
-## Local Web Boundary
+## Client Boundary
 
-The browser is a client of the server. It receives browser-displayable derivatives and never needs the RAW Original to perform ordinary review.
+The browser and CLI are clients of the server. They receive displayable derivatives and never need the RAW Original to perform ordinary review. The CLI contract and the additive query and checked-write surfaces are defined in [Command-Line Architecture](command-line.md). Both interfaces use the same domain and persistence owners.
 
-The server exposes the smallest required surfaces:
+The browser-facing service exposes these surfaces:
 
 - a bounded Library Overview and scan status;
 - bounded direct-child File Location navigation;
@@ -139,8 +139,9 @@ The initial codebase has these logical modules:
 - **Selection** owns Selection State, Rating, and saved Album position.
 - **Album** owns virtual group identity, ordering, and membership.
 - **File Locations** derives read-only Original Folder navigation from Published Library Locations.
-- **Protocol** owns browser-server schemas.
+- **Protocol** owns client-server schemas.
 - **Web** owns presentation, gestures, Preview zoom, and one-level undo.
+- **CLI** owns command parsing, bounded service calls, structured results, and local Preview delivery, with no domain-state ownership.
 
 These are ownership boundaries, not required packages or services. The first implementation uses a modular monolith and one process unless native-library isolation proves necessary for process safety.
 
@@ -172,7 +173,7 @@ The first implementation proves this complete path:
 10. Restart the server and restore cached Previews, the Album, decisions, Rating, and saved position.
 11. Prove that Original File bytes and metadata are unchanged.
 
-Everything else is deferred until this slice works.
+Further increments reuse these ownership boundaries. [Command-Line Use](../docs/command-line.md) adds the delegated-use path without replacing the visual slice.
 
 ## Options
 
