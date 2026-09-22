@@ -47,6 +47,12 @@ Source Inspection determines:
 - byte size;
 - extraction or decode failure.
 
+A RAW Source Candidate also carries an optional container orientation from the
+same LibRaw inspection that produced its JPEG bytes. This is fallback metadata,
+not a second transform or another source. It remains paired with that retained
+Original descriptor and its post-operation revision check. It is not persisted
+as Photo identity or exposed as a new browser rotation control.
+
 Inspection must not apply creative processing.
 
 ### Derivative
@@ -88,9 +94,24 @@ Preview processing is bounded by 128 MiB input JPEG bytes, 100 million decoded p
 
 ### Orientation
 
-The output Derivative must display in the same visible orientation as the selected source under normal browser rendering.
+[Preview Normalization](../docs/previews.md#preview-normalization) owns
+orientation precedence and the behavior when neither source has a valid
+orientation.
 
-The Rust libvips implementation bakes orientation into output pixels and removes orientation metadata. It must use this one tested rule consistently and must not rotate twice.
+The RAW wrapper converts LibRaw's container transform into an optional standard
+EXIF orientation value, including mirrored transforms. Only EXIF values 1
+through 8 are valid; absent, malformed, or out-of-range values supply no
+orientation. LibRaw's internal flip representation must not be passed as an
+EXIF value or reduced to a guessed portrait/landscape flag. A zero candidate
+thumbnail flip alone does not establish that its pixels are already upright.
+
+The libvips wrapper reads the selected JPEG's orientation and applies the
+container fallback only when the JPEG has no valid value. This includes a JPEG
+with an EXIF block but without a valid Orientation field. It then normalizes
+pixels before sizing and encoding and removes orientation metadata from the
+output. Rust passes bounded metadata through the existing native boundary;
+there is no second RAW open or metadata-rewriting codec. The frontend uses the
+corrected derivative dimensions and performs no compensating rotation.
 
 ### Color
 
@@ -125,6 +146,12 @@ A Derivative cache identity includes:
 - pipeline version.
 
 The first implementation does not hash whole RAW files. A changed size or modification time invalidates dependent derivatives.
+
+A change to orientation interpretation requires a new pipeline identity even
+when Original size and modification time are unchanged. An older algorithm's
+bytes or dimensions must not be reused as a current Derivative or hydrated
+current URL. Replacement remains demand-driven and must not require a Library
+scan, Original edits, or deletion of unrelated cache data.
 
 Derivative creation writes to a temporary cache path and publishes the completed file atomically within the cache filesystem. A failed replacement leaves the previous valid Derivative available but stale; the protocol must identify whether a stale result is being shown.
 
@@ -171,6 +198,21 @@ A malformed or adversarial file must not cause unbounded allocation based only o
 
 This combination has a small responsibility split. The owned LibRaw/libjpeg wrapper knows RAW containers, embedded images, and complete JPEG validation. The owned libvips wrapper knows JPEG inspection, orientation, resize, profiles, and encoding. Slipstream owns source order, limits, process-global library lifecycle, caching, and product semantics.
 
+### Selected: Explicit Container Orientation Fallback
+
+Pass one bounded orientation value beside extracted JPEG bytes and let the
+existing libvips normalizer resolve precedence and transform pixels. This
+handles absent and partial EXIF without constructing or rewriting JPEG metadata.
+It keeps RAW interpretation with LibRaw and pixel normalization with libvips.
+
+### Not selected: Synthesize EXIF Through LibRaw Thumbnail Output
+
+LibRaw's memory-thumbnail output can add an EXIF header when one is absent.
+That is insufficient when a JPEG already contains EXIF but has no valid
+Orientation. Extending it with another metadata-rewriting path adds a second
+metadata owner without removing the need to define precedence. An explicit
+fallback covers both cases through the same normalization path.
+
 ### Rejected: LibRaw Basic RAW Conversion
 
 LibRaw's sensor-data conversion would create a new generic appearance that is less representative of the camera preview and introduces RAW-development policy. It is not a useful fallback for the first product.
@@ -199,6 +241,11 @@ Implementation tests must prove:
 - a RAW Photo never substitutes a same-basename JPEG, and a changed source revision returns the Photo to `inspection-pending`;
 - no code path unpacks RAW sensor pixels;
 - portrait and rotated samples display exactly once in the correct orientation;
+- generated RAW extraction-to-derivative cases cover container-only orientation,
+  JPEG precedence including normal orientation, partial EXIF, invalid or unknown
+  values, and all mirrored transforms for both targets;
+- old-algorithm derivatives and stored dimensions cannot pass current cache or
+  URL hydration checks after orientation semantics change;
 - output never exceeds source dimensions or target long edge;
 - valid profile preservation and sRGB conversion behave as specified;
 - source changes invalidate the cache;
