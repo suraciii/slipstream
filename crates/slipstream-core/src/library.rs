@@ -738,7 +738,13 @@ fn inspect_capture_facts(
                     Ok(capture) => capture,
                     Err(crate::CaptureInspectionError::Confinement(
                         crate::confinement::ConfinementError::Changed,
-                    )) => CaptureFact::failed(None),
+                    )) => match crate::capture::inspect_capture_fresh(&capability, original.kind) {
+                        Ok(observation) => {
+                            original.facts = observation.facts;
+                            observation.capture
+                        }
+                        Err(_) => CaptureFact::failed(None),
+                    },
                     Err(_) => CaptureFact::failed(Some(revision)),
                 }
             }
@@ -992,9 +998,13 @@ mod tests {
     use crate::{OriginalKind, identity::original_id, persistence::PersistenceError};
     use rusqlite::{Connection, params};
     use std::{
+        ffi::CString,
         fs,
-        os::unix::ffi::OsStringExt,
-        sync::atomic::{AtomicU64, Ordering},
+        os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::MetadataExt,
+        },
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
     static NEXT_TEMP_TREE: AtomicU64 = AtomicU64::new(0);
@@ -1037,6 +1047,403 @@ mod tests {
         fs::create_dir(base.0.join("originals")).unwrap();
         let config = config(&base);
         (base, config)
+    }
+
+    fn raw_capture_fixture(value: &str) -> Vec<u8> {
+        let value = format!("{value}\0").into_bytes();
+        let value_offset = 8 + 2 + 12 + 4;
+        let mut bytes = b"II*\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&0x9003_u16.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(value_offset as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&value);
+        bytes
+    }
+
+    fn jpeg_capture_fixture(value: &str) -> Vec<u8> {
+        let tiff = raw_capture_fixture(value);
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+        let mut bytes = vec![0xff, 0xd8, 0xff, 0xe1];
+        bytes.extend_from_slice(&u16::try_from(payload.len() + 2).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&[0xff, 0xd9]);
+        bytes
+    }
+
+    fn replace_with_preserved_mtime(path: &std::path::Path, bytes: &[u8]) {
+        let metadata = fs::metadata(path).unwrap();
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, bytes).unwrap();
+        let replacement_name = CString::new(replacement.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+            libc::timespec {
+                tv_sec: metadata.mtime(),
+                tv_nsec: metadata.mtime_nsec(),
+            },
+        ];
+        assert_eq!(
+            unsafe {
+                libc::utimensat(libc::AT_FDCWD, replacement_name.as_ptr(), times.as_ptr(), 0)
+            },
+            0
+        );
+        fs::rename(replacement, path).unwrap();
+    }
+
+    #[test]
+    fn capture_inspection_reobserves_stale_jpeg_discovery() {
+        let (_base, config) = fixture();
+        let path = config.library_root.join("current.JPG");
+        fs::write(&path, jpeg_capture_fixture("2026:02:03 04:05:06")).unwrap();
+        let root = LibraryRoot::open(&config.library_root).unwrap();
+        let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+        fs::write(&path, jpeg_capture_fixture("2026:02:03 05:05:06")).unwrap();
+        let current_facts = root
+            .original(originals[0].path.clone())
+            .unwrap()
+            .facts()
+            .unwrap();
+
+        inspect_capture_facts(
+            &root,
+            &NativeWorkBudget::new(),
+            &mut originals,
+            &[],
+            &Mutex::new(ScanProgress::default()),
+        );
+
+        assert_eq!(originals[0].facts, current_facts);
+        assert_eq!(
+            originals[0].capture.order_key.as_deref(),
+            Some("2026-02-03T05:05:06.000000000")
+        );
+        assert_eq!(
+            originals[0].capture.source_revision,
+            Some(capture_source_revision("current.JPG", current_facts).unwrap())
+        );
+    }
+
+    #[test]
+    fn capture_inspection_accepts_same_size_same_mtime_raw_replacement_as_fresh() {
+        let (_base, config) = fixture();
+        let path = config.library_root.join("current.ARW");
+        let initial = raw_capture_fixture("2026:02:03 04:05:06");
+        let replacement = raw_capture_fixture("2026:02:03 05:05:06");
+        assert_eq!(initial.len(), replacement.len());
+        fs::write(&path, initial).unwrap();
+        let root = LibraryRoot::open(&config.library_root).unwrap();
+        let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+        let stale_facts = originals[0].facts;
+        replace_with_preserved_mtime(&path, &replacement);
+        let current_facts = root
+            .original(originals[0].path.clone())
+            .unwrap()
+            .facts()
+            .unwrap();
+        assert_eq!(current_facts.size, stale_facts.size);
+        assert_eq!(current_facts.mtime_ms, stale_facts.mtime_ms);
+        assert_eq!(current_facts.device, stale_facts.device);
+        assert_ne!(current_facts.inode, stale_facts.inode);
+
+        inspect_capture_facts(
+            &root,
+            &NativeWorkBudget::new(),
+            &mut originals,
+            &[],
+            &Mutex::new(ScanProgress::default()),
+        );
+
+        assert_eq!(originals[0].facts, current_facts);
+        assert_eq!(
+            originals[0].capture.order_key.as_deref(),
+            Some("2026-02-03T05:05:06.000000000")
+        );
+        assert_eq!(
+            originals[0].capture.source_revision,
+            Some(capture_source_revision("current.ARW", current_facts).unwrap())
+        );
+    }
+
+    #[test]
+    fn fresh_capture_mid_read_change_fails_without_third_attempt_or_stale_fact_adoption() {
+        let (_base, config) = fixture();
+        let path = config.library_root.join("bounded-fresh.ARW");
+        let initial = raw_capture_fixture("2026:02:03 04:05:06");
+        fs::write(&path, initial).unwrap();
+        let root = LibraryRoot::open(&config.library_root).unwrap();
+        let mut initial_originals = root.scan(ScanLimits::default()).unwrap().originals;
+        inspect_capture_facts(
+            &root,
+            &NativeWorkBudget::new(),
+            &mut initial_originals,
+            &[],
+            &Mutex::new(ScanProgress::default()),
+        );
+        let remembered_key = initial_originals[0].capture.order_key.clone();
+        let previous = vec![crate::OriginalRecord {
+            id: "remembered-original".to_owned(),
+            relative_path: initial_originals[0].path.clone(),
+            kind: initial_originals[0].kind,
+            facts: initial_originals[0].facts,
+            available: true,
+            error_category: None,
+            error_message: None,
+            capture: initial_originals[0].capture.clone(),
+        }];
+
+        let mut intermediate = raw_capture_fixture("2026:02:03 05:05:06");
+        intermediate.push(0);
+        fs::write(&path, intermediate).unwrap();
+        let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+        let discovery_facts = originals[0].facts;
+        let mut current = raw_capture_fixture("2026:02:03 06:05:06");
+        current.push(0);
+        replace_with_preserved_mtime(&path, &current);
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let hook_opens = opens.clone();
+        let hook_path = path.clone();
+        let _hook = crate::capture::install_capture_inspection_test_hook(move |relative, point| {
+            if relative.as_str() != "bounded-fresh.ARW" {
+                return;
+            }
+            match point {
+                crate::capture::CaptureInspectionTestPoint::BeforeOpen => {
+                    hook_opens.fetch_add(1, Ordering::SeqCst);
+                }
+                crate::capture::CaptureInspectionTestPoint::BeforeVerification
+                    if hook_opens.load(Ordering::SeqCst) == 2 =>
+                {
+                    let mut bytes = fs::read(&hook_path).unwrap();
+                    bytes.push(0);
+                    fs::write(&hook_path, bytes).unwrap();
+                }
+                crate::capture::CaptureInspectionTestPoint::BeforeVerification => {}
+            }
+        });
+
+        inspect_capture_facts(
+            &root,
+            &NativeWorkBudget::new(),
+            &mut originals,
+            &previous,
+            &Mutex::new(ScanProgress::default()),
+        );
+
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+        assert_eq!(originals[0].facts, discovery_facts);
+        assert!(remembered_key.is_some());
+        assert_eq!(
+            originals[0].capture.state,
+            crate::CaptureMetadataState::Failed
+        );
+        assert_eq!(originals[0].capture.source_revision, None);
+        assert_eq!(originals[0].capture.order_key, None);
+    }
+
+    #[test]
+    fn stable_non_revision_capture_failure_is_not_retried() {
+        let (_base, config) = fixture();
+        let path = config.library_root.join("resource-limit.ARW");
+        let mut excessive = b"II*\0\x08\0\0\0".to_vec();
+        excessive.extend_from_slice(&1025_u16.to_le_bytes());
+        fs::write(&path, excessive).unwrap();
+        let root = LibraryRoot::open(&config.library_root).unwrap();
+        let mut originals = root.scan(ScanLimits::default()).unwrap().originals;
+        let discovery_facts = originals[0].facts;
+        let expected_revision =
+            capture_source_revision("resource-limit.ARW", discovery_facts).unwrap();
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let hook_opens = opens.clone();
+        let _hook = crate::capture::install_capture_inspection_test_hook(move |relative, point| {
+            if relative.as_str() == "resource-limit.ARW"
+                && point == crate::capture::CaptureInspectionTestPoint::BeforeOpen
+            {
+                hook_opens.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        inspect_capture_facts(
+            &root,
+            &NativeWorkBudget::new(),
+            &mut originals,
+            &[],
+            &Mutex::new(ScanProgress::default()),
+        );
+
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(originals[0].facts, discovery_facts);
+        assert_eq!(
+            originals[0].capture.state,
+            crate::CaptureMetadataState::Failed
+        );
+        assert_eq!(
+            originals[0].capture.source_revision.as_deref(),
+            Some(expected_revision.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_capture_publication_preserves_identity_decisions_album_order_and_resume() {
+        let (_base, config) = fixture();
+        let target_path = config.library_root.join("preserved.JPG");
+        let sibling_path = config.library_root.join("sibling.ARW");
+        fs::write(&target_path, jpeg_capture_fixture("2026:02:03 04:05:06")).unwrap();
+        fs::write(&sibling_path, raw_capture_fixture("2026:02:03 06:05:06")).unwrap();
+        let library = Library::open(config.clone()).unwrap();
+        let initial = library.scan().await.unwrap();
+        let target_original = initial
+            .originals
+            .iter()
+            .find(|original| original.relative_path.as_str() == "preserved.JPG")
+            .unwrap()
+            .clone();
+        let target_photo = initial
+            .photos
+            .iter()
+            .find(|photo| photo.original_id == target_original.id)
+            .unwrap()
+            .clone();
+        let sibling_photo = initial
+            .photos
+            .iter()
+            .find(|photo| photo.original_id != target_original.id)
+            .unwrap()
+            .clone();
+        library
+            .mutate_photo_state(crate::PhotoStateMutation {
+                photo_id: target_photo.id.clone(),
+                field: crate::PhotoStateField::SelectionState,
+                value: crate::PhotoStateValue::Selection(crate::SelectionState::Selected),
+                expected_current: Some(crate::PhotoStateValue::Selection(
+                    crate::SelectionState::Undecided,
+                )),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        library
+            .mutate_photo_state(crate::PhotoStateMutation {
+                photo_id: target_photo.id.clone(),
+                field: crate::PhotoStateField::Rating,
+                value: crate::PhotoStateValue::Rating(4),
+                expected_current: Some(crate::PhotoStateValue::Rating(0)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let album_id = library
+            .mutate_album(AlbumMutation::Create {
+                name: "Preserved order".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        let album_order = vec![sibling_photo.id.clone(), target_photo.id.clone()];
+        library
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: album_order.clone(),
+            })
+            .await
+            .unwrap();
+        library
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: target_photo.id.clone(),
+            })
+            .await
+            .unwrap();
+
+        // Make discovery observe an intermediate revision. The test hook then
+        // completes a second replacement immediately before the first Capture
+        // open, forcing the bounded fresh observation through the real scanner.
+        fs::write(&target_path, jpeg_capture_fixture("2026:02:03 05:05:06")).unwrap();
+        let final_bytes = jpeg_capture_fixture("2026:02:03 07:05:06");
+        let replacement_path = config.library_root.join("preserved.replacement");
+        fs::write(&replacement_path, final_bytes).unwrap();
+        let replacements = Arc::new(AtomicUsize::new(0));
+        let hook_replacements = replacements.clone();
+        let hook_target = target_path.clone();
+        let _hook = crate::capture::install_capture_inspection_test_hook(move |relative, point| {
+            if relative.as_str() == "preserved.JPG"
+                && point == crate::capture::CaptureInspectionTestPoint::BeforeOpen
+                && hook_replacements.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                fs::rename(&replacement_path, &hook_target).unwrap();
+            }
+        });
+
+        let current = library.scan().await.unwrap();
+        assert_eq!(replacements.load(Ordering::SeqCst), 2);
+        let current_original = current
+            .originals
+            .iter()
+            .find(|original| original.relative_path.as_str() == "preserved.JPG")
+            .unwrap();
+        let current_photo = current
+            .photos
+            .iter()
+            .find(|photo| photo.original_id == current_original.id)
+            .unwrap();
+        assert_eq!(current_original.id, target_original.id);
+        assert_eq!(
+            current_original.relative_path,
+            target_original.relative_path
+        );
+        assert_eq!(current_photo.id, target_photo.id);
+        assert_eq!(
+            current_photo.selection_state,
+            crate::SelectionState::Selected
+        );
+        assert_eq!(current_photo.rating, 4);
+        assert_eq!(
+            current_original.capture.order_key.as_deref(),
+            Some("2026-02-03T07:05:06.000000000")
+        );
+        let current_filesystem_facts = library
+            .original(current_original.relative_path.clone())
+            .unwrap()
+            .facts()
+            .unwrap();
+        assert_eq!(current_original.facts.size, current_filesystem_facts.size);
+        assert_eq!(
+            current_original.facts.mtime_ms,
+            current_filesystem_facts.mtime_ms
+        );
+        assert_eq!(
+            current_original.capture.source_revision,
+            Some(capture_source_revision("preserved.JPG", current_filesystem_facts).unwrap())
+        );
+        let album = library
+            .list_albums()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|album| album.id == album_id)
+            .unwrap();
+        assert_eq!(
+            album
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            album_order
+        );
+        assert_eq!(
+            album.last_reviewed_photo_id.as_deref(),
+            Some(target_photo.id.as_str())
+        );
+        library.shutdown().unwrap();
     }
 
     #[test]
