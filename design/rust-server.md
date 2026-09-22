@@ -159,3 +159,7 @@ Implementation details may improve standards compliance, such as parsing an `If-
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
 The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, v5, and v6 schema shapes, legacy-ID, Album-state, and independent-Photo preservation, Location-independent new-ID allocation, exact-content recovery, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
+
+## Photo Development Processes
+
+The Rust service retains all Photo, persistence, protocol, and lifecycle ownership when it invokes native development tools or a Python simulation adapter. [Photo Development Architecture](photo-development.md) defines that subordinate process boundary. Python must not become a second HTTP or Library owner.

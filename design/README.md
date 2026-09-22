@@ -4,6 +4,11 @@
 
 Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or changing a Design Spec. Product behavior belongs in [`../docs/`](../docs/README.md), and shared language belongs in [`../CONTEXT.md`](../CONTEXT.md).
 
+## Photo Development
+
+- [Photo Development Architecture](photo-development.md): recipe ownership, headless processing, concurrency, export snapshots, source safety, and recovery
+- [Development Color Pipeline](development-color.md): RAW interpretation, linear TIFF handoff, fixed film simulation, display separation, and reproducibility
+
 ## Foundations
 
 - [Foundational Architecture](architecture.md): local Web deployment, file ownership, Photo identity, state ownership, and the first vertical slice

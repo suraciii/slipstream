@@ -104,3 +104,35 @@ The content used for a Preview: `jpeg-original` or `raw-embedded-jpeg`. The lega
 
 **Detail Review**:
 Magnified Preview inspection for focus, motion, or expression. It is a Preview Zoom state in Photo View, not a separate mode. Its detail is limited by the Preview resolution.
+
+## Development
+
+**Edit Recipe**:
+The saved exposure and white-balance intent for one Photo, together with its fixed Film Recipe. It is independent of Selection State, Rating, and Album membership.
+_Avoid_: edit history, darktable sidecar
+
+**Film Recipe**:
+A defined combination of film stock, print paper, and processing choices used to produce a simulated photograph.
+_Avoid_: filter, film name as complete recipe
+
+**Development Result**:
+The scene-linear image produced from a RAW Original after basic camera interpretation, exposure, and white balance, before film simulation or display rendering.
+_Avoid_: Preview, developed Original
+
+**Film Result**:
+The simulated photograph produced by applying a Film Recipe to a Development Result.
+_Avoid_: camera Preview, film Original
+
+**Edit Preview**:
+A displayable rendition of a specified Development Result or Film Result for editing and comparison. Its stage and detail limits are explicit; it is separate from the camera-produced Preview used for selection.
+_Avoid_: Preview when the kind is unclear
+
+**Export**:
+A request to produce a downloadable image from captured editing intent and a specified processing stage, together with its completion outcome. It does not create or modify an Original File.
+_Avoid_: save Original, imported Photo
+
+**Development TIFF**:
+An exported Development Result prepared for further scene-referred processing. It is distinct from a finished film image.
+
+**Finished JPEG**:
+An exported Film Result prepared for ordinary viewing and sharing.

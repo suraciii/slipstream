@@ -15,6 +15,10 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Library Browsing and Selection](library-browsing-and-selection.md): progressive Grid and Photo views, source order, loading feedback, gestures, selection state, rating, detail inspection, and undo
 - [Photo Previews](previews.md): acceptable preview sources, visible provenance, quality limits, caching behavior, and failures
 
+## Photo Development
+
+- [Photo Development](photo-development.md): RAW correction, autosave, fixed film simulation, stage previews, exports, shared client behavior, and recovery
+
 ## Support and Release
 
 - [0.1 Support and Release Contract](0.1-support-and-release.md): supported environment, file and camera boundary, recovery, limitations, rollback-artifact retention, and 0.1.0 release notes

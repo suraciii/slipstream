@@ -38,7 +38,7 @@ The first product uses two views:
 
 The Photographer opens Photo View by activating a Grid cell. A Grid cell must be enabled only while its activation can immediately open Photo View against the current source. While Slipstream replaces an expired source snapshot, it must make retained Grid cells unavailable until the replacement source is ready. It must not expose an enabled Grid cell whose activation does nothing. Photo View must provide a direct return to Grid View. Returning to Grid View must restore the browser-local scroll position and current Photo when those cells remain in the open source. Keyboard focus must return to that Photo cell when it is rendered, or to the Grid viewport when it is not.
 
-Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or RAW adjustment controls.
+Slipstream follows this familiar Library-browser shape without adding desktop editing panels, folder mutation, Album Groups, Smart Albums, keywording, publishing, or a general RAW module editor. The separate [Photo Development](photo-development.md) workspace owns the bounded exposure and white-balance controls.
 
 ## Presentation and Control Hierarchy
 
