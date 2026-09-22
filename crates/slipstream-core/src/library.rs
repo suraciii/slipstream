@@ -1656,10 +1656,40 @@ mod tests {
         occupant_state: Option<(&'static str, u8)>,
         fingerprint: Option<bool>,
     ) -> (TempTree, LibraryConfig) {
+        manual_recovery_fixture_with_candidate(occupant_state, fingerprint, CandidateFile::Readable)
+    }
+
+    /// What the proposed destination Location holds on disk.
+    #[derive(Clone, Copy)]
+    enum CandidateFile {
+        /// One generated readable JPEG, the ordinary recovered candidate.
+        Readable,
+        /// No entry at all, as for a destination that was never written.
+        Absent,
+        /// A generated directory carrying the candidate filename, which no
+        /// Original read can use.
+        NotRegular,
+    }
+
+    /// [`manual_recovery_fixture`] with explicit control over the destination
+    /// entry, for candidate states the scanner would not have discovered.
+    fn manual_recovery_fixture_with_candidate(
+        occupant_state: Option<(&'static str, u8)>,
+        fingerprint: Option<bool>,
+        candidate: CandidateFile,
+    ) -> (TempTree, LibraryConfig) {
         let (base, config) = fixture();
         let root = &config.library_root;
         fs::create_dir_all(root.join("moved")).unwrap();
-        fs::write(root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+        match candidate {
+            CandidateFile::Readable => {
+                fs::write(root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
+            }
+            CandidateFile::Absent => {}
+            CandidateFile::NotRegular => {
+                fs::create_dir(root.join("moved/a.JPG")).unwrap();
+            }
+        }
         fs::create_dir_all(&config.state_directory).unwrap();
         #[cfg(unix)]
         {
@@ -2071,6 +2101,160 @@ mod tests {
         // The destination content matched the persisted fingerprint, so the
         // proposal reports verification even without a permitted retire.
         assert!(proposals[0].verified);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    /// A fingerprint-less proposal cannot fall back on remembered content, so
+    /// it must establish that the destination really holds a readable
+    /// Original. An absent unowned Location is not a match.
+    #[tokio::test]
+    async fn manual_recovery_reports_missing_destination_without_fingerprint() {
+        let (base, config) =
+            manual_recovery_fixture_with_candidate(None, Some(false), CandidateFile::Absent);
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        assert!(survey.unavailable[0].fingerprint.is_none());
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Missing
+        ));
+        assert!(!proposals[0].verified);
+
+        // The single-mapping path reads the same Location and reports the
+        // same truth.
+        let single = crate::plan_single_relocation(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            &survey.unavailable[0].original_id,
+            "moved/a.JPG",
+        )
+        .unwrap();
+        assert!(matches!(single.outcome, crate::ManualOutcome::Missing));
+        assert!(!single.verified);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    /// A remembered destination owner cannot turn an absent Location into a
+    /// retireable occupant: nothing occupies a Location with no file.
+    #[tokio::test]
+    async fn manual_recovery_reports_missing_occupied_destination_without_retirement() {
+        let (base, config) = manual_recovery_fixture_with_candidate(
+            Some(("moved/a.JPG", 0)),
+            Some(false),
+            CandidateFile::Absent,
+        );
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let root = LibraryRoot::open(config.library_root.clone()).unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &root,
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert_eq!(proposals.len(), 1);
+        // The occupant is remembered with default decisions, so a readable
+        // candidate here would offer retirement. With no file at the
+        // Location the proposal refuses instead.
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Missing
+        ));
+        assert!(!proposals[0].verified);
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    /// An inaccessible candidate cannot be judged, so it is not a match and
+    /// offers no retirement even when a remembered occupant qualifies.
+    #[tokio::test]
+    async fn manual_recovery_reports_inaccessible_destination_without_fingerprint() {
+        let (base, config) = manual_recovery_fixture_with_candidate(
+            Some(("moved/a.JPG", 0)),
+            Some(false),
+            CandidateFile::Readable,
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                config.library_root.join("moved/a.JPG"),
+                fs::Permissions::from_mode(0o000),
+            )
+            .unwrap();
+        }
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &LibraryRoot::open(config.library_root.clone()).unwrap(),
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Unreadable
+        ));
+        assert!(!proposals[0].verified);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                config.library_root.join("moved/a.JPG"),
+                fs::Permissions::from_mode(0o644),
+            );
+        }
+        library.shutdown().unwrap();
+        drop(base);
+    }
+
+    /// A non-regular entry at the destination is not a usable Original, so
+    /// the proposal refuses it instead of offering a match.
+    #[tokio::test]
+    async fn manual_recovery_reports_non_regular_destination_without_fingerprint() {
+        let (base, config) =
+            manual_recovery_fixture_with_candidate(None, Some(false), CandidateFile::NotRegular);
+        let library = Library::open(config.clone()).unwrap();
+        let survey = library.recovery_survey().await.unwrap();
+        let snapshot = library.snapshot().await.unwrap();
+        let proposals = crate::plan_manual_relocations(
+            &LibraryRoot::open(config.library_root.clone()).unwrap(),
+            &NativeWorkBudget::new(),
+            &survey,
+            &snapshot,
+            "shoot",
+            "moved",
+        )
+        .unwrap();
+        assert!(matches!(
+            proposals[0].outcome,
+            crate::ManualOutcome::Unreadable
+        ));
+        assert!(!proposals[0].verified);
         library.shutdown().unwrap();
         drop(base);
     }

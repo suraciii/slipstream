@@ -434,16 +434,28 @@ fn evaluate_candidate(
         Ok(capability) => capability,
         Err(_) => return ManualOutcome::Missing,
     };
-    // A persisted fingerprint is verified against the destination content;
-    // a match falls through so the outcome below reports the destination
-    // state, and any mismatch or read failure refuses the mapping.
     if let Some(expected) = record.fingerprint.as_deref() {
+        // A persisted fingerprint is verified against the destination
+        // content; a match falls through so the outcome below reports the
+        // destination state, and any mismatch or read failure refuses the
+        // mapping.
         let permit = native_work.acquire();
         let digest = capability.digest_file();
         drop(permit);
         match digest {
             Ok(checked) if checked.digest == expected => {}
             Ok(_) => return ManualOutcome::ContentMismatch,
+            Err(_) => return ManualOutcome::Unreadable,
+        }
+    } else {
+        // Without a fingerprint nothing proves the destination holds the
+        // remembered content, so the proposal must at least establish that
+        // the Location really holds a readable Original. An absent or
+        // unreadable candidate is neither a match nor a retireable occupant,
+        // whatever the persisted state remembers about that Location.
+        match capability.facts_if_present() {
+            Ok(Some(_)) => {}
+            Ok(None) => return ManualOutcome::Missing,
             Err(_) => return ManualOutcome::Unreadable,
         }
     }

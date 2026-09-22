@@ -240,6 +240,22 @@ impl LibraryRoot {
         Ok(File::from(descriptor))
     }
 
+    /// Opens one confined file, reporting `None` when nothing exists at the
+    /// Location. Every other open failure is unsafe: the Location may hold an
+    /// entry that cannot be used, so the caller must not read it as absence.
+    fn open_confined_if_present(
+        &self,
+        path: &RelativeOriginalPath,
+    ) -> Result<Option<File>, ConfinementError> {
+        self.ensure_open()?;
+        let path = CString::new(path.as_str()).map_err(|_| ConfinementError::InvalidPath)?;
+        match sys::open_confined(self.0.descriptor.as_raw_fd(), &path, false) {
+            Ok(descriptor) => Ok(Some(File::from(descriptor))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(ConfinementError::UnsafeOpen),
+        }
+    }
+
     fn open_directory(&self, path: &str) -> Result<OwnedFd, ConfinementError> {
         self.ensure_open()?;
         if path.is_empty() {
@@ -268,6 +284,18 @@ impl OriginalCapability {
     pub fn facts(&self) -> Result<OriginalFacts, ConfinementError> {
         let file = self.root.open_confined(&self.path, false)?;
         facts(file.as_raw_fd())
+    }
+
+    /// Reports the confined Original File's facts, or `None` when no file
+    /// exists at its Location. An `Err` reports a Location whose entry cannot
+    /// be opened or inspected as one readable regular file. A capability by
+    /// itself proves nothing about the filesystem, so a caller that must not
+    /// accept a phantom candidate checks presence instead of assuming it.
+    pub fn facts_if_present(&self) -> Result<Option<OriginalFacts>, ConfinementError> {
+        let Some(file) = self.root.open_confined_if_present(&self.path)? else {
+            return Ok(None);
+        };
+        facts(file.as_raw_fd()).map(Some)
     }
 
     pub fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, ConfinementError> {
@@ -1329,6 +1357,45 @@ mod tests {
         assert!(matches!(
             verify_thread.join().unwrap(),
             Err(ConfinementError::Changed)
+        ));
+    }
+
+    #[test]
+    fn facts_if_present_distinguishes_absent_from_unreadable_candidates() {
+        let tree = TempTree::new();
+        tree.write("a/one.JPG", b"one");
+        fs::create_dir(tree.path().join("a/dir.JPG")).unwrap();
+        let root = LibraryRoot::open(tree.path()).unwrap();
+
+        // A readable candidate reports its facts.
+        let present = root
+            .original(RelativeOriginalPath::parse("a/one.JPG").unwrap())
+            .unwrap();
+        assert_eq!(present.facts_if_present().unwrap().unwrap().size, 3);
+
+        // An absent Location reports nothing instead of an error.
+        let absent = root
+            .original(RelativeOriginalPath::parse("a/absent.JPG").unwrap())
+            .unwrap();
+        assert!(absent.facts_if_present().unwrap().is_none());
+
+        // A non-regular entry is an unusable candidate, not an absent one.
+        let directory = root
+            .original(RelativeOriginalPath::parse("a/dir.JPG").unwrap())
+            .unwrap();
+        assert!(matches!(
+            directory.facts_if_present(),
+            Err(ConfinementError::NotRegular)
+        ));
+
+        // A closed Library is an error, never a reported absence.
+        let captured = root
+            .original(RelativeOriginalPath::parse("a/one.JPG").unwrap())
+            .unwrap();
+        root.close();
+        assert!(matches!(
+            captured.facts_if_present(),
+            Err(ConfinementError::Closed)
         ));
     }
 
