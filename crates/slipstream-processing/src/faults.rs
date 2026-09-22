@@ -36,6 +36,8 @@ pub(crate) enum Phase {
     StorageUnmount,
     #[serde(rename = "after-slice-stop")]
     SliceStop,
+    #[serde(rename = "after-slice-stop-intent")]
+    SliceStopIntent,
     #[serde(rename = "after-stage-release-intent")]
     StageReleaseIntent,
     #[serde(rename = "after-stage-ack")]

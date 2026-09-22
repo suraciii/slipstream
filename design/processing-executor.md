@@ -169,9 +169,21 @@ processing slice (finite aggregate allocation)
       workload leaf (group OOM; engine and all descendants)
 ```
 
-Systemd owns slice properties through its unit APIs. Each explicitly started
-attempt slice has `StopWhenUnneeded=no`; an ordinary exited scope does not retain
-accounting. Docker owns its scope. The launcher creates and controls only the
+Systemd owns slice properties through its unit APIs. Each attempt uses a fresh
+transient slice created by `StartTransientUnit` with job mode `fail`, no auxiliary
+units, and only the captured memory, zero-swap, task, CPU quota/period and
+`StopWhenUnneeded=no` properties. Aggregate provisioning remains separate.
+Before creation, prove that the derived attempt name has no loaded unit, cgroup
+or unit configuration through bounded, non-loading inventory.
+Persist the pending slice operation before creation; clear it only with the
+confirmed active transient unit's InvocationID and cgroup inode. Before worker
+creation, verify `Transient=yes`, the expected ControlGroup and the exact
+`/run/systemd/transient/<attempt-unit>` FragmentPath, retention and actual limits.
+Require empty DropInPaths; inherited or unit-specific overrides are not part of
+the closed attempt configuration.
+A failed or ambiguous creation never permits adoption or a second creation call.
+An ordinary exited scope does not retain accounting. Docker owns its scope.
+The launcher creates and controls only the
 workload leaf within that delegated scope. It moves the blocked bootstrap into
 the leaf, enables the required controllers, applies and reads back limits, and
 checks membership before release. Future engine descendants inherit the leaf.
@@ -226,6 +238,38 @@ accounting boundaries and private temporary artifacts only after confirmed
 settlement and evidence persistence; active valid artifacts follow the service's
 leases and retention. Repeat cleanup must be safe after partial failure.
 
+Attempt settlement must not request a global systemd reload. After terminal
+evidence is durable, verify the exact bound InvocationID, cgroup inode and
+transient provenance before stopping the attempt slice. Persist a pending stop
+operation before the manager call and clear it only after its confirmed return;
+an unresolved stop keeps the slot blocked, including after launcher restart.
+The existing five-second manager-command limit remains unchanged. Do not repeat
+an uncertain stop, revert unit files, remove unit configuration directly, or
+raise a timeout to complete settlement.
+
+After confirmed stop, observe removal for at most five seconds using only
+bounded read operations. All queries and waits share this single absolute
+observation deadline; individual reads do not receive a new interval.
+An observation must prove that the exact attempt has
+no cgroup, no loaded unit in non-loading manager inventory, and no matching unit
+fragment or drop-in directory in any manager UnitPath, including runtime and
+persistent locations. A matching symlink also counts as configuration; unreadable
+or malformed inventory cannot prove absence. A still-loaded unit may remain
+pending only while its captured InvocationID, transient FragmentPath and
+provenance match, and it is inactive or deactivating. Read its properties through
+the object path addressed by its captured InvocationID, which cannot load or
+recreate a unit by name. Never query a missing unit in a way that loads or
+synthesizes it. A failed property read provides no absence evidence. Only after
+a durably confirmed stop with no pending manager effect may a fresh, successful,
+complete non-loading inventory plus cgroup and all UnitPath checks independently
+prove absence within the same deadline. Do not classify human command-error text
+or retry a mutation. A positively observed foreign generation or configuration,
+an incomplete or unavailable final observation, or expiry leaves cleanup
+uncertain; only confirmed absence releases the slot. Recovery after confirmed partial cleanup performs the same readback
+and never recreates the unit. Surviving legacy nontransient attempt units or
+their configuration require operator reconciliation; the launcher does not
+migrate, adopt or remove them. Aggregate identity and policy rules are unchanged.
+
 ## Capability and Failure
 
 Startup and operator verification must exercise the actual namespace, UID,
@@ -260,6 +304,14 @@ increment.
 Giving the Web service unrestricted Docker access or privileged host mounts is
 rejected because it expands its authority beyond the fixed processing task.
 
+Transient attempt slices are selected because systemd owns their lifetime and
+removes their configuration when they unload. Retained accounting still lasts
+until the explicit stop after evidence persistence. Runtime property overrides
+with ordinary `revert` add a global reload to every settlement. Suppressing that
+reload still requires destructive configuration removal after the live unit
+identity disappears, plus separate durable file provenance for safe recovery.
+That additional ownership model is unnecessary for fresh attempt boundaries.
+
 ## Verification
 
 Prove native and descendant OOM at both leaf and aggregate-parent limits, worker
@@ -268,6 +320,10 @@ control-service survival and a following successful job. Exercise failed start
 at each ordering boundary, idempotent start, lost responses, cancel/complete
 races, launcher/control restart, foreign ownership, policy changes and cleanup
 failure. Validate private protocol bounds and every derived runtime argument.
+Confirm that ordinary settlement requests no manager reload and leaves no
+attempt unit, cgroup or runtime/persistent configuration. Exercise interrupted
+creation and stop, after-stop recovery, foreign replacements with and without
+an active cgroup, and legacy nontransient units without mutating them.
 
 Prove that final accounting survives both the last worker exit and launcher
 restart, and that controlled storage exhaustion and stdout/stderr flooding cannot fill the host filesystem

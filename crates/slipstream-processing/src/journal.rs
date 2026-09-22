@@ -21,6 +21,7 @@ use std::{
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ManagerPhase {
     Slice,
+    SliceStop,
     Mount,
     Create,
     CreateReturned,
@@ -41,6 +42,8 @@ pub(crate) struct Record {
     pub released: bool,
     pub termination_reason: Option<Outcome>,
     pub manager_pending: Option<ManagerPhase>,
+    #[serde(default)]
+    pub stop_confirmed: bool,
     pub settled_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub film: Option<crate::film::Captured>,
@@ -544,6 +547,7 @@ impl Executor {
                     released: false,
                     termination_reason: None,
                     manager_pending: None,
+                    stop_confirmed: false,
                     settled_at_unix_ms: None,
                     film,
                 };
@@ -646,6 +650,7 @@ impl Executor {
         let mut record = record.clone();
         record.receipt.cancellation_requested |= previous.receipt.cancellation_requested;
         record.termination_reason = previous.termination_reason.or(record.termination_reason);
+        record.stop_confirmed |= previous.stop_confirmed;
         if let Some(outcome) = previous.receipt.outcome
             && outcome != Outcome::Unknown
         {
@@ -1028,7 +1033,8 @@ impl Executor {
                 .is_some_and(|evidence| evidence.populated == Some(false))
         {
             drop(session);
-            self.backend.cleanup(&record)?;
+            self.backend
+                .cleanup(&mut record, |record| self.update(record))?;
             record.receipt.cleanup = Cleanup::Complete;
             record.receipt.state = State::Settled;
             record.settled_at_unix_ms = Some(now()?);
@@ -1132,7 +1138,8 @@ impl Executor {
             crate::faults::at(&self.config, &record, crate::faults::Phase::ValidatedResult)?;
         }
         crate::faults::at(&self.config, &record, crate::faults::Phase::Evidence)?;
-        self.backend.cleanup(&record)?;
+        self.backend
+            .cleanup(&mut record, |record| self.update(record))?;
         record.receipt.cleanup = Cleanup::Complete;
         record.receipt.state = State::Settled;
         record.settled_at_unix_ms = Some(now()?);
@@ -1386,6 +1393,15 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 )
             })
             || record.film.is_some() != (config.version == 2)
+            || (record.stop_confirmed
+                && (record.unit_invocation.is_none()
+                    || record.cgroup_inode.is_none()
+                    || record.receipt.outcome.is_none()
+                    || record
+                        .receipt
+                        .evidence
+                        .as_ref()
+                        .is_none_or(|e| e.populated != Some(false))))
             || !hex(&record.launch_id, 32)
             || record.receipt.runtime.as_ref().is_none_or(|runtime| {
                 runtime.launch_id != record.launch_id
@@ -1575,6 +1591,7 @@ mod tests {
             released: true,
             termination_reason: None,
             manager_pending: None,
+            stop_confirmed: false,
             settled_at_unix_ms: Some(1000),
             film: None,
         }
@@ -1593,6 +1610,18 @@ mod tests {
             active: None,
             records: (1..=256).map(|i| (i, record(i, State::Settled))).collect(),
         }
+    }
+
+    #[test]
+    fn legacy_records_do_not_invent_confirmed_stops() {
+        let mut value = serde_json::to_value(record(1, State::Settled)).unwrap();
+        value.as_object_mut().unwrap().remove("stop_confirmed");
+        let restored: Record = serde_json::from_value(value).unwrap();
+        assert!(!restored.stop_confirmed);
+        let mut confirmed = serde_json::to_value(restored).unwrap();
+        confirmed["stop_confirmed"] = serde_json::json!(true);
+        let restored: Record = serde_json::from_value(confirmed).unwrap();
+        assert!(restored.stop_confirmed);
     }
     #[test]
     fn expiry_preserves_watermark_and_active_identity_at_capacity() {
