@@ -137,6 +137,11 @@ exposure, white balance, and a fixed Film Recipe.
 
 ## Verification
 
+Memory optimizations must preserve this color and reproducibility contract.
+[Processing Memory](processing-memory.md#engine-memory-efficiency) defines
+bounded pointwise computation, buffer lifetime, and the qualification required
+before changing spatial processing or numerical precision.
+
 Qualification must establish:
 
 - actual TIFF sample format, dimensions, orientation, ICC bytes, and transfer
