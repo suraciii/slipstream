@@ -1,12 +1,14 @@
 # Product Specs
 
-`docs/` defines the target behavior that Photographers can observe or depend on. It is the product specification layer, not a record of source-code structure.
+`docs/` defines the target behavior that Photographers and their Agents can observe or depend on. It is the product specification layer, not a record of source-code structure.
 
 Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or changing a Product Spec.
 
 ## Product Definition
 
-- [Product Vision](vision.md): Slipstream's goal, initial audience, principles, and first-product boundary
+- [Product Vision](vision.md): human and machine use, goals, audience, principles, and product boundaries
+- [Command-Line Use](command-line.md): delegated photo workflows, shared state, Preview delivery, effects, and recovery
+- [CLI Reference](cli-reference.md): authoritative command syntax, inputs, structured results, errors, and composition examples
 
 ## Core Experience
 
