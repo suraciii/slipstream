@@ -537,9 +537,8 @@ pub fn plan_manual_relocations(
                 &to_location,
             )
         };
-        // Verification is exactly "the destination content matched the
-        // persisted fingerprint": every outcome below proved the digest,
-        // and rows without a fingerprint stay unverified.
+        // Only a stored fingerprint whose destination digest matched can verify
+        // a matched or occupied candidate. Presence alone stays unverified.
         let verified = record.fingerprint.is_some()
             && (matches!(outcome, ManualOutcome::Matched)
                 || matches!(outcome, ManualOutcome::Occupied { .. }));
