@@ -31,7 +31,9 @@ bounds the whole command after argument parsing, including preview transfer.
 Expiry uses the result rules below. It does not cancel an admitted mutation.
 
 `--input FILE` reads one UTF-8 JSON document; `--input -` reads stdin. The input
-must fit 64 KiB. Unknown keys, duplicate JSON object keys, duplicate Photo IDs,
+must fit 64 KiB. An oversized document is refused as soon as a read crosses the
+bound; `limit_exceeded` reports `actual` as `limit + 1` and does not read the
+rest of the input. Unknown keys, duplicate JSON object keys, duplicate Photo IDs,
 trailing content, and an empty mutation list are invalid. The entire document
 must validate before a write. A mutation contains at most 100 Photo IDs; the
 CLI must not split it automatically. Local input-file failures perform no write.

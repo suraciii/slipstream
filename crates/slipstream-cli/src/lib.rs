@@ -12,6 +12,8 @@ const DEFAULT_LIST_PAGE: usize = 50;
 const MAXIMUM_LIST_PAGE: usize = 60;
 const CONTRACT_HEADER: &str = "Slipstream-CLI-Contract";
 const MAXIMUM_JSON_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAXIMUM_INPUT_BYTES: usize = 64 * 1024;
+const MAXIMUM_MUTATION_PHOTO_IDS: usize = 100;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -117,6 +119,50 @@ pub enum AlbumCommand {
         #[arg(value_parser = nonempty)]
         album_id: String,
     },
+    /// Create an empty Album with a name unique in the Library.
+    Create {
+        /// Album name; at most 120 characters, not only whitespace.
+        #[arg(long, value_name = "NAME", value_parser = album_name)]
+        name: String,
+    },
+    /// Rename one Album against its observed Album version.
+    Rename {
+        #[arg(value_name = "ALBUM_ID", value_parser = nonempty)]
+        album_id: String,
+        /// New Album name; at most 120 characters, not only whitespace.
+        #[arg(long, value_name = "NAME", value_parser = album_name)]
+        name: String,
+        /// Album version observed by a prior read.
+        #[arg(long, value_name = "VERSION", value_parser = nonempty)]
+        if_version: String,
+    },
+    /// Delete one Album. Original Files are never changed.
+    Delete {
+        #[arg(value_name = "ALBUM_ID", value_parser = nonempty)]
+        album_id: String,
+        /// Album version observed by a prior read.
+        #[arg(long, value_name = "VERSION", value_parser = nonempty)]
+        if_version: String,
+    },
+    /// Append new Photos in submitted order against the observed version.
+    Add(AlbumMembershipArgs),
+    /// Remove Photos and report the resulting saved position.
+    Remove(AlbumMembershipArgs),
+    /// Replace the complete membership order of one Album.
+    Reorder(AlbumMembershipArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AlbumMembershipArgs {
+    #[arg(value_name = "ALBUM_ID", value_parser = nonempty)]
+    album_id: String,
+    /// UTF-8 JSON file holding one ordered `photoIds` array of at most 100
+    /// distinct Photo IDs; `-` reads the document from stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty)]
+    input: String,
+    /// Album version observed by a prior read.
+    #[arg(long, value_name = "VERSION", value_parser = nonempty)]
+    if_version: String,
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +262,17 @@ fn nonempty(value: &str) -> Result<String, String> {
         .ok_or_else(|| "must not be empty".to_owned())
 }
 
+fn album_name(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err("must not be empty or only whitespace".to_owned())
+    } else if trimmed.chars().count() > 120 {
+        Err("must be at most 120 characters".to_owned())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
 fn page_limit(value: &str) -> Result<u8, String> {
     value
         .parse::<u8>()
@@ -293,6 +350,12 @@ enum Operation {
     AlbumsGet,
     PhotosList,
     PhotosGet,
+    AlbumsCreate,
+    AlbumsRename,
+    AlbumsDelete,
+    AlbumsAdd,
+    AlbumsRemove,
+    AlbumsReorder,
 }
 
 impl Operation {
@@ -304,7 +367,97 @@ impl Operation {
             Self::AlbumsGet => "albums-get",
             Self::PhotosList => "photos-list",
             Self::PhotosGet => "photos-get",
+            Self::AlbumsCreate => "albums-create",
+            Self::AlbumsRename => "albums-rename",
+            Self::AlbumsDelete => "albums-delete",
+            Self::AlbumsAdd => "albums-add",
+            Self::AlbumsRemove => "albums-remove",
+            Self::AlbumsReorder => "albums-reorder",
         }
+    }
+}
+
+fn command_operation(command: &Command) -> Operation {
+    match command {
+        Command::Status => Operation::Status,
+        Command::Folders { .. } => Operation::FoldersList,
+        Command::Albums { command } => match command {
+            AlbumCommand::List(_) => Operation::AlbumsList,
+            AlbumCommand::Get { .. } => Operation::AlbumsGet,
+            AlbumCommand::Create { .. } => Operation::AlbumsCreate,
+            AlbumCommand::Rename { .. } => Operation::AlbumsRename,
+            AlbumCommand::Delete { .. } => Operation::AlbumsDelete,
+            AlbumCommand::Add(_) => Operation::AlbumsAdd,
+            AlbumCommand::Remove(_) => Operation::AlbumsRemove,
+            AlbumCommand::Reorder(_) => Operation::AlbumsReorder,
+        },
+        Command::Photos { command } => match command {
+            PhotoCommand::List(_) => Operation::PhotosList,
+            PhotoCommand::Get { .. } => Operation::PhotosGet,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MembershipKind {
+    Add,
+    Remove,
+    Reorder,
+}
+
+impl MembershipKind {
+    fn operation(self) -> Operation {
+        match self {
+            Self::Add => Operation::AlbumsAdd,
+            Self::Remove => Operation::AlbumsRemove,
+            Self::Reorder => Operation::AlbumsReorder,
+        }
+    }
+
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Reorder => "reorder",
+        }
+    }
+
+    fn limit_name(self) -> &'static str {
+        match self {
+            Self::Reorder => "albumReorderMembersMaximum",
+            Self::Add | Self::Remove => "mutationPhotoIdsMaximum",
+        }
+    }
+}
+
+/// The submitted target of one Album mutation, kept for any unknown-outcome
+/// report after the request may have been admitted.
+#[derive(Clone, Debug)]
+struct MutationIdentity {
+    operation: Operation,
+    photo_ids: Vec<String>,
+    album_id: Option<String>,
+    album_name: Option<String>,
+}
+
+/// Records the point where a mutation request was handed to the transport.
+/// Any later timeout, interruption, or unusable response is an unknown
+/// outcome instead of a claimed refusal.
+#[derive(Debug, Default)]
+struct AdmissionState {
+    identity: std::sync::Mutex<Option<MutationIdentity>>,
+}
+
+impl AdmissionState {
+    fn admit(&self, identity: MutationIdentity) {
+        *self.identity.lock().expect("admission state is lockable") = Some(identity);
+    }
+
+    fn admitted(&self) -> Option<MutationIdentity> {
+        self.identity
+            .lock()
+            .expect("admission state is lockable")
+            .clone()
     }
 }
 
@@ -386,6 +539,69 @@ impl CommandFailure {
                 details: json!({
                     "requestedContractVersion": CLI_CONTRACT_VERSION,
                     "supportedContractVersions": supported,
+                }),
+            },
+        }
+    }
+
+    fn limit_exceeded(limit_name: &str, limit: usize, actual: usize) -> Self {
+        Self {
+            exit_code: 2,
+            payload: ErrorPayload {
+                code: "limit_exceeded".to_owned(),
+                message: "Reduce the request and try again.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({ "limitName": limit_name, "limit": limit, "actual": actual }),
+            },
+        }
+    }
+
+    fn local_input(path: Option<&str>) -> Self {
+        Self {
+            exit_code: 6,
+            payload: ErrorPayload {
+                code: "local_io_failed".to_owned(),
+                message: "Check the local input file and try again.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({
+                    "operation": "read-input",
+                    "path": path,
+                    "fileCommitted": false,
+                }),
+            },
+        }
+    }
+
+    fn unknown(identity: &MutationIdentity) -> Self {
+        Self {
+            exit_code: 7,
+            payload: ErrorPayload {
+                code: "outcome_unknown".to_owned(),
+                message: "Inspect the current state with a read command before continuing."
+                    .to_owned(),
+                effect: "unknown".to_owned(),
+                details: json!({
+                    "operation": identity.operation.wire(),
+                    "photoIds": identity.photo_ids,
+                    "albumId": identity.album_id,
+                    "albumName": identity.album_name,
+                }),
+            },
+        }
+    }
+
+    fn interrupted_unknown(identity: &MutationIdentity) -> Self {
+        Self {
+            exit_code: 130,
+            payload: ErrorPayload {
+                code: "outcome_unknown".to_owned(),
+                message: "The command was interrupted and the outcome is unknown. Inspect the current state before continuing.".to_owned(),
+                effect: "unknown".to_owned(),
+                details: json!({
+                    "operation": identity.operation.wire(),
+                    "photoIds": identity.photo_ids,
+                    "albumId": identity.album_id,
+                    "albumName": identity.album_name,
                 }),
             },
         }
@@ -672,6 +888,60 @@ enum PhotoSource<'a> {
     },
 }
 
+/// The one accepted `--input` document shape. Deserializing it rejects
+/// unknown keys, duplicate keys, trailing content, and non-object documents.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MembershipInput {
+    photo_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumCreationWire {
+    album: AlbumSummary,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumRenameWire {
+    album: AlbumSummary,
+    renamed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumDeleteWire {
+    album_id: String,
+    deleted: bool,
+    original_files_changed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumAddWire {
+    album: AlbumSummary,
+    added_photo_ids: Vec<String>,
+    already_member_photo_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumRemoveWire {
+    album: AlbumSummary,
+    removed_photo_ids: Vec<String>,
+    already_absent_photo_ids: Vec<String>,
+    saved_photo_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AlbumReorderWire {
+    album: AlbumSummary,
+    ordered_photo_ids: Vec<String>,
+    reordered: bool,
+}
+
 struct ServiceClient {
     origin: Url,
     client: Client,
@@ -724,7 +994,8 @@ impl ServiceClient {
             if let Ok(response) = serde_json::from_slice::<ErrorResponse>(&bytes)
                 && response.error.code == "incompatible_server"
             {
-                return Err(validate_route_error(response.error, operation)?);
+                return Err(validated_route_failure(response.error, operation)
+                    .unwrap_or_else(|| CommandFailure::transport(operation)));
             }
             return Err(CommandFailure::incompatible(Vec::new()));
         }
@@ -778,9 +1049,52 @@ impl ServiceClient {
             let error = serde_json::from_slice::<ErrorResponse>(&bytes)
                 .map_err(|_| CommandFailure::transport(operation))?
                 .error;
-            return Err(validate_route_error(error, operation)?);
+            return Err(validated_route_failure(error, operation)
+                .unwrap_or_else(|| CommandFailure::transport(operation)));
         }
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::transport(operation))
+    }
+
+    /// Performs one Album mutation. Everything after the request is handed to
+    /// the transport can only be reported as an unknown outcome, because a
+    /// dropped, malformed, or untrustworthy response is not evidence that the
+    /// write was refused. A connect-phase failure never sent the request.
+    async fn mutation<T: DeserializeOwned>(
+        &self,
+        identity: &MutationIdentity,
+        admission: &AdmissionState,
+        url: Url,
+        body: Value,
+    ) -> Result<T, CommandFailure> {
+        let operation = identity.operation;
+        let request = self
+            .client
+            .request(Method::POST, url)
+            .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .json(&body);
+        admission.admit(identity.clone());
+        let response = request.send().await.map_err(|error| {
+            if error.is_connect() {
+                CommandFailure::transport(operation)
+            } else {
+                CommandFailure::unknown(identity)
+            }
+        })?;
+        let status = response.status();
+        if status.is_redirection() {
+            return Err(CommandFailure::unknown(identity));
+        }
+        let bytes = response_bytes(response, operation)
+            .await
+            .map_err(|_| CommandFailure::unknown(identity))?;
+        if status != StatusCode::OK {
+            let error = serde_json::from_slice::<ErrorResponse>(&bytes)
+                .map_err(|_| CommandFailure::unknown(identity))?
+                .error;
+            return Err(validated_route_failure(error, operation)
+                .unwrap_or_else(|| CommandFailure::unknown(identity)));
+        }
+        serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(identity))
     }
 }
 
@@ -808,17 +1122,13 @@ async fn response_bytes(
     Ok(bytes)
 }
 
-fn validate_route_error(
-    error: ErrorPayload,
-    operation: Operation,
-) -> Result<CommandFailure, CommandFailure> {
+/// Checks one structured service error against the CLI reference shapes.
+/// Returns `None` when the payload cannot be trusted as a confirmed refusal.
+fn validated_route_failure(error: ErrorPayload, operation: Operation) -> Option<CommandFailure> {
     if error.effect != "none" || error.message.is_empty() {
-        return Err(CommandFailure::transport(operation));
+        return None;
     }
-    let details = error
-        .details
-        .as_object()
-        .ok_or_else(|| CommandFailure::transport(operation))?;
+    let details = error.details.as_object()?;
     let string = |name: &str| {
         details
             .get(name)
@@ -837,6 +1147,23 @@ fn validate_route_error(
                 && string("resource")
                     .is_some_and(|value| matches!(value, "photo" | "album" | "folder"))
                 && string("reference").is_some()
+        }
+        "conflict" => {
+            required_keys(&["resource", "reference", "currentVersion"])
+                && string("resource").is_some_and(|value| matches!(value, "photo" | "album"))
+                && string("reference").is_some()
+                && string("currentVersion").is_some()
+        }
+        "name_conflict" => {
+            required_keys(&["name", "albumId"])
+                && string("name").is_some()
+                && string("albumId").is_some()
+        }
+        "limit_exceeded" => {
+            required_keys(&["limitName", "limit", "actual"])
+                && string("limitName").is_some()
+                && details.get("limit").and_then(Value::as_u64).is_some()
+                && details.get("actual").and_then(Value::as_u64).is_some()
         }
         "cursor_expired" => {
             required_keys(&["cursorKind", "reason"])
@@ -875,19 +1202,18 @@ fn validate_route_error(
         "storage_failed" => {
             required_keys(&["operation"]) && string("operation") == Some(operation.wire())
         }
-        _ => return Err(CommandFailure::transport(operation)),
+        _ => return None,
     };
     if !valid {
-        return Err(CommandFailure::transport(operation));
+        return None;
     }
-    let exit_code = if error.code == "invalid_input" {
-        2
-    } else if error.code == "not_found" {
-        3
-    } else {
-        6
+    let exit_code = match error.code.as_str() {
+        "invalid_input" | "limit_exceeded" => 2,
+        "not_found" => 3,
+        "conflict" | "name_conflict" => 4,
+        _ => 6,
     };
-    Ok(CommandFailure {
+    Some(CommandFailure {
         exit_code,
         payload: error,
     })
@@ -988,6 +1314,223 @@ fn album_value(album: AlbumSummary, origin: &Url) -> Result<Value, ()> {
     }))
 }
 
+/// Reads the bounded UTF-8 bytes of one `--input` document. The blocking-pool
+/// read is not itself bounded; on deadline or interruption the
+/// executable-boundary terminal exit publishes the envelope and abandons a
+/// still-blocked read.
+async fn read_input_bytes(input: &str) -> Result<Vec<u8>, CommandFailure> {
+    let owned = input.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if owned == "-" {
+            let mut stdin = std::io::stdin().lock();
+            read_bounded(&mut stdin, None)
+        } else {
+            let mut file = std::fs::File::open(&owned)
+                .map_err(|_| CommandFailure::local_input(Some(&owned)))?;
+            read_bounded(&mut file, Some(&owned))
+        }
+    })
+    .await
+    .map_err(|_| CommandFailure::local_input(None))?
+}
+
+fn read_bounded(
+    source: &mut dyn std::io::Read,
+    path: Option<&str>,
+) -> Result<Vec<u8>, CommandFailure> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|_| CommandFailure::local_input(path))?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if bytes.len().saturating_add(count) > MAXIMUM_INPUT_BYTES {
+            return Err(CommandFailure::limit_exceeded(
+                "inputBytesMaximum",
+                MAXIMUM_INPUT_BYTES,
+                MAXIMUM_INPUT_BYTES + 1,
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+}
+
+/// Validates the complete membership document before any write is attempted.
+fn parse_membership_ids(
+    bytes: Vec<u8>,
+    limit_name: &'static str,
+) -> Result<Vec<String>, CommandFailure> {
+    let document: MembershipInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be one JSON object with only an ordered photoIds array.",
+        )
+    })?;
+    let photo_ids = document.photo_ids;
+    if photo_ids.len() > MAXIMUM_MUTATION_PHOTO_IDS {
+        return Err(CommandFailure::limit_exceeded(
+            limit_name,
+            MAXIMUM_MUTATION_PHOTO_IDS,
+            photo_ids.len(),
+        ));
+    }
+    if photo_ids.is_empty() {
+        return Err(CommandFailure::invalid(
+            "input",
+            "The photoIds array must contain at least one Photo ID.",
+        ));
+    }
+    if photo_ids.iter().any(|photo_id| photo_id.is_empty()) {
+        return Err(CommandFailure::invalid(
+            "input",
+            "Each Photo ID must be a nonempty string.",
+        ));
+    }
+    let distinct = photo_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if distinct != photo_ids.len() {
+        return Err(CommandFailure::invalid(
+            "input",
+            "The photoIds array must not repeat a Photo ID.",
+        ));
+    }
+    Ok(photo_ids)
+}
+
+async fn read_membership_ids(
+    input: &str,
+    limit_name: &'static str,
+) -> Result<Vec<String>, CommandFailure> {
+    parse_membership_ids(read_input_bytes(input).await?, limit_name)
+}
+
+/// Checks that two returned ID arrays are an order-preserving partition of the
+/// submitted IDs: no omission, no duplication, and request order preserved.
+fn request_order_partition(submitted: &[String], first: &[String], second: &[String]) -> bool {
+    let mut assignment = std::collections::HashMap::<&str, usize>::new();
+    for (index, ids) in [first, second].into_iter().enumerate() {
+        for id in ids {
+            if assignment.insert(id.as_str(), index).is_some() {
+                return false;
+            }
+        }
+    }
+    if assignment.len() != submitted.len() {
+        return false;
+    }
+    let mut consumed = [0_usize, 0_usize];
+    for id in submitted {
+        let Some(&assigned) = assignment.get(id.as_str()) else {
+            return false;
+        };
+        if [first, second][assigned]
+            .get(consumed[assigned])
+            .is_none_or(|expected| expected != id)
+        {
+            return false;
+        }
+        consumed[assigned] += 1;
+    }
+    consumed == [first.len(), second.len()]
+}
+
+fn confirmed<T>(result: Result<T, ()>, identity: &MutationIdentity) -> Result<T, CommandFailure> {
+    result.map_err(|()| CommandFailure::unknown(identity))
+}
+
+async fn membership_mutation(
+    kind: MembershipKind,
+    args: &AlbumMembershipArgs,
+    photo_ids: Vec<String>,
+    client: &ServiceClient,
+    admission: &AdmissionState,
+) -> Result<Value, CommandFailure> {
+    let identity = MutationIdentity {
+        operation: kind.operation(),
+        photo_ids: photo_ids.clone(),
+        album_id: Some(args.album_id.clone()),
+        album_name: None,
+    };
+    let result: Value = client
+        .mutation(
+            &identity,
+            admission,
+            client.endpoint(&["api", "albums", &args.album_id, "changes"]),
+            json!({
+                "operation": kind.wire(),
+                "photoIds": photo_ids,
+                "ifVersion": args.if_version,
+            }),
+        )
+        .await?;
+    confirmed_membership_result(kind, &identity, result, &client.origin)
+}
+
+/// Validates one confirmed membership result against the submitted request
+/// and renders the CLI reference data shape.
+fn confirmed_membership_result(
+    kind: MembershipKind,
+    identity: &MutationIdentity,
+    result: Value,
+    origin: &Url,
+) -> Result<Value, CommandFailure> {
+    let unknown = || CommandFailure::unknown(identity);
+    match kind {
+        MembershipKind::Add => {
+            let result: AlbumAddWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if !request_order_partition(
+                &identity.photo_ids,
+                &result.added_photo_ids,
+                &result.already_member_photo_ids,
+            ) {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "addedPhotoIds": result.added_photo_ids,
+                "alreadyMemberPhotoIds": result.already_member_photo_ids,
+            }))
+        }
+        MembershipKind::Remove => {
+            let result: AlbumRemoveWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if result.saved_photo_id.as_deref().is_some_and(str::is_empty)
+                || !request_order_partition(
+                    &identity.photo_ids,
+                    &result.removed_photo_ids,
+                    &result.already_absent_photo_ids,
+                )
+            {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "removedPhotoIds": result.removed_photo_ids,
+                "alreadyAbsentPhotoIds": result.already_absent_photo_ids,
+                "savedPhotoId": result.saved_photo_id,
+            }))
+        }
+        MembershipKind::Reorder => {
+            let result: AlbumReorderWire = serde_json::from_value(result).map_err(|_| unknown())?;
+            if result.ordered_photo_ids != identity.photo_ids {
+                return Err(unknown());
+            }
+            let album = confirmed(album_value(result.album, origin), identity)?;
+            Ok(json!({
+                "album": album,
+                "orderedPhotoIds": result.ordered_photo_ids,
+                "reordered": result.reordered,
+            }))
+        }
+    }
+}
+
 fn preview_valid(preview: &PreviewFacts) -> bool {
     match preview.state {
         PreviewState::Ready => {
@@ -1040,24 +1583,27 @@ fn list_expiry_valid<T>(list: &ListData<T>, page_limit: usize) -> bool {
         && list.expires_at.as_deref().is_none_or(valid_utc_time)
 }
 
-async fn execute(cli: &Cli, environment: Option<&str>) -> Result<Value, CommandFailure> {
-    let operation = match &cli.command {
-        Command::Status => Operation::Status,
-        Command::Folders { .. } => Operation::FoldersList,
-        Command::Albums {
-            command: AlbumCommand::List(_),
-        } => Operation::AlbumsList,
-        Command::Albums {
-            command: AlbumCommand::Get { .. },
-        } => Operation::AlbumsGet,
-        Command::Photos {
-            command: PhotoCommand::List(_),
-        } => Operation::PhotosList,
-        Command::Photos {
-            command: PhotoCommand::Get { .. },
-        } => Operation::PhotosGet,
-    };
+async fn execute(
+    cli: &Cli,
+    environment: Option<&str>,
+    admission: &AdmissionState,
+) -> Result<Value, CommandFailure> {
+    let operation = command_operation(&cli.command);
     validate_command(&cli.command)?;
+    // The complete membership document validates before any network access,
+    // so a local input failure can never depend on service reachability.
+    let pending_membership = match &cli.command {
+        Command::Albums {
+            command: AlbumCommand::Add(args),
+        } => Some(read_membership_ids(&args.input, MembershipKind::Add.limit_name()).await?),
+        Command::Albums {
+            command: AlbumCommand::Remove(args),
+        } => Some(read_membership_ids(&args.input, MembershipKind::Remove.limit_name()).await?),
+        Command::Albums {
+            command: AlbumCommand::Reorder(args),
+        } => Some(read_membership_ids(&args.input, MembershipKind::Reorder.limit_name()).await?),
+        _ => None,
+    };
     let client = ServiceClient::new(service_origin(cli, environment)?)?;
     client.capabilities(operation).await?;
 
@@ -1170,6 +1716,100 @@ async fn execute(cli: &Cli, environment: Option<&str>) -> Result<Value, CommandF
                 )
                 .await?;
             album_value(data, &client.origin).map_err(|_| CommandFailure::transport(operation))
+        }
+        Command::Albums {
+            command: AlbumCommand::Create { name },
+        } => {
+            let identity = MutationIdentity {
+                operation,
+                photo_ids: Vec::new(),
+                album_id: None,
+                album_name: Some(name.clone()),
+            };
+            let result: AlbumCreationWire = client
+                .mutation(
+                    &identity,
+                    admission,
+                    client.endpoint(&["api", "albums"]),
+                    json!({ "name": name }),
+                )
+                .await?;
+            let album = confirmed(album_value(result.album, &client.origin), &identity)?;
+            Ok(json!({ "album": album }))
+        }
+        Command::Albums {
+            command:
+                AlbumCommand::Rename {
+                    album_id,
+                    name,
+                    if_version,
+                },
+        } => {
+            let identity = MutationIdentity {
+                operation,
+                photo_ids: Vec::new(),
+                album_id: Some(album_id.clone()),
+                album_name: Some(name.clone()),
+            };
+            let result: AlbumRenameWire = client
+                .mutation(
+                    &identity,
+                    admission,
+                    client.endpoint(&["api", "albums", album_id, "changes"]),
+                    json!({ "operation": "rename", "name": name, "ifVersion": if_version }),
+                )
+                .await?;
+            let album = confirmed(album_value(result.album, &client.origin), &identity)?;
+            Ok(json!({ "album": album, "renamed": result.renamed }))
+        }
+        Command::Albums {
+            command:
+                AlbumCommand::Delete {
+                    album_id,
+                    if_version,
+                },
+        } => {
+            let identity = MutationIdentity {
+                operation,
+                photo_ids: Vec::new(),
+                album_id: Some(album_id.clone()),
+                album_name: None,
+            };
+            let result: AlbumDeleteWire = client
+                .mutation(
+                    &identity,
+                    admission,
+                    client.endpoint(&["api", "albums", album_id, "changes"]),
+                    json!({ "operation": "delete", "ifVersion": if_version }),
+                )
+                .await?;
+            if !result.deleted || result.original_files_changed || result.album_id.is_empty() {
+                return Err(CommandFailure::unknown(&identity));
+            }
+            Ok(json!({
+                "albumId": result.album_id,
+                "deleted": true,
+                "originalFilesChanged": false,
+            }))
+        }
+        Command::Albums {
+            command: AlbumCommand::Add(args),
+        } => {
+            // The membership document was validated before connecting.
+            let photo_ids = pending_membership.expect("membership input was read");
+            membership_mutation(MembershipKind::Add, args, photo_ids, &client, admission).await
+        }
+        Command::Albums {
+            command: AlbumCommand::Remove(args),
+        } => {
+            let photo_ids = pending_membership.expect("membership input was read");
+            membership_mutation(MembershipKind::Remove, args, photo_ids, &client, admission).await
+        }
+        Command::Albums {
+            command: AlbumCommand::Reorder(args),
+        } => {
+            let photo_ids = pending_membership.expect("membership input was read");
+            membership_mutation(MembershipKind::Reorder, args, photo_ids, &client, admission).await
         }
         Command::Photos {
             command: PhotoCommand::List(args),
@@ -1356,32 +1996,33 @@ pub async fn invoke_until(
     deadline: tokio::time::Instant,
 ) -> InvocationResult {
     let output = cli.output;
-    let operation = match &cli.command {
-        Command::Status => Operation::Status,
-        Command::Folders { .. } => Operation::FoldersList,
-        Command::Albums {
-            command: AlbumCommand::List(_),
-        } => Operation::AlbumsList,
-        Command::Albums { .. } => Operation::AlbumsGet,
-        Command::Photos {
-            command: PhotoCommand::List(_),
-        } => Operation::PhotosList,
-        Command::Photos { .. } => Operation::PhotosGet,
-    };
-    let command = tokio::time::timeout_at(deadline, execute(&cli, environment));
+    let operation = command_operation(&cli.command);
+    let admission = AdmissionState::default();
+    let command = tokio::time::timeout_at(deadline, execute(&cli, environment, &admission));
     tokio::pin!(command);
     let (exit_code, envelope) = tokio::select! {
         result = &mut command => match result {
             Ok(Ok(data)) => (0, Envelope::success(data)),
             Ok(Err(failure)) => (failure.exit_code, Envelope::error(failure.payload)),
             Err(_) => {
-                let failure = CommandFailure::transport(operation);
+                let failure = match admission.admitted() {
+                    Some(identity) => CommandFailure::unknown(&identity),
+                    None => CommandFailure::transport(operation),
+                };
                 (failure.exit_code, Envelope::error(failure.payload))
             }
         },
         _ = tokio::signal::ctrl_c() => {
-            let mut failure = CommandFailure::transport(operation);
-            failure.payload.message = "The command was interrupted. Inspect status before continuing.".to_owned();
+            let failure = match admission.admitted() {
+                Some(identity) => CommandFailure::interrupted_unknown(&identity),
+                None => {
+                    let mut failure = CommandFailure::transport(operation);
+                    failure.payload.message = "The command was interrupted. Inspect status before continuing.".to_owned();
+                    failure
+                }
+            };
+            // A handled interruption exits 130 whether or not a request may
+            // have been admitted; only the envelope distinguishes the cases.
             (130, Envelope::error(failure.payload))
         }
     };
@@ -1647,5 +2288,144 @@ mod tests {
             Cli::try_parse_from(["slipstream", "photos", "list", "--order", "album-order"])
                 .unwrap();
         assert!(validate_command(&album_order.command).is_err());
+    }
+
+    #[test]
+    fn album_mutation_parser_enforces_names_versions_and_input() {
+        assert!(Cli::try_parse_from(["slipstream", "albums", "create", "--name", "Picks"]).is_ok());
+        assert!(Cli::try_parse_from(["slipstream", "albums", "create", "--name", ""]).is_err());
+        assert!(Cli::try_parse_from(["slipstream", "albums", "create", "--name", "  "]).is_err());
+        let name_arguments = |name: String| {
+            ["slipstream", "albums", "create", "--name"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain([name])
+                .collect::<Vec<_>>()
+        };
+        assert!(Cli::try_parse_from(name_arguments("x".repeat(121))).is_err());
+        assert!(Cli::try_parse_from(name_arguments("\u{00e9}".repeat(121))).is_err());
+        assert!(Cli::try_parse_from(name_arguments("\u{00e9}".repeat(120))).is_ok());
+        assert!(
+            Cli::try_parse_from(["slipstream", "albums", "rename", "a", "--name", "N"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["slipstream", "albums", "delete", "a", "--if-version", "",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "slipstream",
+                "albums",
+                "add",
+                "a",
+                "--input",
+                "members.json",
+                "--if-version",
+                "v",
+                "--if-version",
+                "w",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["slipstream", "albums", "remove", "a", "--input", "-"]).is_err()
+        );
+    }
+
+    #[test]
+    fn membership_input_validates_the_complete_document() {
+        let ids = |count: usize| {
+            (0..count)
+                .map(|index| format!("00000000-0000-4000-8000-{index:012x}"))
+                .collect::<Vec<_>>()
+        };
+        let document =
+            |photo_ids: &[String]| serde_json::to_vec(&json!({ "photoIds": photo_ids })).unwrap();
+        let parsed = parse_membership_ids(document(&ids(2)), "mutationPhotoIdsMaximum").unwrap();
+        assert_eq!(parsed, ids(2));
+        for invalid in [
+            b"".as_slice(),
+            b"{".as_slice(),
+            b"[]".as_slice(),
+            b"\"photoIds\"".as_slice(),
+            b"{\"photoIds\": []}".as_slice(),
+            b"{\"photoIds\": [\"\"]}".as_slice(),
+            b"{\"photoIds\": [\"a\", \"a\"]}".as_slice(),
+            b"{\"photoIds\": [\"a\"], \"photoIds\": [\"b\"]}".as_slice(),
+            b"{\"photoIds\": [\"a\"], \"extra\": 1}".as_slice(),
+            b"{\"photoIds\": [\"a\"]} trailing".as_slice(),
+            b"{\"photoIds\": [1]}".as_slice(),
+            b"\xff\xfe{\"photoIds\": [\"a\"]}".as_slice(),
+        ] {
+            let failure =
+                parse_membership_ids(invalid.to_vec(), "mutationPhotoIdsMaximum").unwrap_err();
+            assert_eq!(failure.exit_code, 2, "for {invalid:?}");
+            assert_eq!(failure.payload.code, "invalid_input");
+            assert_eq!(failure.payload.details["argument"], "input");
+        }
+        let over_limit = parse_membership_ids(
+            document(&ids(MAXIMUM_MUTATION_PHOTO_IDS + 1)),
+            "albumReorderMembersMaximum",
+        )
+        .unwrap_err();
+        assert_eq!(over_limit.exit_code, 2);
+        assert_eq!(over_limit.payload.code, "limit_exceeded");
+        assert_eq!(
+            over_limit.payload.details,
+            json!({
+                "limitName": "albumReorderMembersMaximum",
+                "limit": MAXIMUM_MUTATION_PHOTO_IDS,
+                "actual": MAXIMUM_MUTATION_PHOTO_IDS + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn request_order_partitions_must_cover_and_preserve_request_order() {
+        let submitted = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let strings = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(request_order_partition(
+            &submitted,
+            &strings(&["a", "c"]),
+            &strings(&["b", "d"])
+        ));
+        assert!(request_order_partition(
+            &submitted,
+            &strings(&[]),
+            &strings(&["a", "b", "c", "d"])
+        ));
+        assert!(!request_order_partition(
+            &submitted,
+            &strings(&["b", "a"]),
+            &strings(&["c", "d"])
+        ));
+        assert!(!request_order_partition(
+            &submitted,
+            &strings(&["a", "c"]),
+            &strings(&["d"])
+        ));
+        assert!(!request_order_partition(
+            &submitted,
+            &strings(&["a", "c"]),
+            &strings(&["b", "d", "e"])
+        ));
+        assert!(!request_order_partition(
+            &submitted,
+            &strings(&["a", "a"]),
+            &strings(&["b", "c", "d"])
+        ));
+        assert!(!request_order_partition(
+            &submitted,
+            &strings(&["a", "b", "c"]),
+            &strings(&["c", "d"])
+        ));
     }
 }
