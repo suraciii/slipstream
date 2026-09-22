@@ -80,6 +80,17 @@ fn storage_matches(stat: &libc::statfs, limits: &Limits) -> bool {
         && stat.f_files == limits.storage_inodes
 }
 
+fn delegate_workload_controllers(scope: &Path, leaf: &Path) -> Result<()> {
+    write(
+        &scope.join("cgroup.subtree_control"),
+        "+memory +cpu +pids +io",
+    )?;
+    // An empty io.stat is valid before any I/O. Missing accounting must keep
+    // the blocked workload from being released, just like missing limits.
+    read(&leaf.join("io.stat"))?;
+    Ok(())
+}
+
 impl Backend {
     fn docker(&self, args: &[String]) -> Result<String> {
         let mut fixed = vec![
@@ -575,7 +586,7 @@ impl Backend {
         fs::create_dir(&leaf).map_err(|_| ErrorCode::Unavailable)?;
         write(&leaf.join("cgroup.procs"), &live.pid.to_string())?;
         pidfd_alive(&pidfd)?;
-        write(&scope.join("cgroup.subtree_control"), "+memory +cpu +pids")?;
+        delegate_workload_controllers(&scope, &leaf)?;
         for (key, value) in [
             ("memory.max", record.receipt.limits.memory_bytes.to_string()),
             ("memory.swap.max", "0".into()),
@@ -1405,6 +1416,52 @@ fn pidfd_alive(pidfd: &OwnedFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workload_delegation_requires_io_accounting_even_before_io_occurs() {
+        let scope = std::env::temp_dir().join(format!(
+            "slipstream-workload-delegation-{}",
+            std::process::id()
+        ));
+        let leaf = scope.join("workload");
+        fs::create_dir_all(&leaf).unwrap();
+        let control = scope.join("cgroup.subtree_control");
+        fs::write(&control, "").unwrap();
+        // These files exercise failure propagation and the requested controller
+        // set. Only the real executor qualification proves kernel delegation.
+        assert_eq!(
+            delegate_workload_controllers(&scope, &leaf),
+            Err(ErrorCode::Unavailable)
+        );
+        assert_eq!(
+            fs::read_to_string(&control).unwrap(),
+            "+memory +cpu +pids +io"
+        );
+        let accounting = leaf.join("io.stat");
+        for contents in ["", "8:0 rbytes=4096 wbytes=0 rios=1 wios=0\n"] {
+            fs::write(&accounting, contents).unwrap();
+            assert_eq!(delegate_workload_controllers(&scope, &leaf), Ok(()));
+            assert_eq!(fs::read_to_string(&accounting).unwrap(), contents);
+        }
+        fs::remove_file(&accounting).unwrap();
+        fs::create_dir(&accounting).unwrap();
+        assert_eq!(
+            delegate_workload_controllers(&scope, &leaf),
+            Err(ErrorCode::Unavailable)
+        );
+        fs::remove_dir(&accounting).unwrap();
+        fs::write(&accounting, "").unwrap();
+        fs::remove_file(&control).unwrap();
+        fs::create_dir(&control).unwrap();
+        assert_eq!(
+            delegate_workload_controllers(&scope, &leaf),
+            Err(ErrorCode::Unavailable)
+        );
+        assert_eq!(fs::read_to_string(&accounting).unwrap(), "");
+        assert!(!leaf.join("io.max").exists());
+        assert!(!leaf.join("io.weight").exists());
+        fs::remove_dir_all(scope).unwrap();
+    }
 
     #[test]
     fn storage_capacity_checks_type_bytes_and_inodes_without_requiring_free_space() {

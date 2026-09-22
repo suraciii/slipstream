@@ -237,8 +237,15 @@ A failed or ambiguous creation never permits adoption or a second creation call.
 An ordinary exited scope does not retain accounting. Docker owns its scope.
 The launcher creates and controls only the
 workload leaf within that delegated scope. It moves the blocked bootstrap into
-the leaf, enables the required controllers, applies and reads back limits, and
-checks membership before release. Future engine descendants inherit the leaf.
+the leaf, enables the memory, CPU, task and I/O controllers, applies and reads
+back limits, and checks membership before release. I/O delegation supplies
+workload accounting; it does not set an I/O limit or weight. Before release,
+the launcher must verify that the leaf's `io.stat` is readable. An empty file
+is valid before the workload performs I/O. A missing controller, failed
+delegation or unreadable accounting file must stop setup without releasing
+the workload. The launcher must not enable controllers on any ancestor above
+the exact verified delegated Docker scope to repair missing delegation.
+Future engine descendants inherit the leaf.
 The finite enclosing attempt slice already accounts for the bootstrap and
 charges that do not migrate with its PID. Both launcher and Web remain outside
 the entire processing slice.
