@@ -89,7 +89,11 @@ Album queries continue to order only by `album_members.position`. Original Folde
 
 Metadata inspection begins from the Library-owned Original capability. It opens the Original read-only beneath the retained Library Folder descriptor and passes an already-open descriptor or borrowed read/seek adapter to the metadata parser.
 
-The parser must not receive an Original filesystem path or reopen the Original by name. Direct parsing uses bounded reads from the retained descriptor. The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor. The same descriptor is revision-checked before and after inspection and compared to the discovery device, inode, size, and modification time. Traversal, symlink escape, inode substitution, and mid-read revision changes fail only the affected fact.
+The parser must not receive an Original filesystem path or reopen the Original by name. Direct parsing uses bounded reads from the retained descriptor. The LibRaw fallback receives only a `/proc/self/fd` alias of a duplicated retained descriptor. The first attempt compares the opened descriptor with the discovery device, inode, size, and modification time. Each attempt checks that its retained descriptor is unchanged after inspection. A discovery mismatch or a mid-read revision change discards that attempt's metadata; parser failure must not hide a revision change. Traversal and symlink escape remain forbidden.
+
+After a changed-revision failure, Capture inspection makes one fresh observation at the same Location. It opens one new confined read-only descriptor and obtains the observation's source facts, source revision, and metadata through that descriptor. A completed `known`, `missing`, or `invalid` result replaces the scan's discovery facts and capture fact together, before recovery planning or persistence. It must not attach fresh metadata to stale discovery facts. A replacement already complete before this observation is the current file, just as in a later ordinary scan; the rejected attempt contributes no metadata. A change during the fresh descriptor's inspection still fails its revision check.
+
+There are at most two attempts per Original per scan. The fresh attempt must not reuse a prior capture fact, change Location, infer identity or a Content Fingerprint, or start another scan. If it fails, the scan retains its discovery facts and records `failed` without a source revision or ordering key; a later scan may try again. Other first-attempt errors keep their existing failure behavior. Both attempts use the same Library native-work permit, and each keeps the existing parsing limits.
 
 Metadata input, parser allocation, blocking workers, and queued work are bounded. Each Library owns one capacity-two native-work budget shared by Capture inspection, Preview extraction, and derivative processing; standalone cache schedulers may own an independent budget. It must not unlock LibRaw sensor unpack, demosaic, or any RAW development path.
 
@@ -186,6 +190,18 @@ Capture inspection is part of initial scan and rescan completion. This preserves
 
 A lazy backfill would expose temporary path order and move Grid cells or Photo navigation as background work completes.
 
+### Selected: One Fresh Observation After a Revision Change
+
+A scan may hold discovery facts long before it inspects one Original. Rejecting the stale attempt and observing the current file once avoids requiring another whole-Library scan for a transient change. Facts and metadata stay bound to one stable descriptor. This does not claim that bytes observed in separate attempts are identical.
+
+### Rejected: Wait for Another Scan After Every Revision Change
+
+This keeps the same safety boundary but unnecessarily leaves usable current metadata failed until another complete Library check. One bounded local retry limits both the delay and work for a repeatedly changing file.
+
+### Rejected: Ignore Inode Changes or Retain the Old Capture Time
+
+Size and modification time alone cannot detect a same-size, same-time replacement. Reusing an old key or ignoring the mismatch could publish metadata for bytes that were not inspected under the claimed revision.
+
 ## Compatibility Fixtures
 
 - `compatibility/metadata/capture-time.json` owns field precedence, parsing, normalization, offset, and subsecond vectors; `compatibility/metadata/capture-order.json` owns per-Original capture authority, tie, missing-partition, and camera-local-offset ordering vectors.
@@ -197,4 +213,4 @@ A lazy backfill would expose temporary path order and move Grid cells or Photo n
 
 ## Verification
 
-Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Backup restore rehearsal is owned by Issue #38.
+Verification covers every Product Spec example, descriptor-confined inspection, discovery-identity and mid-read revision changes, parser and resource failures, exact v2-to-v3, v4-to-v5, and v5-to-v6 migrated state, stable open Browse Snapshot order, newly opened source order after rescan, unchanged Album positions, bounded protocol omission, and unchanged Original bytes and metadata. Generated JPEG and RAW fixtures must prove the two-attempt bound, successful fresh observation with matching published source facts, rejection of stale-discovery metadata for a same-size/same-time replacement, acceptance of a replacement completed before the fresh observation, and failure without old metadata reuse when the fresh attempt also changes. Persistence checks must preserve Original and Photo IDs, decisions, Album membership order, and Resume. Backup restore rehearsal is owned by Issue #38.
