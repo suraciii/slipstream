@@ -2,7 +2,7 @@
 
 Candidate: suraciii/slipstream `origin/main` @ `df18de3ba5d5fa9cede37fb91c7832cb92ddda04`
 ("Redesign Photo View around an unobstructed Preview and contextual tools (#314)").
-Qualification worktree: `/home/szf/repos/slipstream-issue-310` (branch `feat/310-qualification`),
+Qualification worktree: `/home/<user>/repos/slipstream-issue-310` (branch `feat/310-qualification`),
 prepared with `scripts/prepare-worktree.sh`. No production file differs from the candidate;
 the only source change is additive qualification test scaffolding in
 `apps/web/src/browser-review.browser-test.ts`.
@@ -12,8 +12,8 @@ the only source change is additive qualification test scaffolding in
 Gate #1 — frozen candidate, no added tests (baseline):
 
 ```
-cd /home/szf/repos/slipstream-issue-310
-PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/szf/.agent-browser/browsers/chrome-152.0.7977.42/chrome bun run verify
+cd /home/<user>/repos/slipstream-issue-310
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/<user>/.agent-browser/browsers/chrome-152.0.7977.42/chrome bun run verify
 ```
 
 Result: PASS. Browser suite: 275 passed, 1 skipped (real-camera RAW scenario, expected
@@ -42,8 +42,8 @@ Gate #5 — full `bun run verify` on the committed qualification tree, nothing e
 running on the host (the canonical gate):
 
 ```
-cd /home/szf/repos/slipstream-issue-310
-PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/szf/.agent-browser/browsers/chrome-152.0.7977.42/chrome bun run verify
+cd /home/<user>/repos/slipstream-issue-310
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/<user>/.agent-browser/browsers/chrome-152.0.7977.42/chrome bun run verify
 ```
 
 Result: PASS, exit 0. Browser suite: 286 passed, 4 skipped — 290 discovered =
@@ -58,8 +58,8 @@ a scratch copy of the test file (checksum-verified restored immediately afterwar
 run alone to prove each defect reproduces on the candidate:
 
 ```
-cd /home/szf/repos/slipstream-issue-310
-PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/szf/.agent-browser/browsers/chrome-152.0.7977.42/chrome \
+cd /home/<user>/repos/slipstream-issue-310
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/home/<user>/.agent-browser/browsers/chrome-152.0.7977.42/chrome \
   bun x playwright test --grep 'a narrow header keeps the result count legible beside an active filter flag|a Rating write settles after its surface closes without claiming cancellation|a held Select write cannot repaint or advance a Grid the browser returned to'
 ```
 

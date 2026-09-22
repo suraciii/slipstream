@@ -20,7 +20,7 @@ Running 3 tests using 1 worker
       19961 |     },
       19962 |   );
       19963 |
-        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:19960:23
+        at /home/<user>/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:19960:23
 
     Error Context: test-results/browser-review.browser-tes-54231-eside-an-active-filter-flag/error-context.md
 
@@ -38,7 +38,7 @@ Running 3 tests using 1 worker
       20421 |       await expect(page.locator("[data-status]")).not.toHaveText(/cancel/i);
       20422 |
       20423 |       release();
-        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20420:23
+        at /home/<user>/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20420:23
 
     Error Context: test-results/browser-review.browser-tes-b7e17-thout-claiming-cancellation/error-context.md
 
@@ -65,7 +65,7 @@ Running 3 tests using 1 worker
       20499 |       expect(await historyLength(page)).toBe(length + 1);
       20500 |       await page.unroute("**/api/photos/*/state");
       20501 |     },
-        at /home/szf/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20498:54
+        at /home/<user>/repos/slipstream-issue-310/apps/web/src/browser-review.browser-test.ts:20498:54
 
     Error Context: test-results/browser-review.browser-tes-02b6f-rid-the-browser-returned-to/error-context.md
 
