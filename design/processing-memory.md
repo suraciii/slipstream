@@ -155,6 +155,12 @@ still requires supervised failure settlement; preflight is not a guarantee of
 success. Do not automatically retry an OOM with the same settings or raise the
 budget. Explicit retry creates a new attempt using current policy.
 
+[Qualified Film Memory Envelope](processing-film-envelope.md) defines the
+separate operator-only admission authority over exact registered fixtures. It
+combines source-backed known reservations with a reviewed whole-attempt empirical
+ceiling while retaining unknown component diagnostics. Its fixture gate does not
+grant ordinary Photo/Export admission or a broader photographic class.
+
 ## Engine Memory Efficiency
 
 ### Bounded Pointwise Computation
