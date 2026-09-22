@@ -1412,17 +1412,10 @@ pub(crate) fn classify(
     worker: Option<Outcome>,
     requested: Option<Outcome>,
 ) -> Outcome {
-    let oom = evidence
-        .attempt_before
-        .as_ref()
-        .zip(evidence.attempt_after.as_ref())
-        .is_some_and(|(before, after)| {
-            after
-                .oom_kill
-                .checked_sub(before.oom_kill)
-                .is_some_and(|delta| delta > 0)
-        });
-    if oom && evidence.docker_oom_killed == Some(true) {
+    if attempt_oom_killed(evidence)
+        && (evidence.docker_oom_killed == Some(true)
+            || (evidence.exit_code == Some(137) && owned_limit_pressure(evidence)))
+    {
         return Outcome::Oom;
     }
     match (evidence.exit_code, worker) {
@@ -1440,6 +1433,39 @@ pub(crate) fn classify(
     } else {
         Outcome::Unknown
     }
+}
+
+fn attempt_oom_killed(evidence: &Evidence) -> bool {
+    evidence
+        .attempt_before
+        .as_ref()
+        .zip(evidence.attempt_after.as_ref())
+        .is_some_and(|(before, after)| {
+            after
+                .oom_kill
+                .checked_sub(before.oom_kill)
+                .is_some_and(|delta| delta > 0)
+        })
+}
+
+fn owned_limit_pressure(evidence: &Evidence) -> bool {
+    // Hierarchical events retain pressure at a vanished workload leaf. Only
+    // local parent events exclude pressure from another subtree or ancestor.
+    evidence
+        .attempt_before
+        .as_ref()
+        .zip(evidence.attempt_after.as_ref())
+        .is_some_and(|(before, after)| after.oom.checked_sub(before.oom).is_some_and(|n| n > 0))
+        || evidence
+            .parent_before
+            .as_ref()
+            .zip(evidence.parent_after.as_ref())
+            .is_some_and(|(before, after)| {
+                after
+                    .local_oom
+                    .checked_sub(before.local_oom)
+                    .is_some_and(|n| n > 0)
+            })
 }
 
 fn qualified_availability(
@@ -1491,6 +1517,9 @@ fn qualification_failure(record: &Record) -> Option<crate::qualified::Qualificat
     }
     let outcome = record.receipt.outcome?;
     let evidence = record.receipt.evidence.as_ref()?;
+    if evidence.populated != Some(false) {
+        return None;
+    }
     // An actual retained attempt identity plus the terminal observation owns
     // this peak. The pre-provisioning placeholder is not a measured zero.
     if record.cgroup_inode.is_some()
@@ -1499,18 +1528,14 @@ fn qualification_failure(record: &Record) -> Option<crate::qualified::Qualificat
     {
         return Some(Failure::PeakExceeded);
     }
-    let boundary_oom = |before: &Option<Events>, after: &Option<Events>| {
-        before.as_ref().zip(after.as_ref()).is_some_and(|(a, b)| {
-            b.oom_kill.checked_sub(a.oom_kill).is_some_and(|n| n > 0)
-                && b.local_oom.checked_sub(a.local_oom).is_some_and(|n| n > 0)
-        })
-    };
     // These are snapshots of the exact retained attempt and exclusively owned
-    // processing parent, never of an unrelated finite host ancestor.
+    // processing parent, never of an unrelated finite host ancestor. Kernel
+    // evidence can invalidate qualification even if a partial worker record
+    // or a non-137 exit prevents the terminal classifier from reporting OOM.
     if record.cgroup_inode.is_some()
         && record.unit_invocation.is_some()
-        && (boundary_oom(&evidence.attempt_before, &evidence.attempt_after)
-            || boundary_oom(&evidence.parent_before, &evidence.parent_after))
+        && attempt_oom_killed(evidence)
+        && owned_limit_pressure(evidence)
     {
         return Some(Failure::ProcessingOom);
     }
@@ -1926,7 +1951,6 @@ pub(crate) mod tests {
             Outcome::Oom
         );
         for value in [
-            evidence(137, false, Some(0), Some(1)),
             evidence(137, true, Some(1), Some(1)),
             evidence(137, true, None, Some(1)),
             evidence(137, true, Some(2), Some(1)),
@@ -1938,6 +1962,81 @@ pub(crate) mod tests {
             classify(&evidence(76, false, Some(0), Some(0)), None, None),
             Outcome::Deadline
         );
+    }
+    #[test]
+    fn descendant_oom_survives_a_false_or_missing_docker_flag_and_cancellation() {
+        // Shape captured by the native leaf-pressure regression: the leaf
+        // disappears, local counters stay zero, and Docker reports false.
+        let mut value = evidence(137, false, Some(0), Some(0));
+        value.attempt_after = Some(Events {
+            oom: 1,
+            oom_kill: 3,
+            oom_group_kill: 1,
+            ..Events::default()
+        });
+        for flag in [Some(false), None, Some(true)] {
+            value.docker_oom_killed = flag;
+            for requested in [None, Some(Outcome::Cancelled), Some(Outcome::Interrupted)] {
+                assert_eq!(classify(&value, None, requested), Outcome::Oom);
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_oom_requires_terminal_kill_and_owned_limit_pressure() {
+        let mut value = evidence(137, false, Some(0), Some(0));
+        value.attempt_after.as_mut().unwrap().oom_kill = 3;
+        // A host/global kill is insufficient even if an unrelated child of
+        // the parent raised its hierarchical pressure counter.
+        value.parent_before = Some(Events::default());
+        value.parent_after = Some(events(3));
+        assert_eq!(classify(&value, None, None), Outcome::EngineFailed);
+        value.parent_after.as_mut().unwrap().local_oom = 1;
+        assert_eq!(classify(&value, None, None), Outcome::Oom);
+
+        for missing_before in [true, false] {
+            let mut missing = value.clone();
+            if missing_before {
+                missing.parent_before = None;
+            } else {
+                missing.parent_after = None;
+            }
+            assert_eq!(classify(&missing, None, None), Outcome::EngineFailed);
+        }
+        let mut regressed = value.clone();
+        regressed.parent_before.as_mut().unwrap().local_oom = 2;
+        assert_eq!(classify(&regressed, None, None), Outcome::EngineFailed);
+        for before in [None, Some(events(3)), Some(events(4))] {
+            let mut missing_kill = value.clone();
+            missing_kill.attempt_before = before;
+            assert_eq!(classify(&missing_kill, None, None), Outcome::EngineFailed);
+        }
+        let mut missing_kill = value.clone();
+        missing_kill.attempt_after = None;
+        assert_eq!(classify(&missing_kill, None, None), Outcome::EngineFailed);
+
+        value.parent_before = None;
+        value.parent_after = None;
+        value.attempt_before.as_mut().unwrap().oom = 2;
+        value.attempt_after.as_mut().unwrap().oom = 1;
+        assert_eq!(classify(&value, None, None), Outcome::EngineFailed);
+        value.attempt_after.as_mut().unwrap().oom = 3;
+        assert_eq!(classify(&value, None, None), Outcome::Oom);
+        for (code, worker, expected) in [
+            (Some(0), Some(Outcome::Completed), Outcome::Completed),
+            (
+                Some(20),
+                Some(Outcome::AllocationFailed),
+                Outcome::AllocationFailed,
+            ),
+            (Some(21), Some(Outcome::StorageFull), Outcome::StorageFull),
+            (Some(76), None, Outcome::Deadline),
+            (Some(75), None, Outcome::EngineFailed),
+            (None, None, Outcome::Unknown),
+        ] {
+            value.exit_code = code;
+            assert_eq!(classify(&value, worker, None), expected);
+        }
     }
     #[test]
     fn completed_result_survives_restart_and_late_cancellation() {
@@ -2243,23 +2342,72 @@ pub(crate) mod tests {
             None,
             "a kill can come from outside the owned boundary"
         );
-        record.receipt.evidence.as_mut().unwrap().docker_oom_killed = Some(false);
-        record
-            .receipt
-            .evidence
-            .as_mut()
-            .unwrap()
-            .attempt_after
-            .as_mut()
-            .unwrap()
-            .local_oom = 1;
-        assert_eq!(qualification_failure(&record), Some(Failure::ProcessingOom));
+        // Owned leaf pressure is hierarchical even when local counters and
+        // Docker's flag remain unchanged. A partial worker outcome does not
+        // erase this independently established qualification contradiction.
         let evidence = record.receipt.evidence.as_mut().unwrap();
-        evidence.parent_before = evidence.attempt_before.take();
-        evidence.parent_after = evidence.attempt_after.take();
+        evidence.docker_oom_killed = Some(false);
+        evidence.attempt_after.as_mut().unwrap().oom = 1;
         assert_eq!(qualification_failure(&record), Some(Failure::ProcessingOom));
-        record.receipt.evidence.as_mut().unwrap().parent_before = None;
+        assert_eq!(record.receipt.outcome, Some(Outcome::Cancelled));
+        record.receipt.evidence.as_mut().unwrap().peak_bytes = ceiling + 1;
+        assert_eq!(qualification_failure(&record), Some(Failure::PeakExceeded));
+        record.receipt.evidence.as_mut().unwrap().peak_bytes = ceiling;
+        for populated in [Some(true), None] {
+            record.receipt.evidence.as_mut().unwrap().populated = populated;
+            assert_eq!(qualification_failure(&record), None);
+        }
+        record.receipt.evidence.as_mut().unwrap().populated = Some(false);
+        record.unit_invocation = None;
         assert_eq!(qualification_failure(&record), None);
+        record.unit_invocation = Some("a".repeat(32));
+        record.cgroup_inode = None;
+        assert_eq!(qualification_failure(&record), None);
+        record.cgroup_inode = Some(1);
+        record
+            .film
+            .as_mut()
+            .unwrap()
+            .qualification_observation_valid = Some(false);
+        assert_eq!(qualification_failure(&record), None);
+        record
+            .film
+            .as_mut()
+            .unwrap()
+            .qualification_observation_valid = Some(true);
+
+        // An exact parent limit can kill this attempt without increasing the
+        // attempt's own oom counter. Parent kill or pressure alone cannot
+        // prove that this attempt was killed by an owned limit.
+        let evidence = record.receipt.evidence.as_mut().unwrap();
+        evidence.attempt_after.as_mut().unwrap().oom = 0;
+        evidence.parent_before = Some(Events::default());
+        evidence.parent_after = Some(Events {
+            oom: 1,
+            oom_kill: 1,
+            local_oom: 1,
+            ..Events::default()
+        });
+        assert_eq!(qualification_failure(&record), Some(Failure::ProcessingOom));
+        let proven_parent = record.clone();
+        for kind in 0..7 {
+            let mut invalid = proven_parent.clone();
+            let evidence = invalid.receipt.evidence.as_mut().unwrap();
+            match kind {
+                0 => evidence.attempt_before = None,
+                1 => evidence.attempt_after = None,
+                2 => evidence.attempt_after.as_mut().unwrap().oom_kill = 0,
+                3 => evidence.attempt_before.as_mut().unwrap().oom_kill = 2,
+                4 => evidence.parent_before = None,
+                5 => evidence.parent_after.as_mut().unwrap().local_oom = 0,
+                6 => evidence.parent_before.as_mut().unwrap().local_oom = 2,
+                _ => unreachable!(),
+            }
+            assert_eq!(qualification_failure(&invalid), None, "case {kind}");
+        }
+        let evidence = record.receipt.evidence.as_mut().unwrap();
+        evidence.attempt_after = Some(Events::default());
+        evidence.parent_after = Some(Events::default());
         record.receipt.outcome = Some(Outcome::AllocationFailed);
         assert_eq!(
             qualification_failure(&record),
@@ -2274,6 +2422,38 @@ pub(crate) mod tests {
             record.receipt.outcome = Some(outcome);
             assert_eq!(qualification_failure(&record), None);
         }
+    }
+
+    #[test]
+    fn recovered_descendant_oom_withdraws_the_exact_qualified_case() {
+        let mut record = qualified_record(1);
+        let evidence = record.receipt.evidence.as_mut().unwrap();
+        evidence.exit_code = Some(137);
+        evidence.docker_oom_killed = Some(false);
+        evidence.attempt_after = Some(Events {
+            oom: 1,
+            oom_kill: 3,
+            oom_group_kill: 1,
+            ..Events::default()
+        });
+        record.receipt.outcome = Some(classify(evidence, None, None));
+        let fixture = record.film.as_ref().unwrap().grant.fixture.id.clone();
+        let envelope = record.film.as_ref().unwrap().resource_model.clone();
+        let mut registry = qualified_registry(record);
+        restore_qualifications(&mut registry).unwrap();
+        let invalidations = registry.invalidations.as_ref().unwrap();
+        assert_eq!(invalidations.len(), 1);
+        assert_eq!(invalidations[0].fixture_id, fixture);
+        assert_eq!(invalidations[0].envelope, envelope);
+        assert_eq!(
+            invalidations[0].reason,
+            crate::qualified::QualificationFailure::ProcessingOom
+        );
+        assert_eq!(registry.records[&1].receipt.outcome, Some(Outcome::Oom));
+        let bytes = serde_json::to_vec(&registry).unwrap();
+        let mut recovered: Registry = serde_json::from_slice(&bytes).unwrap();
+        restore_qualifications(&mut recovered).unwrap();
+        assert_eq!(serde_json::to_vec(&recovered).unwrap(), bytes);
     }
 
     #[test]

@@ -265,6 +265,16 @@ vanish. Distinguish ancestor and host pressure and correlate event deltas with
 the exact owned runtime identity. Retain terminal container
 state plus kernel evidence before stopping the accounting boundary.
 
+Confirm an OOM when the retained attempt has a positive checked `oom_kill`
+delta and terminal Docker state reports `OOMKilled=true`. Also confirm it for
+exit 137 when that kill delta accompanies limit pressure inside the owned
+boundary: a positive checked hierarchical `oom` delta at the attempt, or a
+positive checked `local_oom` delta at its exact owned processing parent.
+Docker's flag can remain false for a descendant leaf OOM. Missing or regressing
+counters cannot supply a positive delta. Exit 137 alone and kill counters
+without terminal confirmation are insufficient; a kill counter alone does not
+locate pressure because it can include an unrelated host OOM.
+
 A launcher receipt records requested/captured policy, bundle and manifest
 identity, owned runtime identities, actual limits, start/exit facts, resource
 evidence, and settlement outcome. It does not mark an Export successful. The

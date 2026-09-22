@@ -319,6 +319,14 @@ exceeded E. Unrelated ancestor/host pressure, unavailable observation or detecte
 limit/environment tampering cannot fabricate these findings. Storage/output
 faults and cancellation alone do not invalidate memory qualification.
 
+For OOM attribution, require positive checked attempt `oom_kill` and owned
+limit-pressure deltas as defined by the
+[executor evidence contract](processing-executor.md#evidence-and-settlement).
+Require a valid terminal observation of the empty owned attempt subtree.
+The kernel evidence can establish a qualification failure even when the worker
+reports another outcome or Docker does not set its OOM flag. A parent event
+without a killed member of the attempt cannot establish this failure.
+
 The receipt's nullable `qualification_failure` reports this assessment while
 preserving the execution outcome: a complete reference-matching image whose
 verified peak exceeds E still has outcome `completed`. It cannot authorize
