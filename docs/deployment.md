@@ -49,32 +49,87 @@ SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state
 SLIPSTREAM_CACHE_DIRECTORY=/srv/slipstream/cache
 SLIPSTREAM_BIND_ADDRESS=127.0.0.1
 SLIPSTREAM_PORT=3000
+SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com
 ```
 
 `SLIPSTREAM_BIND_ADDRESS` controls the host-side published interface and
-defaults to loopback. Binding topology is the operator's choice; Slipstream
-0.1 ships no accounts, authentication, or authorization. The Rust process
-listens on the container network; Docker's host-side publication is the
-exposure boundary.
+must remain private behind the HTTPS reverse proxy. The Rust process listens
+on the container network; Docker publication and network policy must prevent
+public clients from bypassing the proxy.
 
-Slipstream is trusted-network-only. `Host`, `Origin`, absolute request
-targets, and forwarded headers do not establish a trust boundary or authorize
-requests. Any client that can reach a non-loopback listener can browse and
-mutate the Photo Library. Keep the default loopback binding unless every client
-on the selected LAN, Tailscale, or other network is trusted. Do not expose
-Slipstream directly to an untrusted network until a separate authentication
-design exists.
+[Instance Access](access.md) defines token provisioning and access behavior.
+[Instance Access Architecture](../design/access.md) owns credential enforcement,
+canonical-origin validation, and private response caching. The operator must
+configure a canonical HTTPS origin and provision a token before exposing the
+Library. An absent token never enables anonymous access, including on loopback.
+Forwarded headers do not establish identity. The proxy must disable caching for
+private responses and expose only the intended origin with trusted TLS.
 
-Storage rules:
+For upgrade, the operator must keep public ingress closed, back up application
+state, provision authentication through local administration with the server
+stopped, and verify private route rejection before opening ingress. Old publicly
+cacheable image paths and proxy caches must be retired under the access design.
+A restore requires token rotation before reopening access. A rollback to a
+binary without authentication must remain isolated from public traffic.
+Operator acceptance tooling must use the credential for private API probes;
+`/healthz` remains a minimal readiness check and is not authentication evidence.
 
-- For `up` and Library Expansion, `SLIPSTREAM_IMAGE` must occur exactly once as
+## Access Administration
+
+`SLIPSTREAM_PUBLIC_ORIGIN` must contain the canonical HTTPS origin with no
+userinfo, query, fragment, or path other than `/`. It is required at server
+startup, including setup-required operation. It must be carried from the
+operator environment file into the container. Trailing `/` is canonicalized;
+matching uses parsed scheme, host, and effective port. It contains no secret.
+
+The supported Compose entry point adds `access-create`, `access-rotate`, and
+`access-revoke`. Each accepts the same single environment file and immutable
+image selection as existing Compose operations, runs host storage preflight,
+and starts a one-shot `slipstream-server` container with the matching subcommand.
+It must not start the ordinary HTTP service or scan the Library. These commands
+use admitted existing state or initialize only a valid new state directory.
+They must acquire the same exclusive process lock used by server startup and
+Library expansion; an active owner causes failure without touching state.
+
+```sh
+./scripts/compose --env-file /srv/slipstream/instance.env down
+./scripts/compose --env-file /srv/slipstream/instance.env access-create
+./scripts/compose --env-file /srv/slipstream/instance.env up -d
+```
+
+`access-create` refuses an already configured credential. `access-rotate`
+requires existing authentication state, including explicitly revoked state;
+`access-revoke` is idempotent for a revoked credential. Rotation and revocation
+must use the same stopped-server procedure above. Keep public ingress closed
+until acceptance is complete. No command accepts a caller-supplied token.
+
+Creation and rotation require an interactive terminal and present the token
+once after durable commit; the wrapper must not capture or log that output.
+The one-shot container must disable Docker logging with the `none` logging
+driver and attach the private terminal directly. The wrapper must not use a
+logging or tee subprocess. They print secrets to the attached terminal, not
+container logs or stdout pipelines. If terminal delivery fails after commit, report uncertainty and
+instruct the operator to rotate; never roll back a successfully committed
+credential or disclose it on a later read. Revocation prints only confirmation.
+Underlying `slipstream-server access-create|access-rotate|access-revoke` uses
+the same existing storage environment and exit 0 for confirmed success, 1 for
+failure. No operation may modify Originals or clear Library state.
+
+The web/CLI HTTPS origin must remain usable from the operator host; authenticated
+CLI access has no plaintext loopback exception. [CLI Reference](cli-reference.md)
+owns credential-file selection. Retain the minimal unauthenticated `/healthz`
+probe on the private hop for container readiness.
+
+## Storage Rules
+
+- For `up`, Library Expansion, and access administration, `SLIPSTREAM_IMAGE` must occur exactly once as
   an unquoted, literal immutable image reference. Its repository path uses
   lowercase components and may include a registry port. It must end in
   `@sha256:` followed by 64 lowercase hexadecimal characters. Shell expansion,
   Compose interpolation, and mutable tags are not supported. Supported Compose
   operations run that digest-pinned image only; they never build an image from
   the repository as a fallback.
-- For `up` and Library Expansion, the Originals, state, and cache directories
+- For `up`, Library Expansion, and access administration, the Originals, state, and cache directories
   must already exist. Each must occur exactly once as `KEY=/absolute/path` in
   the environment file. Its value must be an unquoted, valid UTF-8 literal. It
   may contain ordinary internal spaces, but must not have leading or trailing
@@ -114,9 +169,12 @@ Linux `findmnt`. It supports only these command forms:
 ./scripts/compose --env-file /path/to/slipstream.env up -d
 ./scripts/compose --env-file /path/to/expanded-library.env run --rm --no-deps slipstream expand-library
 ./scripts/compose --env-file /path/to/slipstream.env down
+./scripts/compose --env-file /path/to/slipstream.env access-create
+./scripts/compose --env-file /path/to/slipstream.env access-rotate
+./scripts/compose --env-file /path/to/slipstream.env access-revoke
 ```
 
-For `up` and Library Expansion, it validates the required image input and
+For `up`, Library Expansion, and access administration, it validates the required image input and
 resolves the three host storage sources and captures each endpoint's complete
 nested mount hierarchy before it invokes Compose. It passes every resolved
 source both as the container path and as the server configuration value, so
@@ -132,10 +190,14 @@ point fixes the Compose project name as `slipstream` and rejects any
 `COMPOSE_*` or `DOCKER_*` declaration in the environment file.
 For the finite startup Compose configuration surface, the environment file also
 wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
-`SLIPSTREAM_PORT`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
+`SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
 `SLIPSTREAM_LIBRARY_ROOT`, `SLIPSTREAM_STATE_DIRECTORY`, and
 `SLIPSTREAM_CACHE_DIRECTORY` before startup exports its checked canonical
-values.
+values. An absent or malformed `SLIPSTREAM_PUBLIC_ORIGIN` in the environment
+file must not fall back to an ambient origin for startup. Access administration
+must likewise clear ambient origin values; its offline state operation does not
+require a public origin. These commands use the same image/storage preflight
+and precedence, with interactive and logging behavior from Access Administration.
 
 `compose.yaml` intentionally declares no Docker restart policy. Every container
 start must be initiated through `scripts/compose` so the host storage preflight

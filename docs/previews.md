@@ -58,7 +58,7 @@ The current Photo's review Preview has highest priority. After it is ready, the 
 
 A thumbnail may appear while the review Preview loads. Slipstream must not change Selection State because a higher-quality Preview becomes available.
 
-A generated thumbnail or review Preview must remain in the configured derivative cache across browser reload and server restart. A current cache hit must not re-extract or reprocess the Original File. Derivative responses must use identity-bearing immutable browser caching so reconnect and reload may reuse valid bytes.
+A generated thumbnail or review Preview must remain in the configured derivative cache across browser reload and server restart. A current cache hit must not re-extract or reprocess the Original File. Derivative delivery must follow [Instance Access](access.md) and its private-response cache policy. Server-side cache reuse must remain available independently of browser caching.
 
 Cache reuse must not present a derivative from an older version of the Original File as current. The cache remains rebuildable: deleting cached derivatives may require regeneration but must not remove Photo state or modify Original Files.
 

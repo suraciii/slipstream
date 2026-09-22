@@ -8,7 +8,7 @@ for caller-supplied values, not literal IDs or generated defaults.
 ## Invocation
 
 ```text literal
-slipstream [--server URL] [--output json|text] [--timeout SECONDS] COMMAND
+slipstream [--server URL] [--token-file FILE] [--output json|text] [--timeout SECONDS] COMMAND
 slipstream --help
 slipstream --version
 slipstream COMMAND --help
@@ -20,8 +20,8 @@ network request. Unknown options, duplicate options, extra positional arguments,
 and invalid combinations are errors. Flags must not accept abbreviations.
 
 The service URL resolves from `--server`, then `SLIPSTREAM_SERVER_URL`, then
-`http://127.0.0.1:3000`. A supplied empty or invalid value is an error, not a
-fallback. A URL must be an HTTP or HTTPS origin with no credentials, path other
+an error for network commands when neither is supplied. A supplied empty or
+invalid value is an error, not a fallback. A URL must be an HTTPS origin with no credentials, path other
 than `/`, query, or fragment. HTTPS uses normal certificate validation. There
 is no insecure-TLS flag, profile file, automatic discovery, or login command.
 The CLI must not follow HTTP redirects.
@@ -37,6 +37,40 @@ rest of the input. Unknown keys, duplicate JSON object keys, duplicate Photo IDs
 trailing content, and an empty mutation list are invalid. The entire document
 must validate before a write. A mutation contains at most 100 Photo IDs; the
 CLI must not split it automatically. Local input-file failures perform no write.
+
+## Instance Credentials
+
+[Instance Access](access.md) requires the client to load a generated Access Token
+from a private file and send it only in the Authorization header to the selected
+HTTPS origin. The file must contain exactly one base64url token, optionally
+followed by one line ending. The client must reject missing, unreadable, empty,
+or malformed credentials before network mutation and must never echo file
+contents. Help and version require no credential. Credentials must not be
+accepted as plaintext command arguments, URL components, or mutation input.
+No request redirect may forward the credential.
+
+A confirmed authentication rejection means the request was not admitted; the
+CLI must not retry it automatically. Transport loss after a write was sent
+retains the existing unknown-outcome rules. The token file resolves from `--token-file`, then
+`SLIPSTREAM_ACCESS_TOKEN_FILE`. Omission, an empty path, or duplicate options
+is `invalid_input` before any network request. File input is independent of
+mutation stdin. The file must be a regular nonsymlink file owned by the effective
+user with no group or other permission bits; validate and read the same opened
+file. Refuse files larger than 45 bytes. Missing or unreadable files use
+`local_io_failed` with operation `read-credential` and `fileCommitted: false`; unsafe permissions or invalid content use `invalid_input`.
+No credential contents may appear in either error.
+
+401 maps to `authentication_required`; 403 to `access_denied`; 429 to
+`server_busy` with parsed Retry-After when available. A confirmed boundary
+503 `access_unavailable` or `access_unconfigured` maps to `server_busy`, effect
+`none`, and `retryAfterSeconds: null`; it is not a storage rollback or evidence
+that the requested operation ran. Do not infer this from an arbitrary 503 body.
+Both new error codes have
+`details: { "operation": OPERATION }`, exit 6, and effect `none` when rejection
+is confirmed before admission. An unexpected or invalid response to a possibly
+admitted write must retain `outcome_unknown`. A token does not bypass contract
+version negotiation. HTTP server origins are `invalid_input`, including loopback;
+operators must use their configured HTTPS origin.
 
 ## Service and Discovery
 
@@ -412,9 +446,11 @@ observed version.
 Known error codes are `invalid_input`, `not_found`, `conflict`, `name_conflict`,
 `limit_exceeded`, `cursor_expired`, `incompatible_server`, `library_unavailable`,
 `preview_unavailable`, `server_busy`, `storage_failed`, `partial_result`,
-`transport_failed`, `outcome_unknown`, and `local_io_failed`. Their `details`
+`transport_failed`, `outcome_unknown`, `local_io_failed`,
+`authentication_required`, and `access_denied`. Their `details`
 objects have these required shapes:
 
+- `authentication_required` and `access_denied`: string `operation`;
 - `invalid_input`: string `argument` and string `reason`;
 - `not_found`: `resource` of `photo`, `album`, or `folder`, and string
   `reference`;
@@ -435,10 +471,10 @@ objects have these required shapes:
 - `transport_failed`: string `operation`;
 - `outcome_unknown`: string `operation`, string array `photoIds`, nullable string
   `albumId`, and nullable string `albumName`; and
-- `local_io_failed`: `operation` of `read-input`, `write-preview`, or
+- `local_io_failed`: `operation` of `read-credential`, `read-input`, `write-preview`, or
   `write-output`, nullable local string `path`, and boolean `fileCommitted`.
 
-For `server_busy`, `storage_failed`, `transport_failed`, and `outcome_unknown`,
+For `authentication_required`, `access_denied`, `server_busy`, `storage_failed`, `transport_failed`, and `outcome_unknown`,
 `operation` is one of `status`, `library-check`, `folders-list`, `albums-list`,
 `albums-get`, `photos-list`, `photos-get`, `photos-preview`, `photos-set`,
 `albums-create`, `albums-rename`, `albums-delete`, `albums-add`, `albums-remove`,
@@ -480,7 +516,7 @@ Exit codes are:
 - `3`: confirmed missing object;
 - `4`: confirmed conflict or name conflict, with no changes;
 - `5`: a confirmed partial Photo batch;
-- `6`: unavailable service, expired cursor, incompatible contract, busy service,
+- `6`: authentication required, access denied, unavailable service, expired cursor, incompatible contract, busy service,
   failed scan/Preview, local I/O, output failure, or a confirmed rolled-back
   storage failure;
 - `7`: a write or scan may have been admitted but its outcome is unknown; and

@@ -237,10 +237,7 @@ usage guide. It must not require LibRaw, libvips, Bun, or a mounted Library on
 the client machine. Client/server incompatibility must fail before a mutation.
 Other platforms require their own build and end-to-end evidence.
 
-The [trusted-network boundary](../design/rust-server.md#network-exposure)
-continues to apply. The CLI does not add authentication, scoped credentials,
-public sharing, or remote Agent hosting. The 0.1 support contract remains a
-separate release boundary; documenting CLI behavior does not publish a release.
+[Instance Access](access.md) applies equally to the CLI and browser. The CLI uses instance-wide credentials; it does not introduce per-person scopes, public sharing, or remote Agent hosting. The 0.1 support contract remains a separate release boundary; documenting CLI behavior does not publish a release.
 
 ## Acceptance Scenarios
 

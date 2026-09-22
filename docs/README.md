@@ -12,6 +12,8 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Core Experience
 
+- [Instance Access](access.md): instance token entry, browser sessions, CLI access, sign-out, and recovery
+
 - [Photo Library and Albums](photo-library.md): indexing existing files, read-only Original Folders, virtual Albums, independent RAW and JPEG Photos with Location Recovery, and Original File ownership
 - [Library Browser Experience](library-browser-experience.md): responsive screen composition, contextual controls, browser destinations, history restoration, and space acceptance
 - [Library Browsing and Selection](library-browsing-and-selection.md): progressive Grid and Photo views, source order, loading feedback, gestures, selection state, rating, detail inspection, and undo

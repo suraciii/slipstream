@@ -14,6 +14,8 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Foundations
 
+- [Instance Access Architecture](access.md): credential generations, browser sessions, Bearer admission, revocation, CSRF, and private delivery
+
 - [Foundational Architecture](architecture.md): shared Web/CLI service boundary, file ownership, Photo identity, state ownership, and the first vertical slice
 - [Command-Line Architecture](command-line.md): thin client, bounded queries, shared mutation guards, transport uncertainty, Preview files, and Web handoff
 - [Compose Host Storage Preflight](compose-storage-preflight.md): host bind-source topology, operator entry-point ownership, and Original-safety failure boundary

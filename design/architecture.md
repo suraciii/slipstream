@@ -8,7 +8,7 @@ Slipstream needs the smallest server-owned application boundary that lets one Ph
 - Original Files may be large RAW files on local storage or a mounted network share.
 - Browsers cannot display most RAW formats directly.
 - The first product needs camera-produced Previews, not a general RAW development engine.
-- The first product serves one Photographer and does not require accounts, collaboration, or Internet deployment.
+- The product serves one Photographer and their Agent; public access uses instance credentials without accounts or collaboration roles.
 - Selection changes must persist with low latency and survive server restart.
 - File indexing and Preview work must not block gesture interaction.
 - Original Files are irreplaceable and remain read-only.
@@ -36,7 +36,7 @@ One server process owns:
 
 Importing a module must not scan files, create storage, or bind a port.
 
-Deployment topology is operator territory. Slipstream provides the binding capability — the server binds the configured host (default loopback), and an operator may expose it on any network they choose. The product ships no accounts or authorization; protecting an exposed listener is the operator's responsibility.
+The default listener remains loopback. [Instance Access Architecture](access.md) owns authentication at the HTTP boundary. [Deployment](../docs/deployment.md) owns HTTPS proxy topology and public exposure. Authentication does not introduce user accounts or change Photo Library ownership.
 
 ### Photo Library Scope
 
@@ -122,11 +122,7 @@ The browser-facing service exposes these surfaces:
 
 Protocol types must not expose database rows, native library objects, absolute Original File paths, or internal errors.
 
-The browser mutation boundary is not authorization: request and forwarded
-headers never establish a trusted authority. A reachable client can invoke
-state-changing routes, so a non-loopback listener is trusted-network-only.
-It must not expose Original File paths as arbitrary download parameters.
-Authentication and accounts require a separate future design.
+[Instance Access Architecture](access.md) owns admission before private routes. Request and forwarded headers alone never authenticate a caller. The protocol must not expose Original File paths as arbitrary download parameters.
 
 ## Module Boundaries
 
