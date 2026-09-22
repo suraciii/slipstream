@@ -6015,6 +6015,514 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
 }
 
 #[tokio::test]
+async fn cli_album_routes_map_checked_atomic_results_and_keep_web_shapes() {
+    let (base, config) = prepare_fixture();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let legacy = post_json(
+        &router,
+        "/api/albums",
+        serde_json::json!({"name": "Web Album"}),
+        None,
+    )
+    .await;
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let legacy = response_json(legacy).await;
+    assert!(legacy.get("albums").is_some());
+    assert!(legacy.get("album").is_none());
+    assert!(legacy["albums"][0].get("albumVersion").is_none());
+
+    let created = post_cli_json(
+        &router,
+        "/api/albums",
+        serde_json::json!({"name": "CLI Picks"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = response_json(created).await;
+    let album_id = created["album"]["id"].as_str().unwrap().to_owned();
+    let initial_version = created["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(created["album"]["name"], "CLI Picks");
+    assert_eq!(created["album"]["photoCount"], 0);
+    assert_eq!(created["album"]["hasSavedPosition"], false);
+    assert_eq!(
+        created["album"]["webPath"],
+        format!("/?source=album&albumId={album_id}")
+    );
+
+    let name_conflict = post_cli_json(
+        &router,
+        "/api/albums",
+        serde_json::json!({"name": "cli picks"}),
+    )
+    .await;
+    assert_eq!(name_conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(name_conflict).await["error"],
+        serde_json::json!({
+            "code": "name_conflict",
+            "message": "Inspect the existing Album before choosing a different name.",
+            "effect": "none",
+            "details": {"name": "cli picks", "albumId": album_id}
+        })
+    );
+
+    let added = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_ids[1], photo_ids[0]],
+            "ifVersion": initial_version
+        }),
+    )
+    .await;
+    assert_eq!(added.status(), StatusCode::OK);
+    let added = response_json(added).await;
+    assert_eq!(
+        added["addedPhotoIds"],
+        serde_json::json!([photo_ids[1], photo_ids[0]])
+    );
+    assert_eq!(added["alreadyMemberPhotoIds"], serde_json::json!([]));
+    assert_eq!(added["album"]["photoCount"], 2);
+    let added_version = added["album"]["albumVersion"].as_str().unwrap().to_owned();
+
+    let no_op = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_ids[0]],
+            "ifVersion": added_version
+        }),
+    )
+    .await;
+    assert_eq!(no_op.status(), StatusCode::OK);
+    let no_op = response_json(no_op).await;
+    assert_eq!(no_op["addedPhotoIds"], serde_json::json!([]));
+    assert_eq!(
+        no_op["alreadyMemberPhotoIds"],
+        serde_json::json!([photo_ids[0]])
+    );
+    assert_eq!(no_op["album"]["albumVersion"], added_version);
+
+    let stale = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "rename",
+            "name": "Stale",
+            "ifVersion": initial_version
+        }),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(response_json(stale).await["error"]["code"], "conflict");
+
+    let missing_id = "00000000-0000-4000-8000-00000000dead";
+    let missing = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_ids[2], missing_id],
+            "ifVersion": added_version
+        }),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response_json(missing).await["error"]["details"],
+        serde_json::json!({"resource": "photo", "reference": missing_id})
+    );
+    let after_missing = application.library.album(&album_id).await.unwrap().unwrap();
+    assert_eq!(after_missing.photo_count, 2);
+    assert_eq!(after_missing.album_version, added_version);
+
+    let incomplete = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "reorder",
+            "photoIds": [photo_ids[0]],
+            "ifVersion": added_version
+        }),
+    )
+    .await;
+    assert_eq!(incomplete.status(), StatusCode::CONFLICT);
+    let incomplete = response_json(incomplete).await;
+    assert_eq!(incomplete["error"]["code"], "conflict");
+    assert_eq!(
+        incomplete["error"]["details"]["currentVersion"],
+        added_version
+    );
+
+    let reordered = response_json(
+        post_cli_json(
+            &router,
+            &format!("/api/albums/{album_id}/changes"),
+            serde_json::json!({
+                "operation": "reorder",
+                "photoIds": [photo_ids[0], photo_ids[1]],
+                "ifVersion": added_version
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        reordered["orderedPhotoIds"],
+        serde_json::json!([photo_ids[0], photo_ids[1]])
+    );
+    assert_eq!(reordered["reordered"], true);
+    let reordered_version = reordered["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let progress = post_json(
+        &router,
+        &format!("/api/albums/{album_id}/progress"),
+        serde_json::json!({"photoId": photo_ids[1]}),
+        None,
+    )
+    .await;
+    assert_eq!(progress.status(), StatusCode::OK);
+    assert_eq!(
+        application
+            .library
+            .album(&album_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .album_version,
+        reordered_version
+    );
+
+    let removed = response_json(
+        post_cli_json(
+            &router,
+            &format!("/api/albums/{album_id}/changes"),
+            serde_json::json!({
+                "operation": "remove",
+                "photoIds": [photo_ids[0], photo_ids[2]],
+                "ifVersion": reordered_version
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        removed["removedPhotoIds"],
+        serde_json::json!([photo_ids[0]])
+    );
+    assert_eq!(
+        removed["alreadyAbsentPhotoIds"],
+        serde_json::json!([photo_ids[2]])
+    );
+    assert_eq!(removed["savedPhotoId"], photo_ids[1]);
+    let removed_version = removed["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let other = response_json(
+        post_cli_json(&router, "/api/albums", serde_json::json!({"name": "Other"})).await,
+    )
+    .await;
+    let other_id = other["album"]["id"].as_str().unwrap();
+    let rename_conflict = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "rename",
+            "name": "OTHER",
+            "ifVersion": removed_version
+        }),
+    )
+    .await;
+    assert_eq!(rename_conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(rename_conflict).await["error"]["details"],
+        serde_json::json!({"name": "OTHER", "albumId": other_id})
+    );
+
+    let deleted = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "delete",
+            "ifVersion": removed_version
+        }),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(deleted).await,
+        serde_json::json!({
+            "albumId": album_id,
+            "deleted": true,
+            "originalFilesChanged": false
+        })
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let created = response_json(
+        post_cli_json(
+            &router,
+            "/api/albums",
+            serde_json::json!({"name": "Bounded"}),
+        )
+        .await,
+    )
+    .await;
+    let album_id = created["album"]["id"].as_str().unwrap().to_owned();
+    let version = created["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let unnegotiated = post_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_id],
+            "ifVersion": version
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(unnegotiated.status(), StatusCode::UPGRADE_REQUIRED);
+
+    for body in [
+        r#"{"name":"Unknown","extra":true}"#,
+        r#"{"name":"First","name":"Second"}"#,
+    ] {
+        let rejected = send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/albums")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(rejected).await["error"]["code"],
+            "invalid_input"
+        );
+    }
+
+    let unknown_key = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_id],
+            "ifVersion": version,
+            "force": true
+        }),
+    )
+    .await;
+    assert_eq!(unknown_key.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(unknown_key).await["error"]["code"],
+        "invalid_input"
+    );
+
+    let duplicate_key = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "http://camera.local/api/albums/{album_id}/changes"
+            ))
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"operation":"add","photoIds":["{photo_id}"],"photoIds":["{photo_id}"],"ifVersion":"{version}"}}"#
+            )))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(duplicate_key.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(duplicate_key).await["error"]["code"],
+        "invalid_input"
+    );
+
+    let duplicate_ids = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [photo_id, photo_id],
+            "ifVersion": version
+        }),
+    )
+    .await;
+    assert_eq!(duplicate_ids.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(duplicate_ids).await["error"]["details"]["argument"],
+        "photoIds"
+    );
+
+    let too_many_ids = (0..=slipstream_core::ALBUM_MEMBERSHIP_BATCH_MAX)
+        .map(|index| format!("00000000-0000-4000-8000-{index:012x}"))
+        .collect::<Vec<_>>();
+    let over_limit = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "reorder",
+            "photoIds": too_many_ids,
+            "ifVersion": version
+        }),
+    )
+    .await;
+    assert_eq!(over_limit.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response_json(over_limit).await["error"],
+        serde_json::json!({
+            "code": "limit_exceeded",
+            "message": "Reduce the Photo ID list and try again.",
+            "effect": "none",
+            "details": {
+                "limitName": "albumReorderMembersMaximum",
+                "limit": 100,
+                "actual": 101
+            }
+        })
+    );
+
+    let unchanged = application.library.album(&album_id).await.unwrap().unwrap();
+    assert_eq!(unchanged.photo_count, 0);
+    assert_eq!(unchanged.album_version, version);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_album_reorder_refuses_an_album_larger_than_the_complete_order_bound() {
+    let (base, config) = prepare_fixture();
+    for index in 0..=slipstream_core::ALBUM_MEMBERSHIP_BATCH_MAX {
+        jpeg_fixture(
+            &config.library_root.join(format!("{index:03}.jpg")),
+            8,
+            4,
+            [32, 64, 192],
+        );
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(photo_ids.len(), 101);
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let created = response_json(
+        post_cli_json(&router, "/api/albums", serde_json::json!({"name": "Large"})).await,
+    )
+    .await;
+    let album_id = created["album"]["id"].as_str().unwrap().to_owned();
+    let initial_version = created["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_add = response_json(
+        post_cli_json(
+            &router,
+            &format!("/api/albums/{album_id}/changes"),
+            serde_json::json!({
+                "operation": "add",
+                "photoIds": photo_ids[..100],
+                "ifVersion": initial_version
+            }),
+        )
+        .await,
+    )
+    .await;
+    let first_version = first_add["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_add = response_json(
+        post_cli_json(
+            &router,
+            &format!("/api/albums/{album_id}/changes"),
+            serde_json::json!({
+                "operation": "add",
+                "photoIds": [photo_ids[100]],
+                "ifVersion": first_version
+            }),
+        )
+        .await,
+    )
+    .await;
+    let complete_version = second_add["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(second_add["album"]["photoCount"], 101);
+
+    let refused = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "reorder",
+            "photoIds": photo_ids[..100],
+            "ifVersion": complete_version
+        }),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response_json(refused).await["error"],
+        serde_json::json!({
+            "code": "limit_exceeded",
+            "message": "Reduce the Photo ID list and try again.",
+            "effect": "none",
+            "details": {
+                "limitName": "albumReorderMembersMaximum",
+                "limit": 100,
+                "actual": 101
+            }
+        })
+    );
+    let unchanged = application.library.album(&album_id).await.unwrap().unwrap();
+    assert_eq!(unchanged.photo_count, 101);
+    assert_eq!(unchanged.album_version, complete_version);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let (base, config) = prepare_fixture();
     for index in 0..5 {
@@ -6565,6 +7073,20 @@ async fn post_json(
         builder = builder.header(header::ORIGIN, origin);
     }
     send(router, builder.body(Body::from(body.to_string())).unwrap()).await
+}
+
+async fn post_cli_json(router: &Router, uri: &str, body: serde_json::Value) -> Response<Body> {
+    send(
+        router,
+        Request::builder()
+            .method("POST")
+            .uri(format!("http://camera.local{uri}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
 }
 
 fn jpeg_fixture(path: &Path, width: u32, height: u32, color: [u8; 3]) {

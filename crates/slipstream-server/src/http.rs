@@ -6,10 +6,10 @@ use crate::{
         RetainedKind, format_time,
     },
     wire::{
-        AlbumListItemWire, CapabilitiesResponse, CapabilityLimitsWire, CliAlbumSummaryWire,
-        CliFolderListResponse, CliListResponse, CliPhotoGetWire, CliPhotoItemWire,
-        CliPhotoMetadataWire, CliScanStatusWire, CliStatusResponse, MissingItemWire,
-        PhotoListItemWire,
+        AlbumListItemWire, CapabilitiesResponse, CapabilityLimitsWire, CliAlbumChangeWire,
+        CliAlbumCreationWire, CliAlbumSummaryWire, CliFolderListResponse, CliListResponse,
+        CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire, CliScanStatusWire,
+        CliStatusResponse, MissingItemWire, PhotoListItemWire,
     },
 };
 
@@ -155,6 +155,7 @@ pub(crate) fn create_router_with_web_root(
         .route("/api/capabilities", get(capabilities))
         .route("/api/album-summaries", get(get_album_summaries))
         .route("/api/albums/{id}", get(get_album_summary))
+        .route("/api/albums/{id}/changes", post(change_album))
         .route("/api/photo-queries", post(create_photo_query))
         .route("/api/photo-queries/{cursor}", get(get_photo_query_page))
         .route("/api/photos/{id}", get(get_photo))
@@ -1622,16 +1623,303 @@ pub(crate) async fn recovery_apply(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CliAlbumCreateBody {
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "operation", rename_all = "kebab-case", deny_unknown_fields)]
+enum CliAlbumChangeBody {
+    Rename {
+        name: String,
+        #[serde(rename = "ifVersion")]
+        if_version: String,
+    },
+    Delete {
+        #[serde(rename = "ifVersion")]
+        if_version: String,
+    },
+    Add {
+        #[serde(rename = "photoIds")]
+        photo_ids: Vec<String>,
+        #[serde(rename = "ifVersion")]
+        if_version: String,
+    },
+    Remove {
+        #[serde(rename = "photoIds")]
+        photo_ids: Vec<String>,
+        #[serde(rename = "ifVersion")]
+        if_version: String,
+    },
+    Reorder {
+        #[serde(rename = "photoIds")]
+        photo_ids: Vec<String>,
+        #[serde(rename = "ifVersion")]
+        if_version: String,
+    },
+}
+
+impl CliAlbumChangeBody {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Rename { .. } => "albums-rename",
+            Self::Delete { .. } => "albums-delete",
+            Self::Add { .. } => "albums-add",
+            Self::Remove { .. } => "albums-remove",
+            Self::Reorder { .. } => "albums-reorder",
+        }
+    }
+
+    fn limit_name(&self) -> &'static str {
+        match self {
+            Self::Reorder { .. } => "albumReorderMembersMaximum",
+            _ => "mutationPhotoIdsMaximum",
+        }
+    }
+
+    fn into_mutation(
+        self,
+        album_id: String,
+    ) -> CliBoundaryResult<slipstream_core::CheckedAlbumMutation> {
+        match self {
+            Self::Rename { name, if_version } => {
+                let Some(name) = valid_name(Some(&Value::String(name))) else {
+                    return Err(Box::new(invalid_cli("name", "The Album name is invalid.")));
+                };
+                if if_version.is_empty() {
+                    return Err(Box::new(invalid_cli(
+                        "ifVersion",
+                        "The Album version is required.",
+                    )));
+                }
+                Ok(slipstream_core::CheckedAlbumMutation::Rename {
+                    album_id,
+                    name,
+                    expected_version: if_version,
+                })
+            }
+            Self::Delete { if_version } => {
+                if if_version.is_empty() {
+                    return Err(Box::new(invalid_cli(
+                        "ifVersion",
+                        "The Album version is required.",
+                    )));
+                }
+                Ok(slipstream_core::CheckedAlbumMutation::Delete {
+                    album_id,
+                    expected_version: if_version,
+                })
+            }
+            Self::Add {
+                photo_ids,
+                if_version,
+            } => checked_membership_mutation(album_id, photo_ids, if_version, false, false),
+            Self::Remove {
+                photo_ids,
+                if_version,
+            } => checked_membership_mutation(album_id, photo_ids, if_version, true, false),
+            Self::Reorder {
+                photo_ids,
+                if_version,
+            } => checked_membership_mutation(album_id, photo_ids, if_version, false, true),
+        }
+    }
+}
+
+fn checked_membership_mutation(
+    album_id: String,
+    photo_ids: Vec<String>,
+    if_version: String,
+    remove: bool,
+    reorder: bool,
+) -> CliBoundaryResult<slipstream_core::CheckedAlbumMutation> {
+    if photo_ids.len() > ALBUM_PHOTO_IDS_MAX {
+        return Err(Box::new(cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the Photo ID list and try again.",
+            serde_json::json!({
+                "limitName": if reorder {
+                    "albumReorderMembersMaximum"
+                } else {
+                    "mutationPhotoIdsMaximum"
+                },
+                "limit": ALBUM_PHOTO_IDS_MAX,
+                "actual": photo_ids.len()
+            }),
+        )));
+    }
+    if photo_ids.is_empty()
+        || photo_ids.iter().any(|photo_id| !valid_id(photo_id))
+        || photo_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != photo_ids.len()
+    {
+        return Err(Box::new(invalid_cli(
+            "photoIds",
+            "Photo IDs must be a nonempty ordered list of distinct valid IDs.",
+        )));
+    }
+    if if_version.is_empty() {
+        return Err(Box::new(invalid_cli(
+            "ifVersion",
+            "The Album version is required.",
+        )));
+    }
+    if reorder {
+        Ok(slipstream_core::CheckedAlbumMutation::Reorder {
+            album_id,
+            photo_ids,
+            expected_version: if_version,
+        })
+    } else if remove {
+        Ok(slipstream_core::CheckedAlbumMutation::RemoveMembers {
+            album_id,
+            photo_ids,
+            expected_version: if_version,
+        })
+    } else {
+        Ok(slipstream_core::CheckedAlbumMutation::AddMembers {
+            album_id,
+            photo_ids,
+            expected_version: if_version,
+        })
+    }
+}
+
 pub(crate) async fn create_album(
     State(state): State<HttpState>,
     request: Request<Body>,
 ) -> Response<Body> {
+    if request.headers().contains_key(CLI_CONTRACT_HEADER) {
+        if let Err(response) = require_cli_contract(&request) {
+            return *response;
+        }
+        let body: CliAlbumCreateBody = match read_cli_json_body(request).await {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+        let Some(name) = valid_name(Some(&Value::String(body.name))) else {
+            return invalid_cli("name", "The Album name is invalid.");
+        };
+        return match state.application.create_album_checked(name).await {
+            Ok(result) => json_response(
+                StatusCode::OK,
+                &CliAlbumCreationWire {
+                    album: result.album.into(),
+                },
+            ),
+            Err(error) => map_album_write_error(error, "albums-create", "mutationPhotoIdsMaximum"),
+        };
+    }
     mutate_album_route(&state, request, |body| {
         valid_name(body.get("name"))
             .map(|name| slipstream_core::AlbumMutation::Create { name })
             .ok_or("Invalid Album name")
     })
     .await
+}
+
+pub(crate) async fn change_album(
+    State(state): State<HttpState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    if !valid_id(&id) {
+        return invalid_cli("albumId", "The Album ID is invalid.");
+    }
+    let body: CliAlbumChangeBody = match read_cli_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let operation = body.operation();
+    let limit_name = body.limit_name();
+    let mutation = match body.into_mutation(id) {
+        Ok(mutation) => mutation,
+        Err(response) => return *response,
+    };
+    match state.application.mutate_album_checked(mutation).await {
+        Ok(result) => json_response(StatusCode::OK, &CliAlbumChangeWire::from(result)),
+        Err(error) => map_album_write_error(error, operation, limit_name),
+    }
+}
+
+fn map_album_write_error(
+    error: LibraryError,
+    operation: &'static str,
+    limit_name: &'static str,
+) -> Response<Body> {
+    match error {
+        LibraryError::AlbumWrite(slipstream_core::AlbumWriteError::Invalid) => {
+            invalid_cli("body", "The Album change is invalid.")
+        }
+        LibraryError::AlbumWrite(slipstream_core::AlbumWriteError::AlbumNotFound { album_id }) => {
+            cli_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Query Albums and use a current Album ID.",
+                serde_json::json!({"resource": "album", "reference": album_id}),
+            )
+        }
+        LibraryError::AlbumWrite(slipstream_core::AlbumWriteError::PhotoNotFound { photo_id }) => {
+            cli_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Query Photos and submit only current Photo IDs.",
+                serde_json::json!({"resource": "photo", "reference": photo_id}),
+            )
+        }
+        LibraryError::AlbumWrite(
+            slipstream_core::AlbumWriteError::VersionConflict {
+                album_id,
+                current_version,
+            }
+            | slipstream_core::AlbumWriteError::MembershipConflict {
+                album_id,
+                current_version,
+            },
+        ) => cli_error(
+            StatusCode::CONFLICT,
+            "conflict",
+            "Read the current Album and decide whether to submit a new change.",
+            serde_json::json!({
+                "resource": "album",
+                "reference": album_id,
+                "currentVersion": current_version
+            }),
+        ),
+        LibraryError::AlbumWrite(slipstream_core::AlbumWriteError::NameConflict {
+            name,
+            album_id,
+        }) => cli_error(
+            StatusCode::CONFLICT,
+            "name_conflict",
+            "Inspect the existing Album before choosing a different name.",
+            serde_json::json!({"name": name, "albumId": album_id}),
+        ),
+        LibraryError::AlbumWrite(slipstream_core::AlbumWriteError::LimitExceeded {
+            limit,
+            actual,
+        }) => cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the Photo ID list and try again.",
+            serde_json::json!({"limitName": limit_name, "limit": limit, "actual": actual}),
+        ),
+        _ => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_failed",
+            "Inspect server health and the current Album before trying again.",
+            serde_json::json!({"operation": operation}),
+        ),
+    }
 }
 
 pub(crate) async fn rename_album(
@@ -2170,6 +2458,67 @@ pub(crate) async fn mutate_album_route(
 }
 
 pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Response<Body>> {
+    let bytes = read_body_bytes(request).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
+}
+
+async fn read_cli_json_body<T: serde::de::DeserializeOwned>(
+    request: Request<Body>,
+) -> Result<T, Response<Body>> {
+    let declared_length = match request.headers().get(header::CONTENT_LENGTH) {
+        None => None,
+        Some(length) => {
+            let Some(length) = length
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+            else {
+                return Err(invalid_cli(
+                    "body",
+                    "The request Content-Length is invalid.",
+                ));
+            };
+            Some(length)
+        }
+    };
+    if let Some(actual) = declared_length.filter(|length| *length > MAXIMUM_MUTATION_BODY_BYTES) {
+        return Err(cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the request body and try again.",
+            serde_json::json!({
+                "limitName": "requestBodyBytesMaximum",
+                "limit": MAXIMUM_MUTATION_BODY_BYTES,
+                "actual": actual
+            }),
+        ));
+    }
+    let bytes = read_body_bytes(request).await.map_err(|response| {
+        if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            cli_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "limit_exceeded",
+                "Reduce the request body and try again.",
+                serde_json::json!({
+                    "limitName": "requestBodyBytesMaximum",
+                    "limit": MAXIMUM_MUTATION_BODY_BYTES,
+                    "actual": MAXIMUM_MUTATION_BODY_BYTES + 1
+                }),
+            )
+        } else {
+            invalid_cli("body", "The request body is invalid.")
+        }
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        invalid_cli(
+            "body",
+            "The JSON body is malformed or contains unknown or duplicate keys.",
+        )
+    })
+}
+
+async fn read_body_bytes(request: Request<Body>) -> Result<Vec<u8>, Response<Body>> {
     let (parts, body) = request.into_parts();
     if let Some(length) = parts.headers.get(header::CONTENT_LENGTH) {
         let Ok(length) = length
@@ -2187,8 +2536,9 @@ pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Resp
             ));
         }
     }
-    let bytes = to_bytes(body, MAXIMUM_MUTATION_BODY_BYTES)
+    to_bytes(body, MAXIMUM_MUTATION_BODY_BYTES)
         .await
+        .map(|bytes| bytes.to_vec())
         .map_err(|error| {
             let status = if error.to_string().contains("length limit") {
                 StatusCode::PAYLOAD_TOO_LARGE
@@ -2201,9 +2551,7 @@ pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Resp
                 "Invalid request body"
             };
             api_error(status, message)
-        })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
+        })
 }
 
 pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Body> {
