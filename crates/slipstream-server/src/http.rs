@@ -2792,6 +2792,17 @@ pub(crate) async fn static_web(
     };
     let (bytes, is_index) = match read_web_file(&root, &actual).await {
         Ok(value) => value,
+        Err(_) if requested == "manifest.webmanifest" || requested.starts_with("icons/") => {
+            let mut response = plain_error(StatusCode::NOT_FOUND, "Not found");
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            );
+            if request.method() == axum::http::Method::HEAD {
+                *response.body_mut() = Body::empty();
+            }
+            return response;
+        }
         Err(_) => match read_web_file(&root, &root.path.join("index.html")).await {
             Ok(value) => value,
             Err(_) => {
@@ -2802,10 +2813,10 @@ pub(crate) async fn static_web(
             }
         },
     };
-    let cache_control = if is_index {
-        "no-cache"
-    } else {
+    let cache_control = if !is_index && requested.starts_with("assets/") {
         "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
     };
     let content_length = bytes.len().to_string();
     let body = if request.method().as_str() == "HEAD" {
@@ -2920,6 +2931,7 @@ pub(crate) fn content_type(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("json") => "application/json",
+        Some("webmanifest") => "application/manifest+json",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
