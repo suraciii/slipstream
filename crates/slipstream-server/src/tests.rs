@@ -5,7 +5,10 @@ use std::{
     fs,
     io::{ErrorKind, Read, Write},
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2992,10 +2995,10 @@ async fn browse_tokens_are_process_unique_and_expiry_is_enforced() {
     ));
     {
         let mut snapshots = application_a
-            .browse_snapshots
+            .retained_queries
             .lock()
-            .expect("browse snapshots poisoned");
-        let snapshot = snapshots.get_mut(&opened_a.token).unwrap();
+            .expect("retained queries poisoned");
+        let snapshot = snapshots.entries.get_mut(&opened_a.token).unwrap();
         snapshot.last_used -= BROWSE_SNAPSHOT_IDLE + Duration::from_secs(1);
     }
     assert!(matches!(
@@ -3004,9 +3007,10 @@ async fn browse_tokens_are_process_unique_and_expiry_is_enforced() {
     ));
     assert!(
         !application_a
-            .browse_snapshots
+            .retained_queries
             .lock()
             .unwrap()
+            .entries
             .contains_key(&opened_a.token)
     );
     application_a.shutdown().await.unwrap();
@@ -4091,6 +4095,577 @@ async fn browse_selection_filter_membership_is_frozen_until_the_source_reopens()
     );
     application.browse_close(&opened.token);
     application.browse_close(&reopened.token);
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn metadata_saturation_uses_shared_admission_and_safe_capture_fallback() {
+    let (base, config) = prepare_fixture();
+    generated_non_tiff_raw_fixture(&config.library_root.join("native.ARW"));
+    capture_metadata_fixture(
+        &config.library_root.join("known.jpg"),
+        "2026:01:01 10:00:00",
+    );
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    let raw_id = by_location["native.ARW"].clone();
+    let known_id = by_location["known.jpg"].clone();
+    let raw = application
+        .library
+        .snapshot()
+        .await
+        .unwrap()
+        .originals
+        .into_iter()
+        .find(|original| original.relative_path.as_str() == "native.ARW")
+        .unwrap();
+    assert_eq!(raw.kind, slipstream_core::OriginalKind::Raw);
+    assert!(raw.capture.source_revision.is_some());
+
+    let scheduled = Arc::new(AtomicUsize::new(0));
+    let scheduled_hook = Arc::clone(&scheduled);
+    let _hook = crate::app::install_metadata_inspection_test_hook(move |_| {
+        scheduled_hook.fetch_add(1, Ordering::AcqRel);
+    });
+    let first = application
+        .library
+        .try_admit_native_work()
+        .expect("first shared native slot");
+    let second = application
+        .library
+        .try_admit_native_work()
+        .expect("second shared native slot");
+
+    let saturated =
+        tokio::time::timeout(Duration::from_secs(1), application.photo_metadata(&raw_id))
+            .await
+            .expect("saturation fallback must not wait")
+            .unwrap();
+    assert_eq!(saturated, slipstream_core::CaptureReviewMetadata::default());
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let direct = tokio::time::timeout(
+        Duration::from_secs(1),
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{known_id}"))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("CLI fallback must not wait");
+    let direct = response_json(direct).await;
+    assert_eq!(direct["metadata"]["state"], "known");
+    assert_eq!(
+        direct["metadata"]["captureTime"],
+        "2026-01-01T10:00:00.000000000"
+    );
+    assert_eq!(scheduled.load(Ordering::Acquire), 0);
+
+    drop((first, second));
+    assert_eq!(
+        application.photo_metadata(&raw_id).await.unwrap(),
+        slipstream_core::CaptureReviewMetadata::default()
+    );
+    assert_eq!(scheduled.load(Ordering::Acquire), 1);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cancelled_raw_metadata_requests_retain_admission_until_native_work_finishes() {
+    let (base, config) = prepare_fixture();
+    for name in ["cancel-a.ARW", "cancel-b.ARW", "cancel-c.ARW"] {
+        generated_non_tiff_raw_fixture(&config.library_root.join(name));
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+
+    let gate = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
+    let hook_gate = Arc::clone(&gate);
+    let _hook = crate::app::install_metadata_inspection_test_hook(move |path| {
+        if !path.as_str().starts_with("cancel-") {
+            return;
+        }
+        let (lock, signal) = &*hook_gate;
+        let mut state = lock.lock().unwrap();
+        state.0 += 1;
+        signal.notify_all();
+        while !state.1 {
+            state = signal.wait(state).unwrap();
+        }
+    });
+
+    let first_application = Arc::clone(&application);
+    let first_id = by_location["cancel-a.ARW"].clone();
+    let first = tokio::spawn(async move { first_application.photo_metadata(&first_id).await });
+    let second_application = Arc::clone(&application);
+    let second_id = by_location["cancel-b.ARW"].clone();
+    let second = tokio::spawn(async move { second_application.photo_metadata(&second_id).await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gate.0.lock().unwrap().0 != 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(gate.0.lock().unwrap().0, 2, "two metadata workers admitted");
+
+    let third = tokio::time::timeout(
+        Duration::from_secs(1),
+        application.photo_metadata(&by_location["cancel-c.ARW"]),
+    )
+    .await
+    .expect("third request must fall back instead of queueing")
+    .unwrap();
+    assert_eq!(third, slipstream_core::CaptureReviewMetadata::default());
+    assert_eq!(gate.0.lock().unwrap().0, 2, "no third worker scheduled");
+
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let after_cancellation = tokio::time::timeout(
+        Duration::from_secs(1),
+        application.photo_metadata(&by_location["cancel-c.ARW"]),
+    )
+    .await
+    .expect("cancelled waiter must not release active native work")
+    .unwrap();
+    assert_eq!(
+        after_cancellation,
+        slipstream_core::CaptureReviewMetadata::default()
+    );
+    assert_eq!(gate.0.lock().unwrap().0, 2);
+    assert!(application.library.try_admit_native_work().is_none());
+
+    {
+        let (lock, signal) = &*gate;
+        lock.lock().unwrap().1 = true;
+        signal.notify_all();
+    }
+    second.await.unwrap().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let recovered = loop {
+        if let Some(first) = application.library.try_admit_native_work() {
+            if let Some(second) = application.library.try_admit_native_work() {
+                break (first, second);
+            }
+            drop(first);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native admission was not released"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(application.library.try_admit_native_work().is_none());
+    drop(recovered);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
+    let (base, config) = prepare_fixture();
+    let path = config.library_root.join("a.jpg");
+    capture_metadata_fixture(&path, "2026:01:01 10:00:00");
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    let old_revision = application
+        .shared
+        .snapshot
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .originals[0]
+        .capture
+        .source_revision
+        .clone()
+        .unwrap();
+    let captured_before_replacement = application
+        .published_photo_detail(&photo_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    use std::os::unix::fs::MetadataExt;
+    let original_metadata = fs::metadata(&path).unwrap();
+    let original_mtime = original_metadata.modified().unwrap();
+    let replacement = config.library_root.join("replacement.tmp");
+    capture_metadata_fixture(&replacement, "2026:01:01 11:00:00");
+    let replacement_file = fs::OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .unwrap();
+    replacement_file
+        .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+        .unwrap();
+    drop(replacement_file);
+    let replacement_metadata = fs::metadata(&replacement).unwrap();
+    assert_eq!(replacement_metadata.len(), original_metadata.len());
+    assert_eq!(replacement_metadata.modified().unwrap(), original_mtime);
+    assert_ne!(replacement_metadata.ino(), original_metadata.ino());
+    fs::rename(&replacement, &path).unwrap();
+    let replaced_metadata = fs::metadata(&path).unwrap();
+    assert_eq!(replaced_metadata.len(), original_metadata.len());
+    assert_eq!(replaced_metadata.modified().unwrap(), original_mtime);
+    assert_ne!(replaced_metadata.ino(), original_metadata.ino());
+
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let unpublished_metadata = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/metadata"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unpublished_metadata, serde_json::json!({}));
+    let unpublished_direct = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        unpublished_direct["captureTime"],
+        "2026-01-01T10:00:00.000000000"
+    );
+    assert_eq!(
+        unpublished_direct["metadata"]["captureTime"],
+        "2026-01-01T10:00:00.000000000"
+    );
+
+    let (publish_sender, publish_receiver) = tokio::sync::oneshot::channel();
+    let scan = application
+        .admit_scan_cycle(None, Some(publish_receiver))
+        .unwrap();
+    for _ in 0..400 {
+        let persisted = application.library.snapshot().await.unwrap();
+        if persisted.originals[0].capture.order_key.as_deref()
+            == Some("2026-01-01T11:00:00.000000000")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        application.library.snapshot().await.unwrap().originals[0]
+            .capture
+            .order_key
+            .as_deref(),
+        Some("2026-01-01T11:00:00.000000000"),
+        "scan did not reach the publication gate"
+    );
+
+    // The current file has the next generation's bytes, but both consumers
+    // still present the prior publication. Metadata inspection must reject the
+    // replacement's inode-bound revision until the scan publishes it.
+    let gated_metadata = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/metadata"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(gated_metadata, serde_json::json!({}));
+    let gated = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(gated["captureTime"], "2026-01-01T10:00:00.000000000");
+    assert_eq!(
+        gated["metadata"]["captureTime"],
+        "2026-01-01T10:00:00.000000000"
+    );
+
+    // Replace the publication between detail capture and metadata inspection.
+    // The captured detail remains internally coherent and does not adopt facts
+    // from the new generation.
+    drop(publish_sender);
+    scan.await.unwrap().unwrap();
+    let (prior_photo, prior_metadata) = application
+        .inspect_published_photo_detail(captured_before_replacement)
+        .await;
+    assert_eq!(
+        prior_photo.capture.order_key.as_deref(),
+        Some("2026-01-01T10:00:00.000000000")
+    );
+    assert_eq!(
+        prior_metadata,
+        slipstream_core::CaptureReviewMetadata::default()
+    );
+
+    let new_revision = application
+        .shared
+        .snapshot
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .originals[0]
+        .capture
+        .source_revision
+        .clone()
+        .unwrap();
+    assert_ne!(new_revision, old_revision);
+
+    let fresh_metadata = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/metadata"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        fresh_metadata["captureTime"],
+        "2026-01-01T11:00:00.000000000"
+    );
+    let fresh = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(fresh["captureTime"], "2026-01-01T11:00:00.000000000");
+    assert_eq!(
+        fresh["metadata"]["captureTime"],
+        "2026-01-01T11:00:00.000000000"
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
+    let (base, config) = prepare_fixture();
+    fs::create_dir_all(config.library_root.join("old")).unwrap();
+    jpeg_fixture_with_capture_time(
+        &config.library_root.join("old/a.jpg"),
+        8,
+        4,
+        [32, 64, 192],
+        "2026:01:01 10:00:00",
+    );
+    {
+        let application = Application::open(&config).await.unwrap();
+        wait_for_scan_settled(&application).await;
+        application.shutdown().await.unwrap();
+    }
+    fs::create_dir_all(config.library_root.join("New")).unwrap();
+    jpeg_fixture_with_capture_time(
+        &config.library_root.join("old/a.jpg"),
+        8,
+        4,
+        [48, 80, 176],
+        "2026:01:01 11:00:00",
+    );
+    jpeg_fixture(&config.library_root.join("New/b.jpg"), 8, 4, [64, 96, 160]);
+    let (publish_sender, publish_receiver) = tokio::sync::oneshot::channel();
+    let application =
+        Application::open_with_gate(&config, ScanLimits::default(), None, Some(publish_receiver))
+            .await
+            .unwrap();
+    for _ in 0..400 {
+        if application.library.snapshot().await.unwrap().photos.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let persisted = application.library.snapshot().await.unwrap();
+    assert_eq!(
+        persisted.photos.len(),
+        2,
+        "scan did not reach the publish gate"
+    );
+    let old_id = persisted
+        .photos
+        .iter()
+        .find(|photo| photo.sort_path == "old/a.jpg")
+        .unwrap()
+        .id
+        .clone();
+    let new_id = persisted
+        .photos
+        .iter()
+        .find(|photo| photo.sort_path == "New/b.jpg")
+        .unwrap()
+        .id
+        .clone();
+    application
+        .mutate_photo_state(slipstream_core::PhotoStateMutation {
+            photo_id: old_id.clone(),
+            field: slipstream_core::PhotoStateField::SelectionState,
+            value: slipstream_core::PhotoStateValue::Selection(SelectionState::Selected),
+            expected_current: None,
+            album_id: None,
+        })
+        .await
+        .unwrap();
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let prior = response_json(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/photo-queries")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"selection":"selected","limit":60}"#))
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(prior["total"], 1);
+    assert_eq!(prior["items"][0]["id"], old_id);
+    assert_eq!(
+        prior["items"][0]["captureTime"],
+        "2026-01-01T10:00:00.000000000"
+    );
+
+    let unpublished = send(
+        &router,
+        Request::builder()
+            .uri(format!("http://camera.local/api/photos/{new_id}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(unpublished.status(), StatusCode::NOT_FOUND);
+    let unpublished_folder = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("http://camera.local/api/photo-queries")
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"source":{"kind":"folder","location":"New"}}"#,
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(unpublished_folder.status(), StatusCode::NOT_FOUND);
+
+    drop(publish_sender);
+    wait_for_scan_settled(&application).await;
+    let published = response_json(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/photo-queries")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"limit":60}"#))
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(published["total"], 2);
+    assert_eq!(
+        published["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == old_id)
+            .unwrap()["captureTime"],
+        "2026-01-01T11:00:00.000000000"
+    );
+    assert!(matches!(
+        application
+            .create_photo_query(
+                slipstream_core::PhotoQuery {
+                    source: slipstream_core::PhotoQuerySource::AllPhotos,
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: slipstream_core::PhotoQueryOrder::CaptureTimeAscending,
+                },
+                1,
+            )
+            .await,
+        Err(LibraryError::Query(
+            slipstream_core::PhotoQueryError::ResultLimitExceeded { limit: 1 }
+        ))
+    ));
+    assert!(
+        application
+            .retained_queries
+            .lock()
+            .unwrap()
+            .entries
+            .values()
+            .all(|query| query.kind != crate::queries::RetainedKind::Photo)
+    );
+    let published_new = send(
+        &router,
+        Request::builder()
+            .uri(format!("http://camera.local/api/photos/{new_id}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(published_new.status(), StatusCode::OK);
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -5238,6 +5813,604 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
     let _ = fs::remove_dir_all(base);
 }
 
+#[tokio::test]
+async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(&config.library_root.join("one.jpg"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    let album_id = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Guarded".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Guarded")
+        .unwrap()
+        .id;
+    let before_photo = application.library.photo(&photo_id).await.unwrap().unwrap();
+    let before_album = application.library.album(&album_id).await.unwrap().unwrap();
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let unsupported = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(format!("http://camera.local/api/photos/{photo_id}/state"))
+            .header("Slipstream-CLI-Contract", "2")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"field":"rating","value":4}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(unsupported.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let malformed = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(format!("http://camera.local/api/albums/{album_id}/rename"))
+            .header(
+                "Slipstream-CLI-Contract",
+                header::HeaderValue::from_bytes(&[0xff]).unwrap(),
+            )
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"Changed"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let duplicate = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri(format!("http://camera.local/api/photos/{photo_id}/state"))
+            .header("Slipstream-CLI-Contract", "1")
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"field":"selectionState","value":"selected"}"#,
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let after_photo = application.library.photo(&photo_id).await.unwrap().unwrap();
+    let after_album = application.library.album(&album_id).await.unwrap().unwrap();
+    assert_eq!(after_photo.rating, before_photo.rating);
+    assert_eq!(after_photo.selection_state, before_photo.selection_state);
+    assert_eq!(after_photo.decision_version, before_photo.decision_version);
+    assert_eq!(after_album.name, before_album.name);
+    assert_eq!(after_album.album_version, before_album.album_version);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
+    let (base, config) = prepare_fixture();
+    for index in 0..5 {
+        let folder = if index < 3 { "first" } else { "second" };
+        fs::create_dir_all(config.library_root.join(folder)).unwrap();
+        jpeg_fixture_with_capture_time(
+            &config
+                .library_root
+                .join(folder)
+                .join(format!("{index}.JPG")),
+            32,
+            24,
+            [index as u8 * 20, 64, 128],
+            &format!("2026:01:01 10:00:0{index}"),
+        );
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(ids.len(), 5);
+    let first_album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "First".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums[0]
+        .id
+        .clone();
+    let second_album = application
+        .mutate_album(slipstream_core::AlbumMutation::Create {
+            name: "Second".to_owned(),
+        })
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .find(|album| album.name == "Second")
+        .unwrap()
+        .id;
+    application
+        .add_album_members(&first_album, vec![ids[0].clone(), ids[1].clone()])
+        .await
+        .unwrap();
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let year_zero = send(
+        &router,
+        Request::builder()
+            .method("POST")
+            .uri("http://camera.local/api/photo-queries")
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"capturedFrom":"0000-01-01T00:00:00"}"#))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(year_zero.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(year_zero).await["error"]["code"],
+        "invalid_input"
+    );
+
+    let incompatible = send(
+        &router,
+        Request::builder()
+            .uri("http://camera.local/api/capabilities")
+            .header("Slipstream-CLI-Contract", "2")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(incompatible.status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(
+        response_json(incompatible).await,
+        serde_json::json!({
+            "error": {
+                "code": "incompatible_server",
+                "message": "The server does not support the requested CLI contract; use a compatible client or server.",
+                "effect": "none",
+                "details": {
+                    "requestedContractVersion": 2,
+                    "supportedContractVersions": [1]
+                }
+            }
+        })
+    );
+
+    let capabilities = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/capabilities")
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        capabilities,
+        serde_json::json!({
+            "serverVersion": "0.0.0",
+            "supportedCliContractVersions": [1],
+            "limits": {
+                "listPageMaximum": 60,
+                "mutationPhotoIdsMaximum": 100,
+                "albumReorderMembersMaximum": 100,
+                "retainedQueryIdsMaximum": 1_000_000,
+                "retainedQueryIdleSeconds": 900
+            }
+        })
+    );
+    let status = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/status")
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status["serverVersion"], "0.0.0");
+    assert_eq!(status["cliContractVersion"], 1);
+    assert_eq!(status["published"], true);
+    assert_eq!(status["photoCount"], 5);
+    assert_eq!(status["scan"]["state"], "idle");
+    assert!(status["scan"].get("lastRecovery").is_some());
+    assert!(status["scan"].get("fingerprints").is_some());
+
+    let album_page = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/album-summaries?limit=1")
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(album_page["total"], 2);
+    assert_eq!(album_page["items"].as_array().unwrap().len(), 1);
+    assert!(album_page["nextCursor"].is_string());
+    assert!(album_page["evaluatedAt"].as_str().unwrap().ends_with('Z'));
+    assert!(album_page["expiresAt"].as_str().unwrap().ends_with('Z'));
+    let first_summary = &album_page["items"][0];
+    assert_eq!(
+        first_summary
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "albumVersion".to_owned(),
+            "hasSavedPosition".to_owned(),
+            "id".to_owned(),
+            "name".to_owned(),
+            "photoCount".to_owned(),
+            "webPath".to_owned(),
+        ])
+    );
+    let retained_album = first_summary["id"].as_str().unwrap().to_owned();
+    let deleted_album = if retained_album == first_album {
+        second_album.clone()
+    } else {
+        first_album.clone()
+    };
+    let album_cursor = album_page["nextCursor"].as_str().unwrap();
+    application
+        .mutate_album(slipstream_core::AlbumMutation::Delete {
+            album_id: deleted_album.clone(),
+        })
+        .await
+        .unwrap();
+    let album_page_two = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/album-summaries?cursor={album_cursor}"
+                ))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(album_page_two["total"], 2);
+    assert_eq!(album_page_two["nextCursor"], Value::Null);
+    assert_eq!(album_page_two["expiresAt"], Value::Null);
+    assert_eq!(
+        album_page_two["items"][0],
+        serde_json::json!({"id": deleted_album, "state": "missing"})
+    );
+    let returned_album_ids = [
+        album_page["items"][0]["id"].as_str().unwrap(),
+        album_page_two["items"][0]["id"].as_str().unwrap(),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        returned_album_ids,
+        BTreeSet::from([first_album.as_str(), second_album.as_str()])
+    );
+
+    let photo_page = response_json(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/photo-queries")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "source": {"kind": "all"},
+                        "selection": "all",
+                        "ratingMinimum": 0,
+                        "ratingMaximum": 5,
+                        "kind": "jpeg",
+                        "available": true,
+                        "capturedFrom": "2026-01-01T10:00:00",
+                        "capturedBefore": "2026-01-01T10:01:00",
+                        "order": "capture-time-asc",
+                        "limit": 2
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(photo_page["total"], 5);
+    assert_eq!(photo_page["items"].as_array().unwrap().len(), 2);
+    assert!(photo_page["nextCursor"].is_string());
+    let item = &photo_page["items"][0];
+    assert_eq!(
+        item.as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "captureTime".to_owned(),
+            "decisionVersion".to_owned(),
+            "filename".to_owned(),
+            "id".to_owned(),
+            "originalAvailable".to_owned(),
+            "originalKind".to_owned(),
+            "preview".to_owned(),
+            "rating".to_owned(),
+            "selectionState".to_owned(),
+            "webPath".to_owned(),
+        ])
+    );
+    assert_eq!(
+        item["preview"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "detailLimited".to_owned(),
+            "height".to_owned(),
+            "source".to_owned(),
+            "sourceRevision".to_owned(),
+            "state".to_owned(),
+            "width".to_owned(),
+        ])
+    );
+
+    application
+        .mutate_photo_state(slipstream_core::PhotoStateMutation {
+            photo_id: ids[2].clone(),
+            field: slipstream_core::PhotoStateField::Rating,
+            value: slipstream_core::PhotoStateValue::Rating(4),
+            expected_current: None,
+            album_id: None,
+        })
+        .await
+        .unwrap();
+    let photo_cursor = photo_page["nextCursor"].as_str().unwrap();
+    let photo_page_two = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photo-queries/{photo_cursor}"
+                ))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(photo_page_two["items"][0]["id"], ids[2]);
+    assert_eq!(photo_page_two["items"][0]["rating"], 4);
+    let photo_cursor_two = photo_page_two["nextCursor"].as_str().unwrap();
+    application.rescan().await.unwrap();
+    let photo_page_three = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photo-queries/{photo_cursor_two}"
+                ))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    let traversed = photo_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(photo_page_two["items"].as_array().unwrap())
+        .chain(photo_page_three["items"].as_array().unwrap())
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        traversed,
+        ids.iter().map(String::as_str).collect::<Vec<_>>()
+    );
+    assert_eq!(traversed.iter().copied().collect::<BTreeSet<_>>().len(), 5);
+    assert_eq!(photo_page_three["nextCursor"], Value::Null);
+    assert_eq!(photo_page_three["expiresAt"], Value::Null);
+
+    let direct = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/photos/{}", ids[2]))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(direct["id"], ids[2]);
+    assert_eq!(direct["rating"], 4);
+    assert_eq!(direct["metadata"]["state"], "known");
+    assert_eq!(
+        direct["metadata"]["captureTime"],
+        "2026-01-01T10:00:02.000000000"
+    );
+
+    let direct_album = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!("http://camera.local/api/albums/{retained_album}"))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(direct_album["id"], retained_album);
+    assert!(direct_album["photoCount"].as_u64().is_some());
+    assert!(direct_album["albumVersion"].as_str().unwrap().len() > 20);
+
+    let missing_id = "00000000-0000-4000-8000-000000000099";
+    let missing_token = "test-missing-photo";
+    let evaluated_at = SystemTime::now();
+    application
+        .retained_queries
+        .lock()
+        .unwrap()
+        .insert(
+            missing_token.to_owned(),
+            crate::queries::RetainedKind::Photo,
+            vec![missing_id.to_owned()],
+            Instant::now(),
+            evaluated_at,
+        )
+        .unwrap();
+    let missing_cursor = application.cursor_signer.query_cursor(
+        application.browse_namespace,
+        crate::queries::RetainedKind::Photo,
+        missing_token,
+        0,
+        1,
+    );
+    let missing_page = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri(format!(
+                    "http://camera.local/api/photo-queries/{missing_cursor}"
+                ))
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(missing_page["total"], 1);
+    assert_eq!(
+        missing_page["items"],
+        serde_json::json!([{"id": missing_id, "state": "missing"}])
+    );
+    assert_eq!(missing_page["nextCursor"], Value::Null);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
+    let (base, config) = prepare_fixture();
+    for folder in ["a", "b"] {
+        fs::create_dir_all(config.library_root.join(folder)).unwrap();
+        jpeg_fixture(
+            &config.library_root.join(folder).join("photo.JPG"),
+            32,
+            24,
+            [32, 64, 128],
+        );
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = create_router(Arc::clone(&application), config.web_root());
+    let folders = response_json(
+        send(
+            &router,
+            Request::builder()
+                .uri("http://camera.local/api/file-locations?limit=1")
+                .header("Slipstream-CLI-Contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(folders["total"], 2);
+    assert_eq!(folders["items"].as_array().unwrap().len(), 1);
+    assert_eq!(folders["parent"], "");
+    assert_eq!(folders["expiresAt"], Value::Null);
+    let folder_cursor = folders["nextCursor"].as_str().unwrap().to_owned();
+    application.rescan().await.unwrap();
+    let expired_folder = send(
+        &router,
+        Request::builder()
+            .uri(format!(
+                "http://camera.local/api/file-locations?cursor={folder_cursor}"
+            ))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(expired_folder.status(), StatusCode::GONE);
+    assert_eq!(
+        response_json(expired_folder).await["error"]["details"],
+        serde_json::json!({"cursorKind": "folder", "reason": "publication_replaced"})
+    );
+
+    let query = response_json(
+        send(
+            &router,
+            Request::builder()
+                .method("POST")
+                .uri("http://camera.local/api/photo-queries")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"limit":1}"#))
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    let cursor = query["nextCursor"].as_str().unwrap().to_owned();
+    {
+        let mut retained = application.retained_queries.lock().unwrap();
+        let photo = retained
+            .entries
+            .values_mut()
+            .find(|query| query.kind == crate::queries::RetainedKind::Photo)
+            .unwrap();
+        photo.last_used -= crate::queries::QUERY_IDLE + Duration::from_secs(1);
+    }
+    let expired_query = send(
+        &router,
+        Request::builder()
+            .uri(format!("http://camera.local/api/photo-queries/{cursor}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(expired_query.status(), StatusCode::GONE);
+    assert_eq!(
+        response_json(expired_query).await["error"]["details"],
+        serde_json::json!({"cursorKind": "photo", "reason": "idle_or_evicted"})
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
 async fn send(router: &Router, request: Request<Body>) -> Response<Body> {
     tower::ServiceExt::oneshot(router.clone(), request)
         .await
@@ -5327,6 +6500,12 @@ fn marker_complete_corrupt_jpeg(width: u16, height: u16) -> Vec<u8> {
     bytes.extend_from_slice(&[0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00]);
     bytes.extend_from_slice(&[0xff, 0xd9]);
     bytes
+}
+
+fn generated_non_tiff_raw_fixture(path: &Path) {
+    let bytes = b"Slipstream generated non-TIFF RAW metadata fixture";
+    assert!(!matches!(&bytes[..4], b"II*\0" | b"MM\0*"));
+    fs::write(path, bytes).unwrap();
 }
 
 fn capture_metadata_fixture(path: &Path, capture_time: &str) {

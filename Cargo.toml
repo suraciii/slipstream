@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server", "crates/slipstream-processing"]
+members = ["crates/slipstream-cli", "crates/slipstream-compat", "crates/slipstream-core", "crates/slipstream-server", "crates/slipstream-processing"]
 resolver = "2"
 
 [workspace.package]
@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 bytes = "=1.11.1"
+clap = { version = "=4.6.1", features = ["derive"] }
 http = "=1.4.0"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 lcms2 = { version = "=6.1.1", default-features = false }
@@ -19,6 +20,9 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.149"
 sha2 = "=0.10.9"
 tokio = { version = "=1.53.1", default-features = false, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+time = { version = "=0.3.44", default-features = false, features = ["formatting", "std"] }
 cc = "=1.4.4"
 pkg-config = "=0.3.32"
+reqwest = { version = "=0.13.3", default-features = false, features = ["json", "rustls"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+url = "=2.5.8"

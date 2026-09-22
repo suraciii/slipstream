@@ -203,7 +203,7 @@ fn capture_inspection_test_hook(
 /// Stable Capture Time reuse identity, including the discovery descriptor's
 /// device and inode so same-size/same-mtime path replacement cannot reuse an
 /// old metadata fact.
-pub(crate) fn capture_source_revision(
+pub fn capture_source_revision(
     path: &str,
     facts: OriginalFacts,
 ) -> Result<String, crate::InvalidModificationTime> {

@@ -5,20 +5,22 @@ use super::{
 use crate::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumMember,
     AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation, AlbumMutationResult,
-    AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact, CaptureMetadataState,
-    CaptureTimeField, DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
-    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoAlbumMembership, PhotoRecord, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
-    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState, RecoverySurvey,
-    RelativeOriginalPath, RequestedRelocation, ScanLimits, ScanSnapshot, SelectionState,
-    UnavailablePhotoRecord,
+    AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations, CaptureFact,
+    CaptureMetadataState, CaptureTimeField, DiscoveredOriginal, LibraryRoot,
+    MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory, OriginalFacts, OriginalFingerprint,
+    OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership, PhotoQuery,
+    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
+    PhotoRead, PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
+    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
+    ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    params_from_iter, types::Value,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -39,6 +41,56 @@ const STATE_OPEN: u8 = 0;
 const STATE_CLOSING: u8 = 1;
 const STATE_CLOSED: u8 = 2;
 const SCHEMA_V1_SQL: &str = include_str!("../../../../compatibility/sqlite/schema-v1.sql");
+
+struct MutationVersions {
+    epoch: String,
+    photo: HashMap<String, u64>,
+    album: HashMap<String, u64>,
+}
+
+impl MutationVersions {
+    fn new() -> Result<Self, PersistenceError> {
+        Ok(Self {
+            epoch: random_uuid_v4()?,
+            photo: HashMap::new(),
+            album: HashMap::new(),
+        })
+    }
+
+    fn photo(&self, id: &str) -> String {
+        self.token("photo", id, *self.photo.get(id).unwrap_or(&0))
+    }
+
+    fn album(&self, id: &str) -> String {
+        self.token("album", id, *self.album.get(id).unwrap_or(&0))
+    }
+
+    fn can_advance_photo(&self, id: &str) -> bool {
+        self.photo.get(id).copied().unwrap_or(0) < u64::MAX
+    }
+
+    fn can_advance_album(&self, id: &str) -> bool {
+        self.album.get(id).copied().unwrap_or(0) < u64::MAX
+    }
+
+    fn advance_photo(&mut self, id: &str) -> Result<(), MutationError> {
+        advance_counter(&mut self.photo, id)
+    }
+
+    fn advance_album(&mut self, id: &str) -> Result<(), MutationError> {
+        advance_counter(&mut self.album, id)
+    }
+
+    fn token(&self, kind: &str, id: &str, counter: u64) -> String {
+        format!("{}:{kind}:{id}:{counter}", self.epoch)
+    }
+}
+
+fn advance_counter(counters: &mut HashMap<String, u64>, id: &str) -> Result<(), MutationError> {
+    let counter = counters.entry(id.to_owned()).or_default();
+    *counter = counter.checked_add(1).ok_or(MutationError::Persistence)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub enum PersistenceError {
@@ -279,6 +331,10 @@ type Reply<T> = oneshot::Sender<Result<T, PersistenceError>>;
 
 /// Bounded per-Photo Album membership query result.
 type PhotoAlbums = Result<Option<Vec<PhotoAlbumMembership>>, PersistenceError>;
+type AlbumReadWindow = Result<Vec<Option<AlbumSummary>>, PersistenceError>;
+type AlbumReadWindowReceiver = oneshot::Receiver<AlbumReadWindow>;
+type PhotoReadWindow = Result<Vec<Option<PhotoRead>>, PersistenceError>;
+type PhotoReadWindowReceiver = oneshot::Receiver<PhotoReadWindow>;
 
 enum Command {
     Probe(Reply<u64>),
@@ -305,6 +361,34 @@ enum Command {
     Preview(PreviewSeed, Reply<PreviewSeedResult>),
     ListAlbums(Reply<Vec<AlbumRecord>>),
     ListAlbumSummaries(Reply<Vec<AlbumSummary>>),
+    ReadAlbum {
+        album_id: String,
+        reply: Reply<Option<AlbumSummary>>,
+    },
+    ReadAlbums {
+        album_ids: Vec<String>,
+        reply: Reply<Vec<Option<AlbumSummary>>>,
+    },
+    CreateAlbumQuery {
+        filter: AlbumQueryFilter,
+        maximum_results: usize,
+        reply: oneshot::Sender<Result<Vec<String>, PhotoQueryError>>,
+    },
+    ReadPhoto {
+        photo_id: String,
+        reply: Reply<Option<PhotoRead>>,
+    },
+    ReadPhotos {
+        photo_ids: Vec<String>,
+        projection: Arc<PhotoQueryProjection>,
+        reply: Reply<Vec<Option<PhotoRead>>>,
+    },
+    CreatePhotoQuery {
+        query: PhotoQuery,
+        projection: Arc<PhotoQueryProjection>,
+        maximum_results: usize,
+        reply: oneshot::Sender<Result<Vec<String>, PhotoQueryError>>,
+    },
     PhotoAlbums {
         photo_id: String,
         reply: Reply<Option<Vec<PhotoAlbumMembership>>>,
@@ -667,6 +751,88 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn album_receiver(
+        &self,
+        album_id: &str,
+    ) -> Result<oneshot::Receiver<Result<Option<AlbumSummary>, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadAlbum {
+            album_id: album_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn albums_by_id_receiver(
+        &self,
+        album_ids: Vec<String>,
+    ) -> Result<AlbumReadWindowReceiver, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadAlbums {
+            album_ids,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn create_album_query_receiver(
+        &self,
+        filter: AlbumQueryFilter,
+        maximum_results: usize,
+    ) -> Result<oneshot::Receiver<Result<Vec<String>, PhotoQueryError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::CreateAlbumQuery {
+            filter,
+            maximum_results,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn photo_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<oneshot::Receiver<Result<Option<PhotoRead>, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadPhoto {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn photos_by_id_receiver(
+        &self,
+        photo_ids: Vec<String>,
+        projection: Arc<PhotoQueryProjection>,
+    ) -> Result<PhotoReadWindowReceiver, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadPhotos {
+            photo_ids,
+            projection,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn create_photo_query_receiver(
+        &self,
+        query: PhotoQuery,
+        projection: Arc<PhotoQueryProjection>,
+        maximum_results: usize,
+    ) -> Result<oneshot::Receiver<Result<Vec<String>, PhotoQueryError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::CreatePhotoQuery {
+            query,
+            projection,
+            maximum_results,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
     /// Bounded per-Photo membership: the Albums containing one Photo, in
     /// Album-list order, without materializing any member list.
     pub(crate) fn photo_albums_receiver(
@@ -836,15 +1002,20 @@ fn owner_main(
     startup: std::sync::mpsc::Sender<Result<(), PersistenceError>>,
 ) {
     let mut connection = match open_connection(&state, &database_name, identity, &canonical_root) {
-        Ok(connection) => {
-            let _ = startup.send(Ok(()));
-            connection
-        }
+        Ok(connection) => connection,
         Err(error) => {
             let _ = startup.send(Err(error));
             return;
         }
     };
+    let mut versions = match MutationVersions::new() {
+        Ok(versions) => versions,
+        Err(error) => {
+            let _ = startup.send(Err(error));
+            return;
+        }
+    };
+    let _ = startup.send(Ok(()));
     let mut sequence = 0;
     for command in receiver {
         sequence += 1;
@@ -911,7 +1082,53 @@ fn owner_main(
                 let _ = reply.send(list_albums(&connection));
             }
             Command::ListAlbumSummaries(reply) => {
-                let _ = reply.send(list_album_summaries(&connection));
+                let _ = reply.send(list_album_summaries(&connection, &versions));
+            }
+            Command::ReadAlbum { album_id, reply } => {
+                let _ = reply.send(read_album(&connection, &versions, &album_id));
+            }
+            Command::ReadAlbums { album_ids, reply } => {
+                let result = album_ids
+                    .iter()
+                    .map(|album_id| read_album(&connection, &versions, album_id))
+                    .collect();
+                let _ = reply.send(result);
+            }
+            Command::CreateAlbumQuery {
+                filter,
+                maximum_results,
+                reply,
+            } => {
+                let _ = reply.send(create_album_query(&connection, filter, maximum_results));
+            }
+            Command::ReadPhoto { photo_id, reply } => {
+                let _ = reply.send(read_photo(&connection, &versions, &photo_id));
+            }
+            Command::ReadPhotos {
+                photo_ids,
+                projection,
+                reply,
+            } => {
+                let result = photo_ids
+                    .iter()
+                    .map(|photo_id| {
+                        read_projected_photo(&connection, &versions, &projection, photo_id)
+                    })
+                    .collect();
+                let _ = reply.send(result);
+            }
+            Command::CreatePhotoQuery {
+                query,
+                projection,
+                maximum_results,
+                reply,
+            } => {
+                let _ = reply.send(create_photo_query(
+                    &connection,
+                    query,
+                    &projection,
+                    maximum_results,
+                ));
             }
             Command::PhotoAlbums { photo_id, reply } => {
                 let _ = reply.send(photo_albums(&connection, &photo_id));
@@ -920,21 +1137,76 @@ fn owner_main(
                 let _ = reply.send(album_browse_target(&connection, &album_id));
             }
             Command::MutateAlbum(mutation, reply) => {
-                let result = mutate_album(&state, &database_name, &mut connection, mutation);
+                let plan = album_version_plan(&connection, &mutation);
+                let result = match plan {
+                    Ok(plan) if !plan.advance || versions.can_advance_album(&plan.album_id) => {
+                        let result =
+                            mutate_album(&state, &database_name, &mut connection, mutation);
+                        if result.is_ok() {
+                            if plan.deleted {
+                                versions.album.remove(&plan.album_id);
+                            } else if plan.advance {
+                                let _ = versions.advance_album(&plan.album_id);
+                            }
+                        }
+                        result
+                    }
+                    Ok(_) => Err(MutationError::Persistence),
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(result);
             }
             Command::MutateAlbumMembership(mutation, reply) => {
-                let result =
-                    mutate_album_membership(&state, &database_name, &mut connection, mutation);
+                let album_id = match &mutation {
+                    AlbumMembershipMutation::Add { album_id, .. }
+                    | AlbumMembershipMutation::RemoveAdded { album_id, .. } => album_id,
+                };
+                let result = if versions.can_advance_album(album_id) {
+                    mutate_album_membership(&state, &database_name, &mut connection, mutation)
+                } else {
+                    Err(MutationError::Persistence)
+                };
+                if let Ok(result) = &result
+                    && (!result.added_photo_ids.is_empty() || !result.removed_photo_ids.is_empty())
+                {
+                    let _ = versions.advance_album(&result.album_id);
+                }
                 let _ = reply.send(result);
             }
             Command::MutatePhotoState(mutation, reply) => {
-                let result = mutate_photo_state(&state, &database_name, &mut connection, mutation);
+                let photo_id = mutation.photo_id.clone();
+                let value = mutation.value;
+                let result = if versions.can_advance_photo(&photo_id) {
+                    mutate_photo_state(&state, &database_name, &mut connection, mutation)
+                } else {
+                    Err(MutationError::Persistence)
+                };
+                if result
+                    .as_ref()
+                    .is_ok_and(|result| result.undo.prior_value != value)
+                {
+                    let _ = versions.advance_photo(&photo_id);
+                }
                 let _ = reply.send(result);
             }
             Command::MutatePhotoStateBatch(mutation, reply) => {
-                let result =
-                    mutate_photo_state_batch(&state, &database_name, &mut connection, mutation);
+                let value = mutation.value;
+                let can_advance = mutation
+                    .photos
+                    .iter()
+                    .all(|photo| versions.can_advance_photo(&photo.photo_id));
+                let result = if can_advance {
+                    mutate_photo_state_batch(&state, &database_name, &mut connection, mutation)
+                } else {
+                    Err(MutationError::Persistence)
+                };
+                if let Ok(result) = &result {
+                    for applied in &result.applied {
+                        if applied.prior_value != value {
+                            let _ = versions.advance_photo(&applied.photo_id);
+                        }
+                    }
+                }
                 let _ = reply.send(result);
             }
             Command::WriteProbe(reply) => {
@@ -3106,8 +3378,11 @@ fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceE
     Ok(result)
 }
 
-fn list_album_summaries(connection: &Connection) -> Result<Vec<AlbumSummary>, PersistenceError> {
-    connection
+fn list_album_summaries(
+    connection: &Connection,
+    versions: &MutationVersions,
+) -> Result<Vec<AlbumSummary>, PersistenceError> {
+    let rows = connection
         .prepare(
             "SELECT a.id, a.name,
                     (SELECT count(*) FROM album_members m WHERE m.album_id = a.id),
@@ -3116,19 +3391,405 @@ fn list_album_summaries(connection: &Connection) -> Result<Vec<AlbumSummary>, Pe
         )
         .map_err(|_| PersistenceError::Storage)?
         .query_map([], |row| {
-            Ok(AlbumSummary {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                photo_count: row
-                    .get::<_, i64>(2)?
-                    .try_into()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                has_saved_position: row.get::<_, i64>(3)? != 0,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })
         .map_err(|_| PersistenceError::Storage)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| PersistenceError::Storage)
+        .map_err(|_| PersistenceError::Storage)?;
+    rows.into_iter()
+        .map(|(id, name, photo_count, has_saved_position)| {
+            Ok(AlbumSummary {
+                album_version: versions.album(&id),
+                id,
+                name,
+                photo_count: photo_count
+                    .try_into()
+                    .map_err(|_| PersistenceError::Storage)?,
+                has_saved_position: has_saved_position != 0,
+            })
+        })
+        .collect()
+}
+
+fn read_album(
+    connection: &Connection,
+    versions: &MutationVersions,
+    album_id: &str,
+) -> Result<Option<AlbumSummary>, PersistenceError> {
+    let row = connection
+        .query_row(
+            "SELECT a.id, a.name,
+                    (SELECT count(*) FROM album_members m WHERE m.album_id = a.id),
+                    EXISTS(SELECT 1 FROM album_progress p WHERE p.album_id = a.id)
+             FROM albums a WHERE a.id=?",
+            [album_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    row.map(|(id, name, photo_count, has_saved_position)| {
+        Ok(AlbumSummary {
+            album_version: versions.album(&id),
+            id,
+            name,
+            photo_count: photo_count
+                .try_into()
+                .map_err(|_| PersistenceError::Storage)?,
+            has_saved_position: has_saved_position != 0,
+        })
+    })
+    .transpose()
+}
+
+fn create_album_query(
+    connection: &Connection,
+    filter: AlbumQueryFilter,
+    maximum_results: usize,
+) -> Result<Vec<String>, PhotoQueryError> {
+    if maximum_results == 0 || maximum_results == usize::MAX {
+        return Err(PhotoQueryError::Invalid);
+    }
+    let sql_limit = i64::try_from(maximum_results + 1).map_err(|_| PhotoQueryError::Invalid)?;
+    let (sql, parameters): (&str, Vec<Value>) = match filter {
+        AlbumQueryFilter::All => (
+            "SELECT a.id FROM albums a ORDER BY a.created_at,a.id LIMIT ?",
+            vec![sql_limit.into()],
+        ),
+        AlbumQueryFilter::ExactName(name) if !name.is_empty() => (
+            "SELECT a.id FROM albums a WHERE a.name=? COLLATE NOCASE ORDER BY a.created_at,a.id LIMIT ?",
+            vec![name.into(), sql_limit.into()],
+        ),
+        AlbumQueryFilter::ContainsPhoto(photo_id) if !photo_id.is_empty() => (
+            "SELECT a.id FROM albums a JOIN album_members m ON m.album_id=a.id WHERE m.photo_id=? ORDER BY a.created_at,a.id LIMIT ?",
+            vec![photo_id.into(), sql_limit.into()],
+        ),
+        _ => return Err(PhotoQueryError::Invalid),
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|_| PhotoQueryError::Storage)?;
+    let ids = statement
+        .query_map(params_from_iter(parameters), |row| row.get::<_, String>(0))
+        .map_err(|_| PhotoQueryError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PhotoQueryError::Storage)?;
+    if ids.len() > maximum_results {
+        Err(PhotoQueryError::ResultLimitExceeded {
+            limit: maximum_results,
+        })
+    } else {
+        Ok(ids)
+    }
+}
+
+fn read_photo(
+    connection: &Connection,
+    versions: &MutationVersions,
+    photo_id: &str,
+) -> Result<Option<PhotoRead>, PersistenceError> {
+    let row = connection
+        .query_row(
+            "SELECT p.id,o.relative_path,o.kind,o.available,p.selection_state,p.rating,
+                    o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
+                    o.capture_offset_minutes,o.capture_source_revision,p.preview_state,
+                    p.preview_source_revision,p.preview_width,p.preview_height
+             FROM photos p JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
+            [photo_id],
+            |row| {
+                let path = row.get::<_, String>(1)?;
+                let kind = parse_kind(&row.get::<_, String>(2)?)?;
+                let preview_state = parse_preview_state(&row.get::<_, String>(11)?)?;
+                let preview_source_revision: Option<String> = row.get(12)?;
+                let preview_width = parse_dimension(row.get(13)?)?;
+                let preview_height = parse_dimension(row.get(14)?)?;
+                let ready = preview_state == PreviewState::Ready;
+                Ok(PhotoRead {
+                    decision_version: versions.photo(photo_id),
+                    id: row.get(0)?,
+                    filename: path.rsplit('/').next().unwrap_or(&path).to_owned(),
+                    original_kind: kind,
+                    original_available: row.get::<_, i64>(3)? != 0,
+                    selection_state: parse_selection_state(&row.get::<_, String>(4)?)?,
+                    rating: row
+                        .get::<_, i64>(5)?
+                        .try_into()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    capture: parse_capture_fact(
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    )?,
+                    preview_state,
+                    preview_source: ready.then(|| kind.preview_source()),
+                    preview_source_revision: ready.then_some(preview_source_revision).flatten(),
+                    preview_width: ready.then_some(preview_width).flatten(),
+                    preview_height: ready.then_some(preview_height).flatten(),
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(row)
+}
+
+fn read_projected_photo(
+    connection: &Connection,
+    versions: &MutationVersions,
+    projection: &PhotoQueryProjection,
+    photo_id: &str,
+) -> Result<Option<PhotoRead>, PersistenceError> {
+    let Some(candidate) = projection.get(photo_id) else {
+        return Ok(None);
+    };
+    let decisions = connection
+        .query_row(
+            "SELECT selection_state,rating FROM photos WHERE id=?",
+            [photo_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    let Some((selection_state, rating)) = decisions else {
+        return Ok(None);
+    };
+    let selection_state =
+        parse_selection_state(&selection_state).map_err(|_| PersistenceError::Storage)?;
+    let rating = rating.try_into().map_err(|_| PersistenceError::Storage)?;
+    let ready = candidate.preview_state == PreviewState::Ready;
+    Ok(Some(PhotoRead {
+        id: candidate.photo_id.clone(),
+        filename: candidate
+            .relative_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&candidate.relative_path)
+            .to_owned(),
+        original_kind: candidate.original_kind,
+        original_available: candidate.original_available,
+        selection_state,
+        rating,
+        decision_version: versions.photo(photo_id),
+        capture: candidate.capture.clone(),
+        preview_state: candidate.preview_state,
+        preview_source: ready.then(|| candidate.original_kind.preview_source()),
+        preview_source_revision: ready
+            .then(|| candidate.preview_source_revision.clone())
+            .flatten(),
+        preview_width: ready.then_some(candidate.preview_width).flatten(),
+        preview_height: ready.then_some(candidate.preview_height).flatten(),
+    }))
+}
+
+fn valid_folder_location(location: &str) -> bool {
+    !location.starts_with('/')
+        && !location.ends_with('/')
+        && !location.contains('\0')
+        && !location
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+}
+
+fn candidate_in_folder(candidate: &PhotoQueryCandidate, location: &str) -> bool {
+    location.is_empty()
+        || candidate
+            .relative_path
+            .strip_prefix(location)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn candidate_matches(
+    query: &PhotoQuery,
+    candidate: &PhotoQueryCandidate,
+    selection_state: SelectionState,
+    rating: u8,
+) -> bool {
+    query
+        .selection_state
+        .is_none_or(|expected| selection_state == expected)
+        && query.rating_minimum.is_none_or(|minimum| rating >= minimum)
+        && query.rating_maximum.is_none_or(|maximum| rating <= maximum)
+        && query
+            .original_kind
+            .is_none_or(|kind| candidate.original_kind == kind)
+        && query
+            .original_available
+            .is_none_or(|available| candidate.original_available == available)
+        && query.captured_from.as_ref().is_none_or(|from| {
+            candidate
+                .capture_order_key()
+                .is_some_and(|value| value >= from.as_str())
+        })
+        && query.captured_before.as_ref().is_none_or(|before| {
+            candidate
+                .capture_order_key()
+                .is_some_and(|value| value < before.as_str())
+        })
+}
+
+fn push_query_match(
+    ids: &mut Vec<String>,
+    photo_id: &str,
+    maximum_results: usize,
+) -> Result<(), PhotoQueryError> {
+    ids.push(photo_id.to_owned());
+    if ids.len() > maximum_results {
+        Err(PhotoQueryError::ResultLimitExceeded {
+            limit: maximum_results,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn create_photo_query(
+    connection: &Connection,
+    query: PhotoQuery,
+    projection: &PhotoQueryProjection,
+    maximum_results: usize,
+) -> Result<Vec<String>, PhotoQueryError> {
+    if maximum_results == 0
+        || maximum_results == usize::MAX
+        || query.rating_minimum.is_some_and(|value| value > 5)
+        || query.rating_maximum.is_some_and(|value| value > 5)
+        || query
+            .rating_minimum
+            .zip(query.rating_maximum)
+            .is_some_and(|(minimum, maximum)| minimum > maximum)
+        || query
+            .captured_from
+            .as_ref()
+            .zip(query.captured_before.as_ref())
+            .is_some_and(|(from, before)| from.as_str() >= before.as_str())
+        || (query.order == PhotoQueryOrder::AlbumOrder
+            && !matches!(query.source, PhotoQuerySource::Album(_)))
+    {
+        return Err(PhotoQueryError::Invalid);
+    }
+
+    if let PhotoQuerySource::Folder(location) = &query.source {
+        if !location.is_empty() && !valid_folder_location(location) {
+            return Err(PhotoQueryError::Invalid);
+        }
+        if !location.is_empty()
+            && !projection
+                .ascending()
+                .iter()
+                .any(|candidate| candidate_in_folder(candidate, location))
+        {
+            return Err(PhotoQueryError::SourceNotFound);
+        }
+    }
+
+    let album_id = match &query.source {
+        PhotoQuerySource::Album(album_id) if !album_id.is_empty() => {
+            let exists = connection
+                .query_row("SELECT 1 FROM albums WHERE id=?", [album_id], |_| Ok(()))
+                .optional()
+                .map_err(|_| PhotoQueryError::Storage)?;
+            if exists.is_none() {
+                return Err(PhotoQueryError::SourceNotFound);
+            }
+            Some(album_id.as_str())
+        }
+        PhotoQuerySource::Album(_) => return Err(PhotoQueryError::Invalid),
+        _ => None,
+    };
+
+    let mut ids = Vec::with_capacity(maximum_results.min(64).saturating_add(1));
+    if query.order == PhotoQueryOrder::AlbumOrder {
+        let album_id = album_id.expect("Album order was validated with an Album source");
+        let mut statement = connection
+            .prepare(
+                "SELECT m.photo_id,p.selection_state,p.rating
+                 FROM album_members m JOIN photos p ON p.id=m.photo_id
+                 WHERE m.album_id=? ORDER BY m.position",
+            )
+            .map_err(|_| PhotoQueryError::Storage)?;
+        let mut rows = statement
+            .query([album_id])
+            .map_err(|_| PhotoQueryError::Storage)?;
+        while let Some(row) = rows.next().map_err(|_| PhotoQueryError::Storage)? {
+            let photo_id = row
+                .get::<_, String>(0)
+                .map_err(|_| PhotoQueryError::Storage)?;
+            let Some(candidate) = projection.get(&photo_id) else {
+                continue;
+            };
+            let selection = parse_selection_state(
+                &row.get::<_, String>(1)
+                    .map_err(|_| PhotoQueryError::Storage)?,
+            )
+            .map_err(|_| PhotoQueryError::Storage)?;
+            let rating = row
+                .get::<_, i64>(2)
+                .ok()
+                .and_then(|value| value.try_into().ok())
+                .ok_or(PhotoQueryError::Storage)?;
+            if candidate_matches(&query, candidate, selection, rating) {
+                push_query_match(&mut ids, &photo_id, maximum_results)?;
+            }
+        }
+        return Ok(ids);
+    }
+
+    let mut current = connection
+        .prepare(if album_id.is_some() {
+            "SELECT p.selection_state,p.rating FROM photos p
+             JOIN album_members m ON m.photo_id=p.id
+             WHERE p.id=?1 AND m.album_id=?2"
+        } else {
+            "SELECT selection_state,rating FROM photos WHERE id=?1"
+        })
+        .map_err(|_| PhotoQueryError::Storage)?;
+    let candidates: Box<dyn Iterator<Item = &PhotoQueryCandidate>> = match query.order {
+        PhotoQueryOrder::CaptureTimeAscending => Box::new(projection.ascending().iter()),
+        PhotoQueryOrder::CaptureTimeDescending => Box::new(projection.descending()),
+        PhotoQueryOrder::AlbumOrder => unreachable!(),
+    };
+    for candidate in candidates {
+        if let PhotoQuerySource::Folder(location) = &query.source
+            && !candidate_in_folder(candidate, location)
+        {
+            continue;
+        }
+        let facts = if let Some(album_id) = album_id {
+            current
+                .query_row(params![candidate.photo_id, album_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .optional()
+        } else {
+            current
+                .query_row([&candidate.photo_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .optional()
+        }
+        .map_err(|_| PhotoQueryError::Storage)?;
+        let Some((selection, rating)) = facts else {
+            continue;
+        };
+        let selection = parse_selection_state(&selection).map_err(|_| PhotoQueryError::Storage)?;
+        let rating = rating.try_into().map_err(|_| PhotoQueryError::Storage)?;
+        if candidate_matches(&query, candidate, selection, rating) {
+            push_query_match(&mut ids, &candidate.photo_id, maximum_results)?;
+        }
+    }
+    Ok(ids)
 }
 
 fn photo_albums(
@@ -3200,6 +3861,106 @@ fn album_browse_target(
         members,
         saved_photo_id,
     }))
+}
+
+#[derive(Eq, PartialEq)]
+struct AlbumVersionState {
+    name: String,
+    ordered_photo_ids: Vec<String>,
+}
+
+fn album_version_state(
+    connection: &Connection,
+    album_id: &str,
+) -> Result<Option<AlbumVersionState>, PersistenceError> {
+    let name = connection
+        .query_row("SELECT name FROM albums WHERE id=?", [album_id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let ordered_photo_ids = connection
+        .prepare("SELECT photo_id FROM album_members WHERE album_id=? ORDER BY position")
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map([album_id], |row| row.get(0))
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(Some(AlbumVersionState {
+        name,
+        ordered_photo_ids,
+    }))
+}
+
+struct AlbumVersionPlan {
+    album_id: String,
+    advance: bool,
+    deleted: bool,
+}
+
+fn album_version_plan(
+    connection: &Connection,
+    mutation: &AlbumMutation,
+) -> Result<AlbumVersionPlan, MutationError> {
+    let (album_id, advance, deleted) = match mutation {
+        // A new opaque Album ID begins at counter zero in this process epoch.
+        AlbumMutation::Create { .. } => {
+            return Ok(AlbumVersionPlan {
+                album_id: String::new(),
+                advance: false,
+                deleted: false,
+            });
+        }
+        AlbumMutation::Rename { album_id, name } => {
+            let before = album_version_state(connection, album_id)
+                .map_err(|_| MutationError::Persistence)?;
+            (
+                album_id,
+                before.is_some_and(|before| before.name != *name),
+                false,
+            )
+        }
+        AlbumMutation::Delete { album_id } => (album_id, false, true),
+        AlbumMutation::AddMembers {
+            album_id,
+            photo_ids,
+        }
+        | AlbumMutation::AddFolderMembers {
+            album_id,
+            photo_ids,
+        } => {
+            let before = album_version_state(connection, album_id)
+                .map_err(|_| MutationError::Persistence)?;
+            let advance = before.is_some_and(|before| {
+                photo_ids
+                    .iter()
+                    .any(|photo_id| !before.ordered_photo_ids.contains(photo_id))
+            });
+            (album_id, advance, false)
+        }
+        AlbumMutation::RemoveMember { album_id, .. } => (album_id, true, false),
+        AlbumMutation::Reorder {
+            album_id,
+            photo_ids,
+        } => {
+            let before = album_version_state(connection, album_id)
+                .map_err(|_| MutationError::Persistence)?;
+            (
+                album_id,
+                before.is_some_and(|before| before.ordered_photo_ids != *photo_ids),
+                false,
+            )
+        }
+        AlbumMutation::SetProgress { album_id, .. } => (album_id, false, false),
+    };
+    Ok(AlbumVersionPlan {
+        album_id: album_id.clone(),
+        advance,
+        deleted,
+    })
 }
 
 fn mutation_error_from_sqlite(error: rusqlite::Error) -> MutationError {
@@ -3791,7 +4552,7 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 mod tests {
     use super::*;
     use crate::identity::source_revision;
-    use crate::{LibraryRoot, PhotoStateBatchItem, identity::original_id};
+    use crate::{CaptureTimeBound, LibraryRoot, PhotoStateBatchItem, identity::original_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -4478,6 +5239,714 @@ mod tests {
             error_category: None,
             error_message: None,
             capture: CaptureFact::pending(),
+        }
+    }
+
+    fn query_projection(snapshot: &ScanSnapshot) -> Arc<PhotoQueryProjection> {
+        let originals = snapshot
+            .originals
+            .iter()
+            .map(|original| (original.id.as_str(), original))
+            .collect::<HashMap<_, _>>();
+        let candidates = snapshot
+            .photos
+            .iter()
+            .map(|photo| {
+                let original = originals[photo.original_id.as_str()];
+                PhotoQueryCandidate {
+                    photo_id: photo.id.clone(),
+                    relative_path: original.relative_path.as_str().to_owned(),
+                    sort_path: photo.sort_path.clone(),
+                    original_kind: original.kind,
+                    original_available: original.available,
+                    capture: original.capture.clone(),
+                    preview_state: photo.preview_state,
+                    preview_source_revision: photo.preview_source_revision.clone(),
+                    preview_width: photo.preview_width,
+                    preview_height: photo.preview_height,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut descending = (0..candidates.len()).collect::<Vec<_>>();
+        descending.sort_by(|a, b| {
+            let a = &candidates[*a];
+            let b = &candidates[*b];
+            a.capture_order_key()
+                .is_none()
+                .cmp(&b.capture_order_key().is_none())
+                .then_with(|| match (a.capture_order_key(), b.capture_order_key()) {
+                    (Some(a), Some(b)) => b.cmp(a),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.sort_path.cmp(&b.sort_path))
+                .then_with(|| a.photo_id.cmp(&b.photo_id))
+        });
+        Arc::new(PhotoQueryProjection::new(candidates, descending).unwrap())
+    }
+
+    #[tokio::test]
+    async fn bounded_photo_queries_fix_ordered_membership_and_read_current_facts() {
+        let (_base, library, state, name, _path) = fixture();
+        let mut early = discovered("shoot/early.JPG", OriginalKind::Jpeg, 1, 1.0);
+        early.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T09:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: Some(90),
+            source_revision: Some("early-revision".to_owned()),
+        };
+        let mut late = discovered("shoot/nested/late.RAF", OriginalKind::Raw, 2, 2.0);
+        late.capture = CaptureFact {
+            state: CaptureMetadataState::Known,
+            order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
+            field: Some(CaptureTimeField::DateTimeOriginal),
+            offset_minutes: None,
+            source_revision: Some("late-revision".to_owned()),
+        };
+        let missing_time = discovered("other/missing.JPG", OriginalKind::Jpeg, 3, 3.0);
+        let upper = discovered("Shoot/upper.JPG", OriginalKind::Jpeg, 4, 4.0);
+        let short = discovered("a/one.JPG", OriginalKind::Jpeg, 5, 5.0);
+        let sibling = discovered("ab/two.JPG", OriginalKind::Jpeg, 6, 6.0);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![late, missing_time, early, upper, short, sibling],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let projection = query_projection(&snapshot);
+        let by_path = snapshot
+            .photos
+            .iter()
+            .map(|photo| (photo.sort_path.as_str(), photo.id.clone()))
+            .collect::<HashMap<_, _>>();
+        let early_id = by_path["shoot/early.JPG"].clone();
+        let late_id = by_path["shoot/nested/late.RAF"].clone();
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Order".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![late_id.clone(), early_id.clone()],
+            })
+            .await
+            .unwrap();
+        let album_order = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::Album(album_id),
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::AlbumOrder,
+                },
+                Arc::clone(&projection),
+                10,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(album_order, vec![late_id.clone(), early_id.clone()]);
+
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+
+        let query = PhotoQuery {
+            source: PhotoQuerySource::Folder("shoot".to_owned()),
+            selection_state: Some(SelectionState::Selected),
+            rating_minimum: Some(4),
+            rating_maximum: Some(5),
+            original_kind: Some(OriginalKind::Jpeg),
+            original_available: Some(true),
+            captured_from: Some(CaptureTimeBound::parse("2026-01-01T08:00:00").unwrap()),
+            captured_before: Some(CaptureTimeBound::parse("2026-01-01T10:00:00").unwrap()),
+            order: PhotoQueryOrder::CaptureTimeAscending,
+        };
+        let ids = persistence
+            .create_photo_query_receiver(query, Arc::clone(&projection), 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, vec![early_id.clone()]);
+        let narrow = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::AllPhotos,
+                    selection_state: Some(SelectionState::Selected),
+                    rating_minimum: Some(4),
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::CaptureTimeAscending,
+                },
+                Arc::clone(&projection),
+                1,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(narrow, vec![early_id.clone()]);
+        for (folder, expected_path) in [("Shoot", "Shoot/upper.JPG"), ("a", "a/one.JPG")] {
+            let ids = persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder(folder.to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(ids, vec![by_path[expected_path].clone()]);
+        }
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("SHOOT".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
+        // Query membership is fixed, while a later owner read returns current
+        // facts even when the Photo no longer matches the creation filter.
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: early_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::Folder("missing".to_owned()),
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeAscending,
+                    },
+                    Arc::clone(&projection),
+                    10,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::SourceNotFound)
+        ));
+        assert!(matches!(
+            persistence
+                .create_photo_query_receiver(
+                    PhotoQuery {
+                        source: PhotoQuerySource::AllPhotos,
+                        selection_state: None,
+                        rating_minimum: None,
+                        rating_maximum: None,
+                        original_kind: None,
+                        original_available: None,
+                        captured_from: None,
+                        captured_before: None,
+                        order: PhotoQueryOrder::CaptureTimeDescending,
+                    },
+                    Arc::clone(&projection),
+                    2,
+                )
+                .unwrap()
+                .await
+                .unwrap(),
+            Err(PhotoQueryError::ResultLimitExceeded { limit: 2 })
+        ));
+
+        let current = persistence
+            .photos_by_id_receiver(
+                vec![late_id, early_id.clone(), "removed".to_owned()],
+                Arc::clone(&projection),
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.len(), 3);
+        assert_eq!(current[1].as_ref().unwrap().filename, "early.JPG");
+        assert_eq!(current[1].as_ref().unwrap().rating, 4);
+        assert_eq!(
+            current[1].as_ref().unwrap().selection_state,
+            SelectionState::Rejected
+        );
+        assert_eq!(
+            current[1].as_ref().unwrap().capture.offset_minutes,
+            Some(90)
+        );
+        assert!(current[2].is_none());
+    }
+
+    #[tokio::test]
+    async fn effective_writers_advance_versions_while_noops_and_progress_do_not() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let photo_id = snapshot.photos[0].id.clone();
+        let read_photo = || async {
+            persistence
+                .photo_receiver(&photo_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        let initial_photo_version = read_photo().await.decision_version;
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: photo_id.clone(),
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(0),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(read_photo().await.decision_version, initial_photo_version);
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: photo_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let changed_photo_version = read_photo().await.decision_version;
+        assert_ne!(changed_photo_version, initial_photo_version);
+        persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: vec![PhotoStateBatchItem {
+                    photo_id: photo_id.clone(),
+                    expected_current: SelectionState::Selected,
+                }],
+                value: SelectionState::Selected,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_photo().await.decision_version, changed_photo_version);
+        assert!(
+            persistence
+                .mutate_photo_state(PhotoStateMutation {
+                    photo_id: photo_id.clone(),
+                    field: PhotoStateField::SelectionState,
+                    value: PhotoStateValue::Selection(SelectionState::Rejected),
+                    expected_current: Some(PhotoStateValue::Selection(SelectionState::Undecided)),
+                    album_id: None,
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(read_photo().await.decision_version, changed_photo_version);
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: photo_id.clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Undecided),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let changed_back_photo_version = read_photo().await.decision_version;
+        assert_ne!(changed_back_photo_version, initial_photo_version);
+        assert_ne!(changed_back_photo_version, changed_photo_version);
+
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Review".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        let read_album = || async {
+            persistence
+                .album_receiver(&album_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        };
+        let initial_album_version = read_album().await.album_version;
+        let named_ids = persistence
+            .create_album_query_receiver(AlbumQueryFilter::ExactName("review".to_owned()), 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(named_ids, vec![album_id.clone()]);
+        persistence
+            .mutate_album_membership(AlbumMembershipMutation::Add {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_id.clone()],
+            })
+            .await
+            .unwrap();
+        let membership_version = read_album().await.album_version;
+        assert_ne!(membership_version, initial_album_version);
+        let containing_ids = persistence
+            .create_album_query_receiver(AlbumQueryFilter::ContainsPhoto(photo_id.clone()), 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(containing_ids, vec![album_id.clone()]);
+        let album_window = persistence
+            .albums_by_id_receiver(vec![album_id.clone(), "removed".to_owned()])
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(album_window[0].as_ref().unwrap().photo_count, 1);
+        assert!(album_window[1].is_none());
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: photo_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(read_album().await.album_version, membership_version);
+        persistence
+            .mutate_album(AlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Review".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(read_album().await.album_version, membership_version);
+        persistence
+            .mutate_album(AlbumMutation::Rename {
+                album_id: album_id.clone(),
+                name: "Final".to_owned(),
+            })
+            .await
+            .unwrap();
+        let final_album_version = read_album().await.album_version;
+        assert_ne!(final_album_version, membership_version);
+
+        // A sidecar detected at write admission refuses the transaction. The
+        // previously issued guards remain valid because no commit occurred.
+        fs::write(path.with_file_name("library.sqlite-wal"), b"blocked").unwrap();
+        assert!(
+            persistence
+                .mutate_photo_state(PhotoStateMutation {
+                    photo_id: photo_id.clone(),
+                    field: PhotoStateField::Rating,
+                    value: PhotoStateValue::Rating(5),
+                    expected_current: None,
+                    album_id: None,
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            read_photo().await.decision_version,
+            changed_back_photo_version
+        );
+        assert!(
+            persistence
+                .mutate_album(AlbumMutation::Rename {
+                    album_id: album_id.clone(),
+                    name: "Blocked".to_owned(),
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(read_album().await.album_version, final_album_version);
+    }
+
+    #[tokio::test]
+    async fn every_existing_album_writer_participates_in_version_invalidation() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                    discovered("three.JPG", OriginalKind::Jpeg, 3, 3.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let photo_ids = snapshot
+            .photos
+            .iter()
+            .map(|photo| photo.id.clone())
+            .collect::<Vec<_>>();
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Writers".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        let version = || async {
+            persistence
+                .album_receiver(&album_id)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .album_version
+        };
+        let mut prior = version().await;
+
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[0].clone()],
+            })
+            .await
+            .unwrap();
+        let after_add = version().await;
+        assert_ne!(after_add, prior);
+        prior = after_add;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[0].clone()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(version().await, prior);
+
+        persistence
+            .mutate_album(AlbumMutation::AddFolderMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[1].clone()],
+            })
+            .await
+            .unwrap();
+        let after_folder_add = version().await;
+        assert_ne!(after_folder_add, prior);
+        prior = after_folder_add;
+        persistence
+            .mutate_album(AlbumMutation::Reorder {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[1].clone(), photo_ids[0].clone()],
+            })
+            .await
+            .unwrap();
+        let after_reorder = version().await;
+        assert_ne!(after_reorder, prior);
+        prior = after_reorder;
+        persistence
+            .mutate_album(AlbumMutation::RemoveMember {
+                album_id: album_id.clone(),
+                photo_id: photo_ids[0].clone(),
+            })
+            .await
+            .unwrap();
+        let after_remove = version().await;
+        assert_ne!(after_remove, prior);
+        prior = after_remove;
+
+        persistence
+            .mutate_album_membership(AlbumMembershipMutation::Add {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[2].clone()],
+            })
+            .await
+            .unwrap();
+        let after_membership_add = version().await;
+        assert_ne!(after_membership_add, prior);
+        prior = after_membership_add;
+        persistence
+            .mutate_album_membership(AlbumMembershipMutation::RemoveAdded {
+                album_id: album_id.clone(),
+                photo_ids: vec![photo_ids[2].clone()],
+            })
+            .await
+            .unwrap();
+        let after_compensation = version().await;
+        assert_ne!(after_compensation, prior);
+        prior = after_compensation;
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: photo_ids[1].clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(version().await, prior);
+
+        let photo_version = persistence
+            .photo_receiver(&photo_ids[0])
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .decision_version;
+        persistence
+            .mutate_photo_state_batch_receiver(PhotoStateBatchMutation {
+                photos: vec![PhotoStateBatchItem {
+                    photo_id: photo_ids[0].clone(),
+                    expected_current: SelectionState::Undecided,
+                }],
+                value: SelectionState::Selected,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let after_batch = persistence
+            .photo_receiver(&photo_ids[0])
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .decision_version;
+        assert_ne!(after_batch, photo_version);
+    }
+
+    #[tokio::test]
+    async fn reopening_persistence_invalidates_process_epoch_versions() {
+        let (base, library, state, name, _path) = fixture();
+        let canonical_root = library.canonical_path().to_string_lossy().into_owned();
+        let persistence = Persistence::open(state, name.clone(), canonical_root.clone()).unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let photo_id = snapshot.photos[0].id.clone();
+        let first = persistence
+            .photo_receiver(&photo_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .decision_version;
+        persistence.shutdown().unwrap();
+
+        let reopened_state =
+            StateDirectory::open_or_create(&library, base.0.join("state")).unwrap();
+        let reopened = Persistence::open(reopened_state, name, canonical_root).unwrap();
+        let second = reopened
+            .photo_receiver(&photo_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .decision_version;
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn capture_time_bounds_reject_offsets_and_invalid_calendar_values() {
+        assert!(CaptureTimeBound::parse("2026-02-28T23:59:59").is_ok());
+        assert!(CaptureTimeBound::parse("2024-02-29T00:00:00").is_ok());
+        for invalid in [
+            "0000-01-01T00:00:00",
+            "2026-02-29T00:00:00",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00+01:00",
+            "2026-13-01T00:00:00",
+        ] {
+            assert!(CaptureTimeBound::parse(invalid).is_err(), "{invalid}");
         }
     }
 

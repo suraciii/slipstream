@@ -105,10 +105,13 @@ Use the repository commands rather than invoking individual tools in CI or revie
 
 ```sh
 bun run test:rust
+bun run test:cli
 bun run test:container-input
 bun run test:fast
 bun run verify
 ```
+
+`test:cli` runs the focused command parser, output, and real CLI-to-service query tests. It covers the `status`, Folder, Album, and Photo read commands without running the complete repository gate.
 
 Install the Playwright Chromium browser once before running the gates:
 
