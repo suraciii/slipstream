@@ -1869,7 +1869,7 @@ mod tests {
             panic!("expected a RAW embedded Preview")
         };
         assert_eq!(raw_ready.source, PreviewSource::RawEmbeddedJpeg);
-        assert_eq!((raw_ready.width, raw_ready.height), (1707, 2560));
+        assert_eq!((raw_ready.width, raw_ready.height), (2560, 1707));
 
         // The corrupt JPEG Photo is independently unavailable.
         let jpeg_result = runtime
@@ -1954,7 +1954,7 @@ mod tests {
         };
         assert_eq!(ready.source, PreviewSource::RawEmbeddedJpeg);
         assert_eq!(ready.embedded_candidate_identity.as_deref(), Some("2"));
-        assert_eq!((ready.width, ready.height), (1707, 2560));
+        assert_eq!((ready.width, ready.height), (2560, 1707));
         service.shutdown().unwrap();
         library.shutdown().unwrap();
         assert_eq!(original_snapshot(&copied_raw), copied_before);

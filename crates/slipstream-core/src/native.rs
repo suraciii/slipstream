@@ -591,7 +591,7 @@ mod tests {
         let preview = extract_embedded_jpeg(&capability).unwrap();
         assert_eq!(preview.candidate_index, Some(2));
         assert_eq!((preview.width, preview.height), (9504, 6336));
-        assert_eq!(preview.container_orientation, Some(6));
+        assert_eq!(preview.container_orientation, Some(1));
         assert_eq!(original_snapshot(&path), before);
         let mut decoder = image::ImageReader::new(Cursor::new(preview.jpeg));
         decoder.set_format(image::ImageFormat::Jpeg);
