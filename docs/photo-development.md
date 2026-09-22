@@ -174,6 +174,31 @@ A Photo with saved editing intent or retained Export references must count as
 referenced when assessing Retire and Bind eligibility. Recovery must not retire
 editing state as though it were an unused scan record.
 
+## Processing Capacity
+
+The deployment operator must be able to set a finite memory allowance for image
+processing. The allowance must apply across active processing work. It must not
+be an exposure, white-balance, Film Recipe, or per-Photo control.
+
+Slipstream must report resource availability separately from RAW support and
+engine availability. A Photo may support an Edit Preview while its full Export
+cannot fit the configured allowance. Queued work must be identified as waiting;
+the workspace must not imply that image computation has started.
+
+When an operation cannot fit, Slipstream must identify the affected stage or
+output and explain that the processing allowance is insufficient. A runtime
+memory failure must preserve saved edits and previously completed outputs. The
+Photographer must be able to continue browsing and inspect the failure. A valid
+Development TIFF remains available according to its retention policy even when
+the Film stage fails.
+
+Processing must not silently reduce Export dimensions, disable film effects,
+change numerical quality, raise its allowance, or repeatedly restart the same
+failed attempt to obtain a result. Explicit retry must keep the captured image
+intent and check current resource availability. If the deployment cannot enforce
+its allowance, processing must be unavailable while normal browsing remains
+usable. Increasing the allowance must not change a successfully rendered look.
+
 ## Failure and Retention
 
 An unavailable engine must leave selection and browsing usable and explain
@@ -205,6 +230,10 @@ silently change the result. Engine upgrades must not silently change saved looks
   the CLI's recipe.
 - The Film engine fails after a Development TIFF has completed. That TIFF may
   remain downloadable. The Film Result must remain failed, not successful.
+- A Film Edit Preview succeeds but the full Finished JPEG exceeds the configured
+  processing allowance. The Export must fail with a resource explanation while
+  the Edit Recipe and successful preview remain available. A retry after the
+  operator changes capacity must use the Export's captured settings.
 
 [Photo Development Architecture](../design/photo-development.md) owns execution,
 concurrency, and storage contracts. [Development Color Pipeline](../design/development-color.md)

@@ -190,6 +190,11 @@ only the Rust scheduler. Limits and overload errors must be documented and
 qualified for the supported deployment. Missing required limits must prevent
 processing admission, not normal Library operation.
 
+[Processing Memory](processing-memory.md) owns the finite processing allocation,
+task-level enforcement, engine workspace plans, buffer lifetimes, and memory
+failure evidence. These are execution policies independent of the Edit Recipe.
+The deployment must qualify that boundary before processing is enabled.
+
 A cache entry's identity includes content evidence, stage settings, exact bundle,
 geometry and stochastic policy. Active inputs, outputs and downloads require
 leases so eviction cannot remove them mid-operation. Disk exhaustion must leave
