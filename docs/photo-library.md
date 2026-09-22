@@ -205,3 +205,7 @@ shoot/DSCF0002.RAF
 The filesystem contains `RAW/26春节`, and the Photographer also creates an Album named `26春节`. The File Location changes when a completed rescan observes changed Original Locations. The Album changes only through explicit membership operations.
 
 Deleting an Album named `Portfolio candidates` removes the virtual group only. It does not delete its Photos, Original Locations, Original Folders, or files.
+
+## Editing References During Recovery
+
+[Photo Development](photo-development.md#original-availability-and-recovery) defines how saved editing intent and retained Exports affect recovery and Retire and Bind eligibility. They must not be discarded as unused scan state.

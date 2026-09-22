@@ -6,7 +6,7 @@ Slipstream is a browser-based photo selection workspace. It lets a Photographer 
 
 A Photographer can finish the first selection pass away from a desktop editing application while still seeing a trustworthy representation of each Photo.
 
-Slipstream reduces the cost of deciding what to keep. It does not replace RAW development or final image editing.
+Slipstream reduces the cost of deciding what to keep. Its focused development capability extends that work through exposure and white-balance correction, an interoperable TIFF handoff, and a fixed film simulation. It does not promise a general desktop editing suite.
 
 ## Initial Focus
 
@@ -45,8 +45,8 @@ Slipstream must identify the Preview Source. It must not describe an unavailable
 
 ## What Slipstream Is Not
 
-- Slipstream is not a RAW development application.
-- Slipstream is not a color-grading or retouching application.
+- Slipstream supports the bounded RAW development path in [Photo Development](photo-development.md), without a general RAW module editor.
+- Slipstream offers one fixed Film Recipe and does not provide general color-grading or retouching controls.
 - Slipstream is not initially a cloud backup service.
 - Slipstream is not initially a multi-user digital asset management system.
 - Slipstream does not promise parity with Lightroom, Capture One, darktable, RawTherapee, or a camera vendor's desktop software.
@@ -56,3 +56,5 @@ Slipstream must identify the Preview Source. It must not describe an unavailable
 ## Long-Term Direction
 
 Slipstream may later export selection metadata, support broader Photo Library search, compare similar Photos, or run as a managed personal service. These directions must preserve the initial ownership and Preview Trust boundaries.
+
+[Photo Development](photo-development.md) defines the post-selection editing capability. The [0.1 support contract](0.1-support-and-release.md) continues to define that qualified release; this target does not add editing claims to 0.1.

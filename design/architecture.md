@@ -150,7 +150,7 @@ The production server is a Rust modular monolith. Rust owns HTTP, application li
 
 The browser uses ordinary Web platform image display and pointer/touch events, with a small established gesture library only if it reduces tested interaction complexity.
 
-LibRaw owns RAW container support and embedded JPEG extraction. It does not own a first-product RAW development path.
+LibRaw owns RAW container support and embedded JPEG extraction. The separate [Photo Development Architecture](photo-development.md) owns the bounded darktable and Spektrafilm processing path; it does not change camera Preview source selection.
 
 An established image library owns JPEG decode, orientation, resize, ICC preservation or conversion to sRGB, and derivative encoding. Slipstream must not build custom image codecs or color transforms.
 
@@ -223,3 +223,7 @@ The first-slice gate must prove:
 - the complete path runs through the real browser-server protocol.
 
 A camera sample corpus must include the Photographer's actual RAW formats. Unsupported targets and unavailable devices must be reported rather than inferred.
+
+## Photo Development Extension
+
+[Photo Development Architecture](photo-development.md) extends the Rust service with Edit Recipe ownership, supervised processing, and captured Exports. [Development Color Pipeline](development-color.md) owns scene-linear processing and display separation. The initial selection-only slice and the rejection of a general RAW module editor remain scoped to their stated goals.
