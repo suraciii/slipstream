@@ -77,6 +77,14 @@ When the Photographer opens or changes a source, Slipstream fixes that source's 
 
 The Photo's ordering Location is its own Original Location.
 
+During a Library check, if an Original changes between observations or while
+Capture Time is being read, Slipstream must discard that read's result and
+retry once from the current file at the same Location. A successful retry
+must use only the current file's metadata. If the retry also fails, the
+Photo must remain in the missing-time partition until a later successful
+check. This retry must not change Photo identity, decisions, Album membership
+order, or Resume.
+
 Original Folder order must use the `All Photos` order filtered by component-aware Folder ancestry. A Folder named `a` must not include a sibling named `ab`. Folder filtering must project each Photo once through the parent of its ordering Original Location.
 
 Album order must use membership position only. Capture metadata, availability, Selection State, Rating, Preview state, Original Folder changes, and rescans must not reorder an Album.

@@ -135,6 +135,71 @@ impl fmt::Display for CaptureInspectionError {
 
 impl std::error::Error for CaptureInspectionError {}
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CaptureInspectionTestPoint {
+    BeforeOpen,
+    BeforeVerification,
+}
+
+#[cfg(test)]
+type CaptureInspectionTestHook =
+    dyn Fn(&crate::RelativeOriginalPath, CaptureInspectionTestPoint) + Send + Sync;
+
+#[cfg(test)]
+static CAPTURE_INSPECTION_TEST_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<CaptureInspectionTestHook>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static CAPTURE_INSPECTION_TEST_HOOK_LEASE: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) struct CaptureInspectionTestHookGuard {
+    _lease: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub(crate) fn install_capture_inspection_test_hook(
+    hook: impl Fn(&crate::RelativeOriginalPath, CaptureInspectionTestPoint) + Send + Sync + 'static,
+) -> CaptureInspectionTestHookGuard {
+    let lease = CAPTURE_INSPECTION_TEST_HOOK_LEASE
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    *CAPTURE_INSPECTION_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(std::sync::Arc::new(hook));
+    CaptureInspectionTestHookGuard { _lease: lease }
+}
+
+#[cfg(test)]
+impl Drop for CaptureInspectionTestHookGuard {
+    fn drop(&mut self) {
+        *CAPTURE_INSPECTION_TEST_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+fn capture_inspection_test_hook(
+    capability: &OriginalCapability,
+    point: CaptureInspectionTestPoint,
+) {
+    let hook = CAPTURE_INSPECTION_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    if let Some(hook) = hook {
+        hook(capability.path(), point);
+    }
+}
+
 /// Stable Capture Time reuse identity, including the discovery descriptor's
 /// device and inode so same-size/same-mtime path replacement cannot reuse an
 /// old metadata fact.
@@ -150,6 +215,16 @@ pub(crate) fn capture_source_revision(
     ))
 }
 
+pub(crate) struct CaptureObservation {
+    pub(crate) facts: OriginalFacts,
+    pub(crate) capture: CaptureFact,
+}
+
+struct MetadataObservation {
+    facts: OriginalFacts,
+    outcome: Result<ParseOutcome, MetadataError>,
+}
+
 /// Inspects EXIF metadata from one already-confined Original descriptor.
 ///
 /// JPEGs inspect APP1 segment boundaries only. RAW inspection accepts a TIFF
@@ -161,30 +236,61 @@ pub(crate) fn inspect_capture(
     kind: OriginalKind,
     expected_facts: OriginalFacts,
 ) -> Result<CaptureFact, CaptureInspectionError> {
-    let expected_source_revision =
-        capture_source_revision(capability.path().as_str(), expected_facts)
-            .map_err(|_| CaptureInspectionError::Confinement(ConfinementError::Changed))?;
+    capture_source_revision(capability.path().as_str(), expected_facts)
+        .map_err(|_| CaptureInspectionError::Confinement(ConfinementError::Changed))?;
+    let observation = inspect_metadata(capability, kind)?;
+    // The discovery identity includes device and inode in addition to the
+    // durable size/mtime facts. A same-size, same-mtime path replacement must
+    // never publish metadata for the replacement under the discovery result.
+    // This comparison intentionally wins over parser failures.
+    if observation.facts != expected_facts {
+        return Err(CaptureInspectionError::Confinement(
+            ConfinementError::Changed,
+        ));
+    }
+    complete_capture(capability.path().as_str(), observation).map(|result| result.capture)
+}
+
+/// Makes one fresh observation without a discovery-facts comparison. The
+/// returned source facts and Capture fact come from the same retained,
+/// revision-checked descriptor and must be adopted together by the scanner.
+pub(crate) fn inspect_capture_fresh(
+    capability: &OriginalCapability,
+    kind: OriginalKind,
+) -> Result<CaptureObservation, CaptureInspectionError> {
+    let observation = inspect_metadata(capability, kind)?;
+    complete_capture(capability.path().as_str(), observation)
+}
+
+fn inspect_metadata(
+    capability: &OriginalCapability,
+    kind: OriginalKind,
+) -> Result<MetadataObservation, CaptureInspectionError> {
+    #[cfg(test)]
+    capture_inspection_test_hook(capability, CaptureInspectionTestPoint::BeforeOpen);
     let opened = capability
         .open_revision_checked()
         .map_err(CaptureInspectionError::Confinement)?;
-    let result =
+    let outcome =
         MetadataReader::new(&opened).and_then(|mut reader| parse_metadata(&mut reader, kind));
+    #[cfg(test)]
+    capture_inspection_test_hook(capability, CaptureInspectionTestPoint::BeforeVerification);
     // A metadata classification is useful only when it describes the same
     // bytes that were opened. This check intentionally wins over malformed,
     // I/O, and resource results from the parser.
     let facts = opened
         .verify_unchanged()
         .map_err(CaptureInspectionError::Confinement)?;
-    // The discovery identity includes device and inode in addition to the
-    // durable size/mtime facts. A same-size, same-mtime path replacement must
-    // never publish metadata for the replacement under the discovery result.
-    if facts != expected_facts {
-        return Err(CaptureInspectionError::Confinement(
-            ConfinementError::Changed,
-        ));
-    }
-    let outcome = result.map_err(CaptureInspectionError::from)?;
-    Ok(match outcome {
+    Ok(MetadataObservation { facts, outcome })
+}
+
+fn complete_capture(
+    path: &str,
+    observation: MetadataObservation,
+) -> Result<CaptureObservation, CaptureInspectionError> {
+    let source_revision = capture_source_revision(path, observation.facts)
+        .map_err(|_| CaptureInspectionError::Confinement(ConfinementError::Changed))?;
+    let capture = match observation.outcome.map_err(CaptureInspectionError::from)? {
         ParseOutcome::Known {
             order_key,
             field,
@@ -195,22 +301,26 @@ pub(crate) fn inspect_capture(
             Some(order_key),
             Some(field),
             offset_minutes,
-            expected_source_revision.clone(),
+            source_revision,
         ),
         ParseOutcome::Missing { .. } => CaptureFact::completed(
             CaptureMetadataState::Missing,
             None,
             None,
             None,
-            expected_source_revision.clone(),
+            source_revision,
         ),
         ParseOutcome::Invalid { .. } => CaptureFact::completed(
             CaptureMetadataState::Invalid,
             None,
             None,
             None,
-            expected_source_revision,
+            source_revision,
         ),
+    };
+    Ok(CaptureObservation {
+        facts: observation.facts,
+        capture,
     })
 }
 
@@ -222,20 +332,13 @@ pub fn inspect_review_metadata(
     kind: OriginalKind,
     expected_facts: OriginalFacts,
 ) -> Result<CaptureReviewMetadata, CaptureInspectionError> {
-    let opened = capability
-        .open_revision_checked()
-        .map_err(CaptureInspectionError::Confinement)?;
-    let result =
-        MetadataReader::new(&opened).and_then(|mut reader| parse_metadata(&mut reader, kind));
-    let facts = opened
-        .verify_unchanged()
-        .map_err(CaptureInspectionError::Confinement)?;
-    if facts != expected_facts {
+    let observation = inspect_metadata(capability, kind)?;
+    if observation.facts != expected_facts {
         return Err(CaptureInspectionError::Confinement(
             ConfinementError::Changed,
         ));
     }
-    let outcome = result.map_err(CaptureInspectionError::from)?;
+    let outcome = observation.outcome.map_err(CaptureInspectionError::from)?;
     Ok(match outcome {
         ParseOutcome::Known { review, .. }
         | ParseOutcome::Missing { review }
