@@ -160,6 +160,13 @@ local worker/Web image IDs. It uses only a private synthetic Library and is not
 part of the daemon-free `verify` gate. Passing fixture qualification does not
 enable photo editing or qualify an image engine's memory envelope.
 
+The closed [Film measurement profile](design/processing-film-measurement.md)
+runs the pinned image engine inside that boundary against explicit operator
+fixtures and independent output references. Its opt-in verifier returns resource
+and image-identity evidence, not Exports or accepted production budgets. Host
+fixture-preparation checks run with `bun run test:processing-tools` and are part
+of `test:fast` and `verify`; actual engine and kernel qualification remain separate.
+
 ## Server startup
 
 Build the workspace, then configure one Library and application-owned state locations with absolute paths. The Rust server requires built Web assets and may receive their absolute location through `SLIPSTREAM_WEB_ROOT`:

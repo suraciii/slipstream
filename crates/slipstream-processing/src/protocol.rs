@@ -62,6 +62,14 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn limits(&self) -> Limits {
+        if self.version == 2 {
+            crate::film::limits(self.memory_bytes)
+        } else {
+            Limits::new(self.memory_bytes)
+        }
+    }
+
     pub(crate) fn policy(&self) -> String {
         digest(&serde_json::to_vec(&(PROFILE, self)).expect("serializable configuration"))
     }
@@ -71,7 +79,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Workload {
     ProbeSuccess,
@@ -82,10 +90,12 @@ pub enum Workload {
     ProbeHold,
     ProbeStorageFull,
     ProbeInodesFull,
+    #[serde(untagged)]
+    Film(crate::film::Workload),
 }
 
 impl Workload {
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::ProbeSuccess => "probe-success",
             Self::ProbeNativeOom => "probe-native-oom",
@@ -94,6 +104,7 @@ impl Workload {
             Self::ProbeHold => "probe-hold",
             Self::ProbeStorageFull => "probe-storage-full",
             Self::ProbeInodesFull => "probe-inodes-full",
+            Self::Film(_) => "film-fixture",
         }
     }
 }
@@ -174,7 +185,17 @@ impl Request {
                 ..
             } => hex(incarnation, 32) && *sequence > 0,
         };
-        if version != 1 || !hex(self.instance(), 32) || !identity_valid {
+        if version != 1
+            || !hex(self.instance(), 32)
+            || !identity_valid
+            || matches!(
+                self,
+                Self::Start {
+                    workload: Workload::Film(_),
+                    ..
+                }
+            )
+        {
             return Err(ErrorCode::InvalidRequest);
         }
         Ok(())
@@ -197,6 +218,10 @@ pub enum ErrorCode {
     StaleIncarnation,
     Capacity,
     Uncertain,
+    IncompatibleCatalogue,
+    IncompatibleResourceModel,
+    UnknownFixture,
+    UnsupportedFixture,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -249,6 +274,8 @@ pub enum ResultBody {
     Receipt {
         receipt: Receipt,
     },
+    #[serde(untagged)]
+    Film(Box<crate::film::ResultBody>),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -374,11 +401,11 @@ pub(crate) fn hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-pub(crate) fn digest(bytes: &[u8]) -> String {
+pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub(crate) fn now() -> Result<u64, ErrorCode> {
+pub fn now() -> Result<u64, ErrorCode> {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()
@@ -435,7 +462,7 @@ mod tests {
             Workload::ProbeStorageFull,
             Workload::ProbeInodesFull,
         ] {
-            assert_eq!(serde_json::to_value(workload).unwrap(), workload.name());
+            assert_eq!(serde_json::to_value(&workload).unwrap(), workload.name());
             assert_eq!(
                 serde_json::from_value::<Workload>(serde_json::json!(workload.name())).unwrap(),
                 workload

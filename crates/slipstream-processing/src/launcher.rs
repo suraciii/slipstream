@@ -29,8 +29,13 @@ fn main() {
         }
         let mut bytes = Vec::new();
         file.take(16385).read_to_end(&mut bytes).map_err(|_| ())?;
-        let config = Config::parse(&bytes).map_err(|_| ())?;
-        let executor = Executor::open(config).map_err(|_| ())?;
+        let executor = match Config::parse(&bytes) {
+            Ok(config) => Executor::open(config),
+            Err(_) => {
+                slipstream_processing::film::Config::parse(&bytes).and_then(Executor::open_film)
+            }
+        }
+        .map_err(|_| ())?;
         serve(executor).map_err(|_| ())
     })();
     if result.is_err() {
