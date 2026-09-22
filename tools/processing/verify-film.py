@@ -97,6 +97,7 @@ def expected_artifact(fixture, catalogue):
 class FilmQualification(Qualification):
     def __init__(self, arguments, catalogue_data, catalogue, model_data):
         super().__init__(arguments)
+        self.film_verifier_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         (self.root / 'launcher.log').touch(mode=0o600)
         self.catalogue = catalogue
         self.fixtures = {item['id']: item for item in catalogue['fixtures']}
@@ -260,7 +261,7 @@ class FilmQualification(Qualification):
         self.disarm()
         self.run(fixture_id, 'completed')
 
-    def storage_exhaustion(self, fixture_id):
+    def storage_exhaustion(self, fixture_id, *, inodes=False):
         intent = self.intent(fixture_id)
         self.arm(intent, 'after-snapshot-sealed')
         accepted = self.request('start', **intent)['result']['receipt']
@@ -279,20 +280,40 @@ class FilmQualification(Qualification):
             mount = next(line for line in Path('/proc/self/fdinfo', str(filler.fileno())).read_text().splitlines()
                          if line.startswith('mnt_id:'))
             assert int(mount.split()[1]) == record['mount_id']
-            remaining = os.fstatvfs(filler.fileno()).f_bavail * before.f_frsize
-            os.posix_fallocate(filler.fileno(), 0, remaining)
-            os.fsync(filler.fileno())
-            assert os.fstatvfs(filler.fileno()).f_bavail == 0
-            evidence = dict(kind='host-injected-tmpfs-exhaustion',
+            remaining = os.fstatvfs(filler.fileno())
+            if inodes:
+                assert 0 < remaining.f_favail < 4096
+                for index in range(remaining.f_favail):
+                    with (storage / 'native' / ('qualification-inode-' + str(index))).open('xb'):
+                        pass
+                assert os.fstatvfs(filler.fileno()).f_favail == 0
+            else:
+                os.posix_fallocate(filler.fileno(), 0, remaining.f_bavail * before.f_frsize)
+                os.fsync(filler.fileno())
+                assert os.fstatvfs(filler.fileno()).f_bavail == 0
+            after = os.fstatvfs(filler.fileno())
+            evidence = dict(kind='host-injected-tmpfs-inode-exhaustion' if inodes else 'host-injected-tmpfs-exhaustion',
                             included_in_memory_qualification=False,
                             launch_id=marker['launch_id'], mount_id=record['mount_id'],
-                            device=metadata.st_dev, inode=metadata.st_ino, filled_bytes=remaining)
+                            device=metadata.st_dev, inode=metadata.st_ino,
+                            filled_bytes=0 if inodes else remaining.f_bavail * before.f_frsize,
+                            filled_inodes=remaining.f_favail + 1 if inodes else 1,
+                            capacity_before=dict(bytes_available=before.f_bavail * before.f_frsize,
+                                                 inodes_available=before.f_favail),
+                            capacity_after=dict(bytes_available=after.f_bavail * after.f_frsize,
+                                                inodes_available=after.f_favail))
         self.release(marker)
         receipt = self.terminal(intent)
         evidence['receipt'] = receipt
-        (self.output / 'storage-exhaustion.json').write_text(json.dumps(evidence, indent=2))
+        filename = 'inode-exhaustion.json' if inodes else 'storage-exhaustion.json'
+        (self.output / filename).write_text(json.dumps(evidence, indent=2))
         assert receipt['outcome'] == 'storage-full', receipt
         assert receipt['result'] is None or receipt['result']['outcome'] != 'completed'
+        if inodes:
+            assert receipt['result'] is not None, 'native failure record was lost'
+            assert receipt['result']['outcome'] == 'storage-full'
+            assert receipt['result']['detail'] is None and receipt['result']['phase'] == 'engine'
+            assert evidence['capacity_after']['bytes_available'] > 0
         self.disarm()
         self.run(fixture_id, 'completed')
 
@@ -402,6 +423,8 @@ class FilmQualification(Qualification):
             late = self.request('cancel', incarnation=receipt['incarnation'],
                                 sequence=receipt['sequence'])['result']['receipt']
             assert late == receipt, 'settled outcome changed after late cancellation'
+            if self.arguments.recovery_fixture:
+                self.run(self.arguments.recovery_fixture, 'completed')
         if self.arguments.lifecycle_fixture:
             fixture_id = self.arguments.lifecycle_fixture
             for phase in ['after-intent', 'after-slice', 'after-create-response', 'after-container-bound',
@@ -414,6 +437,7 @@ class FilmQualification(Qualification):
         if self.arguments.failure_fixture:
             self.retained_writer(self.arguments.failure_fixture)
             self.storage_exhaustion(self.arguments.failure_fixture)
+            self.storage_exhaustion(self.arguments.failure_fixture, inodes=True)
             self.output_limit(self.arguments.failure_fixture)
         self.web_request('/api/albums/' + self.album_id + '/rename',
                          {'name': 'Survived Film measurements'})
@@ -430,8 +454,9 @@ class FilmQualification(Qualification):
                 return False
         await_condition(resumed)
         (self.output / 'web-observations.json').write_text(json.dumps(self.web_observations, indent=2))
+        assert hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == self.film_verifier_sha256, 'verifier source changed during qualification'
         identity = dict(instance=self.instance, launcher_sha256=self.launcher_sha256,
-                        verifier_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                        verifier_sha256=self.film_verifier_sha256,
                         native_verifier_sha256=self.verifier_sha256,
                         worker_image=self.arguments.worker_image, web_image=self.arguments.web_image,
                         memory_bytes=self.config['memory_bytes'],
@@ -454,6 +479,7 @@ def main():
                         'engine-failed', 'storage-full', 'deadline'], default='completed')
     parser.add_argument('--lifecycle-fixture', help='Registered small fixture for crash/cancel checks')
     parser.add_argument('--failure-fixture', help='Registered small fixture for injected storage/file-limit failures')
+    parser.add_argument('--recovery-fixture', help='Different small fixture to run after each explicitly expected failure')
     arguments = parser.parse_args()
     assert os.geteuid() == 0, 'run this isolated kernel verifier with sudo'
     assert all(IMAGE.fullmatch(value) for value in [arguments.worker_image, arguments.web_image])
@@ -466,6 +492,12 @@ def main():
     assert all(value in ids for value in arguments.fixture or [])
     assert arguments.lifecycle_fixture is None or arguments.lifecycle_fixture in ids
     assert arguments.failure_fixture is None or arguments.failure_fixture in ids
+    assert arguments.recovery_fixture is None or arguments.recovery_fixture in ids
+    if arguments.recovery_fixture:
+        assert arguments.expect_outcome != 'completed'
+        assert arguments.fixture and arguments.recovery_fixture not in arguments.fixture
+        fixture = next(item for item in fixtures if item['id'] == arguments.recovery_fixture)
+        assert fixture['width'] * fixture['height'] <= 2_000_000
     for fixture_id in [arguments.lifecycle_fixture, arguments.failure_fixture]:
         if fixture_id is None:
             continue

@@ -27,6 +27,52 @@ fn bad(message: &str) -> io::Error {
     io::Error::other(message)
 }
 #[derive(Debug)]
+struct ObservedViolation {
+    detail: Detail,
+    message: &'static str,
+}
+impl std::fmt::Display for ObservedViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for ObservedViolation {}
+fn violation(detail: Detail, message: &'static str) -> io::Error {
+    io::Error::other(ObservedViolation { detail, message })
+}
+fn source_mismatch(message: &'static str) -> io::Error {
+    violation(Detail::SourceMismatch, message)
+}
+fn artifact_invalid(message: &'static str) -> io::Error {
+    violation(Detail::ArtifactInvalid, message)
+}
+fn native_failure(error: &io::Error) -> (Outcome, Option<Detail>) {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let mut detail = None;
+    while let Some(error) = current {
+        if let Some(io) = error.downcast_ref::<io::Error>() {
+            match io.raw_os_error() {
+                Some(libc::ENOSPC | libc::EDQUOT | libc::EFBIG) => {
+                    return (Outcome::StorageFull, None);
+                }
+                Some(libc::ENOMEM) => return (Outcome::AllocationFailed, None),
+                _ => {}
+            }
+            // io::Error may wrap another io::Error; inspect that concrete cause
+            // before following its own source chain.
+            if let Some(cause) = io.get_ref() {
+                current = Some(cause);
+                continue;
+            }
+        }
+        if let Some(observed) = error.downcast_ref::<ObservedViolation>() {
+            detail = Some(observed.detail);
+        }
+        current = error.source();
+    }
+    (Outcome::EngineFailed, detail)
+}
+#[derive(Debug)]
 struct LostController;
 impl std::fmt::Display for LostController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -169,10 +215,14 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                     || offer.source_bytes != *bytes
                     || offer.source_sha256.as_ref() != Some(sha256)
                 {
-                    return Err(bad("source manifest"));
+                    return Err(source_mismatch("source manifest"));
                 }
-                let mut writer = rights.pop().ok_or_else(|| bad("snapshot capability"))?;
-                let mut source = rights.pop().ok_or_else(|| bad("source capability"))?;
+                let mut writer = rights
+                    .pop()
+                    .ok_or_else(|| source_mismatch("snapshot capability"))?;
+                let mut source = rights
+                    .pop()
+                    .ok_or_else(|| source_mismatch("source capability"))?;
                 let before = source.metadata()?;
                 let snapshot = writer.metadata()?;
                 if staging::access(source.as_raw_fd())? != libc::O_RDONLY
@@ -190,7 +240,7 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                     || Some(snapshot.dev()) != offer.destination_device
                     || Some(snapshot.ino()) != offer.destination_inode
                 {
-                    return Err(bad("staging rights"));
+                    return Err(source_mismatch("staging rights"));
                 }
                 let mut hasher = Sha256::new();
                 let mut buffer = [0u8; 65536];
@@ -202,9 +252,9 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                     }
                     copied = copied
                         .checked_add(count as u64)
-                        .ok_or_else(|| bad("source length"))?;
+                        .ok_or_else(|| source_mismatch("source length"))?;
                     if copied > *bytes {
-                        return Err(bad("source grew"));
+                        return Err(source_mismatch("source grew"));
                     }
                     hasher.update(&buffer[..count]);
                     writer.write_all(&buffer[..count])?;
@@ -215,7 +265,7 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                     || format!("{:x}", hasher.finalize()) != *sha256
                     || stamp(&before) != stamp(&after)
                 {
-                    return Err(bad("source changed"));
+                    return Err(source_mismatch("source changed"));
                 }
                 let reclaim = Instant::now();
                 drop(source);
@@ -229,32 +279,22 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                     || offer.destination_device.is_some()
                     || offer.destination_inode.is_some()
                 {
-                    return Err(bad("synthetic rights"));
+                    return Err(source_mismatch("synthetic rights"));
                 }
             }
         }
         if !rights.is_empty() {
-            return Err(bad("extra capabilities"));
+            return Err(source_mismatch("extra capabilities"));
         }
         Ok(())
     })();
     if let Err(error) = stage {
         drop(rights);
-        let outcome = if error.raw_os_error() == Some(libc::ENOSPC) {
-            Outcome::StorageFull
-        } else {
-            Outcome::EngineFailed
-        };
+        let (outcome, detail) = native_failure(&error);
         return finish(
             &mut result,
             &grant,
-            WorkerResult::Failure(failure(
-                &grant,
-                outcome,
-                Some(Detail::SourceMismatch),
-                Phase::Staging,
-                started,
-            )),
+            WorkerResult::Failure(failure(&grant, outcome, detail, Phase::Staging, started)),
         );
     }
     let staging_us = micros(stage_started).saturating_sub(staging_reclaim_us);
@@ -279,7 +319,10 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
     {
         return Err(bad("engine permit"));
     }
-    let producer = engine(channel, &offer.grant_sha256, &permit, deadline);
+    // Keep the pre-ack channel alive through native failure publication. The
+    // engine closes it immediately after a successful EngineStarted packet.
+    let mut engine_channel = Some(channel);
+    let producer = engine(&mut engine_channel, &offer.grant_sha256, &permit, deadline);
     let validation = Instant::now();
     let worker = match producer {
         Err(error) if lost_controller(&error) => return Err(error),
@@ -314,13 +357,16 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
                         stages,
                     })
                 }
-                Err(_) => WorkerResult::Failure(failure(
-                    &grant,
-                    Outcome::EngineFailed,
-                    Some(Detail::ArtifactInvalid),
-                    Phase::Validating,
-                    started,
-                )),
+                Err(error) => {
+                    let (outcome, detail) = native_failure(&error);
+                    WorkerResult::Failure(failure(
+                        &grant,
+                        outcome,
+                        detail,
+                        Phase::Validating,
+                        started,
+                    ))
+                }
             }
         }
         Ok((code, _, Some(ProducerResult::Failure(producer))))
@@ -341,10 +387,14 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
             Phase::Engine,
             started,
         )),
-        _ => WorkerResult::Failure(failure(
+        Err(error) => {
+            let (outcome, detail) = native_failure(&error);
+            WorkerResult::Failure(failure(&grant, outcome, detail, Phase::Engine, started))
+        }
+        Ok((_, _, result)) => WorkerResult::Failure(failure(
             &grant,
             Outcome::EngineFailed,
-            Some(Detail::ArtifactInvalid),
+            result.map(|_| Detail::ArtifactInvalid),
             Phase::Engine,
             started,
         )),
@@ -429,11 +479,11 @@ fn validate_output(
         || producer.outcome != "produced"
         || producer.launch_id != grant.launch_id
         || producer.manifest != grant.manifest
-        || producer.plan_sha256 != film::hash(&grant.plan).map_err(|_| bad("plan"))?
+        || producer.plan_sha256 != film::hash(&grant.plan).map_err(|_| artifact_invalid("plan"))?
     {
-        return Err(bad("producer identity"));
+        return Err(artifact_invalid("producer identity"));
     }
-    film::timings(&producer.stages, true).map_err(|_| bad("stage timing"))?;
+    film::timings(&producer.stages, true).map_err(|_| artifact_invalid("stage timing"))?;
     let p = &producer.pixels;
     let r = &grant.fixture.reference;
     if p.width != grant.fixture.width
@@ -442,11 +492,11 @@ fn validate_output(
         || p.film_pixels_sha256 != r.film_pixels_sha256
         || p.icc_sha256 != grant.output_icc_sha256
     {
-        return Err(bad("pixel observations"));
+        return Err(artifact_invalid("pixel observations"));
     }
     let entries = fs::read_dir("/output")?.collect::<io::Result<Vec<_>>>()?;
     if entries.len() != 1 || entries[0].file_name() != "finished.jpg" {
-        return Err(bad("extra output"));
+        return Err(artifact_invalid("extra output"));
     }
     let output = File::open("/output")?;
     let mut file = staging::safe_open(&output, "finished.jpg", libc::O_RDONLY)?;
@@ -457,7 +507,7 @@ fn validate_output(
         || meta.len() != r.jpeg_bytes
         || meta.len() > 512 * 1024 * 1024
     {
-        return Err(bad("artifact metadata"));
+        return Err(artifact_invalid("artifact metadata"));
     }
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
@@ -470,7 +520,7 @@ fn validate_output(
     }
     let jpeg_sha256 = format!("{:x}", hash.finalize());
     if jpeg_sha256 != r.jpeg_sha256 {
-        return Err(bad("artifact digest"));
+        return Err(artifact_invalid("artifact digest"));
     }
     let reclaim = Instant::now();
     drop(file);
@@ -514,7 +564,7 @@ impl Drop for Children {
     }
 }
 fn engine(
-    channel: OwnedFd,
+    channel: &mut Option<OwnedFd>,
     grant_hash: &str,
     permit: &film::Permit,
     deadline: u64,
@@ -587,14 +637,17 @@ fn engine(
     let child_id = child.id();
     drop(write);
     control(staging::send(
-        channel.as_raw_fd(),
+        channel
+            .as_ref()
+            .ok_or_else(|| bad("engine channel"))?
+            .as_raw_fd(),
         &film::Permit {
             kind: "engine-started".into(),
             ..permit.clone()
         },
         &[],
     ))?;
-    drop(channel);
+    drop(channel.take());
     let mut bytes = Vec::with_capacity(film::FRAME);
     let mut eof = false;
     let mut status = None;
@@ -612,7 +665,7 @@ fn engine(
                 eof = true;
             } else if count > 0 {
                 if bytes.len() + count as usize > film::FRAME {
-                    return Err(bad("producer overflow"));
+                    return Err(artifact_invalid("producer overflow"));
                 }
                 bytes.extend_from_slice(&buffer[..count as usize]);
             } else {
@@ -652,14 +705,18 @@ fn decode_producer(bytes: &[u8]) -> io::Result<Option<ProducerResult>> {
         return Ok(None);
     }
     if bytes.len() < 4 {
-        return Err(bad("producer length"));
+        return Err(artifact_invalid("producer length"));
     }
-    let size =
-        u32::from_be_bytes(bytes[..4].try_into().map_err(|_| bad("producer length"))?) as usize;
+    let size = u32::from_be_bytes(
+        bytes[..4]
+            .try_into()
+            .map_err(|_| artifact_invalid("producer length"))?,
+    ) as usize;
     if size > film::FRAME - 4 || bytes.len() != 4 + size {
-        return Err(bad("producer frame"));
+        return Err(artifact_invalid("producer frame"));
     }
-    let result = film::parse(&bytes[4..], film::FRAME - 4).map_err(|_| bad("producer syntax"))?;
+    let result = film::parse(&bytes[4..], film::FRAME - 4)
+        .map_err(|_| artifact_invalid("producer syntax"))?;
     Ok(Some(result))
 }
 
@@ -729,6 +786,38 @@ fn deadline_timer(deadline_ms: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_resource_errors_survive_io_wrapping_without_invented_content_details() {
+        for (errno, outcome) in [
+            (libc::ENOSPC, Outcome::StorageFull),
+            (libc::EDQUOT, Outcome::StorageFull),
+            (libc::EFBIG, Outcome::StorageFull),
+            (libc::ENOMEM, Outcome::AllocationFailed),
+            (libc::EIO, Outcome::EngineFailed),
+            (libc::EAGAIN, Outcome::EngineFailed),
+        ] {
+            let error = io::Error::from_raw_os_error(errno);
+            assert_eq!(native_failure(&error), (outcome, None));
+            let wrapped = io::Error::other(io::Error::other(error));
+            assert_eq!(native_failure(&wrapped), (outcome, None));
+        }
+        for detail in [Detail::SourceMismatch, Detail::ArtifactInvalid] {
+            let error = io::Error::other(violation(detail, "observed mismatch"));
+            assert_eq!(
+                native_failure(&error),
+                (Outcome::EngineFailed, Some(detail))
+            );
+        }
+        assert_eq!(
+            native_failure(&bad("spawn failed")),
+            (Outcome::EngineFailed, None)
+        );
+        let malformed = decode_producer(&[0, 0, 0]).unwrap_err();
+        assert_eq!(
+            native_failure(&malformed),
+            (Outcome::EngineFailed, Some(Detail::ArtifactInvalid))
+        );
+    }
     #[test]
     fn lost_controller_requires_a_transport_failure_not_invalid_protocol_data() {
         for kind in [

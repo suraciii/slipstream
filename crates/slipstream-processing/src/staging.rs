@@ -702,6 +702,26 @@ mod tests {
     }
     #[test]
     fn sealing_audit_rejects_live_duplicate_writers_and_shared_writable_mappings() {
+        // This fixture owns a process FD table. Other parallel tests may close
+        // and reuse unrelated descriptors between observations, which correctly
+        // makes the runtime audit uncertain instead of establishing a violation.
+        // Isolate this fixture without serializing or weakening the full suite.
+        const CHILD: &str = "SLIPSTREAM_TEST_STAGING_AUDIT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "staging::tests::sealing_audit_rejects_live_duplicate_writers_and_shared_writable_mappings", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
         let path =
             std::env::temp_dir().join(format!("slipstream-stage-writer-{}", std::process::id()));
         let writer = OpenOptions::new()

@@ -176,6 +176,10 @@ Omit `--fixtures` for a wholly synthetic catalogue. `--fixture ID` selects a
 registered case and may repeat; otherwise every entry runs. A contained-failure
 experiment must explicitly name its expected outcome with `--expect-outcome`.
 The verifier never retries an OOM or increases the budget automatically.
+For an expected failure, `--recovery-fixture ID` explicitly adds a successful
+small fixture after each selected failed case in the same instance. It requires
+explicit `--fixture` selections and a different recovery fixture of at most two
+million pixels.
 `--lifecycle-fixture ID` adds crash recovery before container start, at both
 permits, and after final result capture, cancellation before engine release, and
 a subsequent successful attempt.
@@ -184,7 +188,8 @@ lifecycle case also verifies detection of a changed private source copy.
 
 `--failure-fixture ID` requires a registered TIFF of at most two million pixels.
 It verifies rejection of a retained snapshot writer, exhaustion of the shared
-tmpfs, and an injected per-file limit failure, each followed by successful work.
+tmpfs bytes and inodes, and an injected per-file limit failure, each followed by
+successful work.
 These operator faults affect only the exact owned attempt. The storage probe
 fills its host-only native directory after sealing; those host-charged pages
 are storage-cap evidence and are excluded from memory qualification. The
