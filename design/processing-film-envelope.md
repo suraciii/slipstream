@@ -128,9 +128,9 @@ qualifies a fixture or recommends a deployment budget.
 ### Campaign Evidence Eligibility
 
 Memory qualification and terminal I/O diagnostics answer separate questions.
-The campaign records four independent booleans so that loss of an I/O sample
-cannot erase complete memory evidence or be mistaken for a complete campaign
-row:
+The campaign records four explicit eligibility results so that loss of an I/O
+sample cannot erase complete memory evidence or be mistaken for a complete
+campaign row:
 
 - `memory_fit_eligible` requires exact fixture, source, reference, executable,
   launcher and environment identity; retained attempt-slice memory peak, limits,
@@ -155,12 +155,13 @@ row:
 
 An eligibility result that cannot be established from retained evidence is
 false and records its reason; missing evidence never implies a pass.
-The fitter consumes only `memory_fit_eligible` rows and reports I/O diagnostic
-coverage separately. A missing terminal I/O diagnostic may therefore leave
-memory fitting valid while the full campaign row remains ineligible; it cannot
-be imputed, copied from a parent without the proof above, or presented as
-complete release evidence. Per the [Processing Executor](processing-executor.md),
-the launcher must establish its I/O release precondition before work is released.
+The fitter consumes only rows where both `memory_fit_eligible` and
+`observer_window_eligible` are true, and reports I/O diagnostic coverage
+separately. A missing terminal I/O diagnostic may therefore leave memory
+fitting valid while the full campaign row remains ineligible; it cannot be
+imputed, copied from a parent without the proof above, or presented as complete
+release evidence. Per the [Processing Executor](processing-executor.md), the
+launcher must establish its I/O release precondition before work is released.
 Meeting that precondition does not make terminal I/O diagnostics a memory-fit
 input.
 
