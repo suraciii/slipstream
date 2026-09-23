@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { rejects } from "node:assert/strict";
 import {
   createPrivateFetcher,
   exchangeAccessToken,
@@ -221,11 +222,12 @@ describe("private browser fetch", () => {
       },
     );
 
-    await expect(
+    await rejects(
       privateFetch("https://elsewhere.invalid/api/private", {
         method: "POST",
       }),
-    ).rejects.toThrow("private requests must use the current origin");
+      new Error("private requests must use the current origin"),
+    );
     expect(requests).toBe(0);
     expect(validations).toBe(0);
   });
