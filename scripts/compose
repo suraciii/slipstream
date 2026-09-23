@@ -228,7 +228,7 @@ parse_processing_configuration() {
 
 validate_processing_runtime() {
   local runtime_directory="/run/slipstream-processing/$processing_instance"
-  local ancestor=/ component metadata owner mode entry socket claim helper_uid
+  local ancestor=/ component metadata owner mode socket claim
   local -a components=() entries=()
 
   IFS='/' read -r -a components <<< "${runtime_directory#/}"
@@ -269,18 +269,10 @@ validate_processing_runtime() {
 
   [[ -x "$processing_launcher" ]] \
     || fail "host production launcher checker is not installed"
-  helper_uid=$(id -u) || fail "cannot identify current user"
-  if [[ "$helper_uid" == 0 ]]; then
-    command -v setpriv >/dev/null || fail "setpriv is required to check launcher readiness as Web UID 1000"
-    setpriv --reuid=1000 --regid=1000 --clear-groups \
-      "$processing_launcher" --check-production "$processing_instance" "$processing_policy" "$processing_bundle" \
-      || fail "processing launcher did not prove production readiness"
-  elif [[ "$helper_uid" == 1000 ]]; then
+  command -v setpriv >/dev/null || fail "setpriv is required to check launcher readiness as Web UID 1000"
+  setpriv --reuid=1000 --regid=1000 --clear-groups \
     "$processing_launcher" --check-production "$processing_instance" "$processing_policy" "$processing_bundle" \
-      || fail "processing launcher did not prove production readiness"
-  else
-    fail "processing-up must run as root or Web UID 1000"
-  fi
+    || fail "processing launcher did not prove production readiness"
 }
 
 reject_engine_control_declarations() {
@@ -639,6 +631,7 @@ fi
 if [[ "$processing_selected" == true ]]; then
   [[ "$qa_selected" == false ]] || fail "processing-up is not supported for QA instances"
   parse_processing_configuration "$environment_file"
+  [[ "$EUID" == 0 ]] || fail "processing-up must be run as root"
 fi
 
 resolve_existing_path "${BASH_SOURCE[0]}" \

@@ -38,9 +38,10 @@ must report photo processing unavailable. A fixture qualification run, installed
 launcher binary, systemd-active unit or reachable socket is not production
 readiness.
 
-The processing wrapper additionally uses GNU `stat`; when run as root it uses
-util-linux `setpriv` to make the readiness request as UID 1000. The ordinary
-Compose commands do not require these processing tools.
+The processing wrapper must be run as root. It uses GNU `stat` to verify the
+complete private runtime directory, then util-linux `setpriv` to make the
+readiness request as UID 1000. The ordinary Compose commands do not require
+these processing tools.
 
 Install the production launcher as a root-owned systemd service with a
 root-owned host configuration and persistent journal. The repository supplies
@@ -77,7 +78,7 @@ processing remains unavailable and the Library service remains usable.
 The supported opt-in is the dedicated wrapper command:
 
 ```sh
-./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
+sudo ./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
 ```
 
 For this command, the environment file must contain exactly one literal value

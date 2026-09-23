@@ -208,7 +208,40 @@ test("processing-up ignores ambient opt-in and requires the instance in its envi
   }
 });
 
-test("processing-up refuses an unavailable launcher before invoking Compose", async () => {
+test("processing-up rejects a Web UID operator before host preflight", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const instance = randomBytes(16).toString("hex");
+    await writeEnvironment(target, layout.sources);
+    await appendFile(
+      target.environmentFile,
+      [
+        "",
+        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
+        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
+        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        "",
+      ].join("\n"),
+    );
+    const uid = process.getuid?.() === 0 ? 1000 : undefined;
+    if (uid !== undefined) {
+      await chmod(target.root, 0o755);
+    }
+
+    const result = await runCompose(target, ["processing-up", "-d"], { uid });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("processing-up must be run as root");
+    expect(result.stderr).not.toContain("processing runtime path");
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("processing-up requires root or refuses an unavailable launcher before invoking Compose", async () => {
   const target = await fixture();
   try {
     const layout = await topology(target);
@@ -234,7 +267,9 @@ test("processing-up refuses an unavailable launcher before invoking Compose", as
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain(
-      "processing runtime path contains a missing directory or symbolic link",
+      process.getuid?.() === 0
+        ? "processing runtime path contains a missing directory or symbolic link"
+        : "processing-up must be run as root",
     );
     expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
     expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
@@ -465,6 +500,7 @@ async function runCompose(
     environmentFile?: string;
     environment?: Record<string, string>;
     terminal?: boolean;
+    uid?: number;
   } = {},
 ): Promise<CommandResult> {
   const environment = { ...process.env };
@@ -476,6 +512,17 @@ async function runCompose(
     options.environmentFile ?? target.environmentFile,
     ...command,
   ];
+  const setprivArguments =
+    options.uid === undefined
+      ? []
+      : [
+          "setpriv",
+          "--reuid",
+          `${options.uid}`,
+          "--regid",
+          `${options.uid}`,
+          "--clear-groups",
+        ];
   const shellQuote = (value: string): string =>
     `'${value.replaceAll("'", "'\\''")}'`;
   const child = Bun.spawn(
@@ -488,7 +535,7 @@ async function runCompose(
           commandArguments.map(shellQuote).join(" "),
           "/dev/null",
         ]
-      : commandArguments,
+      : [...setprivArguments, ...commandArguments],
     {
       cwd: repositoryRoot,
       env: {
