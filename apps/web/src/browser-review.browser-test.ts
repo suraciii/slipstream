@@ -4736,6 +4736,10 @@ test("Undo of a Photo View Rating that did not advance stays in the open Grid", 
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-review]")).toBeHidden();
+  // The access boundary revalidates the session during history navigation;
+  // Photo View can be hidden by that boundary before the Grid is restored.
+  await expect(page.locator("[data-grid-view]")).toBeVisible();
+  await expect(cell(0)).toBeFocused();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(page.locator("[data-grid-status]")).toHaveText(
