@@ -6592,6 +6592,501 @@ async fn cli_album_reorder_refuses_an_album_larger_than_the_complete_order_bound
 }
 
 #[tokio::test]
+async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches() {
+    let (base, config) = prepare_fixture();
+    for name in ["a.jpg", "b.jpg", "c.jpg"] {
+        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
+    }
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let (a, b, c) = (&photo_ids[0], &photo_ids[1], &photo_ids[2]);
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    // A single-field change reports the exact prior and current decision
+    // objects and becomes visible to Web browsing.
+    let initial = cli_photo_read(&router, a).await;
+    let initial_version = initial["decisionVersion"].as_str().unwrap().to_owned();
+    assert_eq!(initial["selectionState"], "undecided");
+    assert_eq!(initial["rating"], 0);
+    let changed = post_cli_json(
+        &router,
+        "/api/photo-decisions",
+        serde_json::json!({
+            "field": "selectionState",
+            "value": "selected",
+            "photos": [{"photoId": a, "ifVersion": initial_version}]
+        }),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    let changed = response_json(changed).await;
+    let selected_version = changed["results"][0]["current"]["decisionVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(selected_version, initial_version);
+    assert_eq!(changed["results"][0]["photoId"], *a);
+    assert_eq!(changed["results"][0]["outcome"], "changed");
+    assert_eq!(
+        changed["results"][0]["prior"],
+        serde_json::json!({"selectionState": "undecided", "rating": 0})
+    );
+    assert_eq!(
+        changed["results"][0]["current"],
+        serde_json::json!({
+            "selectionState": "selected",
+            "rating": 0,
+            "decisionVersion": selected_version
+        })
+    );
+    assert_eq!(
+        changed["results"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["photoId", "outcome", "prior", "current"])
+    );
+    assert_eq!(
+        changed["counts"],
+        serde_json::json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 0})
+    );
+    let web_summary = published_photo_summary(&application, a).await;
+    assert_eq!(web_summary.selection_state, "selected");
+    assert_eq!(web_summary.rating, 0);
+
+    // A Rating change leaves Selection State untouched, and a repeated value
+    // with the current version is unchanged without advancing the version.
+    let rated = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-decisions",
+            serde_json::json!({
+                "field": "rating",
+                "value": 3,
+                "photos": [{"photoId": a, "ifVersion": selected_version}]
+            }),
+        )
+        .await,
+    )
+    .await;
+    let rated_version = rated["results"][0]["current"]["decisionVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(rated["results"][0]["outcome"], "changed");
+    assert_eq!(
+        rated["results"][0]["prior"],
+        serde_json::json!({"selectionState": "selected", "rating": 0})
+    );
+    assert_eq!(rated["results"][0]["current"]["selectionState"], "selected");
+    assert_eq!(rated["results"][0]["current"]["rating"], 3);
+    let no_op = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-decisions",
+            serde_json::json!({
+                "field": "rating",
+                "value": 3,
+                "photos": [{"photoId": a, "ifVersion": rated_version}]
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(no_op["results"][0]["outcome"], "unchanged");
+    assert_eq!(no_op["results"][0]["current"]["rating"], 3);
+    assert_eq!(
+        no_op["results"][0]["current"]["decisionVersion"],
+        rated_version
+    );
+    assert_eq!(no_op["counts"]["unchanged"], 1);
+    assert_eq!(
+        no_op["results"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["photoId", "outcome", "current"])
+    );
+
+    // Web edits between a CLI read and write conflict, including edits that
+    // change the guarded value away and back.
+    let stale = cli_photo_read(&router, b).await;
+    let stale_version = stale["decisionVersion"].as_str().unwrap().to_owned();
+    for value in [4, 0] {
+        let web = post_json(
+            &router,
+            &format!("/api/photos/{b}/state"),
+            serde_json::json!({"field": "rating", "value": value}),
+            None,
+        )
+        .await;
+        assert_eq!(web.status(), StatusCode::OK);
+    }
+    let away_and_back = post_cli_json(
+        &router,
+        "/api/photo-decisions",
+        serde_json::json!({
+            "field": "rating",
+            "value": 0,
+            "photos": [{"photoId": b, "ifVersion": stale_version}]
+        }),
+    )
+    .await;
+    assert_eq!(away_and_back.status(), StatusCode::OK);
+    let away_and_back = response_json(away_and_back).await;
+    assert_eq!(away_and_back["results"][0]["outcome"], "conflict");
+    assert_eq!(away_and_back["results"][0]["current"]["rating"], 0);
+    let b_version = away_and_back["results"][0]["current"]["decisionVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(b_version, stale_version);
+    let after_conflict = cli_photo_read(&router, b).await;
+    assert_eq!(after_conflict["rating"], 0);
+    assert_eq!(after_conflict["decisionVersion"], b_version);
+
+    // A mixed batch partitions every requested Photo in request order and
+    // leaves Album facts and the saved browsing position untouched.
+    let album = response_json(
+        post_cli_json(
+            &router,
+            "/api/albums",
+            serde_json::json!({"name": "Resume"}),
+        )
+        .await,
+    )
+    .await;
+    let album_id = album["album"]["id"].as_str().unwrap().to_owned();
+    let add_version = album["album"]["albumVersion"].as_str().unwrap().to_owned();
+    let added = post_cli_json(
+        &router,
+        &format!("/api/albums/{album_id}/changes"),
+        serde_json::json!({
+            "operation": "add",
+            "photoIds": [a, c],
+            "ifVersion": add_version
+        }),
+    )
+    .await;
+    assert_eq!(added.status(), StatusCode::OK);
+    let added_version = response_json(added).await["album"]["albumVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let progress = post_json(
+        &router,
+        &format!("/api/albums/{album_id}/progress"),
+        serde_json::json!({"photoId": a}),
+        None,
+    )
+    .await;
+    assert_eq!(progress.status(), StatusCode::OK);
+
+    let c_initial = cli_photo_read(&router, c).await;
+    let c_initial_version = c_initial["decisionVersion"].as_str().unwrap().to_owned();
+    let rejected = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-decisions",
+            serde_json::json!({
+                "field": "selectionState",
+                "value": "rejected",
+                "photos": [{"photoId": c, "ifVersion": c_initial_version}]
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(rejected["results"][0]["outcome"], "changed");
+    let c_version = rejected["results"][0]["current"]["decisionVersion"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let missing_id = "00000000-0000-4000-8000-00000000dead";
+    let mixed = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-decisions",
+            serde_json::json!({
+                "field": "selectionState",
+                "value": "rejected",
+                "photos": [
+                    {"photoId": a, "ifVersion": rated_version},
+                    {"photoId": b, "ifVersion": stale_version},
+                    {"photoId": missing_id, "ifVersion": stale_version},
+                    {"photoId": c, "ifVersion": c_version}
+                ]
+            }),
+        )
+        .await,
+    )
+    .await;
+    let results = mixed["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0]["photoId"], *a);
+    assert_eq!(results[0]["outcome"], "changed");
+    assert_eq!(results[1]["photoId"], *b);
+    assert_eq!(results[1]["outcome"], "conflict");
+    assert_eq!(results[2]["photoId"], missing_id);
+    assert_eq!(results[2]["outcome"], "missing");
+    assert_eq!(
+        results[2]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["photoId", "outcome"])
+    );
+    assert_eq!(results[3]["photoId"], *c);
+    assert_eq!(results[3]["outcome"], "unchanged");
+    assert_eq!(
+        mixed["counts"],
+        serde_json::json!({"changed": 1, "unchanged": 1, "conflict": 1, "missing": 1})
+    );
+    let album_after = application.library.album(&album_id).await.unwrap().unwrap();
+    assert_eq!(album_after.album_version, added_version);
+    assert!(album_after.has_saved_position);
+
+    // A closed Library reports the confirmed storage failure shape.
+    application.shutdown().await.unwrap();
+    let closed = post_cli_json(
+        &router,
+        "/api/photo-decisions",
+        serde_json::json!({
+            "field": "selectionState",
+            "value": "selected",
+            "photos": [{"photoId": a, "ifVersion": rated_version}]
+        }),
+    )
+    .await;
+    assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(closed).await["error"],
+        serde_json::json!({
+            "code": "storage_failed",
+            "message": "Inspect server health and the current Photo decisions before trying again.",
+            "effect": "none",
+            "details": {"operation": "photos-set"}
+        })
+    );
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn cli_photo_decisions_route_rejects_unnegotiated_open_and_over_limit_input() {
+    let (base, config) = prepare_fixture();
+    jpeg_fixture(&config.library_root.join("one.jpg"), 8, 4, [32, 64, 192]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .remove(0);
+    let before = application.library.photo(&photo_id).await.unwrap().unwrap();
+    let router = create_router(Arc::clone(&application), config.web_root());
+
+    let unnegotiated = post_json(
+        &router,
+        "/api/photo-decisions",
+        serde_json::json!({
+            "field": "rating",
+            "value": 4,
+            "photos": [{"photoId": photo_id, "ifVersion": before.decision_version}]
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(unnegotiated.status(), StatusCode::UPGRADE_REQUIRED);
+
+    let version = before.decision_version.as_str();
+    for body in [
+        r#"not json"#,
+        r#"{"field":"rating","value":4}"#,
+        r#"{"field":"rating","photos":[{"photoId":"00000000-0000-4000-8000-000000000001","ifVersion":"v"}]}"#,
+        r#"{"field":"rating","value":4,"photos":[],"unexpected":1}"#,
+        r#"{"field":"rating","value":4,"value":3,"photos":[]}"#,
+        r#"{"field":"rating","value":4,"photos":[{"photoId":"00000000-0000-4000-8000-000000000001","ifVersion":"v","force":true}]}"#,
+        r#"{"field":"rating","value":4,"photos":[{"photoId":"00000000-0000-4000-8000-000000000001","photoId":"00000000-0000-4000-8000-000000000001","ifVersion":"v"}]}"#,
+        r#"{"field":"rating","value":4,"photos":[{"ifVersion":"v"}]}"#,
+        r#"{"field":"rating","value":4,"photos":"one.jpg"}"#,
+    ] {
+        let rejected = send(
+            &router,
+            authenticated_request()
+                .method("POST")
+                .uri("http://camera.local/api/photo-decisions")
+                .header("Slipstream-CLI-Contract", "1")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(rejected).await["error"]["code"],
+            "invalid_input"
+        );
+    }
+
+    for (body, argument) in [
+        (
+            serde_json::json!({
+                "field": "favorite",
+                "value": true,
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "field",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": "4",
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "value",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": 6,
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "value",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": 4.5,
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "value",
+        ),
+        (
+            serde_json::json!({
+                "field": "selectionState",
+                "value": 1,
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "value",
+        ),
+        (
+            serde_json::json!({
+                "field": "selectionState",
+                "value": "picked",
+                "photos": [{"photoId": photo_id, "ifVersion": version}]
+            }),
+            "value",
+        ),
+        (
+            serde_json::json!({"field": "rating", "value": 4, "photos": []}),
+            "photos",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": 4,
+                "photos": [
+                    {"photoId": photo_id, "ifVersion": version},
+                    {"photoId": photo_id, "ifVersion": version}
+                ]
+            }),
+            "photos",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": 4,
+                "photos": [{"photoId": "not-an-id", "ifVersion": version}]
+            }),
+            "photos",
+        ),
+        (
+            serde_json::json!({
+                "field": "rating",
+                "value": 4,
+                "photos": [{"photoId": photo_id, "ifVersion": ""}]
+            }),
+            "photos",
+        ),
+    ] {
+        let rejected = post_cli_json(&router, "/api/photo-decisions", body).await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let error = response_json(rejected).await["error"].clone();
+        assert_eq!(error["code"], "invalid_input");
+        assert_eq!(error["details"]["argument"], argument);
+    }
+
+    let too_many = (0..=slipstream_core::PHOTO_STATE_BATCH_MAX)
+        .map(|index| {
+            serde_json::json!({
+                "photoId": format!("00000000-0000-4000-8000-{index:012x}"),
+                "ifVersion": "v"
+            })
+        })
+        .collect::<Vec<_>>();
+    let over_limit = post_cli_json(
+        &router,
+        "/api/photo-decisions",
+        serde_json::json!({"field": "rating", "value": 4, "photos": too_many}),
+    )
+    .await;
+    assert_eq!(over_limit.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response_json(over_limit).await["error"],
+        serde_json::json!({
+            "code": "limit_exceeded",
+            "message": "Reduce the Photo ID list and try again.",
+            "effect": "none",
+            "details": {"limitName": "photoIds", "limit": 100, "actual": 101}
+        })
+    );
+
+    let oversized = send(
+        &router,
+        authenticated_request()
+            .method("POST")
+            .uri("http://camera.local/api/photo-decisions")
+            .header("Slipstream-CLI-Contract", "1")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::CONTENT_LENGTH,
+                (MAXIMUM_MUTATION_BODY_BYTES + 1).to_string(),
+            )
+            .body(Body::from(vec![b'x'; 16]))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response_json(oversized).await["error"],
+        serde_json::json!({
+            "code": "limit_exceeded",
+            "message": "Reduce the request body and try again.",
+            "effect": "none",
+            "details": {
+                "limitName": "requestBodyBytesMaximum",
+                "limit": MAXIMUM_MUTATION_BODY_BYTES,
+                "actual": MAXIMUM_MUTATION_BODY_BYTES + 1
+            }
+        })
+    );
+
+    let after = application.library.photo(&photo_id).await.unwrap().unwrap();
+    assert_eq!(after.rating, before.rating);
+    assert_eq!(after.selection_state, before.selection_state);
+    assert_eq!(after.decision_version, before.decision_version);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let (base, config) = prepare_fixture();
     for index in 0..5 {
@@ -7156,6 +7651,24 @@ async fn post_cli_json(router: &Router, uri: &str, body: serde_json::Value) -> R
             .unwrap(),
     )
     .await
+}
+
+async fn get_cli_json(router: &Router, uri: &str) -> Response<Body> {
+    send(
+        router,
+        authenticated_request()
+            .uri(format!("http://camera.local{uri}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+}
+
+async fn cli_photo_read(router: &Router, photo_id: &str) -> serde_json::Value {
+    let response = get_cli_json(router, &format!("/api/photos/{photo_id}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
 }
 
 fn jpeg_fixture(path: &Path, width: u32, height: u32, color: [u8; 3]) {

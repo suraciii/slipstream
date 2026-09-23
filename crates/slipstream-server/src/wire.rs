@@ -205,6 +205,115 @@ pub(crate) struct MissingItemWire {
     pub state: &'static str,
 }
 
+/// One confirmed checked Photo decision batch. Results retain request order
+/// with exactly one outcome per requested Photo, and the counts count those
+/// outcomes.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoDecisionResultWire {
+    pub results: Vec<CliPhotoDecisionItemWire>,
+    pub counts: CliPhotoDecisionCountsWire,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoDecisionCountsWire {
+    pub changed: usize,
+    pub unchanged: usize,
+    pub conflict: usize,
+    pub missing: usize,
+}
+
+/// One requested Photo's outcome. `prior` appears only for a confirmed
+/// change and `current` never appears for a missing Photo, so each outcome
+/// reports exactly the keys the CLI reference defines for it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoDecisionItemWire {
+    pub photo_id: String,
+    pub outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior: Option<CliPhotoDecisionFactsWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<CliPhotoDecisionSnapshotWire>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoDecisionFactsWire {
+    pub selection_state: &'static str,
+    pub rating: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPhotoDecisionSnapshotWire {
+    pub selection_state: &'static str,
+    pub rating: u8,
+    pub decision_version: String,
+}
+
+impl From<slipstream_core::CheckedPhotoDecisionResult> for CliPhotoDecisionResultWire {
+    fn from(value: slipstream_core::CheckedPhotoDecisionResult) -> Self {
+        Self {
+            results: value
+                .results
+                .into_iter()
+                .map(|item| {
+                    let (outcome, prior, current) = match item.outcome {
+                        slipstream_core::CheckedPhotoDecisionOutcome::Changed {
+                            prior,
+                            current,
+                        } => (
+                            "changed",
+                            Some(CliPhotoDecisionFactsWire {
+                                selection_state: selection_state(prior.selection_state),
+                                rating: prior.rating,
+                            }),
+                            Some(photo_decision_snapshot_wire(current)),
+                        ),
+                        slipstream_core::CheckedPhotoDecisionOutcome::Unchanged { current } => (
+                            "unchanged",
+                            None,
+                            Some(photo_decision_snapshot_wire(current)),
+                        ),
+                        slipstream_core::CheckedPhotoDecisionOutcome::Conflict { current } => (
+                            "conflict",
+                            None,
+                            Some(photo_decision_snapshot_wire(current)),
+                        ),
+                        slipstream_core::CheckedPhotoDecisionOutcome::Missing => {
+                            ("missing", None, None)
+                        }
+                    };
+                    CliPhotoDecisionItemWire {
+                        photo_id: item.photo_id,
+                        outcome,
+                        prior,
+                        current,
+                    }
+                })
+                .collect(),
+            counts: CliPhotoDecisionCountsWire {
+                changed: value.counts.changed,
+                unchanged: value.counts.unchanged,
+                conflict: value.counts.conflict,
+                missing: value.counts.missing,
+            },
+        }
+    }
+}
+
+fn photo_decision_snapshot_wire(
+    snapshot: slipstream_core::PhotoDecisionSnapshot,
+) -> CliPhotoDecisionSnapshotWire {
+    CliPhotoDecisionSnapshotWire {
+        selection_state: selection_state(snapshot.selection_state),
+        rating: snapshot.rating,
+        decision_version: snapshot.decision_version,
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum PhotoListItemWire {

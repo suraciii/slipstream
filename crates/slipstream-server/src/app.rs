@@ -1776,6 +1776,37 @@ impl Application {
         })
     }
 
+    /// Applies one version-checked Photo decision batch and mirrors every
+    /// effective change into the published snapshot, so Web browsing shows
+    /// the same facts the confirmed result reports before the next scan.
+    pub async fn mutate_photo_decision_checked(
+        &self,
+        mutation: slipstream_core::CheckedPhotoDecisionMutation,
+    ) -> Result<slipstream_core::CheckedPhotoDecisionResult, LibraryError> {
+        let (field, value) = (mutation.field, mutation.value);
+        let result = self.library.mutate_photo_decision_checked(mutation).await?;
+        for item in &result.results {
+            if matches!(
+                item.outcome,
+                slipstream_core::CheckedPhotoDecisionOutcome::Changed { .. }
+            ) {
+                self.shared
+                    .patch_photo(&item.photo_id, |photo| match (field, value) {
+                        (
+                            PhotoStateField::SelectionState,
+                            PhotoStateValue::Selection(selection),
+                        ) => photo.selection_state = selection,
+                        (PhotoStateField::Rating, PhotoStateValue::Rating(rating)) => {
+                            photo.rating = rating;
+                        }
+                        _ => {}
+                    })
+                    .await;
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn mutate_photo_state(
         &self,
         mutation: slipstream_core::PhotoStateMutation,

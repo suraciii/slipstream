@@ -202,6 +202,39 @@ pub enum PhotoCommand {
         #[arg(value_parser = nonempty)]
         photo_id: String,
     },
+    /// Change Selection State or Rating for identified Photos against the
+    /// decision versions observed by a prior read. One command changes one
+    /// field and reports changed, unchanged, conflict, or missing per Photo.
+    Set(PhotoDecisionArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PhotoDecisionArgs {
+    /// One Photo ID for the single-Photo forms.
+    #[arg(value_name = "PHOTO_ID", value_parser = nonempty, conflicts_with = "input")]
+    pub photo_id: Option<String>,
+    /// Selection State to apply to the named Photo.
+    #[arg(long, value_enum, conflicts_with_all = ["rating", "input"])]
+    pub selection: Option<SetSelectionArg>,
+    /// Rating from 0 through 5 to apply to the named Photo. Zero clears it.
+    #[arg(long, value_name = "N", value_parser = rating, conflicts_with_all = ["selection", "input"])]
+    pub rating: Option<u8>,
+    /// UTF-8 JSON file holding one complete decision batch of at most 100
+    /// distinct Photo IDs, each with its observed version; `-` reads the
+    /// document from stdin.
+    #[arg(long, value_name = "FILE", value_parser = nonempty, conflicts_with_all = ["photo_id", "selection", "rating", "if_version"])]
+    pub input: Option<String>,
+    /// Decision version observed by a prior read of the named Photo.
+    #[arg(long, value_name = "VERSION", value_parser = nonempty, conflicts_with = "input", requires = "photo_id")]
+    pub if_version: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SetSelectionArg {
+    Undecided,
+    Selected,
+    Rejected,
 }
 
 #[derive(Debug, Args)]
@@ -362,6 +395,7 @@ enum Operation {
     AlbumsGet,
     PhotosList,
     PhotosGet,
+    PhotosSet,
     AlbumsCreate,
     AlbumsRename,
     AlbumsDelete,
@@ -379,6 +413,7 @@ impl Operation {
             Self::AlbumsGet => "albums-get",
             Self::PhotosList => "photos-list",
             Self::PhotosGet => "photos-get",
+            Self::PhotosSet => "photos-set",
             Self::AlbumsCreate => "albums-create",
             Self::AlbumsRename => "albums-rename",
             Self::AlbumsDelete => "albums-delete",
@@ -406,6 +441,7 @@ fn command_operation(command: &Command) -> Operation {
         Command::Photos { command } => match command {
             PhotoCommand::List(_) => Operation::PhotosList,
             PhotoCommand::Get { .. } => Operation::PhotosGet,
+            PhotoCommand::Set(_) => Operation::PhotosSet,
         },
     }
 }
@@ -500,6 +536,28 @@ impl Envelope {
             error: Some(error),
         }
     }
+
+    /// A mixed Photo batch keeps its confirmed results in `data` beside the
+    /// `partial_result` error.
+    fn partial(data: Value, error: ErrorPayload) -> Self {
+        Self {
+            schema_version: 1,
+            status: "partial",
+            data: Some(data),
+            error: Some(error),
+        }
+    }
+
+    /// An all-unsuccessful Photo batch keeps its complete result array in
+    /// `data` beside its partition error.
+    fn error_with_data(data: Value, error: ErrorPayload) -> Self {
+        Self {
+            schema_version: 1,
+            status: "error",
+            data: Some(data),
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -514,37 +572,48 @@ struct ErrorPayload {
 struct CommandFailure {
     exit_code: u8,
     payload: ErrorPayload,
+    /// Confirmed per-Photo results for a mixed or all-unsuccessful Photo
+    /// batch; the complete result array stays in `data` for those failures.
+    data: Option<Box<Value>>,
 }
 
 impl CommandFailure {
-    fn invalid(argument: &str, reason: impl Into<String>) -> Self {
+    fn from_payload(exit_code: u8, payload: ErrorPayload) -> Self {
         Self {
-            exit_code: 2,
-            payload: ErrorPayload {
+            exit_code,
+            payload,
+            data: None,
+        }
+    }
+
+    fn invalid(argument: &str, reason: impl Into<String>) -> Self {
+        Self::from_payload(
+            2,
+            ErrorPayload {
                 code: "invalid_input".to_owned(),
                 message: "Correct the request and try again.".to_owned(),
                 effect: "none".to_owned(),
                 details: json!({ "argument": argument, "reason": reason.into() }),
             },
-        }
+        )
     }
 
     fn transport(operation: Operation) -> Self {
-        Self {
-            exit_code: 6,
-            payload: ErrorPayload {
+        Self::from_payload(
+            6,
+            ErrorPayload {
                 code: "transport_failed".to_owned(),
                 message: "Check the service connection and try again.".to_owned(),
                 effect: "none".to_owned(),
                 details: json!({ "operation": operation.wire() }),
             },
-        }
+        )
     }
 
     fn incompatible(supported: Vec<u16>) -> Self {
-        Self {
-            exit_code: 6,
-            payload: ErrorPayload {
+        Self::from_payload(
+            6,
+            ErrorPayload {
                 code: "incompatible_server".to_owned(),
                 message: "Use a compatible Slipstream client and service.".to_owned(),
                 effect: "none".to_owned(),
@@ -553,25 +622,25 @@ impl CommandFailure {
                     "supportedContractVersions": supported,
                 }),
             },
-        }
+        )
     }
 
     fn limit_exceeded(limit_name: &str, limit: usize, actual: usize) -> Self {
-        Self {
-            exit_code: 2,
-            payload: ErrorPayload {
+        Self::from_payload(
+            2,
+            ErrorPayload {
                 code: "limit_exceeded".to_owned(),
                 message: "Reduce the request and try again.".to_owned(),
                 effect: "none".to_owned(),
                 details: json!({ "limitName": limit_name, "limit": limit, "actual": actual }),
             },
-        }
+        )
     }
 
     fn local_input(path: Option<&str>) -> Self {
-        Self {
-            exit_code: 6,
-            payload: ErrorPayload {
+        Self::from_payload(
+            6,
+            ErrorPayload {
                 code: "local_io_failed".to_owned(),
                 message: "Check the local input file and try again.".to_owned(),
                 effect: "none".to_owned(),
@@ -581,7 +650,7 @@ impl CommandFailure {
                     "fileCommitted": false,
                 }),
             },
-        }
+        )
     }
 
     fn local_credential(path: Option<&str>) -> Self {
@@ -597,6 +666,7 @@ impl CommandFailure {
                     "fileCommitted": false,
                 }),
             },
+            data: None,
         }
     }
 
@@ -609,6 +679,7 @@ impl CommandFailure {
                 effect: "none".to_owned(),
                 details: json!({ "operation": operation.wire() }),
             },
+            data: None,
         }
     }
 
@@ -621,6 +692,7 @@ impl CommandFailure {
                 effect: "none".to_owned(),
                 details: json!({ "operation": operation.wire() }),
             },
+            data: None,
         }
     }
 
@@ -636,13 +708,14 @@ impl CommandFailure {
                     "retryAfterSeconds": retry_after_seconds,
                 }),
             },
+            data: None,
         }
     }
 
     fn unknown(identity: &MutationIdentity) -> Self {
-        Self {
-            exit_code: 7,
-            payload: ErrorPayload {
+        Self::from_payload(
+            7,
+            ErrorPayload {
                 code: "outcome_unknown".to_owned(),
                 message: "Inspect the current state with a read command before continuing."
                     .to_owned(),
@@ -654,13 +727,13 @@ impl CommandFailure {
                     "albumName": identity.album_name,
                 }),
             },
-        }
+        )
     }
 
     fn interrupted_unknown(identity: &MutationIdentity) -> Self {
-        Self {
-            exit_code: 130,
-            payload: ErrorPayload {
+        Self::from_payload(
+            130,
+            ErrorPayload {
                 code: "outcome_unknown".to_owned(),
                 message: "The command was interrupted and the outcome is unknown. Inspect the current state before continuing.".to_owned(),
                 effect: "unknown".to_owned(),
@@ -671,7 +744,59 @@ impl CommandFailure {
                     "albumName": identity.album_name,
                 }),
             },
-        }
+        )
+    }
+
+    /// A mixed Photo batch: at least one sibling decision committed while
+    /// at least one requested Photo conflicted or was missing.
+    fn photo_batch_partial(counts: &Value) -> Self {
+        Self::from_payload(
+            5,
+            ErrorPayload {
+                code: "partial_result".to_owned(),
+                message: "Read the confirmed sibling outcomes, then re-check each conflicting or missing Photo with a fresh version.".to_owned(),
+                effect: "partial".to_owned(),
+                details: json!({ "counts": counts }),
+            },
+        )
+    }
+
+    /// A batch whose every item conflicted; the details identify the first
+    /// conflicting Photo in request order.
+    fn photo_batch_conflict(reference: &str, current_version: &str) -> Self {
+        Self::from_payload(
+            4,
+            ErrorPayload {
+                code: "conflict".to_owned(),
+                message: "Read the current decisions and retry with their fresh versions."
+                    .to_owned(),
+                effect: "none".to_owned(),
+                details: json!({
+                    "resource": "photo",
+                    "reference": reference,
+                    "currentVersion": current_version,
+                }),
+            },
+        )
+    }
+
+    /// A batch whose every item was missing; the details identify the first
+    /// missing Photo in request order.
+    fn photo_batch_missing(reference: &str) -> Self {
+        Self::from_payload(
+            3,
+            ErrorPayload {
+                code: "not_found".to_owned(),
+                message: "Check the requested Photo IDs against a fresh query.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({ "resource": "photo", "reference": reference }),
+            },
+        )
+    }
+
+    fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(Box::new(data));
+        self
     }
 }
 
@@ -1006,6 +1131,69 @@ struct MembershipInput {
     photo_ids: Vec<String>,
 }
 
+/// One identified Photo together with the decision version the caller
+/// observed before intending to write.
+#[derive(Clone, Debug)]
+struct DecisionTarget {
+    photo_id: String,
+    if_version: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DecisionField {
+    SelectionState,
+    Rating,
+}
+
+impl DecisionField {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::SelectionState => "selectionState",
+            Self::Rating => "rating",
+        }
+    }
+}
+
+/// One validated decision request shared by the single-Photo and batch forms.
+/// A single-Photo command is a one-item batch.
+#[derive(Debug)]
+struct PreparedDecision {
+    field: DecisionField,
+    value: Value,
+    photos: Vec<DecisionTarget>,
+}
+
+impl PreparedDecision {
+    fn body(&self) -> Value {
+        json!({
+            "field": self.field.wire(),
+            "value": self.value,
+            "photos": self.photos.iter().map(|photo| json!({
+                "photoId": photo.photo_id,
+                "ifVersion": photo.if_version,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// The one accepted `photos set --input` document shape. Deserializing it
+/// rejects unknown keys, duplicate keys, trailing content, and non-object
+/// documents, including inside each Photo item.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecisionInput {
+    field: String,
+    value: Value,
+    photos: Vec<DecisionInputPhoto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecisionInputPhoto {
+    photo_id: String,
+    if_version: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AlbumCreationWire {
@@ -1050,6 +1238,47 @@ struct AlbumReorderWire {
     album: AlbumSummary,
     ordered_photo_ids: Vec<String>,
     reordered: bool,
+}
+
+/// One confirmed checked Photo decision batch from the service.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoDecisionWire {
+    results: Vec<PhotoDecisionItemWire>,
+    counts: PhotoDecisionCountsWire,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoDecisionCountsWire {
+    changed: usize,
+    unchanged: usize,
+    conflict: usize,
+    missing: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoDecisionItemWire {
+    photo_id: String,
+    outcome: String,
+    prior: Option<PhotoDecisionFactsWire>,
+    current: Option<PhotoDecisionSnapshotWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoDecisionFactsWire {
+    selection_state: SelectionState,
+    rating: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhotoDecisionSnapshotWire {
+    selection_state: SelectionState,
+    rating: u8,
+    decision_version: String,
 }
 
 struct ServiceClient {
@@ -1362,10 +1591,7 @@ fn validated_route_failure(
         "conflict" | "name_conflict" => 4,
         _ => 6,
     };
-    Some(CommandFailure {
-        exit_code,
-        payload: error,
-    })
+    Some(CommandFailure::from_payload(exit_code, error))
 }
 
 fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFailure> {
@@ -1559,6 +1785,107 @@ async fn read_membership_ids(
     parse_membership_ids(read_input_bytes(input).await?, limit_name)
 }
 
+/// Validates the complete decision document before any write is attempted.
+/// The refusal order mirrors the service's own admission order, so the same
+/// request is refused for the same reason whichever boundary sees it first.
+fn parse_decision_input(bytes: Vec<u8>) -> Result<PreparedDecision, CommandFailure> {
+    let document: DecisionInput = serde_json::from_slice(&bytes).map_err(|_| {
+        CommandFailure::invalid(
+            "input",
+            "The input must be one JSON object with exactly field, value, and photos.",
+        )
+    })?;
+    let field = match document.field.as_str() {
+        "selectionState" => DecisionField::SelectionState,
+        "rating" => DecisionField::Rating,
+        _ => {
+            return Err(CommandFailure::invalid(
+                "field",
+                "The decision field must be selectionState or rating.",
+            ));
+        }
+    };
+    let value_matches_field = match field {
+        DecisionField::SelectionState => document
+            .value
+            .as_str()
+            .is_some_and(|value| matches!(value, "undecided" | "selected" | "rejected")),
+        DecisionField::Rating => document.value.as_u64().is_some_and(|rating| rating <= 5),
+    };
+    if !value_matches_field {
+        return Err(CommandFailure::invalid(
+            "value",
+            "The decision value must match the field's type and range.",
+        ));
+    }
+    if document.photos.len() > MAXIMUM_MUTATION_PHOTO_IDS {
+        return Err(CommandFailure::limit_exceeded(
+            "photoIds",
+            MAXIMUM_MUTATION_PHOTO_IDS,
+            document.photos.len(),
+        ));
+    }
+    if document.photos.is_empty()
+        || document
+            .photos
+            .iter()
+            .any(|photo| photo.photo_id.is_empty() || photo.if_version.is_empty())
+        || document
+            .photos
+            .iter()
+            .map(|photo| photo.photo_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != document.photos.len()
+    {
+        return Err(CommandFailure::invalid(
+            "photos",
+            "Photo items must be a nonempty ordered list of distinct Photo IDs with nonempty versions.",
+        ));
+    }
+    Ok(PreparedDecision {
+        field,
+        value: document.value,
+        photos: document
+            .photos
+            .into_iter()
+            .map(|photo| DecisionTarget {
+                photo_id: photo.photo_id,
+                if_version: photo.if_version,
+            })
+            .collect(),
+    })
+}
+
+async fn read_decision_input(input: &str) -> Result<PreparedDecision, CommandFailure> {
+    parse_decision_input(read_input_bytes(input).await?)
+}
+
+/// Builds the one-item batch shared by the single-Photo forms. The command
+/// was semantically validated before any network access, so each required
+/// piece is present.
+fn single_photo_decision(args: &PhotoDecisionArgs) -> PreparedDecision {
+    let (field, value) = if let Some(selection) = args.selection {
+        (
+            DecisionField::SelectionState,
+            serde_json::to_value(selection).expect("selection values serialize"),
+        )
+    } else {
+        (
+            DecisionField::Rating,
+            json!(args.rating.expect("one decision field is present")),
+        )
+    };
+    PreparedDecision {
+        field,
+        value,
+        photos: vec![DecisionTarget {
+            photo_id: args.photo_id.clone().expect("a Photo ID is present"),
+            if_version: args.if_version.clone().expect("a version is present"),
+        }],
+    }
+}
+
 /// Checks that two returned ID arrays are an order-preserving partition of the
 /// submitted IDs: no omission, no duplication, and request order preserved.
 fn request_order_partition(submitted: &[String], first: &[String], second: &[String]) -> bool {
@@ -1681,6 +2008,139 @@ fn confirmed_membership_result(
     }
 }
 
+/// Validates one confirmed decision batch against the submitted request and
+/// derives the CLI reference data shape, partition, and exit code. Every
+/// result must match its requested Photo and outcome-specific key set, the
+/// reported counts must count those outcomes, and every changed or
+/// unchanged result must repeat the requested decision value in its
+/// current snapshot; anything else is an unknown outcome rather than a
+/// claimed partition.
+fn confirmed_decision_result(
+    identity: &MutationIdentity,
+    prepared: &PreparedDecision,
+    result: PhotoDecisionWire,
+) -> Result<Value, CommandFailure> {
+    let unknown = || CommandFailure::unknown(identity);
+    if result.results.len() != prepared.photos.len() {
+        return Err(unknown());
+    }
+    let mut counted = [0_usize; 4];
+    let mut first_conflict: Option<(String, String)> = None;
+    let mut first_missing: Option<String> = None;
+    let mut items = Vec::with_capacity(result.results.len());
+    // A changed or unchanged result reports the requested decision value,
+    // so any other current value is an untrustworthy response.
+    let echoed_request = |current: &PhotoDecisionSnapshotWire| match prepared.field {
+        DecisionField::SelectionState => serde_json::to_value(&current.selection_state)
+            .is_ok_and(|snapshot| snapshot == prepared.value),
+        DecisionField::Rating => prepared.value.as_u64() == Some(u64::from(current.rating)),
+    };
+    for (item, submitted_photo) in result.results.into_iter().zip(&prepared.photos) {
+        if item.photo_id != submitted_photo.photo_id {
+            return Err(unknown());
+        }
+        let mut value = json!({
+            "photoId": item.photo_id,
+            "outcome": item.outcome,
+        });
+        let current_valid = |current: &PhotoDecisionSnapshotWire| {
+            !current.decision_version.is_empty() && current.rating <= 5
+        };
+        match item.outcome.as_str() {
+            "changed" => {
+                let (Some(prior), Some(current)) = (&item.prior, &item.current) else {
+                    return Err(unknown());
+                };
+                if prior.rating > 5 || !current_valid(current) || !echoed_request(current) {
+                    return Err(unknown());
+                }
+                counted[0] += 1;
+                value["prior"] = json!({
+                    "selectionState": prior.selection_state,
+                    "rating": prior.rating,
+                });
+                value["current"] = json!({
+                    "selectionState": current.selection_state,
+                    "rating": current.rating,
+                    "decisionVersion": current.decision_version,
+                });
+            }
+            "unchanged" | "conflict" => {
+                if item.prior.is_some() {
+                    return Err(unknown());
+                }
+                let Some(current) = &item.current else {
+                    return Err(unknown());
+                };
+                if !current_valid(current) {
+                    return Err(unknown());
+                }
+                if item.outcome == "unchanged" {
+                    if !echoed_request(current) {
+                        return Err(unknown());
+                    }
+                    counted[1] += 1;
+                } else {
+                    counted[2] += 1;
+                    if first_conflict.is_none() {
+                        first_conflict =
+                            Some((item.photo_id.clone(), current.decision_version.clone()));
+                    }
+                }
+                value["current"] = json!({
+                    "selectionState": current.selection_state,
+                    "rating": current.rating,
+                    "decisionVersion": current.decision_version,
+                });
+            }
+            "missing" => {
+                if item.prior.is_some() || item.current.is_some() {
+                    return Err(unknown());
+                }
+                counted[3] += 1;
+                if first_missing.is_none() {
+                    first_missing = Some(item.photo_id.clone());
+                }
+            }
+            _ => return Err(unknown()),
+        }
+        items.push(value);
+    }
+    let [changed, unchanged, conflict, missing] = counted;
+    if (changed, unchanged, conflict, missing)
+        != (
+            result.counts.changed,
+            result.counts.unchanged,
+            result.counts.conflict,
+            result.counts.missing,
+        )
+    {
+        return Err(unknown());
+    }
+    let counts = json!({
+        "changed": changed,
+        "unchanged": unchanged,
+        "conflict": conflict,
+        "missing": missing,
+    });
+    let data = json!({ "results": items, "counts": counts });
+    if conflict + missing == 0 {
+        return Ok(data);
+    }
+    if changed + unchanged > 0 {
+        return Err(CommandFailure::photo_batch_partial(&counts).with_data(data));
+    }
+    if conflict > 0 {
+        let (reference, current_version) =
+            first_conflict.expect("a conflicting result was counted");
+        return Err(
+            CommandFailure::photo_batch_conflict(&reference, &current_version).with_data(data),
+        );
+    }
+    let reference = first_missing.expect("a missing result was counted");
+    Err(CommandFailure::photo_batch_missing(&reference).with_data(data))
+}
+
 fn preview_valid(preview: &PreviewFacts) -> bool {
     match preview.state {
         PreviewState::Ready => {
@@ -1743,8 +2203,9 @@ async fn execute(
     let origin = service_origin(cli, environment)?;
     let token_path = access_token_path(cli)?;
     let token = read_access_token(token_path).await?;
-    // The complete membership document validates before any network access,
-    // so a local input failure can never depend on service reachability.
+    // The complete membership and decision documents validate before any
+    // network access, so a local input failure can never depend on service
+    // reachability.
     let pending_membership = match &cli.command {
         Command::Albums {
             command: AlbumCommand::Add(args),
@@ -1755,6 +2216,15 @@ async fn execute(
         Command::Albums {
             command: AlbumCommand::Reorder(args),
         } => Some(read_membership_ids(&args.input, MembershipKind::Reorder.limit_name()).await?),
+        _ => None,
+    };
+    let pending_decision = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Set(args),
+        } => match &args.input {
+            Some(input) => Some(read_decision_input(input).await?),
+            None => None,
+        },
         _ => None,
     };
     let client = ServiceClient::new(origin, token)?;
@@ -2100,6 +2570,35 @@ async fn execute(
                     );
                 Ok(value)
             }
+            Command::Photos {
+                command: PhotoCommand::Set(args),
+            } => {
+                // The decision document was validated before connecting; the
+                // single-Photo forms are a one-item batch of the same shape.
+                let prepared = match pending_decision {
+                    Some(prepared) => prepared,
+                    None => single_photo_decision(args),
+                };
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: prepared
+                        .photos
+                        .iter()
+                        .map(|photo| photo.photo_id.clone())
+                        .collect(),
+                    album_id: None,
+                    album_name: None,
+                };
+                let result: PhotoDecisionWire = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "photo-decisions"]),
+                        prepared.body(),
+                    )
+                    .await?;
+                confirmed_decision_result(&identity, &prepared, result)
+            }
         }
     }
     .await;
@@ -2110,6 +2609,11 @@ async fn execute(
         }
         Err(mut failure) => {
             redact_error(&mut failure.payload, &client.token);
+            // Attached failure data is server-controlled on the same
+            // untrusted path as the payload.
+            if let Some(data) = failure.data.as_mut() {
+                redact_value(data, &client.token);
+            }
             Err(failure)
         }
     }
@@ -2178,6 +2682,29 @@ fn validate_command(command: &Command) -> Result<(), CommandFailure> {
                 return Err(CommandFailure::invalid(
                     "order",
                     "album-order requires an Album source.",
+                ));
+            }
+            Ok(())
+        }
+        Command::Photos {
+            command: PhotoCommand::Set(args),
+        } if args.input.is_none() => {
+            if args.photo_id.is_none() {
+                return Err(CommandFailure::invalid(
+                    "arguments",
+                    "photos set needs PHOTO_ID with --selection or --rating and --if-version, or --input FILE.",
+                ));
+            }
+            if args.selection.is_none() && args.rating.is_none() {
+                return Err(CommandFailure::invalid(
+                    "arguments",
+                    "The single-Photo forms need exactly one of --selection or --rating.",
+                ));
+            }
+            if args.if_version.is_none() {
+                return Err(CommandFailure::invalid(
+                    "if-version",
+                    "The single-Photo forms need the decision version observed by a prior read.",
                 ));
             }
             Ok(())
@@ -2322,7 +2849,16 @@ pub async fn invoke_until(
     let (exit_code, envelope) = tokio::select! {
         result = &mut command => match result {
             Ok(Ok(data)) => (0, Envelope::success(data)),
-            Ok(Err(failure)) => (failure.exit_code, Envelope::error(failure.payload)),
+            Ok(Err(failure)) => {
+                let envelope = match failure.data {
+                    Some(data) if failure.payload.code == "partial_result" => {
+                        Envelope::partial(*data, failure.payload)
+                    }
+                    Some(data) => Envelope::error_with_data(*data, failure.payload),
+                    None => Envelope::error(failure.payload),
+                };
+                (failure.exit_code, envelope)
+            }
             Err(_) => {
                 let failure = match admission.admitted() {
                     Some(identity) => CommandFailure::unknown(&identity),
@@ -2787,18 +3323,20 @@ mod tests {
         let parsed = parse_membership_ids(document(&ids(2)), "mutationPhotoIdsMaximum").unwrap();
         assert_eq!(parsed, ids(2));
         for invalid in [
-            b"".as_slice(),
-            b"{".as_slice(),
-            b"[]".as_slice(),
-            b"\"photoIds\"".as_slice(),
-            b"{\"photoIds\": []}".as_slice(),
-            b"{\"photoIds\": [\"\"]}".as_slice(),
-            b"{\"photoIds\": [\"a\", \"a\"]}".as_slice(),
-            b"{\"photoIds\": [\"a\"], \"photoIds\": [\"b\"]}".as_slice(),
-            b"{\"photoIds\": [\"a\"], \"extra\": 1}".as_slice(),
-            b"{\"photoIds\": [\"a\"]} trailing".as_slice(),
-            b"{\"photoIds\": [1]}".as_slice(),
-            b"\xff\xfe{\"photoIds\": [\"a\"]}".as_slice(),
+            b"".as_slice().to_vec(),
+            b"{".as_slice().to_vec(),
+            b"[]".as_slice().to_vec(),
+            b"\"photoIds\"".as_slice().to_vec(),
+            b"{\"photoIds\": []}".as_slice().to_vec(),
+            b"{\"photoIds\": [\"\"]}".as_slice().to_vec(),
+            b"{\"photoIds\": [\"a\", \"a\"]}".as_slice().to_vec(),
+            b"{\"photoIds\": [\"a\"], \"photoIds\": [\"b\"]}"
+                .as_slice()
+                .to_vec(),
+            b"{\"photoIds\": [\"a\"], \"extra\": 1}".as_slice().to_vec(),
+            b"{\"photoIds\": [\"a\"]} trailing".as_slice().to_vec(),
+            b"{\"photoIds\": [1]}".as_slice().to_vec(),
+            b"\xff\xfe{\"photoIds\": [\"a\"]}".as_slice().to_vec(),
         ] {
             let failure =
                 parse_membership_ids(invalid.to_vec(), "mutationPhotoIdsMaximum").unwrap_err();
@@ -2870,5 +3408,388 @@ mod tests {
             &strings(&["a", "b", "c"]),
             &strings(&["c", "d"])
         ));
+    }
+
+    #[test]
+    fn photo_decision_parser_requires_one_complete_form() {
+        let single = |arguments: &[&str]| {
+            let mut invocation = vec!["slipstream", "photos", "set"];
+            invocation.extend(arguments);
+            Cli::try_parse_from(invocation)
+        };
+        assert!(single(&["p1", "--selection", "selected", "--if-version", "v"]).is_ok());
+        assert!(single(&["p1", "--selection", "undecided", "--if-version", "v"]).is_ok());
+        assert!(single(&["p1", "--rating", "3", "--if-version", "v"]).is_ok());
+        assert!(single(&["p1", "--rating", "0", "--if-version", "v"]).is_ok());
+        assert!(single(&["--input", "decisions.json"]).is_ok());
+        assert!(single(&["--input", "-"]).is_ok());
+        // Selection and Rating cannot change in the same command, and the
+        // batch form cannot be mixed with the single-Photo options.
+        assert!(
+            single(&[
+                "p1",
+                "--selection",
+                "selected",
+                "--rating",
+                "3",
+                "--if-version",
+                "v"
+            ])
+            .is_err()
+        );
+        assert!(single(&["--input", "d.json", "--if-version", "v"]).is_err());
+        assert!(single(&["--input", "d.json", "p1"]).is_err());
+        assert!(single(&["--input", "d.json", "--selection", "selected"]).is_err());
+        // Unknown values and out-of-range ratings are parser errors.
+        assert!(single(&["p1", "--selection", "all", "--if-version", "v"]).is_err());
+        assert!(single(&["p1", "--rating", "6", "--if-version", "v"]).is_err());
+        assert!(single(&["p1", "--rating", "-1", "--if-version", "v"]).is_err());
+        assert!(single(&["--if-version", "v"]).is_err());
+        // The single-Photo forms must be complete before any network access.
+        let missing_field = single(&["p1", "--if-version", "v"]).expect("the shape parses");
+        assert!(validate_command(&missing_field.command).is_err());
+        let missing_version = single(&["p1", "--selection", "selected"]).expect("the shape parses");
+        assert!(validate_command(&missing_version.command).is_err());
+    }
+
+    #[test]
+    fn decision_input_validates_the_complete_document() {
+        let id = |index: usize| format!("00000000-0000-4000-8000-{index:012x}");
+        let document = |field: Value, value: Value, photos: Value| {
+            serde_json::to_vec(&json!({ "field": field, "value": value, "photos": photos }))
+                .unwrap()
+        };
+        let items = |count: usize| {
+            (0..count)
+                .map(|index| json!({ "photoId": id(index), "ifVersion": "v1" }))
+                .collect::<Vec<_>>()
+        };
+        let parsed = |bytes: Vec<u8>| parse_decision_input(bytes).map(|prepared| prepared.body());
+        assert_eq!(
+            parsed(document(
+                "selectionState".into(),
+                "rejected".into(),
+                json!(items(2))
+            ))
+            .unwrap(),
+            json!({
+                "field": "selectionState",
+                "value": "rejected",
+                "photos": [
+                    { "photoId": id(0), "ifVersion": "v1" },
+                    { "photoId": id(1), "ifVersion": "v1" }
+                ]
+            })
+        );
+        assert!(parsed(document("rating".into(), 4.into(), json!(items(1)))).is_ok());
+        assert!(parsed(document("rating".into(), 0.into(), json!(items(1)))).is_ok());
+
+        let invalid = |bytes: Vec<u8>, argument: &str| {
+            let failure = parse_decision_input(bytes).unwrap_err();
+            assert_eq!(failure.exit_code, 2);
+            assert_eq!(failure.payload.code, "invalid_input");
+            assert_eq!(failure.payload.details["argument"], argument);
+        };
+        for (bytes, argument) in [
+            (b"".as_slice().to_vec(), "input"),
+            (b"{".as_slice().to_vec(), "input"),
+            (b"[]".as_slice().to_vec(), "input"),
+            (b"\"x\"".as_slice().to_vec(), "input"),
+            (b"\xff\xfe{}".as_slice().to_vec(), "input"),
+            (b"{\"field\": \"rating\"}".as_slice().to_vec(), "input"),
+            (
+                b"{\"field\": \"rating\", \"value\": 4, \"photos\": [], \"extra\": 1}".as_slice().to_vec(),
+                "input",
+            ),
+            (
+                b"{\"field\": \"rating\", \"field\": \"rating\", \"value\": 4, \"photos\": []}".as_slice().to_vec(),
+                "input",
+            ),
+            (
+                b"{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\", \"ifVersion\": \"w\"}]}".as_slice().to_vec(),
+                "input",
+            ),
+            (
+                b"{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": 1, \"ifVersion\": \"v\"}]}".as_slice().to_vec(),
+                "input",
+            ),
+            (
+                b"{\"field\": \"rating\", \"value\": 4, \"photos\": []} trailing".as_slice().to_vec(),
+                "input",
+            ),
+            (document("selection".into(), "selected".into(), json!(items(1))), "field"),
+            (document(5.into(), "selected".into(), json!(items(1))), "input"),
+            (document("rating".into(), "4".into(), json!(items(1))), "value"),
+            (document("rating".into(), 4.5.into(), json!(items(1))), "value"),
+            (document("rating".into(), 6.into(), json!(items(1))), "value"),
+            (document("rating".into(), (-1).into(), json!(items(1))), "value"),
+            (
+                document("selectionState".into(), 1.into(), json!(items(1))),
+                "value",
+            ),
+            (
+                document("selectionState".into(), "picked".into(), json!(items(1))),
+                "value",
+            ),
+            (
+                document("rating".into(), 4.into(), serde_json::json!([])),
+                "photos",
+            ),
+            (
+                document(
+                    "rating".into(),
+                    4.into(),
+                    json!([
+                        { "photoId": id(0), "ifVersion": "v1" },
+                        { "photoId": id(0), "ifVersion": "v2" }
+                    ])
+                ),
+                "photos",
+            ),
+            (
+                document("rating".into(), 4.into(), json!([{ "photoId": "", "ifVersion": "v1" }])),
+                "photos",
+            ),
+            (
+                document("rating".into(), 4.into(), json!([{ "photoId": id(0), "ifVersion": "" }])),
+                "photos",
+            ),
+        ] {
+            invalid(bytes.to_vec(), argument);
+        }
+
+        let over_limit = parse_decision_input(document(
+            "rating".into(),
+            4.into(),
+            json!(items(MAXIMUM_MUTATION_PHOTO_IDS + 1)),
+        ))
+        .unwrap_err();
+        assert_eq!(over_limit.exit_code, 2);
+        assert_eq!(over_limit.payload.code, "limit_exceeded");
+        assert_eq!(
+            over_limit.payload.details,
+            json!({
+                "limitName": "photoIds",
+                "limit": MAXIMUM_MUTATION_PHOTO_IDS,
+                "actual": MAXIMUM_MUTATION_PHOTO_IDS + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn decision_batches_partition_from_validated_results_only() {
+        let identity = MutationIdentity {
+            operation: Operation::PhotosSet,
+            photo_ids: vec!["a".to_owned(), "b".to_owned()],
+            album_id: None,
+            album_name: None,
+        };
+        let submitted = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| DecisionTarget {
+                    photo_id: (*id).to_owned(),
+                    if_version: "v1".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let request = |ids: &[&str]| PreparedDecision {
+            field: DecisionField::Rating,
+            value: json!(4),
+            photos: submitted(ids),
+        };
+        let facts = |selection: &str, rating: u8| PhotoDecisionFactsWire {
+            selection_state: serde_json::from_value::<SelectionState>(json!(selection)).unwrap(),
+            rating,
+        };
+        let snapshot = |selection: &str, rating: u8, version: &str| PhotoDecisionSnapshotWire {
+            selection_state: serde_json::from_value::<SelectionState>(json!(selection)).unwrap(),
+            rating,
+            decision_version: version.to_owned(),
+        };
+        let changed = |id: &str, version: &str| PhotoDecisionItemWire {
+            photo_id: id.to_owned(),
+            outcome: "changed".to_owned(),
+            prior: Some(facts("undecided", 0)),
+            current: Some(snapshot("selected", 4, version)),
+        };
+        let unchanged = |id: &str, version: &str| PhotoDecisionItemWire {
+            photo_id: id.to_owned(),
+            outcome: "unchanged".to_owned(),
+            prior: None,
+            current: Some(snapshot("undecided", 4, version)),
+        };
+        let conflict = |id: &str, version: &str| PhotoDecisionItemWire {
+            photo_id: id.to_owned(),
+            outcome: "conflict".to_owned(),
+            prior: None,
+            current: Some(snapshot("rejected", 2, version)),
+        };
+        let missing = |id: &str| PhotoDecisionItemWire {
+            photo_id: id.to_owned(),
+            outcome: "missing".to_owned(),
+            prior: None,
+            current: None,
+        };
+        let wire = |results: Vec<PhotoDecisionItemWire>, counts: [usize; 4]| PhotoDecisionWire {
+            results,
+            counts: PhotoDecisionCountsWire {
+                changed: counts[0],
+                unchanged: counts[1],
+                conflict: counts[2],
+                missing: counts[3],
+            },
+        };
+
+        // Only changed or unchanged results keep status ok and exit 0.
+        let confirmed = confirmed_decision_result(
+            &identity,
+            &request(&["a", "b"]),
+            wire(vec![changed("a", "v2"), conflict("b", "v9")], [1, 0, 1, 0]),
+        )
+        .unwrap_err();
+        assert_eq!(confirmed.exit_code, 5);
+        assert_eq!(confirmed.payload.code, "partial_result");
+        assert_eq!(confirmed.payload.effect, "partial");
+        assert_eq!(
+            confirmed.payload.details,
+            json!({ "counts": { "changed": 1, "unchanged": 0, "conflict": 1, "missing": 0 } })
+        );
+        assert_eq!(
+            confirmed.data.as_ref().unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let (code, exit, reference) = {
+            let failure = confirmed_decision_result(
+                &identity,
+                &request(&["a", "b"]),
+                wire(vec![conflict("a", "v8"), conflict("b", "v9")], [0, 0, 2, 0]),
+            )
+            .unwrap_err();
+            assert_eq!(failure.exit_code, 4);
+            assert_eq!(failure.payload.effect, "none");
+            assert_eq!(
+                failure.payload.details,
+                json!({ "resource": "photo", "reference": "a", "currentVersion": "v8" })
+            );
+            assert_eq!(failure.data.as_ref().unwrap()["counts"]["conflict"], 2);
+            (
+                failure.payload.code.clone(),
+                failure.exit_code,
+                failure.payload.details["reference"].clone(),
+            )
+        };
+        assert_eq!(
+            (code.as_str(), exit, reference.as_str().unwrap()),
+            ("conflict", 4, "a")
+        );
+
+        let missing_failure = confirmed_decision_result(
+            &identity,
+            &request(&["a", "b"]),
+            wire(vec![missing("a"), missing("b")], [0, 0, 0, 2]),
+        )
+        .unwrap_err();
+        assert_eq!(missing_failure.exit_code, 3);
+        assert_eq!(missing_failure.payload.code, "not_found");
+        assert_eq!(
+            missing_failure.payload.details,
+            json!({ "resource": "photo", "reference": "a" })
+        );
+
+        let ok = confirmed_decision_result(
+            &identity,
+            &request(&["a", "b"]),
+            wire(vec![changed("a", "v2"), changed("b", "v3")], [2, 0, 0, 0]),
+        )
+        .unwrap();
+        assert_eq!(
+            ok["counts"],
+            json!({ "changed": 2, "unchanged": 0, "conflict": 0, "missing": 0 })
+        );
+        assert_eq!(
+            ok["results"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["current", "outcome", "photoId", "prior"]
+        );
+
+        let ok_mixed = confirmed_decision_result(
+            &identity,
+            &request(&["a", "b"]),
+            wire(vec![changed("a", "v2"), unchanged("b", "v2")], [1, 1, 0, 0]),
+        )
+        .unwrap();
+        assert_eq!(
+            ok_mixed["counts"],
+            json!({ "changed": 1, "unchanged": 1, "conflict": 0, "missing": 0 })
+        );
+
+        for (label, wire_result) in [
+            (
+                "reordered results",
+                wire(vec![changed("b", "v2"), changed("a", "v3")], [2, 0, 0, 0]),
+            ),
+            (
+                "counts do not match outcomes",
+                wire(vec![changed("a", "v2"), conflict("b", "v9")], [2, 0, 0, 0]),
+            ),
+            (
+                "short result array",
+                wire(vec![changed("a", "v2")], [1, 0, 0, 0]),
+            ),
+            (
+                "changed without prior",
+                PhotoDecisionWire {
+                    results: vec![PhotoDecisionItemWire {
+                        photo_id: "a".to_owned(),
+                        outcome: "changed".to_owned(),
+                        prior: None,
+                        current: Some(snapshot("selected", 3, "v2")),
+                    }],
+                    counts: PhotoDecisionCountsWire {
+                        changed: 1,
+                        unchanged: 0,
+                        conflict: 0,
+                        missing: 0,
+                    },
+                },
+            ),
+            (
+                "changed current does not echo the requested value",
+                wire(
+                    vec![PhotoDecisionItemWire {
+                        photo_id: "a".to_owned(),
+                        outcome: "changed".to_owned(),
+                        prior: Some(facts("undecided", 0)),
+                        current: Some(snapshot("selected", 3, "v2")),
+                    }],
+                    [1, 0, 0, 0],
+                ),
+            ),
+            (
+                "unchanged current does not echo the requested value",
+                wire(
+                    vec![PhotoDecisionItemWire {
+                        photo_id: "a".to_owned(),
+                        outcome: "unchanged".to_owned(),
+                        prior: None,
+                        current: Some(snapshot("undecided", 2, "v2")),
+                    }],
+                    [0, 1, 0, 0],
+                ),
+            ),
+        ] {
+            let failure = confirmed_decision_result(&identity, &request(&["a", "b"]), wire_result)
+                .unwrap_err();
+            assert_eq!(failure.exit_code, 7, "for {label}");
+            assert_eq!(failure.payload.code, "outcome_unknown", "for {label}");
+            assert_eq!(failure.payload.details["operation"], "photos-set");
+        }
     }
 }

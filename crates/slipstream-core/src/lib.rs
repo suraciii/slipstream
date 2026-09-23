@@ -42,15 +42,18 @@ pub use domain::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,
     AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
     AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, CaptureTimeBound,
-    CheckedAlbumMutation, CheckedAlbumMutationResult, DiscoveredOriginal,
-    MAXIMUM_FOLDER_ALBUM_PHOTOS, OriginalErrorCategory, OriginalFacts, OriginalFingerprint,
-    OriginalKind, OriginalRecord, OriginalScanError, PHOTO_STATE_BATCH_MAX, PhotoAlbumMembership,
-    PhotoQuery, PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection,
-    PhotoQuerySource, PhotoRead, PhotoRecord, PhotoStateBatchApplied,
-    PhotoStateBatchChangedElsewhere, PhotoStateBatchItem, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    PreviewSource, PreviewState, RelativeOriginalPath, ScanResult, ScanSnapshot, SelectionState,
+    CheckedAlbumMutation, CheckedAlbumMutationResult, CheckedPhotoDecisionCounts,
+    CheckedPhotoDecisionItem, CheckedPhotoDecisionItemResult, CheckedPhotoDecisionMutation,
+    CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult, DiscoveredOriginal,
+    MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
+    OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError, PHOTO_STATE_BATCH_MAX,
+    PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery,
+    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
+    PhotoRead, PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
+    PhotoStateBatchItem, PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult,
+    PhotoStateField, PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue,
+    PreviewSeed, PreviewSeedResult, PreviewSource, PreviewState, RelativeOriginalPath, ScanResult,
+    ScanSnapshot, SelectionState,
 };
 pub use identity::{InvalidModificationTime, original_id, source_revision, standalone_photo_id};
 pub use library::{
@@ -60,7 +63,7 @@ pub use native::{
     InspectedPreview, InspectedPreviewSource, NativePreview, NativePreviewError, PreviewError,
     extract_embedded_jpeg, inspect_matching_jpeg, inspect_preview_source,
 };
-pub use persistence::{AlbumWriteError, MutationError};
+pub use persistence::{AlbumWriteError, MutationError, PhotoDecisionWriteError};
 pub use preview::{
     DEFAULT_PREVIEW_QUEUE_CAPACITY, DEFAULT_PREVIEW_WAITER_CAPACITY, DEFAULT_PREVIEW_WORKERS,
     PreviewFacts, PreviewFailure, PreviewFailureKind, PreviewReady, PreviewRequestResult,

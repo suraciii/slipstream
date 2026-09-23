@@ -8,8 +8,8 @@ use crate::{
     wire::{
         AlbumListItemWire, CapabilitiesResponse, CapabilityLimitsWire, CliAlbumChangeWire,
         CliAlbumCreationWire, CliAlbumSummaryWire, CliFolderListResponse, CliListResponse,
-        CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire, CliScanStatusWire,
-        CliStatusResponse, MissingItemWire, PhotoListItemWire,
+        CliPhotoDecisionResultWire, CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire,
+        CliScanStatusWire, CliStatusResponse, MissingItemWire, PhotoListItemWire,
     },
 };
 
@@ -159,6 +159,7 @@ pub(crate) fn create_router_with_web_root(
         .route("/api/album-summaries", get(get_album_summaries))
         .route("/api/albums/{id}", get(get_album_summary))
         .route("/api/albums/{id}/changes", post(change_album))
+        .route("/api/photo-decisions", post(mutate_photo_decision))
         .route("/api/photo-queries", post(create_photo_query))
         .route("/api/photo-queries/{cursor}", get(get_photo_query_page))
         .route("/api/photos/{id}", get(get_photo))
@@ -1925,6 +1926,154 @@ fn map_album_write_error(
             "storage_failed",
             "Inspect server health and the current Album before trying again.",
             serde_json::json!({"operation": operation}),
+        ),
+    }
+}
+
+/// One bounded, version-checked Photo decision batch from a CLI client. One
+/// field and value apply to every requested Photo; each item names the
+/// observed decision version the caller intends to write against.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CliPhotoDecisionBody {
+    field: String,
+    value: Value,
+    photos: Vec<CliPhotoDecisionPhotoBody>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CliPhotoDecisionPhotoBody {
+    photo_id: String,
+    if_version: String,
+}
+
+impl CliPhotoDecisionBody {
+    fn into_mutation(self) -> CliBoundaryResult<slipstream_core::CheckedPhotoDecisionMutation> {
+        let field = match self.field.as_str() {
+            "selectionState" => slipstream_core::PhotoStateField::SelectionState,
+            "rating" => slipstream_core::PhotoStateField::Rating,
+            _ => {
+                return Err(Box::new(invalid_cli(
+                    "field",
+                    "The decision field must be selectionState or rating.",
+                )));
+            }
+        };
+        let value = match field {
+            slipstream_core::PhotoStateField::SelectionState => self
+                .value
+                .as_str()
+                .and_then(|value| match value {
+                    "undecided" => Some(SelectionState::Undecided),
+                    "selected" => Some(SelectionState::Selected),
+                    "rejected" => Some(SelectionState::Rejected),
+                    _ => None,
+                })
+                .map(slipstream_core::PhotoStateValue::Selection),
+            slipstream_core::PhotoStateField::Rating => self
+                .value
+                .as_u64()
+                .filter(|rating| *rating <= slipstream_core::MAXIMUM_PHOTO_RATING as u64)
+                .map(|rating| slipstream_core::PhotoStateValue::Rating(rating as u8)),
+        };
+        let Some(value) = value else {
+            return Err(Box::new(invalid_cli(
+                "value",
+                "The decision value must match the field's type and range.",
+            )));
+        };
+        if self.photos.len() > slipstream_core::PHOTO_STATE_BATCH_MAX {
+            return Err(Box::new(cli_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "limit_exceeded",
+                "Reduce the Photo ID list and try again.",
+                serde_json::json!({
+                    "limitName": "photoIds",
+                    "limit": slipstream_core::PHOTO_STATE_BATCH_MAX,
+                    "actual": self.photos.len()
+                }),
+            )));
+        }
+        if self.photos.is_empty()
+            || self
+                .photos
+                .iter()
+                .any(|photo| !valid_id(&photo.photo_id) || photo.if_version.is_empty())
+            || self
+                .photos
+                .iter()
+                .map(|photo| photo.photo_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.photos.len()
+        {
+            return Err(Box::new(invalid_cli(
+                "photos",
+                "Photo items must be a nonempty ordered list of distinct valid Photo IDs with nonempty versions.",
+            )));
+        }
+        Ok(slipstream_core::CheckedPhotoDecisionMutation {
+            field,
+            value,
+            photos: self
+                .photos
+                .into_iter()
+                .map(|photo| slipstream_core::CheckedPhotoDecisionItem {
+                    photo_id: photo.photo_id,
+                    expected_version: photo.if_version,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Applies one checked, atomic Photo decision batch for a negotiated CLI
+/// request. Per-Photo conflicts and missing records are domain results in the
+/// response body; only validation and storage failures are errors.
+pub(crate) async fn mutate_photo_decision(
+    State(state): State<HttpState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Err(response) = require_cli_contract(&request) {
+        return *response;
+    }
+    let body: CliPhotoDecisionBody = match read_cli_json_body(request).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let mutation = match body.into_mutation() {
+        Ok(mutation) => mutation,
+        Err(response) => return *response,
+    };
+    match state
+        .application
+        .mutate_photo_decision_checked(mutation)
+        .await
+    {
+        Ok(result) => json_response(StatusCode::OK, &CliPhotoDecisionResultWire::from(result)),
+        Err(error) => map_photo_decision_write_error(error),
+    }
+}
+
+fn map_photo_decision_write_error(error: LibraryError) -> Response<Body> {
+    match error {
+        LibraryError::PhotoDecisionWrite(slipstream_core::PhotoDecisionWriteError::Invalid) => {
+            invalid_cli("body", "The Photo decision batch is invalid.")
+        }
+        LibraryError::PhotoDecisionWrite(
+            slipstream_core::PhotoDecisionWriteError::LimitExceeded { limit, actual },
+        ) => cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the Photo ID list and try again.",
+            serde_json::json!({"limitName": "photoIds", "limit": limit, "actual": actual}),
+        ),
+        _ => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage_failed",
+            "Inspect server health and the current Photo decisions before trying again.",
+            serde_json::json!({"operation": "photos-set"}),
         ),
     }
 }
