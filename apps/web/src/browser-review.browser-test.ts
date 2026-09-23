@@ -42,11 +42,27 @@ const servers: BrowserServer[] = [];
 const externals: Server[] = [];
 
 let activeContext: BrowserContext;
-test.beforeEach(({ context }) => {
+let transportFailures: Array<{ method: string; path: string; error: string }>;
+test.beforeEach(({ context, page }) => {
   activeContext = context;
+  transportFailures = [];
+  page.on("requestfailed", (request) => {
+    transportFailures.push({
+      method: request.method(),
+      path: new URL(request.url()).pathname,
+      error: request.failure()?.errorText ?? "unknown",
+    });
+    if (transportFailures.length > 50) transportFailures.shift();
+  });
 });
 
-test.afterEach(async () => {
+test.afterEach(async ({}, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("transport-failures", {
+      body: JSON.stringify(transportFailures, null, 2),
+      contentType: "application/json",
+    });
+  }
   await Promise.all(externals.splice(0).map((external) => external.close()));
   await Promise.all(servers.splice(0).map((server) => server.close()));
   await Promise.all(
