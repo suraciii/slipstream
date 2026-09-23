@@ -24,6 +24,33 @@ pub(crate) type Result<T> = std::result::Result<T, ErrorCode>;
 const CGROUP: &str = "/sys/fs/cgroup";
 const WORKER: &str = "/usr/local/bin/slipstream-processing-worker";
 
+fn create_workspace_directory(path: &Path) -> Result<()> {
+    fs::create_dir(path).map_err(|_| ErrorCode::Uncertain)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| ErrorCode::Unavailable)
+}
+
+fn create_control_directory(path: &Path) -> Result<()> {
+    fs::create_dir(path).map_err(|_| ErrorCode::Unavailable)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|_| ErrorCode::Unavailable)
+}
+
+fn create_native_gate(path: &Path) -> Result<File> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| ErrorCode::Unavailable)?;
+    // SAFETY: the path is a new child of the private, owned control directory.
+    if unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) } != 0 {
+        return Err(ErrorCode::Unavailable);
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+        .map_err(|_| ErrorCode::Unavailable)?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| ErrorCode::Unavailable)
+}
+
 pub(crate) enum Gate {
     Native(File),
     Film(Box<crate::staging::Session>),
@@ -395,12 +422,10 @@ impl Backend {
         persist(record)?;
         crate::faults::at(&self.config, record, crate::faults::Phase::Slice)?;
         let workspace = self.workspace(record);
-        fs::create_dir(&workspace).map_err(|_| ErrorCode::Uncertain)?;
-        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o700))
-            .map_err(|_| ErrorCode::Unavailable)?;
+        create_workspace_directory(&workspace)?;
         let control = workspace.join("control");
         let work = workspace.join("work");
-        fs::create_dir(&control).map_err(|_| ErrorCode::Unavailable)?;
+        create_control_directory(&control)?;
         fs::create_dir(&work).map_err(|_| ErrorCode::Unavailable)?;
         record.manager_pending = Some(ManagerPhase::Mount);
         persist(record)?;
@@ -430,20 +455,7 @@ impl Backend {
             persist(record)?;
             Gate::Film(Box::new(session))
         } else {
-            let fifo = control.join("gate");
-            let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes())
-                .map_err(|_| ErrorCode::Unavailable)?;
-            // SAFETY: path is a valid NUL-terminated pathname in a sealed owned directory.
-            if unsafe { libc::mkfifo(path.as_ptr(), 0o644) } != 0 {
-                return Err(ErrorCode::Unavailable);
-            }
-            let gate = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-                .open(&fifo)
-                .map_err(|_| ErrorCode::Unavailable)?;
-            Gate::Native(gate)
+            Gate::Native(create_native_gate(&control.join("gate"))?)
         };
         let mut args = strings(&[
             "create",
@@ -1416,6 +1428,52 @@ fn pidfd_alive(pidfd: &OwnedFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_control_and_native_gate_modes_ignore_restrictive_umask() {
+        const CHILD: &str = "SLIPSTREAM_CONTROL_MODE_TEST_CHILD_7C2A";
+        if std::env::var_os(CHILD).is_some() {
+            // SAFETY: this test branch runs in a dedicated subprocess, so the
+            // process-wide umask cannot affect other parallel tests.
+            unsafe { libc::umask(0o077) };
+            let root = std::env::temp_dir().join(format!(
+                "slipstream-control-mode-test-{}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let workspace = root.join("attempt");
+            create_workspace_directory(&workspace).unwrap();
+            let control = workspace.join("control");
+            create_control_directory(&control).unwrap();
+            let gate = create_native_gate(&control.join("gate")).unwrap();
+
+            assert_eq!(fs::metadata(&workspace).unwrap().mode() & 0o777, 0o700);
+            assert_eq!(fs::metadata(&control).unwrap().mode() & 0o777, 0o755);
+            assert_eq!(
+                fs::metadata(control.join("gate")).unwrap().mode() & 0o777,
+                0o644
+            );
+
+            drop(gate);
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::tests::workspace_control_and_native_gate_modes_ignore_restrictive_umask",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "umask subprocess failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn workload_delegation_requires_io_accounting_even_before_io_occurs() {

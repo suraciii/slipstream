@@ -102,6 +102,13 @@ stable and non-writable by the Web, engine, or other untrusted identities. Rejec
 traversal, links, foreign ownership, and stale incarnation references. A one-time
 path validation followed by a bind of a mutable Web directory is insufficient.
 
+Each attempt workspace is mode `0700`. Its `/control` bind source is mode
+`0755` so the fixed UID-1000 worker can traverse the read-only bind, and the
+native startup gate FIFO is mode `0644` so that worker can open it. Set these
+modes explicitly after creation; inherited process umask must not narrow them.
+The private workspace still prevents other host users from reaching these
+objects.
+
 Admission copies the input and manifest into a launcher-owned immutable snapshot
 and verifies the captured input size and digest before engine release. Use
 confined descriptors to acquire supplied bytes; never re-resolve an untrusted
