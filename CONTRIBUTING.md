@@ -38,7 +38,7 @@ The native Preview boundary is currently verified on Linux only.
 - Rust `1.97.1` with Cargo, Clippy, and rustfmt
 - Bun `1.4.0`
 - Docker CLI with the Compose plugin supporting `docker compose config --format json`
-- A C++17 compiler and Python 3
+- A C++17 compiler, a C compiler, CMake, and Python 3
 - `pkg-config`, LibRaw, libjpeg-turbo, libvips, and LittleCMS development headers
 
 The canonical `verify` gate uses Docker Compose only for its daemon-free
@@ -47,7 +47,7 @@ configuration parser check; it does not require a running Docker daemon.
 On Debian/Ubuntu, install native dependencies with:
 
 ```sh
-sudo apt-get install build-essential pkg-config libraw-dev libjpeg-dev libvips-dev liblcms2-dev
+sudo apt-get install build-essential cmake pkg-config libraw-dev libjpeg-dev libvips-dev liblcms2-dev
 ```
 
 Install the exact Rust and Bun versions recorded in `rust-toolchain.toml` and `package.json`, then prepare the checkout:
@@ -106,12 +106,15 @@ Use the repository commands rather than invoking individual tools in CI or revie
 ```sh
 bun run test:rust
 bun run test:cli
+bun run test:cli-package
 bun run test:container-input
 bun run test:fast
 bun run verify
 ```
 
 `test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
+
+`test:cli-package` verifies the source-bound Linux amd64 candidate archive, its checksum and fixed metadata, and no-replace behavior using synthetic inputs. It runs in `test:fast` and `verify`. To build an actual candidate from a clean committed tree, run `python3 scripts/package-cli.py`; see [CLI Candidate Installation](docs/cli-install.md). Packaging does not publish a tag or upload a release.
 
 Install the Playwright Chromium browser once before running the gates:
 

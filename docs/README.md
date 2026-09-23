@@ -9,6 +9,8 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 - [Product Vision](vision.md): human and machine use, goals, audience, principles, and product boundaries
 - [Command-Line Use](command-line.md): delegated photo workflows, shared state, Preview delivery, effects, and recovery
 - [CLI Reference](cli-reference.md): authoritative command syntax, inputs, structured results, errors, and composition examples
+- [CLI Candidate Installation](cli-install.md): checksum verification, local installation, connection, and upgrade
+- [Agent Use](agent-cli.md): bounded query, Album, Preview, and error-handling workflow
 
 ## Core Experience
 

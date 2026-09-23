@@ -9,6 +9,8 @@ application remains the visual workspace for browsing, judgment, and direct
 control. Both clients use the same service-owned facts and domain rules.
 
 [CLI Reference](cli-reference.md) owns command syntax and machine results.
+[CLI Candidate Installation](cli-install.md) describes local candidate verification;
+[Agent Use](agent-cli.md) describes the bounded Agent workflow.
 [Command-Line Architecture](../design/command-line.md) owns client/service
 boundaries and concurrency. Existing Photo, Album, Preview, and Destination
 contracts remain authoritative.

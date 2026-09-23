@@ -1066,6 +1066,45 @@ async fn cli_validates_membership_input_before_any_network_mutation() {
 }
 
 #[tokio::test]
+async fn incompatible_service_is_rejected_before_album_create_is_sent() {
+    for (status, capabilities, supported) in [
+        (
+            200,
+            json!({"serverVersion": "0.0.0", "supportedCliContractVersions": [2], "limits": capabilities_body()["limits"]}),
+            json!([2]),
+        ),
+        (404, json!({"error": "not found"}), json!([])),
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_listener = listener.try_clone().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = common::accept_tls(&server_listener);
+            let mut request = [0_u8; 8192];
+            let count = stream.read(&mut request).unwrap();
+            common::assert_bearer(&request[..count]);
+            assert!(request[..count].starts_with(b"GET /api/capabilities HTTP/1.1\r\n"));
+            write_json_response(&mut stream, status, &capabilities);
+        });
+        let (exit, envelope) = command(
+            &format!("https://127.0.0.1:{}", address.port()),
+            &["albums", "create", "--name", "Never Sent"],
+        )
+        .await;
+        handle.join().unwrap();
+        assert_eq!(exit, 6);
+        assert_eq!(envelope["error"]["code"], "incompatible_server");
+        assert_eq!(envelope["error"]["effect"], "none");
+        assert_eq!(
+            envelope["error"]["details"]["supportedContractVersions"],
+            supported
+        );
+        listener.set_nonblocking(true).unwrap();
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock));
+    }
+}
+
+#[tokio::test]
 async fn cli_reports_unknown_outcomes_for_lost_or_invalid_mutation_responses() {
     let name_conflict = json!({
         "error": {
