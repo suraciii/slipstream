@@ -52,7 +52,7 @@ install the exact candidate's launcher binary at
 `/run/slipstream-processing/INSTANCE/launcher.sock` and its persistent root at
 `/var/lib/slipstream-processing/INSTANCE`. Replace `INSTANCE` with the same 32
 lowercase hexadecimal identifier in the service name and configuration. The
-after an approved production configuration and its exact policy/bundle
+After an approved production configuration and its exact policy/bundle
 identities are installed, load the unit and start the instance:
 
 ```sh

@@ -41,8 +41,12 @@ Install one root-owned systemd service instance for each configured processing
 instance. Its executable, host-only configuration and persistent journal are
 outside the Library, state, cache and complete processing subtree. The service
 runs outside that subtree with only the host authority needed to manage its
-fixed processing boundary. The Web process and Compose wrapper cannot start,
-stop, reconfigure or signal it through an additional control path.
+fixed processing boundary. It needs a writable host cgroup v2 view to configure
+the bounded attempt cgroups and place the worker process in its workload leaf;
+`ProtectControlGroups=yes` would make those writes fail and must remain disabled.
+The Web process and Compose wrapper cannot start, stop, reconfigure or signal the
+launcher through an additional control path, and the Web container receives no
+cgroup mount.
 
 The configuration binds the instance and journal root to the socket path and
 peer identity, immutable launcher and worker identities, and an operator policy

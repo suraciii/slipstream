@@ -23,7 +23,7 @@ ProtectSystem=strict
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
+ProtectControlGroups=no
 RestrictAddressFamilies=AF_UNIX
 ReadWritePaths=/run/slipstream-processing/%i /var/lib/slipstream-processing
 
