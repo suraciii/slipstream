@@ -35,6 +35,54 @@ trust boundary: access to the local Docker daemon and systemd carries host
 authority. The private protocol restricts what the Web can request; it does not
 make the Docker socket itself a restricted capability.
 
+## Launcher Lifecycle
+
+Install one root-owned systemd service instance for each configured processing
+instance. Its executable, host-only configuration and persistent journal are
+outside the Library, state, cache and complete processing subtree. The service
+runs outside that subtree with only the host authority needed to manage its
+fixed processing boundary. The Web process and Compose wrapper cannot start,
+stop, reconfigure or signal it through an additional control path.
+
+The configuration binds the instance and journal root to the socket path and
+peer identity, immutable launcher and worker identities, and an operator policy
+whose exact finite limits and shared-ancestor allowance have already passed the
+qualified admission contract. It is root-owned and is not passed through Web
+environment variables or mounted into a container. Policy and image identities
+are fixed for an admitted attempt; a request cannot override them.
+
+At service start, acquire the instance and journal locks, validate the complete
+host and manager boundary, and reconcile every recorded attempt before allowing
+new admissions. The socket may be bound during reconciliation, but every new
+Start request remains unavailable until recovery succeeds. A reachable socket is not
+readiness. A restart never clears a journal, instance claim, blocked receipt or
+unknown runtime. If a prior attempt or manager operation is ambiguous, leave
+admission unavailable and require operator reconciliation. A supervisor restart
+policy may restart the executable, but it cannot bypass this ordering or turn a
+failed reconciliation into readiness.
+
+The socket parent and every ancestor are canonical, symlink-free, root-owned
+and not writable by the Web UID. The parent contains only the fixed socket and
+its root-only persistent owner-claim file. Give the Web UID search permission
+on the parent and read/write permission on the socket through a named ACL,
+without directory listing or claim-file access; retain peer-credential checks
+on each connection. Mount the whole parent read-only into the Web container so
+a launcher restart can replace the socket pathname without leaving the Web
+bound to a stale inode. Do not bind-mount one socket inode or place the launcher
+configuration, journal or manager controls in that directory.
+
+Do not apply a resource policy change to a running instance. Stop the
+processing-enabled Web deployment to prevent new admission, leave the launcher
+running until all accepted attempts have settled and cleanup is confirmed, then
+stop the launcher service before atomically installing the changed configuration.
+Restart it and reconcile the existing journal under the new policy before
+allowing admission or starting the processing-enabled Web deployment. A
+missing or mismatched journal, manager identity, image identity or policy leaves
+processing unavailable; operators must not clear the fence by replacing state
+or silently adopting runtime objects. The configuration change path and
+recovery evidence belong to the operator procedure, not a Web or launcher IPC
+operation.
+
 ## Restricted Launch Authority
 
 The launcher accepts only a versioned, bounded protocol with fixed operations:
@@ -278,6 +326,15 @@ A missing launcher, incompatible protocol, unavailable controller or invalid
 allocation disables processing while normal browsing and saved edits remain
 available. Availability is not proven by an open socket or a healthy container.
 
+Processing capability is separate from Library readiness. Report `disabled`
+when the operator has not selected the processing-enabled deployment,
+`unavailable` when it is selected but the launcher, approved policy, bundle,
+resource boundary or reconciliation is not ready, and `available` only when
+all of those checks pass for the exact deployed identities. Report source and
+bundle availability separately from launcher/resource capability. The
+qualification profile reports `qualification-only`; it never reports
+production processing as available.
+
 Failures distinguish invalid authority/request, incompatible bundle/policy,
 already-owned conflicting attempt, capacity wait/rejection, runtime allocation
 failure, confirmed OOM, deadline/cancellation, engine exit, and uncertain cleanup.
@@ -291,6 +348,14 @@ A host launcher with fresh attempt containers is selected because it leaves
 control outside the failure boundary, makes runtime identities explicit and
 preserves kernel enforcement during supervisor restart. Its private protocol is
 limited to the fixed processing capability.
+
+A systemd-managed host service is selected for the launcher lifecycle. Starting
+the privileged launcher from the Web process or from each Compose invocation
+would couple its lifetime to a client/container and make restart reconciliation
+dependent on that caller. Docker restart policy is also outside the manager that
+owns the processing cgroups. Systemd can keep the launcher outside the processing
+subtree and restart it without granting the Web process host management rights;
+the launcher still must reconcile durable ownership before reopening its socket.
 
 A writable cgroup subtree inside the Web container would additionally require
 safe delegation, migration authority and separate controller rights for
@@ -332,3 +397,10 @@ or remove retained evidence.
 Run the exact packaged operator path with the supported Web image and processing
 image before claiming deployment acceptance. Synthetic kernel tests, engine
 image-quality checks and ordinary repository gates remain separate evidence.
+The production acceptance path also verifies the installed launcher and policy
+identities, service restart and policy-change behavior, socket peer authority,
+Web and launcher placement outside the processing subtree, complete attempt
+limits and retained terminal evidence. During a contained failure it verifies
+that Library and Album reads still work, then completes and validates a later
+attempt against its exact admitted identity. Qualification-only results do not
+substitute for this production deployment evidence.
