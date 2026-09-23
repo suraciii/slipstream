@@ -264,8 +264,12 @@ capture_mount_coordinates() {
   local encoded_target encoded_fsroot filesystem extra
   local target fsroot relative effective
   local owner_index owner_length target_length index
+  local -a roles=("${storage_roles[@]}")
+  if (($# > 0)); then
+    roles=("$@")
+  fi
   local -a mount_targets=() mount_fsroots=() mount_filesystems=()
-  for role in "${storage_roles[@]}"; do
+  for role in "${roles[@]}"; do
     endpoint=${storage_sources[$role]}
     if ! captured=$(
       LC_ALL=C findmnt --noheadings --raw --submounts --uniq -T "$endpoint" \
@@ -402,17 +406,85 @@ reject_mount_coordinate_overlaps() {
   done
 }
 
+reject_qa_storage_declarations() {
+  local environment_file=$1 line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(SLIPSTREAM_LIBRARY_ROOT|SLIPSTREAM_STATE_DIRECTORY|SLIPSTREAM_CACHE_DIRECTORY)([^A-Za-z0-9_]|$) ]]; then
+      fail "QA environment file must not declare storage paths"
+    fi
+  done < "$environment_file"
+}
+
+parse_qa_endpoint() {
+  local environment_file=$1 line address='' port='' address_count=0 port_count=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" == SLIPSTREAM_BIND_ADDRESS=* ]]; then
+      address=${line#*=}
+      address_count=$((address_count + 1))
+    elif [[ "$line" == SLIPSTREAM_PORT=* ]]; then
+      port=${line#*=}
+      port_count=$((port_count + 1))
+    elif [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(SLIPSTREAM_BIND_ADDRESS|SLIPSTREAM_PORT)([^A-Za-z0-9_]|$) ]]; then
+      fail "QA endpoint must be literal and unambiguous"
+    fi
+  done < "$environment_file"
+  [[ "$address_count" -eq 1 && "$address" == 127.0.0.1 ]] \
+    || fail "QA bind address must be exactly 127.0.0.1"
+  [[ "$port_count" -eq 1 && "$port" =~ ^[1-9][0-9]{3,4}$ ]] \
+    || fail "QA host port must be an explicit decimal value from 1024 to 65535"
+  ((10#$port >= 1024 && 10#$port <= 65535)) \
+    || fail "QA host port must be from 1024 to 65535"
+}
+
+prepare_qa_storage() {
+  local repository=$1 id=$2 role path fixture
+  fixture="$repository/dist/qa-$id"
+  [[ -d "$repository/dist" && ! -L "$repository/dist" && -d "$fixture" && ! -L "$fixture" ]] \
+    || fail "QA fixture root must exist without symbolic links"
+  [[ "$(realpath -e -- "$fixture")" == "$fixture" ]] \
+    || fail "QA fixture root must be canonical inside the entry point checkout"
+  for role in "${storage_roles[@]}"; do
+    case "$role" in
+      library) path="$fixture/originals" ;;
+      state) path="$fixture/state" ;;
+      cache) path="$fixture/cache" ;;
+    esac
+    [[ -d "$path" && ! -L "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+      || fail "QA $role must be a real directory inside the fixture root"
+    storage_sources[$role]=$path
+  done
+  storage_sources[qa_fixture]=$fixture
+  storage_sources[qa_checkout]=$repository
+  capture_mount_coordinates qa_fixture qa_checkout
+  [[ ${storage_mount_root_count[qa_fixture]} -eq 1 ]] \
+    || fail "QA fixture root must not contain nested mounts"
+  [[ ${storage_mount_root_filesystems["qa_fixture:0"]} == "${storage_mount_root_filesystems["qa_checkout:0"]}" ]] \
+    && contains_path "${storage_mount_root_paths["qa_checkout:0"]}" "${storage_mount_root_paths["qa_fixture:0"]}" \
+    || fail "QA fixture root must not be a bind mount alias"
+}
+
 command -v realpath >/dev/null || fail "GNU realpath is required"
 command -v iconv >/dev/null || fail "iconv is required for UTF-8 path validation"
 command -v cmp >/dev/null || fail "cmp is required for environment file validation"
 command -v tr >/dev/null || fail "tr is required for environment file validation"
 
 if [[ $# -lt 3 || $1 != --env-file ]]; then
-  fail "usage: scripts/compose --env-file PATH {up [-d]|run --rm --no-deps slipstream expand-library|access-create|access-rotate|access-revoke|down}"
+  fail "usage: scripts/compose --env-file PATH [--qa 12_HEX_ID] {up [-d]|run --rm --no-deps slipstream expand-library|access-create|access-rotate|access-revoke|down}"
 fi
 
 environment_file_input=$2
 shift 2
+qa_id=''
+qa_selected=false
+if [[ ${1:-} == --qa ]]; then
+  (($# >= 2)) || fail "QA instance ID is required"
+  [[ "$2" =~ ^[0-9a-f]{12}$ ]] || fail "QA instance ID must be 12 lowercase hexadecimal characters"
+  qa_id=$2
+  qa_selected=true
+  shift 2
+fi
 [[ -r "$environment_file_input" && -f "$environment_file_input" ]] \
   || fail "environment file must be a readable regular file"
 resolve_existing_path "$environment_file_input" \
@@ -465,7 +537,15 @@ valid_utf8 "$compose_file" || fail "repository compose.yaml path must use UTF-8"
 
 if [[ "$preflight" == true ]]; then
   command -v findmnt >/dev/null || fail "Linux findmnt is required"
-  parse_storage_sources "$environment_file"
+  if [[ "$qa_selected" == true ]]; then
+    reject_qa_storage_declarations "$environment_file"
+    prepare_qa_storage "$(dirname -- "$compose_file")" "$qa_id"
+    if [[ "$server_start" == true ]]; then
+      parse_qa_endpoint "$environment_file"
+    fi
+  else
+    parse_storage_sources "$environment_file"
+  fi
   parse_image_input "$environment_file"
   reject_overlaps
   capture_mount_coordinates
@@ -494,4 +574,11 @@ else
   export SLIPSTREAM_PUBLIC_ORIGIN="$down_public_origin_sentinel"
 fi
 
-exec docker --context default compose --project-name slipstream --env-file "$environment_file" -f "$compose_file" "${compose_command[@]}"
+compose_arguments=(--project-name slipstream --env-file "$environment_file" -f "$compose_file")
+if [[ "$qa_selected" == true ]]; then
+  qa_compose_file="$(dirname -- "$compose_file")/compose.qa.yaml"
+  [[ -f "$qa_compose_file" && ! -L "$qa_compose_file" ]] \
+    || fail "repository QA Compose file is unavailable"
+  compose_arguments=(--project-name "slipstream-qa-$qa_id" --env-file "$environment_file" -f "$compose_file" -f "$qa_compose_file")
+fi
+exec docker --context default compose "${compose_arguments[@]}" "${compose_command[@]}"

@@ -200,9 +200,10 @@ probe on the private hop for container readiness.
   Compose interpolation, and mutable tags are not supported. Supported Compose
   operations run that digest-pinned image only; they never build an image from
   the repository as a fallback.
-- For `up`, Library Expansion, and access administration, the Originals, state, and cache directories
+- For ordinary `up`, Library Expansion, and access administration, the Originals, state, and cache directories
   must already exist. Each must occur exactly once as `KEY=/absolute/path` in
-  the environment file. Its value must be an unquoted, valid UTF-8 literal. It
+  the environment file. QA runs derive these three paths from the explicit
+  QA ID instead; they reject storage declarations in the QA environment file. Its value must be an unquoted, valid UTF-8 literal. It
   may contain ordinary internal spaces, but must not have leading or trailing
   whitespace, tabs, carriage returns, control characters, `#`, quotes,
   backslashes, backticks, or `$`. Shell expansion and Compose variable
@@ -226,14 +227,18 @@ publication and scan state.
 ## Compose Entry Point
 
 Run supported repository Compose operations through `scripts/compose`. It
-requires one environment file and always uses this repository's `compose.yaml`:
+requires one environment file and always uses this repository's `compose.yaml`;
+for a QA instance it also uses only the repository-owned `compose.qa.yaml`
+override:
 
 ```sh
 ./scripts/compose --env-file /path/to/slipstream.env up -d
 ```
 
 The entry point requires Bash, GNU `realpath`, `tr`, and `cmp`, `iconv`, and
-Linux `findmnt`. It supports only these command forms:
+Linux `findmnt`. The one environment file supplies the QA image, origin, and loopback endpoint;
+the QA storage paths are derived and must not appear in it. The bounded
+operator surface supports only these command forms:
 
 ```sh
 ./scripts/compose --env-file /path/to/slipstream.env up
@@ -243,6 +248,8 @@ Linux `findmnt`. It supports only these command forms:
 ./scripts/compose --env-file /path/to/slipstream.env access-create
 ./scripts/compose --env-file /path/to/slipstream.env access-rotate
 ./scripts/compose --env-file /path/to/slipstream.env access-revoke
+./scripts/compose --env-file /path/to/slipstream.env --qa 0123456789ab up -d
+./scripts/compose --env-file /path/to/slipstream.env --qa 0123456789ab down
 ```
 
 For `up`, Library Expansion, and access administration, it validates the required image input and
@@ -254,11 +261,14 @@ real topology. It rejects any equal, nested, symbolic-link-alias, or Linux
 bind-mount-alias pair—including aliases exposed through a nested mount on
 another filesystem—before it invokes Compose or changes the Originals tree or
 content.
-It also rejects alternate Compose files, additional environment files, mount,
-environment, or entrypoint overrides, and unsupported Compose commands. The
+It also rejects alternate Compose files (except its own QA override),
+additional environment files, mount, environment, or entrypoint overrides,
+and unsupported Compose commands. The
 server retains its storage admission as a second safety boundary. The entry
-point fixes the Compose project name as `slipstream` and rejects any
-`COMPOSE_*` or `DOCKER_*` declaration in the environment file.
+point fixes the ordinary Compose project name as `slipstream`; the explicit
+[Short-Lived QA Instance](#short-lived-qa-instance) selects only its own
+bounded project name. The entry point rejects any `COMPOSE_*` or `DOCKER_*`
+declaration in the environment file.
 For the finite startup Compose configuration surface, the environment file also
 wins over ambient `SLIPSTREAM_IMAGE`, `SLIPSTREAM_BIND_ADDRESS`,
 `SLIPSTREAM_PORT`, `SLIPSTREAM_PUBLIC_ORIGIN`, and `SLIPSTREAM_DATABASE_BASENAME` values. It also clears ambient
@@ -279,8 +289,8 @@ Docker autonomous restarts that can bypass this wrapper.
 This contract supports only a Linux host using its local Docker Engine. Do not
 set `DOCKER_HOST` or `DOCKER_CONTEXT`; the entry point rejects them and rejects
 a Docker default context that is not a local Unix socket. Direct `docker
-compose` invocation is outside the supported deployment contract. The fixed
-`down` form intentionally skips image and storage-source preflight, so an
+compose` invocation is outside the supported deployment contract. The
+ordinary `down` form intentionally skips image and storage-source preflight, so an
 operator can stop an existing container after a source path or image input
 becomes unavailable or unsafe. While Compose parses that fixed stop operation,
 the entry point supplies fixed internal stop-only image and storage values
@@ -295,6 +305,57 @@ must use the same host mount namespace as `scripts/compose`. The three storage
 directories and their parent paths must remain stable between the preflight and
 Docker admission. The preflight does not eliminate this time-of-check/
 time-of-use window; it rejects unsafe topology that is present when it checks.
+
+## Short-Lived QA Instance
+
+A qualification instance may run beside the ordinary service on the same
+trusted local Docker Engine. Supply `--qa ID` immediately after the environment
+file argument, before the action. `ID` must be exactly 12 lowercase hexadecimal
+characters; the launcher selects only the `slipstream-qa-ID` Compose project.
+A misplaced, repeated, missing, or invalid QA ID fails before Docker and never
+falls through to an ordinary action. Omitting `--qa` retains the ordinary
+`slipstream` project. Neither identity is selected by ambient Compose variables
+or by the environment file.
+
+```sh
+./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab access-create
+./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab up -d
+./scripts/compose --env-file /path/to/qa.env --qa 0123456789ab down
+```
+
+The operator creates a new `dist/qa-ID/` fixture root in the entry point's
+own checkout, with existing `originals`, `state`, and `cache` subdirectories.
+Use a fresh ID for each qualification run: reusing an ID also reuses its
+credential, scan state, and cache. For QA startup and administration, the
+launcher derives these three canonical storage paths from its own checkout
+and ID, rather than trusting paths supplied by the caller. It rejects an
+environment file declaring any of the three storage keys before Docker.
+The fixture root and its ancestors below the checkout must not be symlinks or
+bind mounts; no mount may appear inside it. The launcher verifies this before
+Docker, so a QA path cannot be an alias into production storage. The operator
+must never copy production state or Originals into a QA fixture.
+
+For QA `up` and `up -d`, the environment file must satisfy the ordinary
+immutable-image and canonical HTTPS-origin grammar. The launcher checks an
+explicit `SLIPSTREAM_BIND_ADDRESS=127.0.0.1` and an explicit decimal
+`SLIPSTREAM_PORT` from 1024 through 65535 before Docker. The port must differ
+from the ordinary instance's published port; Docker refuses an occupied port
+at startup. Other QA actions do not publish a port; `access-revoke` does not
+require an origin. The repository-owned `compose.qa.yaml` is the only
+additional Compose file. It adds no services, mounts, or restart policies and
+applies memory (2 GiB), CPU (2), and PID (256) limits to both `slipstream` and
+`slipstream-admin`, without changing the ordinary configuration.
+
+The supported QA actions are the same as the ordinary bounded entry point.
+QA `down` requires a valid ID, readable environment file, and the usual
+rejection of `COMPOSE_*`/`DOCKER_*` declarations. It uses the same stop-only
+sentinels and the fixed QA Compose files, without checking unavailable fixture
+paths, image, or origin. It targets only the named QA project and never removes
+host directories. Access creation and rotation retain the interactive, no-log
+token-delivery contract. Qualification needs a private HTTPS proxy and a
+separately trusted client; loopback HTTP alone is not a CLI endpoint.
+Containers share the local Docker daemon and host capacity: this mode does not
+turn an untrusted workload into an isolated security domain.
 
 ## Image
 
