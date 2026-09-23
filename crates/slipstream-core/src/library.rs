@@ -153,6 +153,7 @@ pub enum LibraryError {
     Persistence(PersistenceError),
     Mutation(MutationError),
     AlbumWrite(AlbumWriteError),
+    PhotoDecisionWrite(crate::PhotoDecisionWriteError),
     Query(PhotoQueryError),
     ScanBusy,
     Closed,
@@ -168,6 +169,7 @@ impl fmt::Display for LibraryError {
             Self::Persistence(error) => error.fmt(formatter),
             Self::Mutation(error) => error.fmt(formatter),
             Self::AlbumWrite(error) => error.fmt(formatter),
+            Self::PhotoDecisionWrite(error) => error.fmt(formatter),
             Self::Query(error) => error.fmt(formatter),
             Self::ScanBusy => formatter.write_str("Photo Library scan is busy"),
             Self::Closed => formatter.write_str("Photo Library is closed"),
@@ -205,6 +207,11 @@ impl From<MutationError> for LibraryError {
 impl From<AlbumWriteError> for LibraryError {
     fn from(value: AlbumWriteError) -> Self {
         Self::AlbumWrite(value)
+    }
+}
+impl From<crate::PhotoDecisionWriteError> for LibraryError {
+    fn from(value: crate::PhotoDecisionWriteError) -> Self {
+        Self::PhotoDecisionWrite(value)
     }
 }
 impl From<PhotoQueryError> for LibraryError {
@@ -727,6 +734,25 @@ impl Library {
         receive
             .await
             .unwrap_or(Err(AlbumWriteError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Applies one atomic, version-checked Photo decision batch and returns
+    /// the per-Photo facts a machine client response needs. The write changes
+    /// only the requested decision field and never an Album saved position.
+    pub async fn mutate_photo_decision_checked(
+        &self,
+        mutation: crate::CheckedPhotoDecisionMutation,
+    ) -> Result<crate::CheckedPhotoDecisionResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .mutate_photo_decision_checked_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(crate::PhotoDecisionWriteError::Persistence))
             .map_err(Into::into)
     }
 

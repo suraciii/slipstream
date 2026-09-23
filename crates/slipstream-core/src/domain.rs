@@ -679,6 +679,85 @@ pub struct PhotoStateBatchResult {
     pub missing: Vec<PhotoStateBatchMissing>,
 }
 
+/// The largest Rating a Photo decision may carry.
+pub const MAXIMUM_PHOTO_RATING: u8 = 5;
+
+/// A version-checked Photo decision batch for machine clients. One field and
+/// value apply to every requested Photo; each item names the observed decision
+/// version the caller intends to write against. Existing browser mutations
+/// remain separate so they cannot accidentally bypass this guard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedPhotoDecisionMutation {
+    pub field: PhotoStateField,
+    pub value: PhotoStateValue,
+    pub photos: Vec<CheckedPhotoDecisionItem>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedPhotoDecisionItem {
+    pub photo_id: String,
+    pub expected_version: String,
+}
+
+/// The guarded decision facts one Photo held before a checked change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhotoDecisionFacts {
+    pub selection_state: SelectionState,
+    pub rating: u8,
+}
+
+/// One Photo's current decision facts together with their process-epoch
+/// mutation guard, read by the same serialized persistence-owner command as
+/// the decision write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoDecisionSnapshot {
+    pub selection_state: SelectionState,
+    pub rating: u8,
+    pub decision_version: String,
+}
+
+/// One requested Photo's outcome in a checked decision batch. The version is
+/// compared before no-op detection, so a changed-away-and-back decision
+/// conflicts instead of reporting `Unchanged`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckedPhotoDecisionOutcome {
+    Changed {
+        prior: PhotoDecisionFacts,
+        current: PhotoDecisionSnapshot,
+    },
+    Unchanged {
+        current: PhotoDecisionSnapshot,
+    },
+    Conflict {
+        current: PhotoDecisionSnapshot,
+    },
+    Missing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedPhotoDecisionItemResult {
+    pub photo_id: String,
+    pub outcome: CheckedPhotoDecisionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CheckedPhotoDecisionCounts {
+    pub changed: usize,
+    pub unchanged: usize,
+    pub conflict: usize,
+    pub missing: usize,
+}
+
+/// Confirmed facts from one checked decision commit. Results retain request
+/// order with exactly one outcome per requested Photo, and the counts count
+/// those outcomes. Conflicts and missing records are domain results, not
+/// transaction failures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckedPhotoDecisionResult {
+    pub results: Vec<CheckedPhotoDecisionItemResult>,
+    pub counts: CheckedPhotoDecisionCounts,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreviewSeed {
     pub photo_id: String,

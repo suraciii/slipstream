@@ -7,15 +7,17 @@ use crate::{
     AlbumMember, AlbumMembershipMutation, AlbumMembershipResult, AlbumMutation,
     AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary, AppliedRelocations,
     CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
-    CheckedAlbumMutationResult, DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS,
+    CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
+    CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
+    DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING,
     OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoAlbumMembership, PhotoQuery, PhotoQueryCandidate, PhotoQueryError,
-    PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord,
-    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation, ScanLimits,
-    ScanSnapshot, SelectionState, UnavailablePhotoRecord,
+    OriginalScanError, PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery,
+    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
+    PhotoRead, PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
+    PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
+    PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
+    PreviewSeedResult, PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
+    ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -247,6 +249,50 @@ fn album_write_error_from_mutation(error: MutationError) -> AlbumWriteError {
     }
 }
 
+/// Detailed refusal or storage outcome for checked Photo decision batches.
+/// Conflicting and missing Photos are per-item domain results, so only
+/// request validation and storage failures appear here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhotoDecisionWriteError {
+    Invalid,
+    LimitExceeded { limit: usize, actual: usize },
+    Persistence,
+    Saturated,
+    Closed,
+}
+
+impl fmt::Display for PhotoDecisionWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => formatter.write_str("Photo decision write request is not valid"),
+            Self::LimitExceeded { .. } => {
+                formatter.write_str("Photo decision write exceeds its limit")
+            }
+            Self::Persistence => formatter.write_str("Photo decision write could not be persisted"),
+            Self::Saturated => formatter.write_str("SQLite persistence queue is saturated"),
+            Self::Closed => formatter.write_str("SQLite persistence is closed"),
+        }
+    }
+}
+
+impl std::error::Error for PhotoDecisionWriteError {}
+
+fn photo_decision_write_error_from_persistence(error: PersistenceError) -> PhotoDecisionWriteError {
+    match error {
+        PersistenceError::Saturated => PhotoDecisionWriteError::Saturated,
+        PersistenceError::Closed => PhotoDecisionWriteError::Closed,
+        _ => PhotoDecisionWriteError::Persistence,
+    }
+}
+
+fn photo_decision_write_error_from_mutation(error: MutationError) -> PhotoDecisionWriteError {
+    match error {
+        MutationError::Saturated => PhotoDecisionWriteError::Saturated,
+        MutationError::Closed => PhotoDecisionWriteError::Closed,
+        _ => PhotoDecisionWriteError::Persistence,
+    }
+}
+
 fn mutation_error_from_persistence(error: PersistenceError) -> MutationError {
     match error {
         PersistenceError::Saturated => MutationError::Saturated,
@@ -468,6 +514,44 @@ fn normalize_checked_album_mutation(
     }
 }
 
+fn normalize_checked_photo_decision_mutation(
+    mutation: CheckedPhotoDecisionMutation,
+) -> Result<CheckedPhotoDecisionMutation, PhotoDecisionWriteError> {
+    if std::mem::discriminant(&mutation.value)
+        != match mutation.field {
+            PhotoStateField::SelectionState => {
+                std::mem::discriminant(&PhotoStateValue::Selection(SelectionState::Undecided))
+            }
+            PhotoStateField::Rating => std::mem::discriminant(&PhotoStateValue::Rating(0)),
+        }
+        || matches!(mutation.value, PhotoStateValue::Rating(value) if value > MAXIMUM_PHOTO_RATING)
+    {
+        return Err(PhotoDecisionWriteError::Invalid);
+    }
+    if mutation.photos.len() > crate::PHOTO_STATE_BATCH_MAX {
+        return Err(PhotoDecisionWriteError::LimitExceeded {
+            limit: crate::PHOTO_STATE_BATCH_MAX,
+            actual: mutation.photos.len(),
+        });
+    }
+    if mutation.photos.is_empty()
+        || mutation
+            .photos
+            .iter()
+            .any(|photo| photo.photo_id.trim().is_empty() || photo.expected_version.is_empty())
+        || mutation
+            .photos
+            .iter()
+            .map(|photo| &photo.photo_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != mutation.photos.len()
+    {
+        return Err(PhotoDecisionWriteError::Invalid);
+    }
+    Ok(mutation)
+}
+
 fn validate_photo_state_mutation(mutation: &PhotoStateMutation) -> Result<(), MutationError> {
     if mutation.expected_current.is_some_and(|expected| {
         std::mem::discriminant(&expected) != std::mem::discriminant(&mutation.value)
@@ -589,6 +673,10 @@ enum Command {
     MutateAlbumChecked(
         CheckedAlbumMutation,
         oneshot::Sender<Result<CheckedAlbumMutationResult, AlbumWriteError>>,
+    ),
+    MutatePhotoDecisionChecked(
+        CheckedPhotoDecisionMutation,
+        oneshot::Sender<Result<CheckedPhotoDecisionResult, PhotoDecisionWriteError>>,
     ),
     MutatePhotoState(
         PhotoStateMutation,
@@ -1129,6 +1217,30 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub async fn mutate_photo_decision_checked(
+        &self,
+        mutation: CheckedPhotoDecisionMutation,
+    ) -> Result<CheckedPhotoDecisionResult, PhotoDecisionWriteError> {
+        let receive = self.mutate_photo_decision_checked_receiver(mutation)?;
+        receive
+            .await
+            .unwrap_or(Err(PhotoDecisionWriteError::Persistence))
+    }
+
+    pub(crate) fn mutate_photo_decision_checked_receiver(
+        &self,
+        mutation: CheckedPhotoDecisionMutation,
+    ) -> Result<
+        oneshot::Receiver<Result<CheckedPhotoDecisionResult, PhotoDecisionWriteError>>,
+        PhotoDecisionWriteError,
+    > {
+        let mutation = normalize_checked_photo_decision_mutation(mutation)?;
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::MutatePhotoDecisionChecked(mutation, send))
+            .map_err(photo_decision_write_error_from_persistence)?;
+        Ok(receive)
+    }
+
     pub async fn mutate_photo_state(
         &self,
         mutation: PhotoStateMutation,
@@ -1407,6 +1519,16 @@ fn owner_main(
             }
             Command::MutateAlbumChecked(mutation, reply) => {
                 let result = mutate_album_checked(
+                    &state,
+                    &database_name,
+                    &mut connection,
+                    &mut versions,
+                    mutation,
+                );
+                let _ = reply.send(result);
+            }
+            Command::MutatePhotoDecisionChecked(mutation, reply) => {
+                let result = mutate_photo_decision_checked(
                     &state,
                     &database_name,
                     &mut connection,
@@ -5072,6 +5194,165 @@ fn selection_state_value(value: SelectionState) -> &'static str {
     }
 }
 
+/// The current decision facts together with their guard, as one serialized
+/// owner operation sees them.
+fn photo_decision_snapshot(
+    versions: &MutationVersions,
+    facts: PhotoDecisionFacts,
+    photo_id: &str,
+) -> PhotoDecisionSnapshot {
+    PhotoDecisionSnapshot {
+        selection_state: facts.selection_state,
+        rating: facts.rating,
+        decision_version: versions.photo(photo_id),
+    }
+}
+
+/// One version-checked Photo decision batch. Classification, effective
+/// writes, and version advancement run in this single serialized owner
+/// command: every effective change commits in one transaction, storage
+/// failure rolls back all of them and preserves versions, and conflicts or
+/// missing records are per-item domain results in request order.
+fn mutate_photo_decision_checked(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    versions: &mut MutationVersions,
+    mutation: CheckedPhotoDecisionMutation,
+) -> Result<CheckedPhotoDecisionResult, PhotoDecisionWriteError> {
+    enum Classification {
+        Missing,
+        Conflict { current: PhotoDecisionSnapshot },
+        Unchanged { current: PhotoDecisionSnapshot },
+        Change { prior: PhotoDecisionFacts },
+    }
+    let current_value = |facts: PhotoDecisionFacts| match mutation.field {
+        PhotoStateField::SelectionState => PhotoStateValue::Selection(facts.selection_state),
+        PhotoStateField::Rating => PhotoStateValue::Rating(facts.rating),
+    };
+    let mut classified = Vec::with_capacity(mutation.photos.len());
+    for item in &mutation.photos {
+        let facts = connection
+            .query_row(
+                "SELECT selection_state,rating FROM photos WHERE id=?",
+                [&item.photo_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|_| PhotoDecisionWriteError::Persistence)
+            .and_then(|row| {
+                row.map(|(selection_state, rating)| {
+                    Ok(PhotoDecisionFacts {
+                        selection_state: parse_selection_state(&selection_state)
+                            .map_err(|_| PhotoDecisionWriteError::Persistence)?,
+                        rating: rating
+                            .try_into()
+                            .map_err(|_| PhotoDecisionWriteError::Persistence)?,
+                    })
+                })
+                .transpose()
+            })?;
+        // The guard is deliberately checked before classifying an otherwise
+        // idempotent request. A changed-away-and-back decision still conflicts.
+        let classification = match facts {
+            None => Classification::Missing,
+            Some(facts) => {
+                let current = photo_decision_snapshot(versions, facts, &item.photo_id);
+                if current.decision_version != item.expected_version {
+                    Classification::Conflict { current }
+                } else if current_value(facts) == mutation.value {
+                    Classification::Unchanged { current }
+                } else {
+                    Classification::Change { prior: facts }
+                }
+            }
+        };
+        classified.push((item.photo_id.clone(), classification));
+    }
+    let effective = classified
+        .iter()
+        .filter(|(_, classification)| matches!(classification, Classification::Change { .. }))
+        .map(|(photo_id, _)| photo_id.clone())
+        .collect::<Vec<_>>();
+    // Counter saturation fails closed before any write rather than wrapping.
+    if effective
+        .iter()
+        .any(|photo_id| !versions.can_advance_photo(photo_id))
+    {
+        return Err(PhotoDecisionWriteError::Persistence);
+    }
+    mutation_transaction(state, database_name, connection, |transaction| {
+        for photo_id in &effective {
+            match mutation.value {
+                PhotoStateValue::Selection(value) => {
+                    transaction
+                        .execute(
+                            "UPDATE photos SET selection_state=? WHERE id=?",
+                            params![selection_state_value(value), photo_id],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                }
+                PhotoStateValue::Rating(value) => {
+                    transaction
+                        .execute(
+                            "UPDATE photos SET rating=? WHERE id=?",
+                            params![i64::from(value), photo_id],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .map_err(photo_decision_write_error_from_mutation)?;
+    // Counters become visible only after the committed transaction; a
+    // rollback above leaves every prior version unchanged.
+    for photo_id in &effective {
+        versions
+            .advance_photo(photo_id)
+            .map_err(photo_decision_write_error_from_mutation)?;
+    }
+    let mut counts = CheckedPhotoDecisionCounts::default();
+    let mut results = Vec::with_capacity(classified.len());
+    for (photo_id, classification) in classified {
+        let outcome = match classification {
+            Classification::Missing => {
+                counts.missing += 1;
+                CheckedPhotoDecisionOutcome::Missing
+            }
+            Classification::Conflict { current } => {
+                counts.conflict += 1;
+                CheckedPhotoDecisionOutcome::Conflict { current }
+            }
+            Classification::Unchanged { current } => {
+                counts.unchanged += 1;
+                CheckedPhotoDecisionOutcome::Unchanged { current }
+            }
+            Classification::Change { prior } => {
+                counts.changed += 1;
+                let after = PhotoDecisionFacts {
+                    selection_state: match (mutation.field, mutation.value) {
+                        (PhotoStateField::SelectionState, PhotoStateValue::Selection(value)) => {
+                            value
+                        }
+                        _ => prior.selection_state,
+                    },
+                    rating: match (mutation.field, mutation.value) {
+                        (PhotoStateField::Rating, PhotoStateValue::Rating(value)) => value,
+                        _ => prior.rating,
+                    },
+                };
+                CheckedPhotoDecisionOutcome::Changed {
+                    prior,
+                    current: photo_decision_snapshot(versions, after, &photo_id),
+                }
+            }
+        };
+        results.push(CheckedPhotoDecisionItemResult { photo_id, outcome });
+    }
+    Ok(CheckedPhotoDecisionResult { results, counts })
+}
+
 fn table_exists(connection: &Connection, name: &str) -> Result<bool, PersistenceError> {
     connection
         .query_row(
@@ -5110,7 +5391,10 @@ fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>, Pe
 mod tests {
     use super::*;
     use crate::identity::source_revision;
-    use crate::{CaptureTimeBound, LibraryRoot, PhotoStateBatchItem, identity::original_id};
+    use crate::{
+        CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoStateBatchItem,
+        identity::original_id,
+    };
     use serde::Deserialize;
     use std::{
         fs,
@@ -7826,6 +8110,538 @@ mod tests {
                 .collect::<Vec<_>>(),
             ids
         );
+    }
+
+    #[tokio::test]
+    async fn checked_photo_decisions_classify_guard_and_invalidate_across_writers() {
+        let (base, library, state, name, _path) = fixture();
+        let canonical_root = library.canonical_path().to_string_lossy().into_owned();
+        let persistence = Persistence::open(state, name.clone(), canonical_root.clone()).unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                    discovered("three.JPG", OriginalKind::Jpeg, 3, 3.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let read_photo = |photo_id: String| {
+            let persistence = persistence.clone();
+            async move {
+                persistence
+                    .photo_receiver(&photo_id)
+                    .unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+
+        // One single-field change reports both decision fields before and
+        // after, advances the version, and leaves the other field untouched.
+        let initial = read_photo(ids[0].clone()).await;
+        let changed = persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: initial.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(changed.counts.changed, 1);
+        assert_eq!(changed.counts.unchanged, 0);
+        assert_eq!(changed.counts.conflict, 0);
+        assert_eq!(changed.counts.missing, 0);
+        assert_eq!(
+            changed.results,
+            vec![CheckedPhotoDecisionItemResult {
+                photo_id: ids[0].clone(),
+                outcome: CheckedPhotoDecisionOutcome::Changed {
+                    prior: PhotoDecisionFacts {
+                        selection_state: SelectionState::Undecided,
+                        rating: 0,
+                    },
+                    current: PhotoDecisionSnapshot {
+                        selection_state: SelectionState::Selected,
+                        rating: 0,
+                        decision_version: read_photo(ids[0].clone()).await.decision_version,
+                    },
+                },
+            }]
+        );
+        let observed = read_photo(ids[0].clone()).await;
+        assert_eq!(observed.selection_state, SelectionState::Selected);
+        assert_eq!(observed.rating, 0);
+        let selected_version = observed.decision_version;
+        assert_ne!(selected_version, initial.decision_version);
+
+        // An intervening Web write that changes the value away and back must
+        // still conflict with the version read before those edits. Web Undo
+        // replays the same single-Photo writer, so it shares this guard.
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: ids[0].clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Undecided),
+                expected_current: Some(PhotoStateValue::Selection(SelectionState::Selected)),
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let undone = read_photo(ids[0].clone()).await;
+        assert_eq!(undone.selection_state, SelectionState::Undecided);
+        let away_and_back_version = undone.decision_version.clone();
+        assert_ne!(away_and_back_version, selected_version);
+        let away_and_back = persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Undecided),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: selected_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            away_and_back.results,
+            vec![CheckedPhotoDecisionItemResult {
+                photo_id: ids[0].clone(),
+                outcome: CheckedPhotoDecisionOutcome::Conflict {
+                    current: PhotoDecisionSnapshot {
+                        selection_state: SelectionState::Undecided,
+                        rating: 0,
+                        decision_version: away_and_back_version.clone(),
+                    },
+                },
+            }]
+        );
+
+        // A mixed batch keeps request order, reports one outcome and exact
+        // counts per Photo, and leaves no-op versions untouched. ids[1]
+        // already holds the target Rating; ids[2] carries a stale version
+        // because an intervening Web write advanced it.
+        let photo_two_initial = read_photo(ids[1].clone()).await;
+        persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[1].clone(),
+                    expected_version: photo_two_initial.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        let photo_two = read_photo(ids[1].clone()).await;
+        assert_eq!(photo_two.rating, 4);
+        let photo_three_stale = read_photo(ids[2].clone()).await;
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: ids[2].clone(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Selected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let photo_three = read_photo(ids[2].clone()).await;
+        assert_ne!(
+            photo_three.decision_version,
+            photo_three_stale.decision_version
+        );
+        let photo_one = read_photo(ids[0].clone()).await;
+        let mixed = persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![
+                    CheckedPhotoDecisionItem {
+                        photo_id: ids[0].clone(),
+                        expected_version: photo_one.decision_version.clone(),
+                    },
+                    CheckedPhotoDecisionItem {
+                        photo_id: ids[2].clone(),
+                        expected_version: photo_three_stale.decision_version.clone(),
+                    },
+                    CheckedPhotoDecisionItem {
+                        photo_id: "missing-photo".to_owned(),
+                        expected_version: photo_three.decision_version.clone(),
+                    },
+                    CheckedPhotoDecisionItem {
+                        photo_id: ids[1].clone(),
+                        expected_version: photo_two.decision_version.clone(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        assert_eq!(mixed.counts.changed, 1);
+        assert_eq!(mixed.counts.unchanged, 1);
+        assert_eq!(mixed.counts.conflict, 1);
+        assert_eq!(mixed.counts.missing, 1);
+        assert_eq!(
+            mixed
+                .results
+                .iter()
+                .map(|result| result.photo_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                ids[0].clone(),
+                ids[2].clone(),
+                "missing-photo".to_owned(),
+                ids[1].clone(),
+            ]
+        );
+        assert!(matches!(
+            mixed.results[0].outcome,
+            CheckedPhotoDecisionOutcome::Changed { .. }
+        ));
+        assert_eq!(
+            mixed.results[1].outcome,
+            CheckedPhotoDecisionOutcome::Conflict {
+                current: PhotoDecisionSnapshot {
+                    selection_state: SelectionState::Selected,
+                    rating: 0,
+                    decision_version: photo_three.decision_version.clone(),
+                },
+            }
+        );
+        assert_eq!(
+            mixed.results[2].outcome,
+            CheckedPhotoDecisionOutcome::Missing
+        );
+        assert_eq!(
+            mixed.results[3].outcome,
+            CheckedPhotoDecisionOutcome::Unchanged {
+                current: PhotoDecisionSnapshot {
+                    selection_state: SelectionState::Undecided,
+                    rating: 4,
+                    decision_version: photo_two.decision_version.clone(),
+                },
+            }
+        );
+        // A no-op does not advance the version; the conflict left the stale
+        // item's facts and version untouched.
+        assert_eq!(
+            read_photo(ids[1].clone()).await.decision_version,
+            photo_two.decision_version
+        );
+        let after_three = read_photo(ids[2].clone()).await;
+        assert_eq!(after_three.rating, 0);
+        assert_eq!(after_three.selection_state, SelectionState::Selected);
+
+        // Restart issues a fresh process epoch: the old token conflicts, and
+        // a fresh read allows one explicit next write.
+        persistence.shutdown().unwrap();
+        let reopened_state =
+            StateDirectory::open_or_create(&library, base.0.join("state")).unwrap();
+        let reopened = Persistence::open(reopened_state, name, canonical_root).unwrap();
+        let fresh = reopened
+            .photo_receiver(&ids[0])
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh.decision_version, photo_one.decision_version);
+        assert_eq!(fresh.rating, 4);
+        let expired = reopened
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(5),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: photo_one.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(expired.counts.conflict, 1);
+        let explicit = reopened
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(5),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: fresh.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(explicit.counts.changed, 1);
+        reopened.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_photo_decision_refusals_write_nothing_and_change_one_field() {
+        let (_base, library, state, name, _path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let read_photo = |photo_id: String| {
+            let persistence = persistence.clone();
+            async move {
+                persistence
+                    .photo_receiver(&photo_id)
+                    .unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let first = read_photo(ids[0].clone()).await;
+        let refusal = |mutation| persistence.mutate_photo_decision_checked(mutation);
+        // Malformed batches are refused before any write.
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![],
+            })
+            .await,
+            Err(PhotoDecisionWriteError::Invalid)
+        );
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: first.decision_version.clone(),
+                }],
+            })
+            .await,
+            Err(PhotoDecisionWriteError::Invalid)
+        );
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(MAXIMUM_PHOTO_RATING + 1),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: first.decision_version.clone(),
+                }],
+            })
+            .await,
+            Err(PhotoDecisionWriteError::Invalid)
+        );
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![
+                    CheckedPhotoDecisionItem {
+                        photo_id: ids[0].clone(),
+                        expected_version: first.decision_version.clone(),
+                    },
+                    CheckedPhotoDecisionItem {
+                        photo_id: ids[0].clone(),
+                        expected_version: first.decision_version.clone(),
+                    },
+                ],
+            })
+            .await,
+            Err(PhotoDecisionWriteError::Invalid)
+        );
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: String::new(),
+                }],
+            })
+            .await,
+            Err(PhotoDecisionWriteError::Invalid)
+        );
+        assert_eq!(
+            refusal(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(4),
+                photos: (0..=crate::PHOTO_STATE_BATCH_MAX)
+                    .map(|index| CheckedPhotoDecisionItem {
+                        photo_id: format!("photo-{index}"),
+                        expected_version: first.decision_version.clone(),
+                    })
+                    .collect(),
+            })
+            .await,
+            Err(PhotoDecisionWriteError::LimitExceeded {
+                limit: crate::PHOTO_STATE_BATCH_MAX,
+                actual: crate::PHOTO_STATE_BATCH_MAX + 1,
+            })
+        );
+        let untouched = read_photo(ids[0].clone()).await;
+        assert_eq!(untouched.selection_state, first.selection_state);
+        assert_eq!(untouched.rating, first.rating);
+        assert_eq!(untouched.decision_version, first.decision_version);
+
+        // A checked decision write changes neither the other decision field
+        // nor an Album's saved browsing position or version.
+        let album_id = persistence
+            .mutate_album(AlbumMutation::Create {
+                name: "Resume".to_owned(),
+            })
+            .await
+            .unwrap()
+            .album_id;
+        persistence
+            .mutate_album(AlbumMutation::AddMembers {
+                album_id: album_id.clone(),
+                photo_ids: vec![ids[0].clone()],
+            })
+            .await
+            .unwrap();
+        persistence
+            .mutate_album(AlbumMutation::SetProgress {
+                album_id: album_id.clone(),
+                photo_id: ids[0].clone(),
+            })
+            .await
+            .unwrap();
+        let before = persistence
+            .album_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(before.has_saved_position);
+        let changed = persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::Rating,
+                value: PhotoStateValue::Rating(3),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: untouched.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(changed.counts.changed, 1);
+        let after_photo = read_photo(ids[0].clone()).await;
+        assert_eq!(after_photo.rating, 3);
+        assert_eq!(after_photo.selection_state, SelectionState::Undecided);
+        let after_album = persistence
+            .album_receiver(&album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(after_album.has_saved_position);
+        assert_eq!(after_album.album_version, before.album_version);
+        assert_eq!(after_album.photo_count, before.photo_count);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_photo_decision_batch_rolls_back_siblings_and_preserves_versions() {
+        let (_base, library, state, name, path) = fixture();
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .apply_scan(
+                vec![
+                    discovered("one.JPG", OriginalKind::Jpeg, 1, 1.0),
+                    discovered("two.JPG", OriginalKind::Jpeg, 2, 2.0),
+                ],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let ids = photo_ids(&snapshot);
+        let escaped_id = ids[1].replace('\'', "''");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_checked_second BEFORE UPDATE OF selection_state ON photos\n                 WHEN OLD.id = '{escaped_id}'\n                 BEGIN SELECT RAISE(ABORT, 'forced checked failure'); END;"
+            ))
+            .unwrap();
+        let read_photo = |photo_id: String| {
+            let persistence = persistence.clone();
+            async move {
+                persistence
+                    .photo_receiver(&photo_id)
+                    .unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let first = read_photo(ids[0].clone()).await;
+        let second = read_photo(ids[1].clone()).await;
+        assert_eq!(
+            persistence
+                .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                    field: PhotoStateField::SelectionState,
+                    value: PhotoStateValue::Selection(SelectionState::Selected),
+                    photos: vec![
+                        CheckedPhotoDecisionItem {
+                            photo_id: ids[0].clone(),
+                            expected_version: first.decision_version.clone(),
+                        },
+                        CheckedPhotoDecisionItem {
+                            photo_id: ids[1].clone(),
+                            expected_version: second.decision_version.clone(),
+                        },
+                    ],
+                })
+                .await,
+            Err(PhotoDecisionWriteError::Persistence)
+        );
+        // Both siblings are unchanged and every version survives the
+        // rollback; the next explicit write still uses the observed version.
+        let after_first = read_photo(ids[0].clone()).await;
+        let after_second = read_photo(ids[1].clone()).await;
+        assert_eq!(after_first.selection_state, SelectionState::Undecided);
+        assert_eq!(after_second.selection_state, SelectionState::Undecided);
+        assert_eq!(after_first.decision_version, first.decision_version);
+        assert_eq!(after_second.decision_version, second.decision_version);
+        let recovered = persistence
+            .mutate_photo_decision_checked(CheckedPhotoDecisionMutation {
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                photos: vec![CheckedPhotoDecisionItem {
+                    photo_id: ids[0].clone(),
+                    expected_version: first.decision_version.clone(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovered.counts.changed, 1);
+        persistence.shutdown().unwrap();
     }
 
     #[tokio::test]
