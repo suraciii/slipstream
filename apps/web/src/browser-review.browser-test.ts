@@ -6391,6 +6391,8 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
+  // Saved-position persistence does not imply that the Preview has decoded.
+  await waitForLoadedReviewImage(page);
   await page.keyboard.press("d");
   const preview = page.locator("[data-preview]");
   await expect(preview).toHaveAttribute("data-zoom-state", "manual");
