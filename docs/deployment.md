@@ -40,6 +40,13 @@ supported ways to enable it.
 
 ## Configuration
 
+For application installation, serve the Web application and its API on the
+same trusted HTTPS origin through an operator-managed reverse proxy. Keep
+the listener within the trusted-network boundary described below; TLS does
+not add authentication. An HTTP LAN address is not a localhost development
+exception. See [Installed Web Application](installed-web-app.md) for launch
+and online-use behavior.
+
 Create an environment file outside the repository:
 
 ```dotenv

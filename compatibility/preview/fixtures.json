@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "algorithmVersionGate": {
     "required": "fixture-matrix-pass",
-    "selectedRustVersion": "rust-vips-v1"
+    "selectedRustVersion": "rust-vips-v2"
   },
   "targets": [512, 2560],
   "limits": {

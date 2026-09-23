@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn slipstream_vips_process_jpeg(
         bytes: *const u8,
         length: usize,
+        container_orientation: i32,
         target_long_edge: u32,
         maximum_input_bytes: u64,
         maximum_pixels: u64,
@@ -116,9 +117,20 @@ fn status_error(status: i32) -> DerivativeError {
 }
 
 pub fn process_jpeg(bytes: &[u8], target: DerivativeTarget) -> Result<Derivative, DerivativeError> {
+    process_jpeg_with_orientation(bytes, None, target)
+}
+
+pub(crate) fn process_jpeg_with_orientation(
+    bytes: &[u8],
+    container_orientation: Option<u8>,
+    target: DerivativeTarget,
+) -> Result<Derivative, DerivativeError> {
     initialize()?;
     if bytes.is_empty() || bytes.len() as u64 > MAXIMUM_INPUT_BYTES {
         return Err(DerivativeError::ResourceLimit);
+    }
+    if container_orientation.is_some_and(|value| !(1..=8).contains(&value)) {
+        return Err(DerivativeError::Internal);
     }
     let mut result = empty_result();
     // SAFETY: `bytes` remains borrowed for the complete synchronous native call;
@@ -127,6 +139,7 @@ pub fn process_jpeg(bytes: &[u8], target: DerivativeTarget) -> Result<Derivative
         slipstream_vips_process_jpeg(
             bytes.as_ptr(),
             bytes.len(),
+            i32::from(container_orientation.unwrap_or(0)),
             target.long_edge(),
             MAXIMUM_INPUT_BYTES,
             MAXIMUM_PIXELS,
@@ -208,12 +221,68 @@ mod tests {
         jpeg
     }
 
+    fn directional_jpeg() -> Vec<u8> {
+        const COLORS: [[u8; 3]; 4] = [[230, 20, 20], [20, 220, 20], [20, 20, 230], [230, 220, 20]];
+        let (width, height) = (120, 80);
+        let mut pixels = vec![0; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                let quadrant = usize::from(x >= width / 2) + 2 * usize::from(y >= height / 2);
+                let offset = (y * width + x) * 3;
+                pixels[offset..offset + 3].copy_from_slice(&COLORS[quadrant]);
+            }
+        }
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 100)
+            .encode(
+                &pixels,
+                width as u32,
+                height as u32,
+                ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        jpeg
+    }
+
+    fn corner_directions(jpeg: &[u8]) -> [usize; 4] {
+        const COLORS: [[i32; 3]; 4] = [[230, 20, 20], [20, 220, 20], [20, 20, 230], [230, 220, 20]];
+        let decoded =
+            DynamicImage::from_decoder(JpegDecoder::new(std::io::Cursor::new(jpeg)).unwrap())
+                .unwrap()
+                .to_rgb8();
+        let samples = [
+            (decoded.width() / 4, decoded.height() / 4),
+            (decoded.width() * 3 / 4, decoded.height() / 4),
+            (decoded.width() / 4, decoded.height() * 3 / 4),
+            (decoded.width() * 3 / 4, decoded.height() * 3 / 4),
+        ];
+        samples.map(|(x, y)| {
+            let pixel = decoded.get_pixel(x, y).0.map(i32::from);
+            COLORS
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, color)| {
+                    pixel
+                        .iter()
+                        .zip(color.iter())
+                        .map(|(actual, expected)| (actual - expected).pow(2))
+                        .sum::<i32>()
+                })
+                .unwrap()
+                .0
+        })
+    }
+
     fn exif_orientation(value: u16) -> Vec<u8> {
         let mut exif =
             b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0"
                 .to_vec();
         exif[24..26].copy_from_slice(&value.to_le_bytes());
         exif
+    }
+
+    fn exif_without_orientation() -> Vec<u8> {
+        b"Exif\0\0II\x2a\0\x08\0\0\0\0\0\0\0\0\0\0\0".to_vec()
     }
 
     fn insert_app1(jpeg: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -276,6 +345,76 @@ mod tests {
             assert_eq!(orientation, Some(Orientation::NoTransforms));
             assert!(!exif.windows(2).any(|window| window == [0x12, 0x01]));
         }
+    }
+
+    #[test]
+    fn raw_container_fallback_preserves_every_direction_for_both_targets() {
+        let source = directional_jpeg();
+        let expected_corners = [
+            [0, 1, 2, 3],
+            [1, 0, 3, 2],
+            [3, 2, 1, 0],
+            [2, 3, 0, 1],
+            [0, 2, 1, 3],
+            [2, 0, 3, 1],
+            [3, 1, 2, 0],
+            [1, 3, 0, 2],
+        ];
+        for target in [DerivativeTarget::Thumbnail512, DerivativeTarget::Review2560] {
+            for orientation in 1..=8_u8 {
+                let result =
+                    process_jpeg_with_orientation(&source, Some(orientation), target).unwrap();
+                let expected_dimensions = if orientation >= 5 {
+                    (80, 120)
+                } else {
+                    (120, 80)
+                };
+                assert_eq!(
+                    (result.width, result.height),
+                    expected_dimensions,
+                    "target {target:?}, orientation {orientation}"
+                );
+                assert_eq!(
+                    corner_directions(&result.jpeg),
+                    expected_corners[usize::from(orientation - 1)],
+                    "target {target:?}, orientation {orientation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_direction_wins_and_missing_partial_or_invalid_direction_falls_back() {
+        let source = directional_jpeg();
+        let explicit_normal = insert_app1(&source, &exif_orientation(1));
+        let normal = process_jpeg_with_orientation(
+            &explicit_normal,
+            Some(6),
+            DerivativeTarget::Thumbnail512,
+        )
+        .unwrap();
+        assert_eq!((normal.width, normal.height), (120, 80));
+        assert_eq!(corner_directions(&normal.jpeg), [0, 1, 2, 3]);
+
+        for lacking in [
+            source.clone(),
+            insert_app1(&source, &exif_without_orientation()),
+            insert_app1(&source, &exif_orientation(9)),
+        ] {
+            let rotated =
+                process_jpeg_with_orientation(&lacking, Some(6), DerivativeTarget::Thumbnail512)
+                    .unwrap();
+            assert_eq!((rotated.width, rotated.height), (80, 120));
+            assert_eq!(corner_directions(&rotated.jpeg), [2, 0, 3, 1]);
+        }
+
+        let encoded_order = process_jpeg(&source, DerivativeTarget::Thumbnail512).unwrap();
+        assert_eq!((encoded_order.width, encoded_order.height), (120, 80));
+        assert_eq!(corner_directions(&encoded_order.jpeg), [0, 1, 2, 3]);
+        assert_eq!(
+            process_jpeg_with_orientation(&source, Some(9), DerivativeTarget::Thumbnail512),
+            Err(DerivativeError::Internal)
+        );
     }
 
     #[test]

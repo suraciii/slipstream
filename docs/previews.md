@@ -31,6 +31,19 @@ Photo View must identify `JPEG` or `RAW embedded JPEG` as the Preview Source. Th
 
 Slipstream may decode, orient, scale, and re-encode source JPEG data for browser delivery. It must preserve the visible orientation and must not apply creative color, exposure, contrast, sharpening, denoising, lens, or crop changes beyond those already present in the source.
 
+For a RAW Photo, a valid orientation in the selected embedded JPEG takes
+precedence over the RAW container's orientation. If the JPEG has no valid
+orientation, Slipstream must use a valid orientation from that same RAW
+container. This fallback also applies when the JPEG contains other EXIF
+metadata but no valid orientation. For a JPEG Photo, only its own orientation
+applies.
+
+An explicit normal orientation is valid and must prevent an additional RAW
+container rotation. If neither source supplies a valid orientation, Slipstream
+must preserve the encoded pixel order. It must not guess orientation from
+image dimensions, filenames, or image content. Rotation and reflection must
+apply exactly once in thumbnails and review Previews.
+
 Slipstream must not overwrite or append data to the Original File.
 
 The first product provides two derivative sizes:
@@ -81,3 +94,9 @@ A Preview generation failure must not modify the Original File or remove an exis
 `DSCF0002.RAF` contains a 6240-by-4160 embedded JPEG. Slipstream uses that embedded JPEG and labels the source `RAW embedded JPEG`.
 
 `DSCF0003.RAF` contains only a 640-by-480 embedded thumbnail. Slipstream may show it, but must identify that focus inspection is limited by the Preview resolution.
+
+A RAW contains a 1200-by-800 embedded JPEG with no orientation and records a
+90-degree clockwise orientation in its container. Its review Preview is
+800-by-1200. If that embedded JPEG instead explicitly records normal
+orientation, its review Preview remains 1200-by-800, even when the container
+records a rotation.

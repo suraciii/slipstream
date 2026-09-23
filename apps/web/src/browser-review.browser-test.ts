@@ -9447,7 +9447,7 @@ test("delayed File Location responses from a superseded publication are discarde
   await writeFile(join(root, "a/sub/two.jpg"), data);
   await post(running.url, "/api/scan", {});
   await page.waitForFunction(async () => {
-    const response = await fixtureFetch("/api/overview");
+    const response = await fetch("/api/overview");
     const overview = (await response.json()) as { scan: { state: string } };
     return overview.scan.state === "idle";
   });
@@ -9718,7 +9718,7 @@ test("file locations reload coherently when a scan replaces the publication", as
   await writeFile(join(root, "later/two.jpg"), data);
   await post(running.url, "/api/scan", {});
   await page.waitForFunction(async () => {
-    const response = await fixtureFetch("/api/overview");
+    const response = await fetch("/api/overview");
     const overview = (await response.json()) as { scan: { state: string } };
     return overview.scan.state === "idle";
   });
@@ -10056,6 +10056,11 @@ test("real-camera: shows matching JPEG then RAW embedded JPEG through the mobile
   await expect(page.locator("[data-source]")).toContainText(
     "RAW embedded JPEG",
   );
+  const rawGeometry = await previewImageGeometry(page);
+  expect([rawGeometry.naturalWidth, rawGeometry.naturalHeight]).toEqual([
+    2560, 1707,
+  ]);
+  expect(rawGeometry.width).toBeGreaterThan(rawGeometry.height);
   await page.keyboard.press("d");
   await expect(page.locator("[data-preview]")).toHaveAttribute(
     "data-zoom-state",
@@ -10534,7 +10539,7 @@ test("a Folder sort change waits for the File Location binding before reopening"
   );
   await post(running.url, "/api/scan", {});
   await page.waitForFunction(async () => {
-    const response = await fixtureFetch("/api/overview");
+    const response = await fetch("/api/overview");
     const overview = (await response.json()) as { scan: { state: string } };
     return overview.scan.state === "idle";
   });
@@ -14472,7 +14477,7 @@ test("Grid filter re-anchors the current Photo and survives a refresh, sort, and
   await writeFile(join(root, "extra.jpg"), source);
   await post(running.url, "/api/scan", {});
   await page.waitForFunction(async () => {
-    const response = await fixtureFetch("/api/overview");
+    const response = await fetch("/api/overview");
     const overview = (await response.json()) as { scan: { state: string } };
     return overview.scan.state === "idle";
   });
@@ -16495,7 +16500,10 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
     window.fetch = ((input, init) => {
       if (typeof input === "string") {
         const url = new URL(input, window.location.href);
-        if (url.pathname.startsWith("/api/browse/") && !init?.method)
+        if (
+          url.pathname.startsWith("/api/browse/") &&
+          (init?.method ?? "GET").toUpperCase() === "GET"
+        )
           admissions.push({
             token: url.pathname.split("/").at(-1) ?? "",
             start: url.searchParams.get("start") ?? "",
@@ -16768,7 +16776,10 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
         const preview =
           url.pathname.startsWith("/api/photos/") &&
           url.pathname.endsWith("/preview");
-        if ((browse || preview) && !init?.method) {
+        if (
+          (browse || preview) &&
+          (init?.method ?? "GET").toUpperCase() === "GET"
+        ) {
           if (browse) {
             if (admissions.length === 64) {
               admissions.shift();
