@@ -132,13 +132,16 @@ The campaign records four explicit eligibility results so that loss of an I/O
 sample cannot erase complete memory evidence or be mistaken for a complete
 campaign row:
 
-- `memory_fit_eligible` requires exact fixture, source, reference, executable,
-  launcher and environment identity; retained attempt-slice memory peak, limits,
-  memory events and zero-swap evidence equal to the terminal receipt; successful
-  reference-matching output; confirmed cleanup and exact ownership; and every
-  predeclared Web/Album and host/ancestor headroom check to pass. Missing memory
-  evidence, unresolved identity, OOM, failed output, uncertain cleanup or failed
-  headroom makes the row ineligible for E/R fitting.
+- `memory_fit_eligible` is the final row-level E/R fitting decision. It requires
+  exact fixture, source, reference, executable, launcher and environment
+  identity; retained attempt-slice memory peak, limits, memory events and
+  zero-swap evidence equal to the terminal receipt; successful
+  reference-matching output; confirmed cleanup and exact ownership; a complete
+  observer window; and every predeclared Web/Album and host/ancestor headroom
+  criterion to pass. Attempt-memory proof alone is necessary but not sufficient.
+  Missing required memory or headroom evidence, unresolved identity, OOM, failed
+  output, incomplete observer evidence, uncertain cleanup or failed headroom
+  makes the row ineligible for E/R fitting.
 - `io_diagnostic_eligible` requires complete terminal I/O evidence for the exact
   attempt and its declared scope. Missing per-attempt terminal counters make the
   diagnostic unavailable. Parent I/O counters cannot stand in for attempt
@@ -147,23 +150,25 @@ campaign row:
 - `observer_window_eligible` requires the predeclared observer window to have
   complete, attributable Web/Album and host/ancestor observations, with no
   unresolved identity or ordering contradiction that affects memory or
-  headroom evidence. It does not require terminal I/O counters when those
-  counters are unavailable independently of the complete memory observations.
+  headroom evidence. Missing any required observation makes the window
+  ineligible. It does not require terminal I/O counters when those counters are
+  unavailable independently of the complete memory observations.
 - `campaign_row_eligible` is true only when memory-fit, I/O-diagnostic and
   observer-window eligibility all pass. It represents a complete campaign row,
   not the input gate for the memory fitter.
 
 An eligibility result that cannot be established from retained evidence is
 false and records its reason; missing evidence never implies a pass.
-The fitter consumes only rows where both `memory_fit_eligible` and
-`observer_window_eligible` are true, and reports I/O diagnostic coverage
-separately. A missing terminal I/O diagnostic may therefore leave memory
-fitting valid while the full campaign row remains ineligible; it cannot be
-imputed, copied from a parent without the proof above, or presented as complete
-release evidence. Per the [Processing Executor](processing-executor.md), the
-launcher must establish its I/O release precondition before work is released.
-Meeting that precondition does not make terminal I/O diagnostics a memory-fit
-input.
+The fitter consumes only final `memory_fit_eligible` rows and independently
+checks their retained attempt-memory proof, exact fixture/source/reference and
+candidate/runtime identities, and true `observer_window_eligible` result before
+using their peaks. It reports I/O diagnostic coverage separately. A missing
+terminal I/O diagnostic may therefore leave memory fitting valid while the full
+campaign row remains ineligible; it cannot be imputed, copied from a parent
+without the proof above, or presented as complete release evidence. Per the
+[Processing Executor](processing-executor.md), the launcher must establish its
+I/O release precondition before work is released. Meeting that precondition does
+not make terminal I/O diagnostics a memory-fit input.
 
 The selected separation preserves usable, independently complete memory
 observations while keeping missing diagnostics visible. A single composite
