@@ -247,6 +247,11 @@ The worker has no writable cgroup mount. The leaf sets `memory.oom.group=1`;
 the retained attempt and aggregate slices enforce the captured memory ceiling
 and zero swap. CPU/task limits cover bootstrap and descendants as well. No
 controller write may race systemd or Docker over a manager-owned ancestor.
+Before releasing engine work, the launcher must confirm that the I/O controller
+is available at the owned attempt boundary and that `io.stat` is readable there.
+If either check fails, work remains unreleased. This launch precondition is
+separate from whether complete terminal per-attempt I/O counters survive
+settlement; diagnostic evidence is recorded as unavailable when it does not.
 
 ## Evidence and Settlement
 

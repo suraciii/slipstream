@@ -115,19 +115,74 @@ reference outputs, finite repetitions, tested limits, cache/thread procedure,
 the rule deriving E from calibration observations, the independent R rule and
 all failure criteria. Derive E and freeze it before revealing held-out results.
 R cannot be adjusted to hide a failed held-out observation. Qualification must
-show every required valid observation at or below E itself; neither R nor the
-overlapping S/F reservations may conceal an E miss. Require complete reference
-output, exact retained peak/events, terminal cleanup and healthy control-state
-operations. Low-limit OOM experiments establish containment; they cannot be
-discarded or relabeled as successful samples. A changed scope or fitted rule
-requires fresh held-out acceptance. No observation in a syntax example qualifies
-a fixture or recommends a deployment budget.
+show every required valid memory-fit observation at or below E itself; neither
+R nor the overlapping S/F reservations may conceal an E miss. Each such
+observation requires complete reference output, exact retained peak/events,
+confirmed terminal cleanup and healthy control-state operations. Low-limit OOM
+experiments establish containment; they cannot be discarded or relabeled as
+successful samples. A changed scope, eligibility/observer protocol or fitted
+rule requires independent review and a fresh campaign; observations from
+different protocols cannot be combined. No observation in a syntax example
+qualifies a fixture or recommends a deployment budget.
+
+### Campaign Evidence Eligibility
+
+Memory qualification and terminal I/O diagnostics answer separate questions.
+The campaign records four explicit eligibility results so that loss of an I/O
+sample cannot erase complete memory evidence or be mistaken for a complete
+campaign row:
+
+- `memory_fit_eligible` is the final row-level E/R fitting decision. It requires
+  exact fixture, source, reference, executable, launcher and environment
+  identity; retained attempt-slice memory peak, limits, memory events and
+  zero-swap evidence equal to the terminal receipt; successful
+  reference-matching output; confirmed cleanup and exact ownership; a complete
+  observer window; and every predeclared Web/Album and host/ancestor headroom
+  criterion to pass. Attempt-memory proof alone is necessary but not sufficient.
+  Missing required memory or headroom evidence, unresolved identity, OOM, failed
+  output, incomplete observer evidence, uncertain cleanup or failed headroom
+  makes the row ineligible for E/R fitting.
+- `io_diagnostic_eligible` requires complete terminal I/O evidence for the exact
+  attempt and its declared scope. Missing per-attempt terminal counters make the
+  diagnostic unavailable. Parent I/O counters cannot stand in for attempt
+  counters unless contemporaneous evidence proves exclusive membership of the
+  attempt in that parent for the entire observation interval.
+- `observer_window_eligible` requires the predeclared observer window to have
+  complete, attributable Web/Album and host/ancestor observations, with no
+  unresolved identity or ordering contradiction that affects memory or
+  headroom evidence. Missing any required observation makes the window
+  ineligible. It does not require terminal I/O counters when those counters are
+  unavailable independently of the complete memory observations.
+- `campaign_row_eligible` is true only when memory-fit, I/O-diagnostic and
+  observer-window eligibility all pass. It represents a complete campaign row,
+  not the input gate for the memory fitter.
+
+An eligibility result that cannot be established from retained evidence is
+false and records its reason; missing evidence never implies a pass.
+The fitter consumes only final `memory_fit_eligible` rows and independently
+checks their retained attempt-memory proof, exact fixture/source/reference and
+candidate/runtime identities, and true `observer_window_eligible` result before
+using their peaks. It reports I/O diagnostic coverage separately. A missing
+terminal I/O diagnostic may therefore leave memory fitting valid while the full
+campaign row remains ineligible; it cannot be imputed, copied from a parent
+without the proof above, or presented as complete release evidence. Per the
+[Processing Executor](processing-executor.md), the launcher must establish its
+I/O release precondition before work is released. Meeting that precondition does
+not make terminal I/O diagnostics a memory-fit input.
+
+The selected separation preserves usable, independently complete memory
+observations while keeping missing diagnostics visible. A single composite
+eligibility flag is rejected because it either discards valid memory evidence
+when only terminal I/O is missing or silently treats incomplete diagnostics as
+complete. Low-level observer failures that affect memory identity, memory
+accounting or declared headroom still disqualify the memory-fit row.
 
 Evidence retains the immutable image/launcher identities, source and output
 hashes, compiled inventory/formula, full captured limits, thread/cache procedure,
 environment, raw parent/attempt local and hierarchical events, peak, outcome,
 phase timing where observed, cleanup and independent reference provenance. It
-also records the predeclared corpus/rules and review decision. Full evidence is
+also records the predeclared corpus/rules, each eligibility result with its
+supporting reason, I/O diagnostic coverage and review decision. Full evidence is
 an operator artifact; the launcher does not fetch URLs or implement a review,
 signing or approval service.
 
