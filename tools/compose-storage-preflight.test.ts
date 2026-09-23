@@ -22,8 +22,10 @@ const composeEntryPoint = join(repositoryRoot, "scripts", "compose");
 const composeFile = join(repositoryRoot, "compose.yaml");
 const immutableImage =
   "registry.example.com:5000/slipstream/release@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const publicOrigin = "https://photos.example.com";
 const downImageSentinel =
   "registry.invalid/slipstream/stop@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const downPublicOriginSentinel = "https://stop.invalid";
 const originalBytes = "Original bytes must not change";
 
 type StorageRole = "library" | "state" | "cache";
@@ -65,6 +67,7 @@ interface CommandResult {
 
 async function dockerComposeConfig(
   environmentFile: string,
+  profile?: string,
 ): Promise<Record<string, unknown>> {
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) {
@@ -79,25 +82,24 @@ async function dockerComposeConfig(
 
   let child: ReturnType<typeof Bun.spawn>;
   try {
-    child = Bun.spawn(
-      [
-        "docker",
-        "compose",
-        "--env-file",
-        environmentFile,
-        "-f",
-        composeFile,
-        "config",
-        "--format",
-        "json",
-      ],
-      {
-        cwd: repositoryRoot,
-        env: environment,
-        stderr: "pipe",
-        stdout: "pipe",
-      },
-    );
+    const arguments_ = [
+      "docker",
+      "compose",
+      "--env-file",
+      environmentFile,
+      ...(profile ? ["--profile", profile] : []),
+      "-f",
+      composeFile,
+      "config",
+      "--format",
+      "json",
+    ];
+    child = Bun.spawn(arguments_, {
+      cwd: repositoryRoot,
+      env: environment,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
   } catch (error) {
     throw new Error(
       "Docker Compose is required for the Compose configuration contract test",
@@ -163,7 +165,7 @@ async function fixture(): Promise<Fixture> {
       '  original_arguments=("$@")',
       "  shift 3",
       '  printf \'%s\\n\' "$@" > "$FAKE_DOCKER_COMPOSE_ARGUMENTS"',
-      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_DATABASE_BASENAME-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
+      '  printf \'%s\\n\' "${SLIPSTREAM_IMAGE-}" "${SLIPSTREAM_BIND_ADDRESS-}" "${SLIPSTREAM_PORT-}" "${SLIPSTREAM_DATABASE_BASENAME-}" "${SLIPSTREAM_PUBLIC_ORIGIN-}" > "$FAKE_DOCKER_COMPOSE_CONFIGURATION"',
       '  printf \'%s\\n\' "${COMPOSE_FILE-}" "${COMPOSE_ENV_FILES-}" "${COMPOSE_PROFILES-}" "${COMPOSE_PROJECT_NAME-}" > "$FAKE_DOCKER_COMPOSE_ENVIRONMENT"',
       '  printf \'%s\\n\' "${SLIPSTREAM_LIBRARY_ROOT-}" "${SLIPSTREAM_STATE_DIRECTORY-}" "${SLIPSTREAM_CACHE_DIRECTORY-}" > "$FAKE_DOCKER_COMPOSE_SOURCES"',
       '  if [[ "${FAKE_DOCKER_REAL_CONFIG:-}" == "1" ]]; then',
@@ -330,6 +332,7 @@ async function writeEnvironment(
       "SLIPSTREAM_BIND_ADDRESS=127.0.0.2",
       "SLIPSTREAM_PORT=3100",
       "SLIPSTREAM_DATABASE_BASENAME=environment-file.sqlite",
+      `SLIPSTREAM_PUBLIC_ORIGIN=${publicOrigin}`,
       `SLIPSTREAM_LIBRARY_ROOT=${sources.library}`,
       `SLIPSTREAM_STATE_DIRECTORY=${sources.state}`,
       `SLIPSTREAM_CACHE_DIRECTORY=${sources.cache}`,
@@ -343,18 +346,31 @@ async function runCompose(
   options: {
     environmentFile?: string;
     environment?: Record<string, string>;
+    terminal?: boolean;
   } = {},
 ): Promise<CommandResult> {
   const environment = { ...process.env };
   delete environment.DOCKER_CONTEXT;
   delete environment.DOCKER_HOST;
+  const commandArguments = [
+    composeEntryPoint,
+    "--env-file",
+    options.environmentFile ?? target.environmentFile,
+    ...command,
+  ];
+  const shellQuote = (value: string): string =>
+    `'${value.replaceAll("'", "'\\''")}'`;
   const child = Bun.spawn(
-    [
-      composeEntryPoint,
-      "--env-file",
-      options.environmentFile ?? target.environmentFile,
-      ...command,
-    ],
+    options.terminal
+      ? [
+          "script",
+          "--quiet",
+          "--return",
+          "--command",
+          commandArguments.map(shellQuote).join(" "),
+          "/dev/null",
+        ]
+      : commandArguments,
     {
       cwd: repositoryRoot,
       env: {
@@ -691,7 +707,6 @@ test("startup and Library Expansion forward canonical sources with builds disabl
           "run",
           "--rm",
           "--no-deps",
-          "--no-build",
           "slipstream",
           "expand-library",
         ],
@@ -1396,6 +1411,7 @@ test("environment-file configuration wins over ambient values", async () => {
         SLIPSTREAM_BIND_ADDRESS: "0.0.0.0",
         SLIPSTREAM_PORT: "3999",
         SLIPSTREAM_DATABASE_BASENAME: "ambient.sqlite",
+        SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.example.net",
         SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
         SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
         SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
@@ -1424,7 +1440,9 @@ test("environment-file configuration wins over ambient values", async () => {
         "",
       ].join("\n"),
     );
-    expect(await Bun.file(target.composeConfiguration).text()).toBe("\n\n\n\n");
+    expect(await Bun.file(target.composeConfiguration).text()).toBe(
+      "\n\n\n\n\n",
+    );
     expect(await Bun.file(target.composeEnvironment).text()).toBe("\n\n\n\n");
 
     const canonicalSources = {
@@ -1454,7 +1472,7 @@ test("environment-file configuration wins over ambient values", async () => {
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
     });
-    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBeUndefined();
+    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBe(publicOrigin);
     expect(
       ports.some(
         (port) =>
@@ -1482,6 +1500,172 @@ test("environment-file configuration wins over ambient values", async () => {
     }
     expect(service.restart).toBeUndefined();
     expect(service.restart_policy).toBeUndefined();
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("startup requires one literal canonical HTTPS public origin", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const invalidOrigins = [
+      [],
+      ['SLIPSTREAM_PUBLIC_ORIGIN="https://photos.example.com"'],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=http://photos.example.com"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://user@photos.example.com"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com/library"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com?query"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com#fragment"],
+      ["SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com:0"],
+      [
+        "SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com",
+        "SLIPSTREAM_PUBLIC_ORIGIN=https://other.example.com",
+      ],
+    ] as const;
+
+    for (const declarations of invalidOrigins) {
+      await writeFile(
+        target.environmentFile,
+        [
+          `SLIPSTREAM_IMAGE=${immutableImage}`,
+          `SLIPSTREAM_LIBRARY_ROOT=${layout.sources.library}`,
+          `SLIPSTREAM_STATE_DIRECTORY=${layout.sources.state}`,
+          `SLIPSTREAM_CACHE_DIRECTORY=${layout.sources.cache}`,
+          ...declarations,
+        ].join("\n"),
+      );
+
+      const result = await runCompose(target, ["up"]);
+
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("SLIPSTREAM_PUBLIC_ORIGIN");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+      expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    }
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("startup accepts and passes the documented trailing-slash origin", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    const environment = (
+      await readFile(target.environmentFile, "utf8")
+    ).replace(
+      `SLIPSTREAM_PUBLIC_ORIGIN=${publicOrigin}`,
+      `SLIPSTREAM_PUBLIC_ORIGIN=${publicOrigin}/`,
+    );
+    await writeFile(target.environmentFile, environment);
+
+    const result = await runCompose(target, ["up"], {
+      environment: { FAKE_DOCKER_REAL_CONFIG: "1" },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const configuration = JSON.parse(result.stdout) as Record<string, unknown>;
+    const services = configuration.services as Record<string, unknown>;
+    const service = services.slipstream as Record<string, unknown>;
+    const serviceEnvironment = service.environment as Record<string, unknown>;
+    expect(serviceEnvironment.SLIPSTREAM_PUBLIC_ORIGIN).toBe(
+      `${publicOrigin}/`,
+    );
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("access creation and rotation require a terminal and run a no-log admin container", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    const environment = (await readFile(target.environmentFile, "utf8"))
+      .split("\n")
+      .filter((line) => !line.startsWith("SLIPSTREAM_PUBLIC_ORIGIN="));
+    await writeFile(target.environmentFile, environment.join("\n"));
+
+    for (const action of ["access-create", "access-rotate"] as const) {
+      await rm(target.dockerCalls, { force: true });
+      await rm(target.composeArguments, { force: true });
+      const withoutTerminal = await runCompose(target, [action]);
+      expect(withoutTerminal.exitCode).toBe(2);
+      expect(withoutTerminal.stderr).toContain(
+        "require an interactive terminal",
+      );
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+
+      const result = await runCompose(target, [action], {
+        terminal: true,
+        environment: {
+          SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.example.net",
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(await Bun.file(target.composeArguments).text()).toBe(
+        [
+          "--project-name",
+          "slipstream",
+          "--env-file",
+          await realpath(target.environmentFile),
+          "-f",
+          composeFile,
+          "--profile",
+          "access-admin",
+          "run",
+          "--rm",
+          "--no-deps",
+          "--interactive",
+          "--tty",
+          "slipstream-admin",
+          action,
+          "",
+        ].join("\n"),
+      );
+      expect(await Bun.file(target.composeConfiguration).text()).toBe(
+        "\n\n\n\n\n",
+      );
+    }
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("access revocation runs without a TTY and does not require a public origin", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    const environment = (await readFile(target.environmentFile, "utf8"))
+      .split("\n")
+      .filter((line) => !line.startsWith("SLIPSTREAM_PUBLIC_ORIGIN="));
+    await writeFile(target.environmentFile, environment.join("\n"));
+
+    const result = await runCompose(target, ["access-revoke"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(await Bun.file(target.composeArguments).text()).toBe(
+      [
+        "--project-name",
+        "slipstream",
+        "--env-file",
+        await realpath(target.environmentFile),
+        "-f",
+        composeFile,
+        "--profile",
+        "access-admin",
+        "run",
+        "--rm",
+        "--no-deps",
+        "--no-TTY",
+        "slipstream-admin",
+        "access-revoke",
+        "",
+      ].join("\n"),
+    );
   } finally {
     await removeFixture(target);
   }
@@ -1547,6 +1731,10 @@ test("down parses semantic-invalid image and storage values with stop-only senti
         name: "malformed digest image and missing storage values",
         values: ["SLIPSTREAM_IMAGE=registry.example.com/slipstream@sha256:bad"],
       },
+      {
+        name: "invalid public origin",
+        values: ["SLIPSTREAM_PUBLIC_ORIGIN=http://malformed.example/path"],
+      },
     ] as const;
 
     for (const variant of variants) {
@@ -1558,6 +1746,7 @@ test("down parses semantic-invalid image and storage values with stop-only senti
           SLIPSTREAM_LIBRARY_ROOT: "/ambient/originals",
           SLIPSTREAM_STATE_DIRECTORY: "/ambient/state",
           SLIPSTREAM_CACHE_DIRECTORY: "/ambient/cache",
+          SLIPSTREAM_PUBLIC_ORIGIN: "https://ambient.example.net",
           FAKE_DOCKER_REAL_CONFIG: "1",
         },
       });
@@ -1576,7 +1765,7 @@ test("down parses semantic-invalid image and storage values with stop-only senti
         ].join("\n"),
       );
       expect(await Bun.file(target.composeConfiguration).text()).toBe(
-        `${downImageSentinel}\n\n\n\n`,
+        `${downImageSentinel}\n\n\n\n${downPublicOriginSentinel}\n`,
       );
       expect(await Bun.file(target.composeSources).text()).toBe(
         `${downStorageSentinels.library}\n${downStorageSentinels.state}\n${downStorageSentinels.cache}\n`,
@@ -1607,6 +1796,9 @@ test("down parses semantic-invalid image and storage values with stop-only senti
         expect(volume).toBeDefined();
         expect(volume?.read_only ?? false).toBe(role === "library");
       }
+      expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBe(
+        downPublicOriginSentinel,
+      );
     }
   } finally {
     await removeFixture(target);
@@ -1644,7 +1836,7 @@ test("Docker Compose config preserves the digest-only storage contract", async (
     expect(environment).toMatchObject({
       SLIPSTREAM_DATABASE_BASENAME: "environment-file.sqlite",
     });
-    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBeUndefined();
+    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBe(publicOrigin);
     expect(
       ports.some(
         (port) =>
@@ -1686,6 +1878,43 @@ test("Docker Compose config preserves the digest-only storage contract", async (
 
     expect(service.restart).toBeUndefined();
     expect(service.restart_policy).toBeUndefined();
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("the access-admin profile shares pinned storage but disables container logs", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+
+    const configuration = await dockerComposeConfig(
+      target.environmentFile,
+      "access-admin",
+    );
+    const services = configuration.services as Record<string, unknown>;
+    const server = services.slipstream as Record<string, unknown>;
+    const admin = services["slipstream-admin"] as Record<string, unknown>;
+
+    expect(Object.keys(services).sort()).toEqual([
+      "slipstream",
+      "slipstream-admin",
+    ]);
+    expect(admin.image).toBe(immutableImage);
+    expect(admin.build).toBeUndefined();
+    expect(admin.platform).toBe(server.platform);
+    expect(admin.user).toBe(server.user);
+    expect(admin.read_only).toBe(true);
+    expect(admin.cap_drop).toEqual(["ALL"]);
+    expect(admin.security_opt).toEqual(["no-new-privileges:true"]);
+    expect(admin.logging).toEqual({ driver: "none" });
+    expect(server.logging).toBeUndefined();
+    expect(admin.ports).toBeUndefined();
+    expect(admin.healthcheck).toBeUndefined();
+    expect(admin.profiles).toEqual(["access-admin"]);
+    expect(admin.volumes).toEqual(server.volumes);
+    expect(admin.environment).toEqual(server.environment);
   } finally {
     await removeFixture(target);
   }

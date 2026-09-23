@@ -46,37 +46,12 @@ Blocking SQLite, LibRaw, JPEG, and derivative work must not run on asynchronous 
 
 ## Network Exposure
 
-The default listener is loopback. `SLIPSTREAM_HOST` may select a wider
-listener for a trusted LAN, Tailscale network, or equivalent private network.
-Slipstream 0.1 has no accounts, authentication, authorization, or request
-origin access control. Any client that can reach a listener can read and mutate
-the Photo Library.
-
-`Host`, `Origin`, absolute request targets, and forwarded headers are
-transport metadata, not access-control inputs. HTTP still applies the decoded
-header limit, method and mutation-path policy, route validation, and mutation
-body limit. `GET /healthz` and `HEAD /healthz` retain their fixed readiness
-behavior.
-
-### Selected: Trusted-Network Exposure
-
-Loopback makes the default local workflow work without extra configuration.
-A wider listener remains useful for a Photographer's private network, but it
-does not add a security boundary. The operator must limit that network to
-trusted clients.
-
-### Rejected: Origin and Authority Admission
-
-Matching a configured origin against `Host` or `Origin` does not authenticate
-a client. Keeping it would add configuration and error behavior while falsely
-suggesting that a non-loopback listener is protected. It is therefore removed
-instead of becoming an optional partial authentication mode.
-
-### Deferred: Authentication
-
-Accounts, passwords, tokens, sessions, CSRF policy, and proxy integration are
-one future authentication design. They are not approximated with browser
-request headers in 0.1.
+The default listener remains loopback. [Instance Access Architecture](access.md)
+owns credential verification, sessions, request-origin checks, private response
+caching, and admission before all private route handlers. [Deployment](../docs/deployment.md)
+owns HTTPS exposure and the private proxy hop. There is no anonymous fallback
+when access configuration is missing. Accounts and identity providers are not
+part of this contract. Minimal health checks retain their fixed readiness body.
 
 ## Compatibility
 
@@ -141,7 +116,7 @@ The compatibility probe links system LibRaw `0.21.5`, libjpeg-compatible API `2.
 The service preserves:
 
 - the bounded protocol routes and statuses defined by the latest compatibility fixtures, path-free JSON errors, 16 KiB decoded header bound, and 64 KiB streamed mutation-body bound;
-- strong derivative ETags derived from cache identity, immutable derivative caching, revalidatable `index.html`, and no API-to-SPA fallback;
+- strong derivative ETags derived from cache identity, private derivative delivery, revalidatable `index.html`, and no API-to-SPA fallback;
 - canonical SQLite schema validation, the lossless v2-to-v3 migration history, canonical v3-to-v4 identity migration, canonical v4-to-v5 Album migration, canonical v5-to-v6 independent-Photo migration, fail-closed Library Folder admission, exact migration rejection, `foreign_keys=ON`, fixed journal policy, admitted sidecars, and one admitted `BEGIN IMMEDIATE` transaction per write;
 - the explicit ancestor-expansion transaction defined by [Photo Library Identity and Expansion](library-identity.md), with canonical v3, v4, and v5 as preserved migration inputs and v6 as required writable state;
 - exact preservation of existing Original File and Photo IDs as opaque values across migration and Library expansion, without recomputing them from the current Original Location;
@@ -158,7 +133,7 @@ Implementation details may improve standards compliance, such as parsing an `If-
 
 The verification gate runs the shared compatibility crate, Rust formatting, Clippy with warnings denied, Rust tests/build, Bun Web checks, and real Chromium browser tests against the Rust server.
 
-The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, v5, and v6 schema shapes, legacy-ID, Album-state, and independent-Photo preservation, Location-independent new-ID allocation, exact-content recovery, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag revalidation, immutable delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
+The checked-in compatibility suite covers representative v0/v1/v2 state migration success and rejection rollback, exact v3, v4, v5, and v6 schema shapes, legacy-ID, Album-state, and independent-Photo preservation, Location-independent new-ID allocation, exact-content recovery, Capture Time parsing and deterministic ordering, request/status/body/header vectors, derivative ETag admission, private delivery, index revalidation, and API no-SPA-fallback behavior. The full gate also covers Linux traversal and inode attacks, every exact HTTP body/header boundary, bind and shutdown failures, cache cross-read, all eight EXIF orientations, ICC conversion vectors, concurrency and memory limits, browser Library browsing and selection behavior, and the configured Sony sample with unchanged Original hash.
 
 ## Photo Development Processes
 

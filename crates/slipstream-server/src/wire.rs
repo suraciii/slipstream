@@ -747,7 +747,7 @@ impl PreviewResponse {
             height: Some(ready.height),
             limited_detail: Some(ready.width.max(ready.height) < 2560),
             url: Some(format!(
-                "/api/derivatives/{}/{}/{}.jpg",
+                "/api/private/derivatives/{}/{}/{}.jpg",
                 photo_id,
                 derivative_target_name(ready.target),
                 ready.cache_key

@@ -41,7 +41,9 @@ use tokio::{
     task::JoinHandle,
 };
 
+mod access;
 mod app;
+pub use access::administer_access;
 mod config;
 pub(crate) mod folders;
 mod http;

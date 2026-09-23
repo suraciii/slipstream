@@ -80,7 +80,7 @@ pub struct StateDirectory {
     canonical_path: PathBuf,
 }
 
-pub(crate) struct StateDatabaseLock {
+pub struct StateDatabaseLock {
     _descriptor: OwnedFd,
 }
 
@@ -145,10 +145,7 @@ impl StateDirectory {
         safe_identity(&facts).ok_or(StateError::UnsafeDatabase)
     }
 
-    pub(crate) fn lock_database(
-        &self,
-        name: &DatabaseName,
-    ) -> Result<StateDatabaseLock, StateError> {
+    pub fn lock_database(&self, name: &DatabaseName) -> Result<StateDatabaseLock, StateError> {
         let descriptor = self.open_database(name, libc::O_RDWR | libc::O_NONBLOCK, 0)?;
         sys::lock_exclusive(descriptor.as_raw_fd()).map_err(|error| {
             if error.raw_os_error() == Some(libc::EWOULDBLOCK)

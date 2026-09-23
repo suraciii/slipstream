@@ -1,11 +1,20 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { access } from "node:fs/promises";
-import { createServer } from "node:net";
+import { access, readFile, writeFile, mkdir, chmod } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  createServer as createHttpsServer,
+  request as httpsRequest,
+} from "node:https";
+import { request as httpRequest, type ClientRequest } from "node:http";
+import { readFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 
 export type BrowserServer = Readonly<{
   url: string;
+  token: string;
+  tokenFile: string;
   close(): Promise<void>;
 }>;
 
@@ -28,9 +37,74 @@ export async function startBrowserServer({
   await access(binary);
   await access(join(webRoot, "index.html"));
 
+  const token = randomBytes(32).toString("base64url");
+  const tokenFile = join(base, "access-token");
+  await writeFile(tokenFile, token, { mode: 0o600 });
+  await mkdir(join(base, "state"), { recursive: true, mode: 0o700 });
+  const records = JSON.stringify({
+    credential: {
+      digest: Array.from(createHash("sha256").update(token).digest()),
+      generation: randomBytes(32).toString("base64url"),
+    },
+    sessions: [],
+  });
+  execFileSync("python3", [
+    "-c",
+    "import sqlite3,sys,os; p=sys.argv[1]; c=sqlite3.connect(p); c.execute('CREATE TABLE IF NOT EXISTS access (id INTEGER PRIMARY KEY CHECK(id=1), records TEXT NOT NULL)'); c.execute('INSERT OR REPLACE INTO access VALUES(1, ?)', (sys.argv[2],)); c.commit(); c.close(); os.chmod(p,0o600)",
+    join(base, "state/access.sqlite"),
+    records,
+  ]);
+  await chmod(join(base, "state/access.sqlite"), 0o600);
   for (let attempt = 1; attempt <= maxStartupAttempts; attempt += 1) {
     const port = await availablePort();
-    const url = `http://127.0.0.1:${port}`;
+    const backendUrl = `http://127.0.0.1:${port}`;
+    const sockets = new Set<Socket>();
+    const upstreams = new Set<ClientRequest>();
+    const proxy = createHttpsServer(
+      {
+        key: await readFile(resolve("tools/test-tls/server-key.pem")),
+        cert: await readFile(resolve("tools/test-tls/server-cert.pem")),
+      },
+      (incoming, outgoing) => {
+        const upstream = httpRequest(
+          `${backendUrl}${incoming.url ?? "/"}`,
+          { method: incoming.method, headers: incoming.headers, agent: false },
+          (response) => {
+            outgoing.writeHead(response.statusCode ?? 502, response.headers);
+            response.pipe(outgoing);
+          },
+        );
+        upstreams.add(upstream);
+        upstream.once("close", () => upstreams.delete(upstream));
+        outgoing.once("close", () => upstream.destroy());
+        incoming.once("aborted", () => upstream.destroy());
+        upstream.on("error", () => {
+          if (outgoing.destroyed) return;
+          if (!outgoing.headersSent) outgoing.writeHead(502);
+          outgoing.end();
+        });
+        incoming.pipe(upstream);
+      },
+    );
+    // Browsers can preconnect without starting TLS. HTTP connection helpers
+    // do not own those raw sockets, so track the complete listener lifetime.
+    proxy.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    const closeProxy = async (): Promise<void> => {
+      const closed = new Promise<void>((done, reject) =>
+        proxy.close((error) => (error ? reject(error) : done())),
+      );
+      for (const socket of sockets) socket.destroy();
+      for (const upstream of upstreams) upstream.destroy();
+      await closed;
+    };
+    await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
+    const address = proxy.address();
+    if (!address || typeof address === "string")
+      throw new Error("HTTPS proxy address unavailable");
+    const url = `https://127.0.0.1:${address.port}`;
     const child = spawn(binary, [], {
       cwd: process.cwd(),
       env: {
@@ -42,6 +116,7 @@ export async function startBrowserServer({
         SLIPSTREAM_WEB_ROOT: webRoot,
         SLIPSTREAM_HOST: "127.0.0.1",
         SLIPSTREAM_PORT: String(port),
+        SLIPSTREAM_PUBLIC_ORIGIN: url,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -50,17 +125,31 @@ export async function startBrowserServer({
       if (errors.join("").length < 8_192) errors.push(chunk.toString());
     });
     try {
-      await waitForReady(child, url, errors);
+      await waitForReady(child, backendUrl, errors);
+      fixtureTokens.set(url, token);
       let closing: Promise<void> | undefined;
       return {
         url,
+        token,
+        tokenFile,
         close() {
-          closing ??= stop(child);
+          closing ??= (async () => {
+            fixtureTokens.delete(url);
+            try {
+              await closeProxy();
+            } finally {
+              await stop(child);
+            }
+          })();
           return closing;
         },
       };
     } catch (error) {
-      await stop(child);
+      try {
+        await closeProxy();
+      } finally {
+        await stop(child);
+      }
       if (
         attempt === maxStartupAttempts ||
         !retryableStartupFailure(error, errors)
@@ -124,4 +213,56 @@ async function availablePort(): Promise<number> {
     probe.close((error) => (error ? reject(error) : resolve())),
   );
   return port;
+}
+
+// Fixture requests use real TLS verification and explicit Bearer credentials.
+const fixtureTokens = new Map<string, string>();
+export async function fixtureFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  const token = fixtureTokens.get(url.origin);
+  if (!token) throw new Error("Unknown authenticated fixture origin");
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  const outgoingHeaders: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    outgoingHeaders[key] = value;
+  });
+  return new Promise((resolveResponse, reject) => {
+    const request = httpsRequest(
+      url,
+      {
+        method: init.method ?? "GET",
+        headers: outgoingHeaders,
+        ca: readFileSync(resolve("tools/test-tls/cert.pem")),
+      },
+      (incoming) => {
+        const chunks: Buffer[] = [];
+        incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+        incoming.on("end", () => {
+          const responseHeaders = new Headers();
+          for (const [key, value] of Object.entries(incoming.headers)) {
+            if (value !== undefined)
+              responseHeaders.set(
+                key,
+                Array.isArray(value) ? value.join(", ") : value,
+              );
+          }
+          const status = incoming.statusCode ?? 500;
+          resolveResponse(
+            new Response(
+              [204, 304].includes(status) ? null : Buffer.concat(chunks),
+              { status, headers: responseHeaders },
+            ),
+          );
+        });
+        incoming.on("error", reject);
+      },
+    );
+    request.on("error", reject);
+    if (init.body) request.write(init.body);
+    request.end();
+  });
 }

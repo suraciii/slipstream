@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
-use slipstream_server::{Config, start_server};
+use slipstream_server::Config;
+mod common;
 use std::{
     fs,
     io::{ErrorKind, Read, Write},
@@ -36,7 +37,7 @@ fn capabilities_body() -> Value {
     })
 }
 
-fn write_json_response(stream: &mut TcpStream, status: u16, body: &Value) {
+fn write_json_response(stream: &mut impl Write, status: u16, body: &Value) {
     let bytes = serde_json::to_vec(body).unwrap();
     let _ = write!(
         stream,
@@ -59,12 +60,10 @@ fn stub_service(reply: MutationReply) -> (String, JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
         for request_index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            let (mut stream, _) = common::accept_tls(&listener);
             let mut request = [0_u8; 8192];
-            let _ = stream.read(&mut request).unwrap();
+            let count = stream.read(&mut request).unwrap();
+            common::assert_bearer(&request[..count]);
             if request_index == 0 {
                 write_json_response(&mut stream, 200, &capabilities_body());
             } else {
@@ -77,7 +76,7 @@ fn stub_service(reply: MutationReply) -> (String, JoinHandle<()>) {
             }
         }
     });
-    (format!("http://{address}"), handle)
+    (format!("https://127.0.0.1:{}", address.port()), handle)
 }
 
 /// Forwards requests to a real service but drops the response of the first
@@ -90,11 +89,11 @@ fn dropping_proxy(upstream: &str) -> String {
         .unwrap_or(upstream)
         .to_owned();
     std::thread::spawn(move || {
-        while let Ok((mut client, _)) = listener.accept() {
-            client
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            while let Some((head, body)) = read_http_message(&mut client) {
+        while let Ok((stream, _)) = listener.accept() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let mut client = common::tls_stream(stream);
+            while let Some((head, body)) = common::read_http_message(&mut client) {
                 let mut forwarded = head.clone().into_bytes();
                 forwarded.extend_from_slice(&body);
                 let Ok(mut upstream_stream) = TcpStream::connect(&upstream) else {
@@ -106,7 +105,8 @@ fn dropping_proxy(upstream: &str) -> String {
                 if upstream_stream.write_all(&forwarded).is_err() {
                     return;
                 }
-                let Some((response_head, response_body)) = read_http_message(&mut upstream_stream)
+                let Some((response_head, response_body)) =
+                    common::read_http_message(&mut upstream_stream)
                 else {
                     return;
                 };
@@ -123,31 +123,7 @@ fn dropping_proxy(upstream: &str) -> String {
             }
         }
     });
-    format!("http://{address}")
-}
-
-fn read_http_message(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
-    let mut head = Vec::new();
-    let mut byte = [0_u8; 1];
-    loop {
-        stream.read_exact(&mut byte).ok()?;
-        head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
-        }
-    }
-    let head = String::from_utf8(head).ok()?;
-    let length = head
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        })
-        .unwrap_or(0);
-    let mut body = vec![0_u8; length];
-    stream.read_exact(&mut body).ok()?;
-    Some((head, body))
+    format!("https://127.0.0.1:{}", address.port())
 }
 
 fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
@@ -178,6 +154,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
         cache_directory: base.join("cache"),
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
+        public_origin: "https://localhost".to_owned(),
         port: 0,
         web_root: Some(web),
     };
@@ -196,7 +173,9 @@ async fn command_with_stdin(server: &str, arguments: &[&str], stdin: &str) -> (u
         .collect::<Vec<_>>();
     let stdin = stdin.to_owned();
     tokio::task::spawn_blocking(move || {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+        let mut child = common::cli_command()
+            .arg("--token-file")
+            .arg(common::credential_file())
             .arg("--server")
             .arg(server)
             .args(arguments)
@@ -213,18 +192,21 @@ async fn command_with_stdin(server: &str, arguments: &[&str], stdin: &str) -> (u
             "unexpected CLI stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        (
-            output.status.code().unwrap() as u8,
-            serde_json::from_slice(&output.stdout).unwrap(),
-        )
+        let exit = output.status.code().unwrap() as u8;
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (exit, envelope)
     })
     .await
     .unwrap()
 }
 
 async fn post_json(server: &str, path: &str, body: Value) -> reqwest::Response {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .add_root_certificate(common::test_certificate())
+        .build()
+        .unwrap()
         .post(format!("{server}{path}"))
+        .bearer_auth(common::ACCESS_TOKEN)
         .json(&body)
         .send()
         .await
@@ -311,7 +293,7 @@ async fn assert_album_state(
 #[tokio::test]
 async fn cli_completes_the_selected_query_to_ordered_album_workflow() {
     let (base, config) = fixture_with(&["one.JPG", "two.JPG", "three.JPG", "four.JPG", "five.JPG"]);
-    let server = start_server(config).await.unwrap();
+    let server = common::start_authenticated_server(config).await;
     wait_until_idle(&server.url).await;
 
     let (exit, baseline) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
@@ -441,7 +423,7 @@ async fn cli_completes_the_selected_query_to_ordered_album_workflow() {
 #[tokio::test]
 async fn cli_album_mutations_use_checked_versions_and_confirmed_results() {
     let (base, config) = fixture_with(&["one.JPG", "two.JPG", "three.JPG", "four.JPG", "five.JPG"]);
-    let server = start_server(config).await.unwrap();
+    let server = common::start_authenticated_server(config).await;
     wait_until_idle(&server.url).await;
 
     let (exit, baseline) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
@@ -738,7 +720,7 @@ async fn cli_reorder_refuses_large_albums_while_membership_stays_bounded() {
         .collect::<Vec<_>>();
     let references = names.iter().map(String::as_str).collect::<Vec<_>>();
     let (base, config) = fixture_with(&references);
-    let server = start_server(config).await.unwrap();
+    let server = common::start_authenticated_server(config).await;
     wait_until_idle(&server.url).await;
 
     let mut ids = Vec::new();
@@ -913,7 +895,7 @@ async fn cli_validates_membership_input_before_any_network_mutation() {
         std::env::temp_dir().join(format!("slipstream-cli-input-test-{}", std::process::id()));
     fs::create_dir_all(&base).unwrap();
     // Nothing listens here; any network attempt would fail as transport.
-    let dead = "http://127.0.0.1:9";
+    let dead = "https://127.0.0.1:9";
     let id = "00000000-0000-4000-8000-000000000001".to_owned();
     let other = "00000000-0000-4000-8000-000000000002".to_owned();
     let valid_ids = vec![id.clone(), other.clone()];
@@ -1151,7 +1133,7 @@ async fn cli_reports_unknown_outcomes_for_lost_or_invalid_mutation_responses() {
     let address = listener.local_addr().unwrap();
     drop(listener);
     let (exit, envelope) = command(
-        &format!("http://{address}"),
+        &format!("https://127.0.0.1:{}", address.port()),
         &["albums", "create", "--name", "Lost"],
     )
     .await;
@@ -1169,14 +1151,14 @@ fn stalling_after_admission(
     let address = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         for request_index in 0..2 {
-            let Ok((mut stream, _)) = listener.accept() else {
+            let Ok((stream, _)) = listener.accept() else {
                 return;
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut stream = common::tls_stream(stream);
             let mut request = [0_u8; 8192];
-            let _ = stream.read(&mut request);
+            let count = stream.read(&mut request).unwrap_or(0);
+            common::assert_bearer(&request[..count]);
             if request_index == 0 {
                 write_json_response(&mut stream, 200, &capabilities_body());
             } else {
@@ -1185,7 +1167,7 @@ fn stalling_after_admission(
             }
         }
     });
-    format!("http://{address}")
+    format!("https://127.0.0.1:{}", address.port())
 }
 
 fn wait_for_exit(child: &mut Child, maximum: Duration) -> Option<std::process::ExitStatus> {
@@ -1219,14 +1201,16 @@ fn connection_recorder() -> (String, std::sync::Arc<AtomicUsize>) {
             }
         }
     });
-    (format!("http://{address}"), connections)
+    (format!("https://127.0.0.1:{}", address.port()), connections)
 }
 
 #[test]
 fn cli_interruption_after_a_possible_send_reports_an_unknown_outcome() {
     let mutation_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let server = stalling_after_admission(std::sync::Arc::clone(&mutation_seen));
-    let child = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let child = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
         .args([
             "--server",
             &server,
@@ -1274,7 +1258,9 @@ fn cli_interruption_after_a_possible_send_reports_an_unknown_outcome() {
 #[test]
 fn held_open_stdin_still_exits_at_the_whole_command_deadline() {
     let (server, connections) = connection_recorder();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let mut child = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
         .args([
             "--server",
             &server,
@@ -1316,7 +1302,9 @@ fn held_open_stdin_still_exits_at_the_whole_command_deadline() {
 #[test]
 fn held_open_stdin_interruption_exits_without_sending_a_request() {
     let (server, connections) = connection_recorder();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let mut child = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
         .args([
             "--server",
             &server,
@@ -1365,7 +1353,9 @@ fn held_open_stdin_interruption_exits_without_sending_a_request() {
 #[test]
 fn closed_stdin_reports_invalid_input_without_a_request() {
     let (server, connections) = connection_recorder();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let mut child = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
         .args([
             "--server",
             &server,
@@ -1407,10 +1397,10 @@ fn closed_stdin_reports_invalid_input_without_a_request() {
 #[tokio::test]
 async fn cli_inspects_current_state_after_a_lost_create_response() {
     let (base, config) = fixture_with(&["one.JPG", "two.JPG"]);
-    let server = start_server(config).await.unwrap();
+    let (server, upstream) = common::start_authenticated_server_with_upstream(config).await;
     wait_until_idle(&server.url).await;
 
-    let proxy = dropping_proxy(&server.url);
+    let proxy = dropping_proxy(&upstream);
     let (exit, envelope) = command(&proxy, &["albums", "create", "--name", "Recovered"]).await;
     assert_eq!(exit, 7);
     assert_eq!(envelope["error"]["code"], "outcome_unknown");

@@ -1,4 +1,5 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import {
   createServer,
@@ -22,20 +23,47 @@ import { extname, join, resolve } from "node:path";
 import {
   expect,
   test,
+  type BrowserContext,
   type Locator,
   type Page,
   type Request as PlaywrightRequest,
   type Route,
 } from "@playwright/test";
 
-import { startBrowserServer, type BrowserServer } from "./browser-server.js";
+import {
+  fixtureFetch,
+  startBrowserServer,
+  type BrowserServer,
+} from "./browser-server.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
 const temporary: string[] = [];
 const servers: BrowserServer[] = [];
 const externals: Server[] = [];
 
+let activeContext: BrowserContext;
+let transportFailures: Array<{ method: string; path: string; error: string }>;
+test.beforeEach(({ context, page }) => {
+  activeContext = context;
+  transportFailures = [];
+  page.on("requestfailed", (request) => {
+    transportFailures.push({
+      method: request.method(),
+      path: new URL(request.url()).pathname,
+      error: request.failure()?.errorText ?? "unknown",
+    });
+    if (transportFailures.length > 50) transportFailures.shift();
+  });
+});
+
 test.afterEach(async () => {
+  const testInfo = test.info();
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("transport-failures", {
+      body: JSON.stringify(transportFailures, null, 2),
+      contentType: "application/json",
+    });
+  }
   await Promise.all(externals.splice(0).map((external) => external.close()));
   await Promise.all(servers.splice(0).map((server) => server.close()));
   await Promise.all(
@@ -133,12 +161,17 @@ async function writePhotos(root: string, count: number) {
 async function server(base: string, root: string) {
   const running = await startBrowserServer({ base, root });
   servers.push(running);
+  const login = await activeContext.request.post(
+    `${running.url}/api/access/session`,
+    { headers: { Origin: running.url }, data: { token: running.token } },
+  );
+  expect(login.status()).toBe(204);
   // The server binds before its owned startup scan finishes, so tests wait
   // for the Library to settle before driving the UI.
   await expect
     .poll(
       async () => {
-        const response = await fetch(`${running.url}/api/status`);
+        const response = await fixtureFetch(`${running.url}/api/status`);
         return ((await response.json()) as { state: string }).state;
       },
       { timeout: 60_000 },
@@ -147,7 +180,7 @@ async function server(base: string, root: string) {
   return running;
 }
 async function post(url: string, path: string, body: unknown) {
-  return fetch(`${url}${path}`, {
+  return fixtureFetch(`${url}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Origin: url },
     body: JSON.stringify(body),
@@ -170,7 +203,7 @@ async function browseWindow(
   start: number,
 ): Promise<{ start: number; total: number; photos: BrowsePhoto[] }> {
   const window = (await (
-    await fetch(`${url}/api/browse/${token}?start=${start}&limit=60`)
+    await fixtureFetch(`${url}/api/browse/${token}?start=${start}&limit=60`)
   ).json()) as { start: number; total: number; photos: BrowsePhoto[] };
   if (window.start !== start)
     throw new Error("browse window start is inconsistent");
@@ -191,7 +224,7 @@ async function browseIds(url: string): Promise<string[]> {
     start += window.photos.length;
     if (window.photos.length === 0 || start >= opened.total) break;
   }
-  await fetch(`${url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: url },
   });
@@ -205,7 +238,7 @@ async function libraryPhoto(url: string, index: number): Promise<BrowsePhoto> {
     await post(url, "/api/browse", { source: "library" })
   ).json()) as { token: string; total: number };
   const window = await browseWindow(url, opened.token, 0);
-  await fetch(`${url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: url },
   });
@@ -232,7 +265,7 @@ async function browseOrderedIds(
     start += window.photos.length;
     if (window.photos.length === 0 || start >= opened.total) break;
   }
-  await fetch(`${url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: url },
   });
@@ -254,15 +287,23 @@ async function createAlbum(url: string, name = "Review", photoIds?: string[]) {
 
 /// Runs one compiled CLI client command against a real service, mirroring the
 /// server-binary resolution browser-server.ts already uses.
-function cli(server: string, invocation: string[]) {
+async function cli(server: string, invocation: string[]) {
   const binary = resolve(
     process.env.SLIPSTREAM_CLI_BINARY ?? "target/debug/slipstream",
   );
-  const completed = spawnSync(binary, ["--server", server, ...invocation], {
-    encoding: "utf8",
-  });
-  if (completed.error)
-    throw new Error(`CLI client unavailable: ${completed.error}`);
+  const running = servers.find((candidate) => candidate.url === server);
+  if (!running) throw new Error("Unknown CLI fixture");
+  const completed = await promisify(execFile)(
+    binary,
+    ["--server", server, "--token-file", running.tokenFile, ...invocation],
+    {
+      env: {
+        ...process.env,
+        SSL_CERT_FILE: resolve("tools/test-tls/cert.pem"),
+      },
+      encoding: "utf8",
+    },
+  );
   if (completed.stderr)
     throw new Error(`unexpected CLI stderr: ${completed.stderr}`);
   const envelope = JSON.parse(completed.stdout) as {
@@ -570,7 +611,7 @@ async function state(url: string, albumId: string): Promise<AlbumState> {
     start += window.photos.length;
     if (window.photos.length === 0 || start >= opened.total) break;
   }
-  await fetch(`${url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: url },
   });
@@ -2009,7 +2050,9 @@ test("zoom controls are disabled while no Preview image is measurable", async ({
   const running = await server(base, root);
   // The Preview state stays ready while its bytes never arrive, which
   // leaves an image element on the stage without any pixels to measure.
-  await page.route("**/api/derivatives/*/review/*", (route) => route.abort());
+  await page.route("**/api/private/derivatives/*/review/*", (route) =>
+    route.abort(),
+  );
   await startReview(page, running.url, "All Photos");
   await expect(page.locator("[data-status]")).toHaveText(
     "Preview could not be loaded. You can continue browsing.",
@@ -2038,7 +2081,7 @@ test("zoom controls are disabled while no Preview image is measurable", async ({
   await expect(preview).toHaveAttribute("data-zoom-state", "fit");
 
   // A healthy Photo restores zoom control.
-  await page.unroute("**/api/derivatives/*/review/*");
+  await page.unroute("**/api/private/derivatives/*/review/*");
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.getByText("2 / 2")).toBeVisible();
   await waitForLoadedReviewImage(page);
@@ -2058,8 +2101,8 @@ test("a Photo without usable Preview bytes reports no zoom percentage", async ({
   await writePhotos(root, 2);
   const running = await server(base, root);
   let healthyPhotoId: string | undefined;
-  await page.route("**/api/derivatives/*/review/*", async (route) => {
-    const photoId = new URL(route.request().url()).pathname.split("/")[3]!;
+  await page.route("**/api/private/derivatives/*/review/*", async (route) => {
+    const photoId = new URL(route.request().url()).pathname.split("/")[4]!;
     healthyPhotoId ??= photoId;
     if (photoId === healthyPhotoId) {
       await route.continue();
@@ -3867,7 +3910,7 @@ test("Grid batch Review retains a changed Photo when refresh shows it missing", 
     await post(running.url, "/api/browse", { source: "library" })
   ).json()) as { token: string };
   const tail = await browseWindow(running.url, tailSource.token, 60);
-  await fetch(`${running.url}/api/browse/${tailSource.token}`, {
+  await fixtureFetch(`${running.url}/api/browse/${tailSource.token}`, {
     method: "DELETE",
     headers: { Origin: running.url },
   });
@@ -4710,6 +4753,10 @@ test("Undo of a Photo View Rating that did not advance stays in the open Grid", 
   await closePhotoTools(page);
   await page.getByRole("button", { name: "Back to Grid" }).click();
   await expect(page.locator("[data-review]")).toBeHidden();
+  // The access boundary revalidates the session during history navigation;
+  // Photo View can be hidden by that boundary before the Grid is restored.
+  await expect(page.locator("[data-grid-view]")).toBeVisible();
+  await expect(cell(0)).toBeFocused();
   await page.keyboard.press("Control+z");
   await expect(page.locator("[data-review]")).toBeHidden();
   await expect(page.locator("[data-grid-status]")).toHaveText(
@@ -6365,6 +6412,8 @@ test("stale undo conflict is visible and zoomed horizontal drag pans without mut
   await actionWithProgress(page, albumId, () =>
     page.getByRole("button", { name: "Previous" }).click(),
   );
+  // Saved-position persistence does not imply that the Preview has decoded.
+  await waitForLoadedReviewImage(page);
   await page.keyboard.press("d");
   const preview = page.locator("[data-preview]");
   await expect(preview).toHaveAttribute("data-zoom-state", "manual");
@@ -7277,9 +7326,11 @@ test("an older saved-position response cannot supersede a newer Album removal", 
     await overviewCaptured;
     releaseProgress();
     const deliveredProgress = await savedPositionResponse;
-    await deliveredProgress.finished();
-    // The sentinel's next event-loop task runs only after the complete fetch
-    // continuation, including the stale Album summary confirmation attempt.
+    expect(deliveredProgress.status()).toBe(200);
+    // The page sentinel runs after the complete fetch continuation, including
+    // the stale Album summary confirmation attempt. Playwright's CDP
+    // `finished()` event can remain pending for a routed no-store response even
+    // though the browser has received it and the application has processed it.
     await expect(page.locator("html")).toHaveAttribute(
       "data-saved-position-settled",
       "true",
@@ -7603,7 +7654,7 @@ test("different Album membership keys admit independently", async ({
   await expect
     .poll(async () => {
       const overview = (await (
-        await fetch(`${running.url}/api/overview`)
+        await fixtureFetch(`${running.url}/api/overview`)
       ).json()) as { albums: Array<{ id: string; photoCount: number }> };
       const countA = overview.albums.find(
         (album) => album.id === albumA,
@@ -8299,10 +8350,13 @@ test("terminal scan completion fences a delayed applying-to-idle status pair", a
   await writeFile(join(root, "one.jpg"), await jpeg());
   const running = await server(base, root);
   const initialStatus = (await (
-    await fetch(`${running.url}/api/status`)
+    await fixtureFetch(`${running.url}/api/status`)
   ).json()) as { publication: string };
   const nextPublication = "0000000000000002";
   await page.goto(running.url);
+  // Authentication precedes Library startup; exclude its initial overview
+  // from the count of refreshes caused by the controlled scan race.
+  await expect(page.getByText("Ready · 1 Photo")).toBeVisible();
 
   let race = false;
   let statusCalls = 0;
@@ -9253,13 +9307,13 @@ test("file location publication values stay unique across server restarts", asyn
   const data = await jpeg();
   await writeFile(join(root, "one.jpg"), data);
   const first = await server(base, root);
-  const responseOne = await fetch(
+  const responseOne = await fixtureFetch(
     `${first.url}/api/file-locations?start=0&limit=60`,
   );
   const windowOne = (await responseOne.json()) as { publication: string };
   await first.close();
   const second = await server(base, root);
-  const responseTwo = await fetch(
+  const responseTwo = await fixtureFetch(
     `${second.url}/api/file-locations?start=0&limit=60`,
   );
   const windowTwo = (await responseTwo.json()) as { publication: string };
@@ -10113,7 +10167,7 @@ test("Library Review uses server Capture Time order, snapshots it, and stores no
   });
   expect(stateBodies[0]).not.toHaveProperty("albumId");
   const overview = (await (
-    await fetch(`${running.url}/api/overview`)
+    await fixtureFetch(`${running.url}/api/overview`)
   ).json()) as {
     albums: unknown[];
   };
@@ -10551,7 +10605,7 @@ test("a Folder sort change waits for the File Location binding before reopening"
   await closeViewOptions(page);
   await expect(page.getByText("Ready · 2 Photos")).toBeVisible();
   const publication = (
-    (await (await fetch(`${running.url}/api/status`)).json()) as {
+    (await (await fixtureFetch(`${running.url}/api/status`)).json()) as {
       publication: string;
     }
   ).publication;
@@ -11191,7 +11245,9 @@ test("hydrated Grid thumbnails render without thumbnail API requests", async ({
   const running = await server(base, root);
   const ids = await browseIds(running.url);
   for (const id of ids) {
-    const response = await fetch(`${running.url}/api/photos/${id}/thumbnail`);
+    const response = await fixtureFetch(
+      `${running.url}/api/photos/${id}/thumbnail`,
+    );
     expect(response.ok).toBe(true);
   }
 
@@ -11208,7 +11264,7 @@ test("hydrated Grid thumbnails render without thumbnail API requests", async ({
   const thumbnail = page.locator(".photo-cell img").first();
   await expect(thumbnail).toHaveAttribute(
     "src",
-    /\/api\/derivatives\/[^/]+\/thumbnail\/[^/]+\.jpg$/,
+    /\/api\/private\/derivatives\/[^/]+\/thumbnail\/[^/]+\.jpg$/,
   );
   await expect(thumbnail).toHaveAttribute("fetchpriority", "low");
   await expect(thumbnail).toHaveAttribute("decoding", "async");
@@ -11233,10 +11289,10 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
   });
   let derivativeRequests = 0;
   page.on("request", (request) => {
-    if (new URL(request.url()).pathname.includes("/api/derivatives/"))
+    if (new URL(request.url()).pathname.includes("/api/private/derivatives/"))
       derivativeRequests += 1;
   });
-  await page.route("**/api/derivatives/**", (route) =>
+  await page.route("**/api/private/derivatives/**", (route) =>
     derivativesHeld.then(() => route.continue()).catch(() => undefined),
   );
   try {
@@ -11248,7 +11304,7 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
     const viewport = page.locator("[data-grid-viewport]");
     const requestsBeforeScroll = derivativeRequests;
     const scrolledDerivative = page.waitForRequest((request) =>
-      new URL(request.url()).pathname.includes("/api/derivatives/"),
+      new URL(request.url()).pathname.includes("/api/private/derivatives/"),
     );
     await viewport.evaluate((element) => {
       element.scrollTop = element.scrollHeight;
@@ -11282,7 +11338,7 @@ test("source switching reaches Ready while Grid derivatives remain held", async 
     expect(derivativeRequests).toBeGreaterThan(1);
   } finally {
     release();
-    await page.unroute("**/api/derivatives/**");
+    await page.unroute("**/api/private/derivatives/**");
   }
 });
 
@@ -11320,7 +11376,7 @@ test("an admitted Album write settles after application teardown without present
   await expect
     .poll(async () => {
       const overview = (await (
-        await fetch(`${running.url}/api/overview`)
+        await fixtureFetch(`${running.url}/api/overview`)
       ).json()) as { albums: Array<{ id: string; photoCount: number }> };
       return overview.albums.find((album) => album.id === albumId)?.photoCount;
     })
@@ -11351,6 +11407,8 @@ test("application teardown halts image ownership and releases the Browse token",
   await page.getByRole("button", { name: /^Photo 1 of 1/ }).click();
   const image = page.getByRole("img", { name: "Photo 1 of 1" });
   await expect(image).toHaveAttribute("src", /.+/);
+  const imageHandle = await image.elementHandle();
+  expect(imageHandle).not.toBeNull();
 
   const statusRequest = page.waitForRequest((request) =>
     request.url().endsWith("/api/status"),
@@ -11376,7 +11434,8 @@ test("application teardown halts image ownership and releases the Browse token",
   await statusResponse;
   await released;
   expect(browseReleaseRequests).toBe(1);
-  await expect(image).not.toHaveAttribute("src", /.+/);
+  expect(await imageHandle!.getAttribute("src")).toBeNull();
+  await expect(page.locator("img")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Retry Library Check" }),
   ).toBeHidden();
@@ -11441,7 +11500,7 @@ test("leaving Photo View cancels a pending review image transfer", async ({
   await writeFile(join(root, "photo.jpg"), await jpeg());
   const running = await server(base, root);
   const [photoId] = await browseIds(running.url);
-  const previewResponse = await fetch(
+  const previewResponse = await fixtureFetch(
     `${running.url}/api/photos/${photoId}/preview`,
   );
   expect(previewResponse.ok).toBe(true);
@@ -11452,7 +11511,7 @@ test("leaving Photo View cancels a pending review image transfer", async ({
   const reviewHeld = new Promise<void>((resolve) => {
     release = resolve;
   });
-  await page.route("**/api/derivatives/**/review/**", (route) =>
+  await page.route("**/api/private/derivatives/**/review/**", (route) =>
     reviewHeld.then(() => route.continue()).catch(() => undefined),
   );
   try {
@@ -11475,7 +11534,7 @@ test("leaving Photo View cancels a pending review image transfer", async ({
     ).toBe(false);
   } finally {
     release();
-    await page.unroute("**/api/derivatives/**/review/**");
+    await page.unroute("**/api/private/derivatives/**/review/**");
   }
 });
 
@@ -12482,7 +12541,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
   await writeFile(join(root, "photo.jpg"), await jpeg());
   const running = await server(base, root);
   const [photoId] = await browseIds(running.url);
-  const response = await fetch(
+  const response = await fixtureFetch(
     `${running.url}/api/photos/${photoId}/thumbnail`,
   );
   expect(response.ok).toBe(true);
@@ -12494,7 +12553,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
     if (/^\/api\/photos\/[^/]+\/thumbnail$/.test(pathname))
       thumbnailApiRequests += 1;
     if (
-      pathname.includes("/api/derivatives/") &&
+      pathname.includes("/api/private/derivatives/") &&
       pathname.includes("/thumbnail/")
     )
       derivativeRequests += 1;
@@ -12522,7 +12581,7 @@ test("hydrated Grid thumbnail delivery failures stay attached to the Photo", asy
       return;
     }
     if (
-      pathname.includes("/api/derivatives/") &&
+      pathname.includes("/api/private/derivatives/") &&
       pathname.includes("/thumbnail/")
     ) {
       await route.fulfill({ status: 404, body: "missing derivative" });
@@ -12619,7 +12678,9 @@ test("Grid presents Photo, Original kind, and Preview facts without removing act
   await writePhotos(root, 4);
   const running = await server(base, root);
   const ids = await browseIds(running.url);
-  const hydrated = await fetch(`${running.url}/api/photos/${ids[3]}/thumbnail`);
+  const hydrated = await fixtureFetch(
+    `${running.url}/api/photos/${ids[3]}/thumbnail`,
+  );
   expect(hydrated.ok).toBe(true);
   const thumbnailRequests: string[] = [];
   page.on("request", (request) => {
@@ -12714,7 +12775,7 @@ test("Grid and Photo View identify a Photo by its Original filename", async ({
     "IMG_4521.jpg",
     "IMG_4522.jpg",
   ]);
-  await fetch(`${running.url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${running.url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: running.url },
   });
@@ -12907,10 +12968,13 @@ test("a Photo View navigation binds again the strip thumbnails it detached mid-t
     releaseImages = resolve;
   });
   let holdImages = true;
-  await page.route("**/api/derivatives/*/thumbnail/*", async (route) => {
-    if (holdImages) await imagesReleased;
-    await route.continue();
-  });
+  await page.route(
+    "**/api/private/derivatives/*/thumbnail/*",
+    async (route) => {
+      if (holdImages) await imagesReleased;
+      await route.continue();
+    },
+  );
 
   await page.goto(running.url);
   await expect(page.getByText(/^Ready · 8 Photos$/)).toBeVisible();
@@ -12948,7 +13012,7 @@ test("a Photo View navigation binds again the strip thumbnails it detached mid-t
       strip.locator(".filmstrip-cell img").nth(index),
     ).toHaveAttribute(
       "src",
-      new RegExp(`/api/derivatives/${ids[index]}/thumbnail/`),
+      new RegExp(`/api/private/derivatives/${ids[index]}/thumbnail/`),
     );
   }
 });
@@ -13532,7 +13596,7 @@ test("detached Grid image errors cannot poison the replacement cell", async ({
   await writeFile(join(root, "photo.jpg"), await jpeg());
   const running = await server(base, root);
   const [photoId] = await browseIds(running.url);
-  const response = await fetch(
+  const response = await fixtureFetch(
     `${running.url}/api/photos/${photoId}/thumbnail`,
   );
   expect(response.ok).toBe(true);
@@ -14856,7 +14920,7 @@ test("a filtered view larger than one window pages through its own sequence", as
       await post(running.url, "/api/browse", { source: "library" })
     ).json()) as { token: string };
     const window = await browseWindow(running.url, opened.token, 180);
-    await fetch(`${running.url}/api/browse/${opened.token}`, {
+    await fixtureFetch(`${running.url}/api/browse/${opened.token}`, {
       method: "DELETE",
       headers: { Origin: running.url },
     });
@@ -14936,7 +15000,7 @@ test("a RAW and its JPEG render independent Grid cells with the JPEG's rotation"
     await post(running.url, "/api/browse", { source: "library" })
   ).json()) as { token: string; total: number };
   const independent = await browseWindow(running.url, opened.token, 0);
-  await fetch(`${running.url}/api/browse/${opened.token}`, {
+  await fixtureFetch(`${running.url}/api/browse/${opened.token}`, {
     method: "DELETE",
     headers: { Origin: running.url },
   });
@@ -15085,7 +15149,7 @@ test("Grid placeholders and late thumbnails never change cell geometry", async (
   const running = await server(base, root);
   let holdThumbnails = true;
   const heldThumbnails: Array<() => void> = [];
-  await page.route("**/api/derivatives/**", async (route) => {
+  await page.route("**/api/private/derivatives/**", async (route) => {
     if (!holdThumbnails) return route.continue();
     await new Promise<void>((resolve) => heldThumbnails.push(resolve));
     return route.continue();
@@ -15779,10 +15843,13 @@ test("a failed expired reopen binds the thumbnails of its retained cells again",
   const imagesReleased = new Promise<void>((resolve) => {
     releaseImages = resolve;
   });
-  await page.route("**/api/derivatives/*/thumbnail/*", async (route) => {
-    await imagesReleased;
-    await route.continue();
-  });
+  await page.route(
+    "**/api/private/derivatives/*/thumbnail/*",
+    async (route) => {
+      await imagesReleased;
+      await route.continue();
+    },
+  );
 
   let releaseExpired!: () => void;
   const expiredReleased = new Promise<void>((resolve) => {
@@ -15872,7 +15939,7 @@ test("a failed expired reopen binds the thumbnails of its retained cells again",
     releaseReopen();
     releaseImages();
     await page.unroute(/\/api\/browse/);
-    await page.unroute("**/api/derivatives/*/thumbnail/*");
+    await page.unroute("**/api/private/derivatives/*/thumbnail/*");
   }
 });
 
@@ -16456,7 +16523,10 @@ test("Photo View recovery defers Grid windows until Grid is visible", async ({
     window.fetch = ((input, init) => {
       if (typeof input === "string") {
         const url = new URL(input, window.location.href);
-        if (url.pathname.startsWith("/api/browse/") && !init?.method)
+        if (
+          url.pathname.startsWith("/api/browse/") &&
+          (init?.method ?? "GET").toUpperCase() === "GET"
+        )
           admissions.push({
             token: url.pathname.split("/").at(-1) ?? "",
             start: url.searchParams.get("start") ?? "",
@@ -16729,7 +16799,10 @@ test("Photo Retry reloads the current aligned range after an expired reopen pref
         const preview =
           url.pathname.startsWith("/api/photos/") &&
           url.pathname.endsWith("/preview");
-        if ((browse || preview) && !init?.method) {
+        if (
+          (browse || preview) &&
+          (init?.method ?? "GET").toUpperCase() === "GET"
+        ) {
           if (browse) {
             if (admissions.length === 64) {
               admissions.shift();
@@ -17791,7 +17864,7 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
   await expect
     .poll(
       async () => {
-        const response = await fetch(`${running.url}/api/status`);
+        const response = await fixtureFetch(`${running.url}/api/status`);
         return ((await response.json()) as { state: string }).state;
       },
       { timeout: 120_000 },
@@ -17802,7 +17875,14 @@ test("a persisted 40,000-Photo Library is served from persisted state and stays 
       const opened = (await (
         await fetch("/api/browse", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": (
+              (await (await fetch("/api/access/session")).json()) as {
+                csrfToken: string;
+              }
+            ).csrfToken,
+          },
           body: JSON.stringify({ source: "library" }),
         })
       ).json()) as { token: string };
@@ -18226,10 +18306,13 @@ test.describe("browser navigation", () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
     await expect(page.getByText("Ready · 3 Photos")).toBeVisible();
-    const removed = await fetch(`${running.url}/api/albums/${albumId}/delete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Origin: running.url },
-    });
+    const removed = await fixtureFetch(
+      `${running.url}/api/albums/${albumId}/delete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: running.url },
+      },
+    );
     expect(removed.ok).toBe(true);
     await page.goto(`${running.url}/?source=album&albumId=${albumId}`);
     await expect(page.locator(".photo-cell")).toHaveCount(3);
@@ -18333,7 +18416,7 @@ test.describe("browser navigation", () => {
       }
     }
 
-    const queried = cli(running.url, [
+    const queried = await cli(running.url, [
       "photos",
       "list",
       "--album",
@@ -18354,7 +18437,7 @@ test.describe("browser navigation", () => {
     // the seeded Album order (one, two, three, four).
     expect(orderedIds).toEqual([twoId, threeId, oneId, fourId]);
 
-    const created = cli(running.url, [
+    const created = await cli(running.url, [
       "albums",
       "create",
       "--name",
@@ -18371,7 +18454,7 @@ test.describe("browser navigation", () => {
     ).album;
     const membersPath = join(base, "members.json");
     await writeFile(membersPath, JSON.stringify({ photoIds: orderedIds }));
-    const added = cli(running.url, [
+    const added = await cli(running.url, [
       "albums",
       "add",
       album.id,
@@ -19009,7 +19092,14 @@ test.describe("browser navigation", () => {
       const opened = (await (
         await fetch("/api/browse", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": (
+              (await (await fetch("/api/access/session")).json()) as {
+                csrfToken: string;
+              }
+            ).csrfToken,
+          },
           body: JSON.stringify({ source: "library" }),
         })
       ).json()) as { token?: string };
@@ -19921,7 +20011,7 @@ test.describe("Issue #310 integrated qualification", () => {
       const window = await browseWindow(url, opened.token, start);
       const found = window.photos.find((photo) => photo.id === photoId);
       if (found) {
-        await fetch(`${url}/api/browse/${opened.token}`, {
+        await fixtureFetch(`${url}/api/browse/${opened.token}`, {
           method: "DELETE",
           headers: { Origin: url },
         });
@@ -19930,7 +20020,7 @@ test.describe("Issue #310 integrated qualification", () => {
       start += window.photos.length;
       if (window.photos.length === 0 || start >= opened.total) break;
     }
-    await fetch(`${url}/api/browse/${opened.token}`, {
+    await fixtureFetch(`${url}/api/browse/${opened.token}`, {
       method: "DELETE",
       headers: { Origin: url },
     });
@@ -20445,7 +20535,7 @@ test.describe("Issue #310 integrated qualification", () => {
       (photo) => photo.originalFilename === "a.jpg",
     );
     if (!target) throw new Error("Library has no a.jpg");
-    await fetch(`${running.url}/api/browse/${opened.token}`, {
+    await fixtureFetch(`${running.url}/api/browse/${opened.token}`, {
       method: "DELETE",
       headers: { Origin: running.url },
     });
@@ -20455,7 +20545,7 @@ test.describe("Issue #310 integrated qualification", () => {
     await post(running.url, "/api/scan", {});
     await expect
       .poll(async () => {
-        const response = await fetch(`${running.url}/api/status`);
+        const response = await fixtureFetch(`${running.url}/api/status`);
         return ((await response.json()) as { state: string }).state;
       })
       .toBe("idle");
@@ -20909,7 +20999,14 @@ test.describe("Issue #310 integrated qualification", () => {
       const opened = (await (
         await fetch("/api/browse", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": (
+              (await (await fetch("/api/access/session")).json()) as {
+                csrfToken: string;
+              }
+            ).csrfToken,
+          },
           body: JSON.stringify({ source: "library" }),
         })
       ).json()) as { token?: string };

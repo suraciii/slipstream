@@ -14,6 +14,7 @@ Follow the scoped instructions in [`AGENTS.md`](AGENTS.md) when writing or chang
 
 ## Foundations
 
+- [Instance Access Architecture](access.md): credential generations, browser sessions, Bearer admission, revocation, CSRF, and private delivery
 - [Web Installation](web-installation.md): manifest ownership and installation resource delivery
 
 - [Foundational Architecture](architecture.md): shared Web/CLI service boundary, file ownership, Photo identity, state ownership, and the first vertical slice

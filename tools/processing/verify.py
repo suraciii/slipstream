@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import secrets
+import sqlite3
 import shutil
 import socket
 import struct
@@ -38,6 +40,29 @@ with socket.socket(socket.AF_UNIX) as stream:
     response=json.loads(receive(length))
 print(json.dumps(dict(response=response,uid=os.getuid(),cgroup=pathlib.Path('/proc/self/cgroup').read_text())))
 """
+
+# The embedded Web probe binds only to host loopback and does not serve this
+# illustrative origin. It is configuration required by the server, not TLS
+# qualification evidence.
+QUALIFICATION_PUBLIC_ORIGIN = 'https://qualification.invalid'
+
+
+def seed_web_access(state_directory):
+    """Create a fresh fixture token and persist only its digest for the Web container."""
+    token = secrets.token_urlsafe(32)
+    records = dict(credential=dict(
+        digest=list(hashlib.sha256(token.encode('ascii')).digest()),
+        generation=secrets.token_urlsafe(32)), sessions=[])
+    database_path = Path(state_directory) / 'access.sqlite'
+    database = sqlite3.connect(database_path)
+    try:
+        database.execute('CREATE TABLE access (id INTEGER PRIMARY KEY CHECK(id=1), records TEXT NOT NULL)')
+        database.execute('INSERT INTO access VALUES(1, ?)', (json.dumps(records, separators=(',', ':')),))
+        database.commit()
+    finally:
+        database.close()
+    database_path.chmod(0o600)
+    return token
 
 def command(*arguments, check=True, timeout=15):
     result = subprocess.run(arguments, capture_output=True, text=True, timeout=timeout)
@@ -111,6 +136,7 @@ class Qualification:
         self.socket = self.root / 'control.sock'
         self.process = None
         self.web = None
+        self.web_token = None
         self.results = []
         self.web_observations = []
         self.permitted_peer_observations = []
@@ -366,8 +392,12 @@ class Qualification:
                 case.cleanup()
 
     def web_request(self, path, body=None):
+        headers = {'Content-Type':'application/json'}
+        if path.startswith('/api/'):
+            assert self.web_token is not None
+            headers['Authorization'] = 'Bearer ' + self.web_token
         request=urllib.request.Request(self.url+path, data=None if body is None else json.dumps(body).encode(),
-            headers={'Content-Type':'application/json','Origin':self.url})
+            headers=headers)
         with urllib.request.urlopen(request,timeout=2) as response:
             assert response.status==200
             return json.load(response)
@@ -387,11 +417,14 @@ class Qualification:
         library = self.root/'empty-library'; state = self.root/'web-state'; cache = self.root/'web-cache'
         for path in [library,state,cache]:
             path.mkdir(); os.chown(path,1000,1000)
+        self.web_token = seed_web_access(state)
+        os.chown(state/'access.sqlite',1000,1000)
         self.web = command('docker','create','--name','slipstream-qualification-web-'+self.instance,
             '--user','1000:1000','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true',
             '--log-driver','none','--memory','512m','--memory-swap','512m','--pids-limit','64',
             '-p','127.0.0.1::3000','-e','SLIPSTREAM_LIBRARY_ROOT=/library','-e','SLIPSTREAM_STATE_DIRECTORY=/state',
-            '-e','SLIPSTREAM_CACHE_DIRECTORY=/cache','-e','SLIPSTREAM_HOST=0.0.0.0','-e','SLIPSTREAM_PORT=3000',
+            '-e','SLIPSTREAM_CACHE_DIRECTORY=/cache','-e','SLIPSTREAM_PUBLIC_ORIGIN='+QUALIFICATION_PUBLIC_ORIGIN,
+            '-e','SLIPSTREAM_HOST=0.0.0.0','-e','SLIPSTREAM_PORT=3000',
             '--mount',f'type=bind,source={library},target=/library,readonly',
             '--mount',f'type=bind,source={state},target=/state','--mount',f'type=bind,source={cache},target=/cache',
             self.arguments.web_image)
@@ -801,6 +834,7 @@ class Qualification:
                 command('systemctl','stop',runtime['attempt_unit'],check=False)
                 command('systemctl','revert',runtime['attempt_unit'],check=False)
         if self.web:command('docker','rm','--force',self.web)
+        self.web_token = None
         command('systemctl','stop',self.parent,check=False);command('systemctl','revert',self.parent,check=False)
         assert not command('docker','ps','-aq','--filter','label=slipstream.processing.instance='+self.instance)
         assert not Path('/sys/fs/cgroup',self.parent).exists()

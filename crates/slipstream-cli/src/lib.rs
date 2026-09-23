@@ -1,12 +1,19 @@
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Client, Method, StatusCode, header::RETRY_AFTER};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{env, ffi::OsString, fmt, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    fmt,
+    fs::OpenOptions,
+    io::Read,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use url::Url;
 
 const CLI_CONTRACT_VERSION: u16 = 1;
-const DEFAULT_SERVER: &str = "http://127.0.0.1:3000";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_LIST_PAGE: usize = 50;
 const MAXIMUM_LIST_PAGE: usize = 60;
@@ -20,12 +27,17 @@ const MAXIMUM_MUTATION_PHOTO_IDS: usize = 100;
     name = "slipstream",
     version,
     about = "Query a Slipstream Photo Library",
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    infer_long_args = false
 )]
 pub struct Cli {
-    /// Slipstream service origin. Overrides SLIPSTREAM_SERVER_URL.
+    /// HTTPS Slipstream service origin. Overrides SLIPSTREAM_SERVER_URL.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
+
+    /// Private file containing the instance Access Token. Overrides SLIPSTREAM_ACCESS_TOKEN_FILE.
+    #[arg(long, value_name = "FILE")]
+    pub token_file: Option<PathBuf>,
 
     /// Output format for operational commands.
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
@@ -572,6 +584,61 @@ impl CommandFailure {
         }
     }
 
+    fn local_credential(path: Option<&str>) -> Self {
+        Self {
+            exit_code: 6,
+            payload: ErrorPayload {
+                code: "local_io_failed".to_owned(),
+                message: "Check the local credential file and try again.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({
+                    "operation": "read-credential",
+                    "path": path,
+                    "fileCommitted": false,
+                }),
+            },
+        }
+    }
+
+    fn authentication_required(operation: Operation) -> Self {
+        Self {
+            exit_code: 6,
+            payload: ErrorPayload {
+                code: "authentication_required".to_owned(),
+                message: "Provide a valid Access Token and try again.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({ "operation": operation.wire() }),
+            },
+        }
+    }
+
+    fn access_denied(operation: Operation) -> Self {
+        Self {
+            exit_code: 6,
+            payload: ErrorPayload {
+                code: "access_denied".to_owned(),
+                message: "The service denied access to this operation.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({ "operation": operation.wire() }),
+            },
+        }
+    }
+
+    fn server_busy(operation: Operation, retry_after_seconds: Option<u64>) -> Self {
+        Self {
+            exit_code: 6,
+            payload: ErrorPayload {
+                code: "server_busy".to_owned(),
+                message: "The service is temporarily unavailable. Try again later.".to_owned(),
+                effect: "none".to_owned(),
+                details: json!({
+                    "operation": operation.wire(),
+                    "retryAfterSeconds": retry_after_seconds,
+                }),
+            },
+        }
+    }
+
     fn unknown(identity: &MutationIdentity) -> Self {
         Self {
             exit_code: 7,
@@ -611,6 +678,49 @@ impl CommandFailure {
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
     error: ErrorPayload,
+}
+
+fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// Maps only the access-boundary statuses whose refusal semantics are part of
+/// the CLI contract. A 503 is trusted only for the explicit access errors.
+fn access_boundary_failure(
+    status: StatusCode,
+    retry_after: Option<u64>,
+    body: &[u8],
+    operation: Operation,
+) -> Option<CommandFailure> {
+    match status {
+        StatusCode::UNAUTHORIZED => Some(CommandFailure::authentication_required(operation)),
+        StatusCode::FORBIDDEN => Some(CommandFailure::access_denied(operation)),
+        StatusCode::TOO_MANY_REQUESTS => Some(CommandFailure::server_busy(operation, retry_after)),
+        StatusCode::SERVICE_UNAVAILABLE if is_access_unavailable(body) => {
+            Some(CommandFailure::server_busy(operation, None))
+        }
+        _ => None,
+    }
+}
+
+fn is_access_unavailable(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.len() == 1
+        && matches!(
+            object.get("error").and_then(Value::as_str),
+            Some("access_unavailable" | "access_unconfigured")
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -945,6 +1055,7 @@ struct AlbumReorderWire {
 struct ServiceClient {
     origin: Url,
     client: Client,
+    token: String,
 }
 
 impl fmt::Debug for ServiceClient {
@@ -957,12 +1068,16 @@ impl fmt::Debug for ServiceClient {
 }
 
 impl ServiceClient {
-    fn new(origin: Url) -> Result<Self, CommandFailure> {
+    fn new(origin: Url, token: String) -> Result<Self, CommandFailure> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| CommandFailure::transport(Operation::Status))?;
-        Ok(Self { origin, client })
+        Ok(Self {
+            origin,
+            client,
+            token,
+        })
     }
 
     fn endpoint(&self, segments: &[&str]) -> Url {
@@ -985,17 +1100,30 @@ impl ServiceClient {
             .client
             .get(url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .bearer_auth(&self.token)
             .send()
             .await
             .map_err(|_| CommandFailure::transport(operation))?;
         let status = response.status();
+        if status.is_redirection() {
+            return Err(CommandFailure::transport(operation));
+        }
+        let retry_after = retry_after_seconds(&response);
+        if let Some(failure) = access_boundary_failure(status, retry_after, &[], operation) {
+            return Err(failure);
+        }
         let bytes = response_bytes(response, operation).await?;
+        if let Some(failure) = access_boundary_failure(status, retry_after, &bytes, operation) {
+            return Err(failure);
+        }
         if status != StatusCode::OK {
             if let Ok(response) = serde_json::from_slice::<ErrorResponse>(&bytes)
                 && response.error.code == "incompatible_server"
             {
-                return Err(validated_route_failure(response.error, operation)
-                    .unwrap_or_else(|| CommandFailure::transport(operation)));
+                return Err(
+                    validated_route_failure(response.error, operation, &self.token)
+                        .unwrap_or_else(|| CommandFailure::transport(operation)),
+                );
             }
             return Err(CommandFailure::incompatible(Vec::new()));
         }
@@ -1032,7 +1160,8 @@ impl ServiceClient {
         let mut request = self
             .client
             .request(method, url)
-            .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION);
+            .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .bearer_auth(&self.token);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1044,12 +1173,19 @@ impl ServiceClient {
         if status.is_redirection() {
             return Err(CommandFailure::transport(operation));
         }
+        let retry_after = retry_after_seconds(&response);
+        if let Some(failure) = access_boundary_failure(status, retry_after, &[], operation) {
+            return Err(failure);
+        }
         let bytes = response_bytes(response, operation).await?;
+        if let Some(failure) = access_boundary_failure(status, retry_after, &bytes, operation) {
+            return Err(failure);
+        }
         if status != StatusCode::OK {
             let error = serde_json::from_slice::<ErrorResponse>(&bytes)
                 .map_err(|_| CommandFailure::transport(operation))?
                 .error;
-            return Err(validated_route_failure(error, operation)
+            return Err(validated_route_failure(error, operation, &self.token)
                 .unwrap_or_else(|| CommandFailure::transport(operation)));
         }
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::transport(operation))
@@ -1071,6 +1207,7 @@ impl ServiceClient {
             .client
             .request(Method::POST, url)
             .header(CONTRACT_HEADER, CLI_CONTRACT_VERSION)
+            .bearer_auth(&self.token)
             .json(&body);
         admission.admit(identity.clone());
         let response = request.send().await.map_err(|error| {
@@ -1084,14 +1221,21 @@ impl ServiceClient {
         if status.is_redirection() {
             return Err(CommandFailure::unknown(identity));
         }
+        let retry_after = retry_after_seconds(&response);
+        if let Some(failure) = access_boundary_failure(status, retry_after, &[], operation) {
+            return Err(failure);
+        }
         let bytes = response_bytes(response, operation)
             .await
             .map_err(|_| CommandFailure::unknown(identity))?;
+        if let Some(failure) = access_boundary_failure(status, retry_after, &bytes, operation) {
+            return Err(failure);
+        }
         if status != StatusCode::OK {
             let error = serde_json::from_slice::<ErrorResponse>(&bytes)
                 .map_err(|_| CommandFailure::unknown(identity))?
                 .error;
-            return Err(validated_route_failure(error, operation)
+            return Err(validated_route_failure(error, operation, &self.token)
                 .unwrap_or_else(|| CommandFailure::unknown(identity)));
         }
         serde_json::from_slice(&bytes).map_err(|_| CommandFailure::unknown(identity))
@@ -1124,7 +1268,11 @@ async fn response_bytes(
 
 /// Checks one structured service error against the CLI reference shapes.
 /// Returns `None` when the payload cannot be trusted as a confirmed refusal.
-fn validated_route_failure(error: ErrorPayload, operation: Operation) -> Option<CommandFailure> {
+fn validated_route_failure(
+    mut error: ErrorPayload,
+    operation: Operation,
+    secret: &str,
+) -> Option<CommandFailure> {
     if error.effect != "none" || error.message.is_empty() {
         return None;
     }
@@ -1207,6 +1355,7 @@ fn validated_route_failure(error: ErrorPayload, operation: Operation) -> Option<
     if !valid {
         return None;
     }
+    redact_error(&mut error, secret);
     let exit_code = match error.code.as_str() {
         "invalid_input" | "limit_exceeded" => 2,
         "not_found" => 3,
@@ -1220,11 +1369,12 @@ fn validated_route_failure(error: ErrorPayload, operation: Operation) -> Option<
 }
 
 fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFailure> {
-    let value = cli
-        .server
-        .as_deref()
-        .or(environment)
-        .unwrap_or(DEFAULT_SERVER);
+    let value = cli.server.as_deref().or(environment).ok_or_else(|| {
+        CommandFailure::invalid(
+            "server",
+            "Set --server or SLIPSTREAM_SERVER_URL to an HTTPS service origin.",
+        )
+    })?;
     if value.is_empty() {
         return Err(CommandFailure::invalid(
             "server",
@@ -1232,7 +1382,7 @@ fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFa
         ));
     }
     let url = Url::parse(value).map_err(|_| {
-        CommandFailure::invalid("server", "The service URL must be an HTTP or HTTPS origin.")
+        CommandFailure::invalid("server", "The service URL must be an HTTPS origin.")
     })?;
     let has_userinfo = value
         .split_once("://")
@@ -1243,7 +1393,7 @@ fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFa
                 .contains('@')
         })
         .unwrap_or(false);
-    let valid = matches!(url.scheme(), "http" | "https")
+    let valid = url.scheme() == "https"
         && url.host_str().is_some()
         && !has_userinfo
         && url.username().is_empty()
@@ -1254,7 +1404,7 @@ fn service_origin(cli: &Cli, environment: Option<&str>) -> Result<Url, CommandFa
     if !valid {
         return Err(CommandFailure::invalid(
             "server",
-            "The service URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment.",
+            "The service URL must be an HTTPS origin without credentials, path, query, or fragment.",
         ));
     }
     Ok(url)
@@ -1590,6 +1740,9 @@ async fn execute(
 ) -> Result<Value, CommandFailure> {
     let operation = command_operation(&cli.command);
     validate_command(&cli.command)?;
+    let origin = service_origin(cli, environment)?;
+    let token_path = access_token_path(cli)?;
+    let token = read_access_token(token_path).await?;
     // The complete membership document validates before any network access,
     // so a local input failure can never depend on service reachability.
     let pending_membership = match &cli.command {
@@ -1604,346 +1757,394 @@ async fn execute(
         } => Some(read_membership_ids(&args.input, MembershipKind::Reorder.limit_name()).await?),
         _ => None,
     };
-    let client = ServiceClient::new(service_origin(cli, environment)?)?;
+    let client = ServiceClient::new(origin, token)?;
     client.capabilities(operation).await?;
 
-    match &cli.command {
-        Command::Status => {
-            let data: StatusData = client
-                .json(
-                    operation,
-                    Method::GET,
-                    client.endpoint(&["api", "status"]),
-                    None,
-                )
-                .await?;
-            if data.server_version.is_empty()
-                || data.cli_contract_version != CLI_CONTRACT_VERSION
-                || data.publication.as_deref().is_some_and(str::is_empty)
-            {
-                return Err(CommandFailure::transport(operation));
-            }
-            serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
-        }
-        Command::Folders {
-            command: FolderCommand::List(args),
-        } => {
-            let mut url = client.endpoint(&["api", "file-locations"]);
-            if let Some(cursor) = &args.cursor {
-                url.query_pairs_mut().append_pair("cursor", cursor);
-            } else {
-                if let Some(parent) = &args.parent {
-                    url.query_pairs_mut().append_pair("parent", parent);
-                }
-                if let Some(limit) = args.limit {
-                    url.query_pairs_mut()
-                        .append_pair("limit", &limit.to_string());
-                }
-            }
-            let data: FolderListData = client.json(operation, Method::GET, url, None).await?;
-            let page_limit = if args.cursor.is_some() {
-                MAXIMUM_LIST_PAGE
-            } else {
-                usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
-            };
-            if data.expires_at.is_some()
-                || data.items.len() > page_limit
-                || !valid_utc_time(&data.evaluated_at)
-                || data.total < data.items.len() as u64
-                || data.publication.is_empty()
-                || data.next_cursor.as_deref().is_some_and(str::is_empty)
-            {
-                return Err(CommandFailure::transport(operation));
-            }
-            serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
-        }
-        Command::Albums {
-            command: AlbumCommand::List(args),
-        } => {
-            let mut url = client.endpoint(&["api", "album-summaries"]);
-            if let Some(cursor) = &args.cursor {
-                url.query_pairs_mut().append_pair("cursor", cursor);
-            } else {
-                if let Some(name) = &args.name {
-                    url.query_pairs_mut().append_pair("name", name);
-                }
-                if let Some(photo) = &args.photo {
-                    url.query_pairs_mut().append_pair("photoId", photo);
-                }
-                if let Some(limit) = args.limit {
-                    url.query_pairs_mut()
-                        .append_pair("limit", &limit.to_string());
-                }
-            }
-            let data: ListData<AlbumListItem> =
-                client.json(operation, Method::GET, url, None).await?;
-            let page_limit = if args.cursor.is_some() {
-                MAXIMUM_LIST_PAGE
-            } else {
-                usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
-            };
-            if !list_expiry_valid(&data, page_limit)
-                || data.next_cursor.as_deref().is_some_and(str::is_empty)
-            {
-                return Err(CommandFailure::transport(operation));
-            }
-            let items = data
-                .items
-                .into_iter()
-                .map(|item| match item {
-                    AlbumListItem::Missing(missing) => missing_value(missing),
-                    AlbumListItem::Present(album) => album_value(album, &client.origin),
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| CommandFailure::transport(operation))?;
-            Ok(json!({
-                "items": items,
-                "total": data.total,
-                "nextCursor": data.next_cursor,
-                "evaluatedAt": data.evaluated_at,
-                "expiresAt": data.expires_at,
-            }))
-        }
-        Command::Albums {
-            command: AlbumCommand::Get { album_id },
-        } => {
-            let data: AlbumSummary = client
-                .json(
-                    operation,
-                    Method::GET,
-                    client.endpoint(&["api", "albums", album_id]),
-                    None,
-                )
-                .await?;
-            album_value(data, &client.origin).map_err(|_| CommandFailure::transport(operation))
-        }
-        Command::Albums {
-            command: AlbumCommand::Create { name },
-        } => {
-            let identity = MutationIdentity {
-                operation,
-                photo_ids: Vec::new(),
-                album_id: None,
-                album_name: Some(name.clone()),
-            };
-            let result: AlbumCreationWire = client
-                .mutation(
-                    &identity,
-                    admission,
-                    client.endpoint(&["api", "albums"]),
-                    json!({ "name": name }),
-                )
-                .await?;
-            let album = confirmed(album_value(result.album, &client.origin), &identity)?;
-            Ok(json!({ "album": album }))
-        }
-        Command::Albums {
-            command:
-                AlbumCommand::Rename {
-                    album_id,
-                    name,
-                    if_version,
-                },
-        } => {
-            let identity = MutationIdentity {
-                operation,
-                photo_ids: Vec::new(),
-                album_id: Some(album_id.clone()),
-                album_name: Some(name.clone()),
-            };
-            let result: AlbumRenameWire = client
-                .mutation(
-                    &identity,
-                    admission,
-                    client.endpoint(&["api", "albums", album_id, "changes"]),
-                    json!({ "operation": "rename", "name": name, "ifVersion": if_version }),
-                )
-                .await?;
-            let album = confirmed(album_value(result.album, &client.origin), &identity)?;
-            Ok(json!({ "album": album, "renamed": result.renamed }))
-        }
-        Command::Albums {
-            command:
-                AlbumCommand::Delete {
-                    album_id,
-                    if_version,
-                },
-        } => {
-            let identity = MutationIdentity {
-                operation,
-                photo_ids: Vec::new(),
-                album_id: Some(album_id.clone()),
-                album_name: None,
-            };
-            let result: AlbumDeleteWire = client
-                .mutation(
-                    &identity,
-                    admission,
-                    client.endpoint(&["api", "albums", album_id, "changes"]),
-                    json!({ "operation": "delete", "ifVersion": if_version }),
-                )
-                .await?;
-            if !result.deleted || result.original_files_changed || result.album_id.is_empty() {
-                return Err(CommandFailure::unknown(&identity));
-            }
-            Ok(json!({
-                "albumId": result.album_id,
-                "deleted": true,
-                "originalFilesChanged": false,
-            }))
-        }
-        Command::Albums {
-            command: AlbumCommand::Add(args),
-        } => {
-            // The membership document was validated before connecting.
-            let photo_ids = pending_membership.expect("membership input was read");
-            membership_mutation(MembershipKind::Add, args, photo_ids, &client, admission).await
-        }
-        Command::Albums {
-            command: AlbumCommand::Remove(args),
-        } => {
-            let photo_ids = pending_membership.expect("membership input was read");
-            membership_mutation(MembershipKind::Remove, args, photo_ids, &client, admission).await
-        }
-        Command::Albums {
-            command: AlbumCommand::Reorder(args),
-        } => {
-            let photo_ids = pending_membership.expect("membership input was read");
-            membership_mutation(MembershipKind::Reorder, args, photo_ids, &client, admission).await
-        }
-        Command::Photos {
-            command: PhotoCommand::List(args),
-        } => {
-            let data: ListData<PhotoListItem> = if let Some(cursor) = &args.cursor {
-                client
+    let result = async {
+        match &cli.command {
+            Command::Status => {
+                let data: StatusData = client
                     .json(
                         operation,
                         Method::GET,
-                        client.endpoint(&["api", "photo-queries", cursor]),
+                        client.endpoint(&["api", "status"]),
                         None,
                     )
-                    .await?
-            } else {
-                let source = args
-                    .album
-                    .as_deref()
-                    .map(|album_id| PhotoSource::Album { album_id })
-                    .or_else(|| {
-                        args.folder
-                            .as_deref()
-                            .map(|location| PhotoSource::Folder { location })
-                    });
-                let request = PhotoQueryRequest {
-                    source,
-                    selection: args.selection,
-                    rating_minimum: args.rating_min,
-                    rating_maximum: args.rating_max,
-                    kind: args.kind,
-                    available: args.available,
-                    captured_from: args.captured_from.as_deref(),
-                    captured_before: args.captured_before.as_deref(),
-                    order: args.order,
-                    limit: args.limit,
+                    .await?;
+                if data.server_version.is_empty()
+                    || data.cli_contract_version != CLI_CONTRACT_VERSION
+                    || data.publication.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
+            }
+            Command::Folders {
+                command: FolderCommand::List(args),
+            } => {
+                let mut url = client.endpoint(&["api", "file-locations"]);
+                if let Some(cursor) = &args.cursor {
+                    url.query_pairs_mut().append_pair("cursor", cursor);
+                } else {
+                    if let Some(parent) = &args.parent {
+                        url.query_pairs_mut().append_pair("parent", parent);
+                    }
+                    if let Some(limit) = args.limit {
+                        url.query_pairs_mut()
+                            .append_pair("limit", &limit.to_string());
+                    }
+                }
+                let data: FolderListData = client.json(operation, Method::GET, url, None).await?;
+                let page_limit = if args.cursor.is_some() {
+                    MAXIMUM_LIST_PAGE
+                } else {
+                    usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
                 };
-                let body = serde_json::to_value(request)
+                if data.expires_at.is_some()
+                    || data.items.len() > page_limit
+                    || !valid_utc_time(&data.evaluated_at)
+                    || data.total < data.items.len() as u64
+                    || data.publication.is_empty()
+                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
+            }
+            Command::Albums {
+                command: AlbumCommand::List(args),
+            } => {
+                let mut url = client.endpoint(&["api", "album-summaries"]);
+                if let Some(cursor) = &args.cursor {
+                    url.query_pairs_mut().append_pair("cursor", cursor);
+                } else {
+                    if let Some(name) = &args.name {
+                        url.query_pairs_mut().append_pair("name", name);
+                    }
+                    if let Some(photo) = &args.photo {
+                        url.query_pairs_mut().append_pair("photoId", photo);
+                    }
+                    if let Some(limit) = args.limit {
+                        url.query_pairs_mut()
+                            .append_pair("limit", &limit.to_string());
+                    }
+                }
+                let data: ListData<AlbumListItem> =
+                    client.json(operation, Method::GET, url, None).await?;
+                let page_limit = if args.cursor.is_some() {
+                    MAXIMUM_LIST_PAGE
+                } else {
+                    usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
+                };
+                if !list_expiry_valid(&data, page_limit)
+                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let items = data
+                    .items
+                    .into_iter()
+                    .map(|item| match item {
+                        AlbumListItem::Missing(missing) => missing_value(missing),
+                        AlbumListItem::Present(album) => album_value(album, &client.origin),
+                    })
+                    .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| CommandFailure::transport(operation))?;
-                client
+                Ok(json!({
+                    "items": items,
+                    "total": data.total,
+                    "nextCursor": data.next_cursor,
+                    "evaluatedAt": data.evaluated_at,
+                    "expiresAt": data.expires_at,
+                }))
+            }
+            Command::Albums {
+                command: AlbumCommand::Get { album_id },
+            } => {
+                let data: AlbumSummary = client
                     .json(
                         operation,
-                        Method::POST,
-                        client.endpoint(&["api", "photo-queries"]),
-                        Some(body),
+                        Method::GET,
+                        client.endpoint(&["api", "albums", album_id]),
+                        None,
                     )
-                    .await?
-            };
-            let page_limit = if args.cursor.is_some() {
-                MAXIMUM_LIST_PAGE
-            } else {
-                usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
-            };
-            if !list_expiry_valid(&data, page_limit)
-                || data.next_cursor.as_deref().is_some_and(str::is_empty)
-            {
-                return Err(CommandFailure::transport(operation));
+                    .await?;
+                album_value(data, &client.origin).map_err(|_| CommandFailure::transport(operation))
             }
-            let items = data
-                .items
-                .into_iter()
-                .map(|item| match item {
-                    PhotoListItem::Missing(missing) => missing_value(missing),
-                    PhotoListItem::Present(photo) => photo_value(photo, &client.origin),
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| CommandFailure::transport(operation))?;
-            Ok(json!({
-                "items": items,
-                "total": data.total,
-                "nextCursor": data.next_cursor,
-                "evaluatedAt": data.evaluated_at,
-                "expiresAt": data.expires_at,
-            }))
-        }
-        Command::Photos {
-            command: PhotoCommand::Get { photo_id },
-        } => {
-            let photo: PhotoGet = client
-                .json(
+            Command::Albums {
+                command: AlbumCommand::Create { name },
+            } => {
+                let identity = MutationIdentity {
                     operation,
-                    Method::GET,
-                    client.endpoint(&["api", "photos", photo_id]),
-                    None,
-                )
-                .await?;
-            let PhotoGet {
-                id,
-                filename,
-                original_kind,
-                original_available,
-                selection_state,
-                rating,
-                decision_version,
-                capture_time,
-                preview,
-                web_path,
-                metadata,
-            } = photo;
-            let metadata_values_absent = metadata.capture_time.is_none()
-                && metadata.aperture.is_none()
-                && metadata.shutter_speed.is_none()
-                && metadata.focal_length.is_none()
-                && metadata.iso.is_none();
-            if metadata
-                .capture_time
-                .as_deref()
-                .is_some_and(|value| !valid_camera_time(value))
-                || (!matches!(metadata.state, MetadataState::Known) && !metadata_values_absent)
-            {
-                return Err(CommandFailure::transport(operation));
+                    photo_ids: Vec::new(),
+                    album_id: None,
+                    album_name: Some(name.clone()),
+                };
+                let result: AlbumCreationWire = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "albums"]),
+                        json!({ "name": name }),
+                    )
+                    .await?;
+                let album = confirmed(album_value(result.album, &client.origin), &identity)?;
+                Ok(json!({ "album": album }))
             }
-            let item = PhotoItem {
-                id,
-                filename,
-                original_kind,
-                original_available,
-                selection_state,
-                rating,
-                decision_version,
-                capture_time,
-                preview,
-                web_path,
-            };
-            let mut value = photo_value(item, &client.origin)
-                .map_err(|_| CommandFailure::transport(operation))?;
-            value
-                .as_object_mut()
-                .ok_or_else(|| CommandFailure::transport(operation))?
-                .insert(
-                    "metadata".to_owned(),
-                    serde_json::to_value(metadata)
-                        .map_err(|_| CommandFailure::transport(operation))?,
-                );
-            Ok(value)
+            Command::Albums {
+                command:
+                    AlbumCommand::Rename {
+                        album_id,
+                        name,
+                        if_version,
+                    },
+            } => {
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: Vec::new(),
+                    album_id: Some(album_id.clone()),
+                    album_name: Some(name.clone()),
+                };
+                let result: AlbumRenameWire = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "albums", album_id, "changes"]),
+                        json!({ "operation": "rename", "name": name, "ifVersion": if_version }),
+                    )
+                    .await?;
+                let album = confirmed(album_value(result.album, &client.origin), &identity)?;
+                Ok(json!({ "album": album, "renamed": result.renamed }))
+            }
+            Command::Albums {
+                command:
+                    AlbumCommand::Delete {
+                        album_id,
+                        if_version,
+                    },
+            } => {
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: Vec::new(),
+                    album_id: Some(album_id.clone()),
+                    album_name: None,
+                };
+                let result: AlbumDeleteWire = client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "albums", album_id, "changes"]),
+                        json!({ "operation": "delete", "ifVersion": if_version }),
+                    )
+                    .await?;
+                if !result.deleted || result.original_files_changed || result.album_id.is_empty() {
+                    return Err(CommandFailure::unknown(&identity));
+                }
+                Ok(json!({
+                    "albumId": result.album_id,
+                    "deleted": true,
+                    "originalFilesChanged": false,
+                }))
+            }
+            Command::Albums {
+                command: AlbumCommand::Add(args),
+            } => {
+                // The membership document was validated before connecting.
+                let photo_ids = pending_membership.expect("membership input was read");
+                membership_mutation(MembershipKind::Add, args, photo_ids, &client, admission).await
+            }
+            Command::Albums {
+                command: AlbumCommand::Remove(args),
+            } => {
+                let photo_ids = pending_membership.expect("membership input was read");
+                membership_mutation(MembershipKind::Remove, args, photo_ids, &client, admission)
+                    .await
+            }
+            Command::Albums {
+                command: AlbumCommand::Reorder(args),
+            } => {
+                let photo_ids = pending_membership.expect("membership input was read");
+                membership_mutation(MembershipKind::Reorder, args, photo_ids, &client, admission)
+                    .await
+            }
+            Command::Photos {
+                command: PhotoCommand::List(args),
+            } => {
+                let data: ListData<PhotoListItem> = if let Some(cursor) = &args.cursor {
+                    client
+                        .json(
+                            operation,
+                            Method::GET,
+                            client.endpoint(&["api", "photo-queries", cursor]),
+                            None,
+                        )
+                        .await?
+                } else {
+                    let source = args
+                        .album
+                        .as_deref()
+                        .map(|album_id| PhotoSource::Album { album_id })
+                        .or_else(|| {
+                            args.folder
+                                .as_deref()
+                                .map(|location| PhotoSource::Folder { location })
+                        });
+                    let request = PhotoQueryRequest {
+                        source,
+                        selection: args.selection,
+                        rating_minimum: args.rating_min,
+                        rating_maximum: args.rating_max,
+                        kind: args.kind,
+                        available: args.available,
+                        captured_from: args.captured_from.as_deref(),
+                        captured_before: args.captured_before.as_deref(),
+                        order: args.order,
+                        limit: args.limit,
+                    };
+                    let body = serde_json::to_value(request)
+                        .map_err(|_| CommandFailure::transport(operation))?;
+                    client
+                        .json(
+                            operation,
+                            Method::POST,
+                            client.endpoint(&["api", "photo-queries"]),
+                            Some(body),
+                        )
+                        .await?
+                };
+                let page_limit = if args.cursor.is_some() {
+                    MAXIMUM_LIST_PAGE
+                } else {
+                    usize::from(args.limit.unwrap_or(DEFAULT_LIST_PAGE as u8))
+                };
+                if !list_expiry_valid(&data, page_limit)
+                    || data.next_cursor.as_deref().is_some_and(str::is_empty)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let items = data
+                    .items
+                    .into_iter()
+                    .map(|item| match item {
+                        PhotoListItem::Missing(missing) => missing_value(missing),
+                        PhotoListItem::Present(photo) => photo_value(photo, &client.origin),
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| CommandFailure::transport(operation))?;
+                Ok(json!({
+                    "items": items,
+                    "total": data.total,
+                    "nextCursor": data.next_cursor,
+                    "evaluatedAt": data.evaluated_at,
+                    "expiresAt": data.expires_at,
+                }))
+            }
+            Command::Photos {
+                command: PhotoCommand::Get { photo_id },
+            } => {
+                let photo: PhotoGet = client
+                    .json(
+                        operation,
+                        Method::GET,
+                        client.endpoint(&["api", "photos", photo_id]),
+                        None,
+                    )
+                    .await?;
+                let PhotoGet {
+                    id,
+                    filename,
+                    original_kind,
+                    original_available,
+                    selection_state,
+                    rating,
+                    decision_version,
+                    capture_time,
+                    preview,
+                    web_path,
+                    metadata,
+                } = photo;
+                let metadata_values_absent = metadata.capture_time.is_none()
+                    && metadata.aperture.is_none()
+                    && metadata.shutter_speed.is_none()
+                    && metadata.focal_length.is_none()
+                    && metadata.iso.is_none();
+                if metadata
+                    .capture_time
+                    .as_deref()
+                    .is_some_and(|value| !valid_camera_time(value))
+                    || (!matches!(metadata.state, MetadataState::Known) && !metadata_values_absent)
+                {
+                    return Err(CommandFailure::transport(operation));
+                }
+                let item = PhotoItem {
+                    id,
+                    filename,
+                    original_kind,
+                    original_available,
+                    selection_state,
+                    rating,
+                    decision_version,
+                    capture_time,
+                    preview,
+                    web_path,
+                };
+                let mut value = photo_value(item, &client.origin)
+                    .map_err(|_| CommandFailure::transport(operation))?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| CommandFailure::transport(operation))?
+                    .insert(
+                        "metadata".to_owned(),
+                        serde_json::to_value(metadata)
+                            .map_err(|_| CommandFailure::transport(operation))?,
+                    );
+                Ok(value)
+            }
         }
+    }
+    .await;
+    match result {
+        Ok(mut data) => {
+            redact_value(&mut data, &client.token);
+            Ok(data)
+        }
+        Err(mut failure) => {
+            redact_error(&mut failure.payload, &client.token);
+            Err(failure)
+        }
+    }
+}
+
+fn redact_error(error: &mut ErrorPayload, secret: &str) {
+    redact_string(&mut error.code, secret);
+    redact_string(&mut error.message, secret);
+    redact_string(&mut error.effect, secret);
+    redact_value(&mut error.details, secret);
+}
+
+fn redact_value(value: &mut Value, secret: &str) {
+    match value {
+        Value::String(string) => redact_string(string, secret),
+        Value::Array(items) => {
+            for item in items {
+                redact_value(item, secret);
+            }
+        }
+        Value::Object(fields) => {
+            let previous = std::mem::take(fields);
+            for (mut key, mut field) in previous {
+                redact_string(&mut key, secret);
+                redact_value(&mut field, secret);
+                fields.insert(key, field);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn redact_string(value: &mut String, secret: &str) {
+    if !secret.is_empty() && value.contains(secret) {
+        *value = value.replace(secret, "[redacted]");
     }
 }
 
@@ -1983,6 +2184,124 @@ fn validate_command(command: &Command) -> Result<(), CommandFailure> {
         }
         _ => Ok(()),
     }
+}
+
+fn access_token_path(cli: &Cli) -> Result<PathBuf, CommandFailure> {
+    let path = cli
+        .token_file
+        .clone()
+        .or_else(|| env::var_os("SLIPSTREAM_ACCESS_TOKEN_FILE").map(PathBuf::from));
+    let Some(path) = path else {
+        return Err(CommandFailure::invalid(
+            "token-file",
+            "Set --token-file or SLIPSTREAM_ACCESS_TOKEN_FILE.",
+        ));
+    };
+    if path.as_os_str().is_empty() {
+        return Err(CommandFailure::invalid(
+            "token-file",
+            "The credential file path must not be empty.",
+        ));
+    }
+    Ok(path)
+}
+
+async fn read_access_token(path: PathBuf) -> Result<String, CommandFailure> {
+    tokio::task::spawn_blocking(move || read_access_token_file(&path))
+        .await
+        .map_err(|_| CommandFailure::local_credential(None))?
+}
+
+#[cfg(unix)]
+fn read_access_token_file(path: &Path) -> Result<String, CommandFailure> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    const MAXIMUM_CREDENTIAL_BYTES: usize = 45;
+    let path_text = path.to_str();
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            CommandFailure::invalid(
+                "token-file",
+                "The credential file must be a nonsymlink regular file.",
+            )
+        } else {
+            CommandFailure::local_credential(path_text)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| CommandFailure::local_credential(path_text))?;
+    // Check the file opened above, so a symlink swap cannot change which file
+    // is validated and read. Do not disclose which credential rule failed.
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > MAXIMUM_CREDENTIAL_BYTES as u64
+    {
+        return Err(CommandFailure::invalid(
+            "token-file",
+            "The credential file must be a private regular file owned by the current user.",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(MAXIMUM_CREDENTIAL_BYTES);
+    file.take((MAXIMUM_CREDENTIAL_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| CommandFailure::local_credential(path_text))?;
+    if bytes.len() > MAXIMUM_CREDENTIAL_BYTES {
+        return Err(CommandFailure::invalid(
+            "token-file",
+            "The credential file must contain one Access Token and an optional line ending.",
+        ));
+    }
+    let token_bytes = bytes
+        .strip_suffix(b"\r\n")
+        .or_else(|| bytes.strip_suffix(b"\n"))
+        .unwrap_or(&bytes);
+    if !canonical_access_token(token_bytes) {
+        return Err(CommandFailure::invalid(
+            "token-file",
+            "The credential file must contain one canonical Access Token and an optional line ending.",
+        ));
+    }
+    // canonical_access_token accepts only ASCII base64url bytes.
+    Ok(String::from_utf8(token_bytes.to_vec()).expect("validated token is ASCII"))
+}
+
+#[cfg(not(unix))]
+fn read_access_token_file(_path: &Path) -> Result<String, CommandFailure> {
+    Err(CommandFailure::invalid(
+        "token-file",
+        "Private credential-file checks are unavailable on this platform.",
+    ))
+}
+
+fn canonical_access_token(token: &[u8]) -> bool {
+    token.len() == 43
+        && token
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        && matches!(
+            token[42],
+            b'A' | b'E'
+                | b'I'
+                | b'M'
+                | b'Q'
+                | b'U'
+                | b'Y'
+                | b'c'
+                | b'g'
+                | b'k'
+                | b'o'
+                | b's'
+                | b'w'
+                | b'0'
+                | b'4'
+                | b'8'
+        )
 }
 
 pub async fn invoke(cli: Cli, environment: Option<&str>) -> InvocationResult {
@@ -2219,24 +2538,148 @@ mod tests {
                 .as_str(),
             "https://example.test:8443/"
         );
-        let defaulted = Cli::try_parse_from(["slipstream", "status"]).unwrap();
-        assert_eq!(
-            service_origin(&defaulted, None).unwrap().as_str(),
-            DEFAULT_SERVER.to_owned() + "/"
-        );
-        assert!(service_origin(&defaulted, Some("")).is_err());
+        let without_server = Cli::try_parse_from(["slipstream", "status"]).unwrap();
+        assert!(service_origin(&without_server, None).is_err());
+        assert!(service_origin(&without_server, Some("")).is_err());
         for invalid in [
             "ftp://example.test",
+            "http://127.0.0.1:3000",
             "http://user@example.test",
             "http://@example.test",
-            "http://example.test/path",
-            "http://example.test/?x=1",
+            "https://example.test/path",
+            "https://example.test/?x=1",
         ] {
             assert!(
-                service_origin(&defaulted, Some(invalid)).is_err(),
+                service_origin(&without_server, Some(invalid)).is_err(),
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn token_file_option_is_explicit_and_does_not_accept_abbreviations_or_duplicates() {
+        assert!(
+            Cli::try_parse_from([
+                "slipstream",
+                "--token-file",
+                "/run/slipstream/token",
+                "status"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "slipstream",
+                "--token-file",
+                "first",
+                "--token-file",
+                "second",
+                "status"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["slipstream", "--tok", "file", "status"]).is_err());
+        assert!(canonical_access_token(b"A".repeat(43).as_slice()));
+        assert!(!canonical_access_token(b"A".repeat(42).as_slice()));
+        assert!(!canonical_access_token(
+            b"A".repeat(42)
+                .iter()
+                .copied()
+                .chain(*b"B")
+                .collect::<Vec<_>>()
+                .as_slice()
+        ));
+        assert!(!canonical_access_token(
+            b"A".repeat(42)
+                .iter()
+                .copied()
+                .chain(*b"=")
+                .collect::<Vec<_>>()
+                .as_slice()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_file_reader_rejects_fifos_without_blocking() {
+        use std::{
+            ffi::CString,
+            os::unix::ffi::OsStrExt,
+            sync::{
+                OnceLock,
+                atomic::{AtomicU64, Ordering},
+                mpsc,
+            },
+            thread,
+        };
+
+        static NEXT_PATH: OnceLock<AtomicU64> = OnceLock::new();
+        let sequence = NEXT_PATH
+            .get_or_init(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "slipstream-cli-token-fifo-{}-{sequence}",
+            std::process::id()
+        ));
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = mpsc::channel();
+        let reader_path = path.clone();
+        thread::spawn(move || {
+            let _ = sender.send(read_access_token_file(&reader_path));
+        });
+        let failure = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("opening a FIFO credential must not block");
+        assert_eq!(failure.unwrap_err().payload.code, "invalid_input");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn access_boundary_errors_are_normalized_without_server_diagnostics() {
+        let unauthorized = access_boundary_failure(
+            StatusCode::UNAUTHORIZED,
+            None,
+            br#"{"error":"token leaked by a server"}"#,
+            Operation::Status,
+        )
+        .unwrap();
+        assert_eq!(unauthorized.payload.code, "authentication_required");
+        assert_eq!(unauthorized.payload.details["operation"], "status");
+        assert!(!unauthorized.payload.message.contains("token leaked"));
+
+        let limited = access_boundary_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(7),
+            b"{}",
+            Operation::AlbumsCreate,
+        )
+        .unwrap();
+        assert_eq!(limited.payload.code, "server_busy");
+        assert_eq!(limited.payload.details["retryAfterSeconds"], 7);
+
+        assert!(
+            access_boundary_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+                br#"{"error":"storage_failed"}"#,
+                Operation::Status,
+            )
+            .is_none()
+        );
+        let unconfigured = access_boundary_failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(9),
+            br#"{"error":"access_unconfigured"}"#,
+            Operation::Status,
+        )
+        .unwrap();
+        assert_eq!(unconfigured.payload.code, "server_busy");
+        assert_eq!(
+            unconfigured.payload.details["retryAfterSeconds"],
+            Value::Null
+        );
     }
 
     #[test]

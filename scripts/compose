@@ -4,7 +4,9 @@ set -euo pipefail
 
 readonly storage_roles=(library state cache)
 readonly image_key=SLIPSTREAM_IMAGE
+readonly public_origin_key=SLIPSTREAM_PUBLIC_ORIGIN
 readonly down_image_sentinel='registry.invalid/slipstream/stop@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+readonly down_public_origin_sentinel='https://stop.invalid'
 readonly down_library_sentinel='/__slipstream-down-library__'
 readonly down_state_sentinel='/__slipstream-down-state__'
 readonly down_cache_sentinel='/__slipstream-down-cache__'
@@ -135,6 +137,51 @@ parse_image_input() {
     fi
   done < "$environment_file"
   [[ "$declared" == true ]] || fail "image environment file is missing $image_key"
+}
+
+literal_public_origin() {
+  local value=$1 authority host port label
+  local -a labels=()
+  valid_utf8 "$value" || return 1
+  [[ ${#value} -le 2048 && "$value" == https://* ]] || return 1
+  authority=${value#https://}
+  authority=${authority%/}
+  [[ "$authority" =~ ^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:([0-9]+))?$ ]] || return 1
+  host=${BASH_REMATCH[1]}
+  port=${BASH_REMATCH[3]:-}
+  if [[ "$host" == \[* ]]; then
+    [[ "$host" == *:*:* ]] || return 1
+  else
+    [[ "$host" != .* && "$host" != *. && "$host" != *..* ]] || return 1
+    IFS=. read -r -a labels <<< "$host"
+    for label in "${labels[@]}"; do
+      [[ ${#label} -le 63 && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+    done
+  fi
+  if [[ -n "$port" ]]; then
+    [[ ${#port} -le 5 ]] || return 1
+    port=$((10#$port))
+    (( port > 0 && port <= 65535 )) || return 1
+  fi
+}
+
+parse_public_origin() {
+  local environment_file=$1
+  local line value declared=false
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" == "$public_origin_key="* ]]; then
+      [[ "$declared" == false ]] || fail "environment file has duplicate $public_origin_key"
+      value=${line#"$public_origin_key="}
+      literal_public_origin "$value" || fail "environment file has invalid $public_origin_key"
+      declared=true
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?${public_origin_key}([^A-Za-z0-9_]|$) ]]; then
+      fail "environment file has invalid $public_origin_key"
+    fi
+  done < "$environment_file"
+  [[ "$declared" == true ]] || fail "environment file is missing $public_origin_key"
 }
 
 reject_engine_control_declarations() {
@@ -361,7 +408,7 @@ command -v cmp >/dev/null || fail "cmp is required for environment file validati
 command -v tr >/dev/null || fail "tr is required for environment file validation"
 
 if [[ $# -lt 3 || $1 != --env-file ]]; then
-  fail "usage: scripts/compose --env-file PATH {up [-d]|run --rm --no-deps slipstream expand-library|down}"
+  fail "usage: scripts/compose --env-file PATH {up [-d]|run --rm --no-deps slipstream expand-library|access-create|access-rotate|access-revoke|down}"
 fi
 
 environment_file_input=$2
@@ -377,16 +424,30 @@ valid_utf8 "$environment_file" || fail "environment file path must use UTF-8"
 reject_nul_bytes "$environment_file"
 reject_engine_control_declarations "$environment_file"
 
-startup=false
+preflight=false
+server_start=false
 if [[ $# -eq 1 && $1 == up ]]; then
   compose_command=(up --no-build)
-  startup=true
+  preflight=true
+  server_start=true
 elif [[ $# -eq 2 && $1 == up && $2 == -d ]]; then
   compose_command=(up -d --no-build)
-  startup=true
+  preflight=true
+  server_start=true
 elif [[ $# -eq 5 && $1 == run && $2 == --rm && $3 == --no-deps && $4 == slipstream && $5 == expand-library ]]; then
-  compose_command=(run --rm --no-deps --no-build slipstream expand-library)
-  startup=true
+  compose_command=(run --rm --no-deps slipstream expand-library)
+  preflight=true
+elif [[ $# -eq 1 && $1 == access-create ]]; then
+  [[ -t 0 && -t 1 && -t 2 ]] || fail "access-create and access-rotate require an interactive terminal"
+  compose_command=(--profile access-admin run --rm --no-deps --interactive --tty slipstream-admin access-create)
+  preflight=true
+elif [[ $# -eq 1 && $1 == access-rotate ]]; then
+  [[ -t 0 && -t 1 && -t 2 ]] || fail "access-create and access-rotate require an interactive terminal"
+  compose_command=(--profile access-admin run --rm --no-deps --interactive --tty slipstream-admin access-rotate)
+  preflight=true
+elif [[ $# -eq 1 && $1 == access-revoke ]]; then
+  compose_command=(--profile access-admin run --rm --no-deps --no-TTY slipstream-admin access-revoke)
+  preflight=true
 elif [[ $# -eq 1 && $1 == down ]]; then
   compose_command=(down)
 else
@@ -402,7 +463,7 @@ compose_file=$resolved_path
 valid_utf8 "$entry_point" || fail "entry point path must use UTF-8"
 valid_utf8 "$compose_file" || fail "repository compose.yaml path must use UTF-8"
 
-if [[ "$startup" == true ]]; then
+if [[ "$preflight" == true ]]; then
   command -v findmnt >/dev/null || fail "Linux findmnt is required"
   parse_storage_sources "$environment_file"
   parse_image_input "$environment_file"
@@ -410,15 +471,18 @@ if [[ "$startup" == true ]]; then
   capture_mount_coordinates
   reject_mount_coordinate_overlaps
 fi
+if [[ "$server_start" == true ]]; then
+  parse_public_origin "$environment_file"
+fi
 
 require_local_docker
 unset COMPOSE_DISABLE_ENV_FILE COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR
 unset COMPOSE_PROFILES COMPOSE_PROJECT_NAME
 unset SLIPSTREAM_IMAGE SLIPSTREAM_BIND_ADDRESS
-unset SLIPSTREAM_PORT SLIPSTREAM_DATABASE_BASENAME
+unset SLIPSTREAM_PORT SLIPSTREAM_DATABASE_BASENAME SLIPSTREAM_PUBLIC_ORIGIN
 unset SLIPSTREAM_LIBRARY_ROOT SLIPSTREAM_STATE_DIRECTORY SLIPSTREAM_CACHE_DIRECTORY
 
-if [[ "$startup" == true ]]; then
+if [[ "$preflight" == true ]]; then
   export SLIPSTREAM_LIBRARY_ROOT="${storage_sources[library]}"
   export SLIPSTREAM_STATE_DIRECTORY="${storage_sources[state]}"
   export SLIPSTREAM_CACHE_DIRECTORY="${storage_sources[cache]}"
@@ -427,6 +491,7 @@ else
   export SLIPSTREAM_LIBRARY_ROOT="$down_library_sentinel"
   export SLIPSTREAM_STATE_DIRECTORY="$down_state_sentinel"
   export SLIPSTREAM_CACHE_DIRECTORY="$down_cache_sentinel"
+  export SLIPSTREAM_PUBLIC_ORIGIN="$down_public_origin_sentinel"
 fi
 
 exec docker --context default compose --project-name slipstream --env-file "$environment_file" -f "$compose_file" "${compose_command[@]}"

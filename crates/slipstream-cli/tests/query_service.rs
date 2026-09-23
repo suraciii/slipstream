@@ -1,7 +1,6 @@
-use clap::Parser;
 use serde_json::Value;
-use slipstream_cli::{Cli, invoke};
-use slipstream_server::{Config, start_server};
+use slipstream_server::Config;
+mod common;
 use std::{
     fs,
     io::{ErrorKind, Read, Write},
@@ -20,12 +19,10 @@ fn fake_service(response: Value) -> (String, JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
         for request_index in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            let (mut stream, _) = common::accept_tls(&listener);
             let mut request = [0_u8; 8192];
-            let _ = stream.read(&mut request).unwrap();
+            let count = stream.read(&mut request).unwrap();
+            common::assert_bearer(&request[..count]);
             let body = if request_index == 0 {
                 serde_json::json!({
                     "serverVersion": "0.0.0",
@@ -51,7 +48,7 @@ fn fake_service(response: Value) -> (String, JoinHandle<()>) {
             stream.write_all(&bytes).unwrap();
         }
     });
-    (format!("http://{address}"), handle)
+    (format!("https://127.0.0.1:{}", address.port()), handle)
 }
 
 fn wait_for_exit(child: &mut Child, maximum: Duration) -> Option<std::process::ExitStatus> {
@@ -95,6 +92,7 @@ fn fixture() -> (PathBuf, Config) {
         cache_directory: base.join("cache"),
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
+        public_origin: "https://localhost".to_owned(),
         port: 0,
         web_root: Some(web),
     };
@@ -108,7 +106,9 @@ async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
         .map(|argument| (*argument).to_owned())
         .collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_slipstream"))
+        let output = common::cli_command()
+            .arg("--token-file")
+            .arg(common::credential_file())
             .arg("--server")
             .arg(server)
             .args(arguments)
@@ -129,8 +129,12 @@ async fn command(server: &str, arguments: &[&str]) -> (u8, Value) {
 }
 
 async fn post_json(server: &str, path: &str, body: Value) -> reqwest::Response {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .add_root_certificate(common::test_certificate())
+        .build()
+        .unwrap()
         .post(format!("{server}{path}"))
+        .bearer_auth(common::ACCESS_TOKEN)
         .json(&body)
         .send()
         .await
@@ -269,20 +273,11 @@ async fn client_rejects_folder_album_and_photo_pages_over_the_requested_limit() 
 
 #[test]
 fn executable_network_timeout_publishes_an_envelope_when_stdout_is_writable() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let address = listener.local_addr().unwrap();
-    let stalled = std::thread::spawn(move || {
-        let (_stream, _) = listener.accept().unwrap();
-        std::thread::sleep(Duration::from_secs(2));
-    });
-    let output = Command::new(env!("CARGO_BIN_EXE_slipstream"))
-        .args([
-            "--server",
-            &format!("http://{address}"),
-            "--timeout",
-            "1",
-            "status",
-        ])
+    let (server, stalled) = common::stalled_tls_service();
+    let output = common::cli_command()
+        .args(["--token-file"])
+        .arg(common::credential_file())
+        .args(["--server", &server, "--timeout", "1", "status"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(6));
@@ -311,7 +306,9 @@ fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
         }
     });
     let (server, handle) = fake_service(status.clone());
-    let mut timed = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let mut timed = common::cli_command()
+        .args(["--token-file"])
+        .arg(common::credential_file())
         .args(["--server", &server, "--timeout", "1", "status"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -325,7 +322,9 @@ fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
     handle.join().unwrap();
 
     let (server, handle) = fake_service(status_payload_with_version(256 * 1024));
-    let mut interrupted = Command::new(env!("CARGO_BIN_EXE_slipstream"))
+    let mut interrupted = common::cli_command()
+        .args(["--token-file"])
+        .arg(common::credential_file())
         .args(["--server", &server, "--timeout", "300", "status"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -364,40 +363,26 @@ fn status_payload_with_version(length: usize) -> Value {
 
 #[tokio::test]
 async fn whole_command_deadline_covers_capability_negotiation() {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .unwrap();
-    let address = listener.local_addr().unwrap();
-    let stalled = tokio::spawn(async move {
-        let (_stream, _) = listener.accept().await.unwrap();
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    });
+    let (server, stalled) = common::stalled_tls_service();
     let started = std::time::Instant::now();
-    let result = invoke(
-        Cli::try_parse_from([
-            "slipstream",
-            "--server",
-            &format!("http://{address}"),
-            "--timeout",
-            "1",
-            "status",
-        ])
-        .unwrap(),
-        None,
-    )
-    .await;
-    assert_eq!(result.exit_code, 6);
+    let output = common::cli_command()
+        .args(["--token-file"])
+        .arg(common::credential_file())
+        .args(["--server", &server, "--timeout", "1", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(6));
     assert!(started.elapsed() < Duration::from_secs(3));
-    let envelope: Value = serde_json::from_str(result.stdout.trim()).unwrap();
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "transport_failed");
     assert_eq!(envelope["error"]["details"]["operation"], "status");
-    stalled.abort();
+    stalled.join().unwrap();
 }
 
 #[tokio::test]
 async fn executable_queries_the_real_service_with_fixed_multi_page_membership() {
     let (base, config) = fixture();
-    let server = start_server(config).await.unwrap();
+    let server = common::start_authenticated_server(config).await;
     wait_until_idle(&server.url).await;
 
     let (exit, status) = command(&server.url, &["status"]).await;

@@ -7,6 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "=0.22.1"
+getrandom = "=0.4.3"
+subtle = "=2.6.1"
+sha2.workspace = true
+rusqlite.workspace = true
+url.workspace = true
 axum.workspace = true
 http.workspace = true
 libc.workspace = true
@@ -18,5 +24,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-rusqlite.workspace = true
 tower.workspace = true

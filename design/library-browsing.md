@@ -405,7 +405,7 @@ the resulting saved position when it removes the saved Photo.
 
 The existing cache identity and atomic publication contracts remain authoritative. Both `thumbnail-512` and `review-2560` derivatives persist in the configured cache directory and may be reused across server restart.
 
-A current cache hit must not reopen or reprocess the Original File. Derivative delivery uses immutable identity-bearing URLs, `ETag`, and long-lived immutable browser caching. A changed source revision creates a different cache identity and cannot be presented as current under the previous identity.
+A current cache hit must not reopen or reprocess the Original File. Derivative delivery uses identity-bearing URLs and `ETag`; [Instance Access Architecture](access.md#private-content-and-transport) owns authentication, private response caching, and migration from publicly cached URLs. A changed source revision creates a different cache identity and cannot be presented as current under the previous identity.
 
 The cache is rebuildable and not authoritative for Selection State, Rating, membership, or saved position. Removing cache bytes may cause regeneration but must not change SQLite user state or Original Files.
 

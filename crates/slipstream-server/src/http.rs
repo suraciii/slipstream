@@ -118,12 +118,15 @@ pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> 
     let router = create_router_with_web_root(Arc::clone(&application), web_root);
     let (sender, receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = receiver.await;
-            })
-            .await
-            .map_err(|error| error.to_string())
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = receiver.await;
+        })
+        .await
+        .map_err(|error| error.to_string())
     });
     Ok(RunningServer {
         url: format!("http://{}:{}", config.host, address.port()),
@@ -223,13 +226,17 @@ pub(crate) fn create_router_with_web_root(
             get(method_not_allowed).post(recovery_apply),
         )
         .route(
-            "/api/derivatives/{photo_id}/{target}/{filename}",
+            "/api/private/derivatives/{photo_id}/{target}/{filename}",
             get(get_derivative),
         )
         .fallback(static_web)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_policy,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::boundary,
         ))
         .with_state(state)
 }
@@ -2426,7 +2433,7 @@ pub(crate) async fn get_derivative(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CONTENT_LENGTH, length)
-        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::CACHE_CONTROL, "no-store")
         .header(header::ETAG, entity_tag)
         .header("x-content-type-options", "nosniff")
         .body(body)

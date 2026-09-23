@@ -588,6 +588,7 @@ impl SharedLibrary {
 }
 
 pub struct Application {
+    pub(crate) access: crate::access::Access,
     pub(crate) library: Arc<Library>,
     library_root: PathBuf,
     pub(crate) preview: PreviewService,
@@ -691,6 +692,13 @@ impl Application {
             .await
             .map_err(|error| ServerError::Join(error.to_string()))??;
         let library = Arc::new(library);
+        let access = match crate::access::Access::open(config) {
+            Ok(access) => access,
+            Err(error) => {
+                let _ = library.shutdown();
+                return Err(error);
+            }
+        };
         // Admission is complete: serve the last committed Library immediately
         // while the ordinary startup rescan runs in the background. A store
         // without a published Library stays initializing until its first scan
@@ -731,6 +739,7 @@ impl Application {
             ^ (u128::from(std::process::id()) << 64)
             ^ u128::from(NEXT_BROWSE_NAMESPACE.fetch_add(1, Ordering::Relaxed));
         let application = Arc::new(Self {
+            access,
             library,
             library_root: config.library_root.clone(),
             preview,
@@ -1537,7 +1546,7 @@ impl Application {
                     .flatten()
                     .map(|cache_key| {
                         format!(
-                            "/api/derivatives/{}/review/{}.jpg",
+                            "/api/private/derivatives/{}/review/{}.jpg",
                             facts.photo.id, cache_key
                         )
                     })
@@ -1552,7 +1561,7 @@ impl Application {
                     .flatten()
                     .map(|cache_key| {
                         format!(
-                            "/api/derivatives/{}/thumbnail/{}.jpg",
+                            "/api/private/derivatives/{}/thumbnail/{}.jpg",
                             facts.photo.id, cache_key
                         )
                     })

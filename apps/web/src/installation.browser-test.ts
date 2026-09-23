@@ -13,7 +13,14 @@ test("production application publishes usable online installation resources", as
   const server = await startBrowserServer({ base, root });
   try {
     await page.goto(server.url);
-    await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+    await expect(
+      page.getByLabel("Access Token", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("img")).toHaveCount(0);
+    const anonymousApi = await page.request.get(`${server.url}/api/overview`);
+    expect(anonymousApi.status()).toBe(401);
+    expect(anonymousApi.headers()["cache-control"]).toBe("no-store");
+
     const manifestUrl = await page
       .locator('link[rel="manifest"]')
       .getAttribute("href");
@@ -74,6 +81,20 @@ test("production application publishes usable online installation resources", as
         ),
       ),
     ).toEqual([]);
+
+    await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+    await page
+      .getByRole("button", { name: "Open library", exact: true })
+      .click();
+    await expect(page.locator("[data-grid-title]")).toHaveText("All Photos");
+    const privateApi = await page.evaluate(async () => {
+      const response = await fetch("/api/status");
+      return {
+        status: response.status,
+        cacheControl: response.headers.get("Cache-Control"),
+      };
+    });
+    expect(privateApi).toEqual({ status: 200, cacheControl: "no-store" });
   } finally {
     await server.close();
     await rm(base, { recursive: true, force: true });

@@ -1178,6 +1178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
@@ -1195,6 +1196,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -1407,9 +1417,14 @@ name = "slipstream-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "libc",
  "reqwest",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2",
  "slipstream-server",
  "tokio",
  "url",
@@ -1466,16 +1481,21 @@ name = "slipstream-server"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64",
+ "getrandom 0.4.3",
  "http",
  "image",
  "libc",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "slipstream-core",
+ "subtle",
  "time",
  "tokio",
  "tower",
+ "url",
 ]
 
 [[package]]

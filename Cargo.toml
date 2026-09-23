@@ -8,7 +8,7 @@ rust-version = "1.97.1"
 license = "MIT"
 
 [workspace.dependencies]
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 bytes = "=1.11.1"
 clap = { version = "=4.6.1", features = ["derive"] }
 http = "=1.4.0"

@@ -3,7 +3,8 @@
     "environment": {
       "SLIPSTREAM_LIBRARY_ROOT": "/photos",
       "SLIPSTREAM_STATE_DIRECTORY": "/state",
-      "SLIPSTREAM_CACHE_DIRECTORY": "/cache"
+      "SLIPSTREAM_CACHE_DIRECTORY": "/cache",
+      "SLIPSTREAM_PUBLIC_ORIGIN": "https://camera.local"
     },
     "expected": {
       "libraryRoot": "/photos",
@@ -21,7 +22,8 @@
       "SLIPSTREAM_CACHE_DIRECTORY": "/cache",
       "SLIPSTREAM_DATABASE_BASENAME": "review.sqlite",
       "SLIPSTREAM_HOST": "0.0.0.0",
-      "SLIPSTREAM_PORT": "8080"
+      "SLIPSTREAM_PORT": "8080",
+      "SLIPSTREAM_PUBLIC_ORIGIN": "https://camera.local"
     },
     "expected": {
       "libraryRoot": "/photos",

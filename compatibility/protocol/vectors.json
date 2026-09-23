@@ -31,7 +31,7 @@
       "method": "POST",
       "path": "/api/photo-sets",
       "headers": {
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       }
     },
     "expected": {
@@ -60,7 +60,7 @@
       "method": "POST",
       "path": "/api/scan",
       "headers": {
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       }
     },
     "expected": {
@@ -89,7 +89,7 @@
       "path": "/api/albums",
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "body": {
         "name": "Compat Album"
@@ -116,7 +116,7 @@
       "path": "/api/albums",
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "body": {
         "name": ""
@@ -130,7 +130,7 @@
     }
   },
   {
-    "name": "foreign-origin-scan-is-admitted",
+    "name": "foreign-origin-scan-is-rejected",
     "request": {
       "method": "POST",
       "path": "/api/scan",
@@ -139,7 +139,10 @@
       }
     },
     "expected": {
-      "status": 200
+      "status": 403,
+      "body": {
+        "error": "access_denied"
+      }
     }
   },
   {

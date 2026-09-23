@@ -125,7 +125,7 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a real loopback TCP port, and gives it independent temporary state and cache directories. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
+`test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
@@ -182,16 +182,17 @@ SLIPSTREAM_CACHE_DIRECTORY=/var/cache/slipstream \
 SLIPSTREAM_WEB_ROOT="$PWD/apps/web/dist" \
 SLIPSTREAM_HOST=127.0.0.1 \
 SLIPSTREAM_PORT=3000 \
+SLIPSTREAM_PUBLIC_ORIGIN=https://photos.example.com \
 cargo run --locked -p slipstream-server
 ```
 
 `SLIPSTREAM_DATABASE_BASENAME` defaults to `library.sqlite`. The host defaults
-to loopback; set `SLIPSTREAM_HOST` to the listener address. Slipstream 0.1
-has no accounts, authentication, or authorization. `Host`, `Origin`, and
-forwarded headers do not authorize requests. Bind a non-loopback listener only
-to a trusted network because every reachable client can read and mutate the
-Photo Library. `GET /api/status` separately reports Library initialization,
-scan, and publication state.
+to loopback; set `SLIPSTREAM_HOST` to the private listener address. Configure
+the canonical HTTPS origin and provision an Access Token with the stopped-server
+[access administration procedure](docs/deployment.md#access-administration).
+Without a token, only the public shell, access status, and health check are
+available. `GET /api/status` requires valid access and reports Library
+initialization, scan, and publication state.
 
 To expand a stopped schema-v5 Library to an ancestor Folder, first create and
 record a verified consistent backup with the service stopped (see
@@ -220,4 +221,4 @@ fixed container inputs without building an image. The explicit Linux amd64
 digest-only Compose operation are defined by
 [`docs/deployment.md`](docs/deployment.md).
 
-The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. A LAN or Tailscale binding remains trusted-network-only; it does not add authentication. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).
+The bind address exposed on the host is configured with `SLIPSTREAM_BIND_ADDRESS` in [`compose.yaml`](compose.yaml), defaulting to loopback. The backend must remain private behind the configured HTTPS proxy. Supported Compose operations use [`scripts/compose`](scripts/compose); their input grammar and Linux-local Docker deployment contract are defined by [`docs/deployment.md`](docs/deployment.md).
