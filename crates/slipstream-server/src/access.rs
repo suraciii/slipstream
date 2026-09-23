@@ -649,6 +649,7 @@ mod tests {
                 port: 0,
                 public_origin: "https://camera.local".into(),
                 web_root: Some(base.join("web")),
+                processing: None,
             };
             Self { base, config }
         }
@@ -983,6 +984,7 @@ mod tests {
         let paths = [
             "/api/status",
             "/api/capabilities",
+            "/api/processing/capability",
             "/api/overview",
             "/api/albums",
             "/api/albums/missing",

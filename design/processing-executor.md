@@ -335,6 +335,34 @@ bundle availability separately from launcher/resource capability. The
 qualification profile reports `qualification-only`; it never reports
 production processing as available.
 
+`GET /api/processing/capability` reports this read-only state independently of
+`/healthz` and the CLI contract endpoint. A base deployment reports
+`disabled` without contacting a launcher. A processing-enabled Web service
+receives the operator-pinned instance, policy digest and bundle digest as
+read-only startup values and derives the fixed socket path from the instance.
+It sends Reconcile to that socket and accepts launcher readiness only for the
+version-1 `photo-processing` capability, the matching instance and digests, a
+valid incarnation, a positive next sequence and `available` admission. A
+blocked response, protocol mismatch, unsupported capability or transport
+failure reports `unavailable` with a stable reason code; it never changes
+Library readiness or starts an attempt. The endpoint does not return paths,
+raw launcher errors or pinned digests.
+
+The response has `state` (`disabled`, `unavailable` or `available`), `launcher`,
+`source`, `bundle`, and `reason`. `launcher`, `source` and `bundle` each report
+`disabled`, `available` or `unavailable`. Bundle availability requires the
+exact configured digest to match the launcher response. Source availability
+remains `unavailable` until the qualified source and Export path is connected,
+so the overall state cannot report `available` before that boundary exists.
+`reason` is null only when the overall state is `available`; otherwise it is
+one of `operator-disabled`, `launcher-unavailable`,
+`unsupported-capability`, `identity-mismatch`, `launcher-blocked`, or
+`source-unavailable`.
+
+This state could be added to `/api/capabilities`, but that endpoint is versioned
+for static CLI contract support. A separate path keeps changing launcher
+readiness independent from CLI compatibility and `/healthz` Library health.
+
 Failures distinguish invalid authority/request, incompatible bundle/policy,
 already-owned conflicting attempt, capacity wait/rejection, runtime allocation
 failure, confirmed OOM, deadline/cancellation, engine exit, and uncertain cleanup.

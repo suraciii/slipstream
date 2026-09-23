@@ -5,6 +5,10 @@ set -euo pipefail
 readonly storage_roles=(library state cache)
 readonly image_key=SLIPSTREAM_IMAGE
 readonly public_origin_key=SLIPSTREAM_PUBLIC_ORIGIN
+readonly processing_instance_key=SLIPSTREAM_PROCESSING_INSTANCE
+readonly processing_policy_key=SLIPSTREAM_PROCESSING_POLICY_SHA256
+readonly processing_bundle_key=SLIPSTREAM_PROCESSING_BUNDLE_SHA256
+readonly processing_launcher=/usr/local/libexec/slipstream-processing-launcher
 readonly down_image_sentinel='registry.invalid/slipstream/stop@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 readonly down_public_origin_sentinel='https://stop.invalid'
 readonly down_library_sentinel='/__slipstream-down-library__'
@@ -182,6 +186,101 @@ parse_public_origin() {
     fi
   done < "$environment_file"
   [[ "$declared" == true ]] || fail "environment file is missing $public_origin_key"
+}
+
+parse_processing_configuration() {
+  local environment_file=$1 line key value
+  local -a processing_keys=(
+    "$processing_instance_key"
+    "$processing_policy_key"
+    "$processing_bundle_key"
+  )
+  declare -A declared=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    for key in "${processing_keys[@]}"; do
+      if [[ "$line" == "$key="* ]]; then
+        [[ ! -v "declared[$key]" ]] || fail "environment file has duplicate $key"
+        value=${line#*=}
+        if [[ "$key" == "$processing_instance_key" ]]; then
+          [[ "$value" =~ ^[0-9a-f]{32}$ ]] || fail "environment file has invalid $key"
+          processing_instance=$value
+        else
+          [[ "$value" =~ ^[0-9a-f]{64}$ ]] || fail "environment file has invalid $key"
+          if [[ "$key" == "$processing_policy_key" ]]; then
+            processing_policy=$value
+          else
+            processing_bundle=$value
+          fi
+        fi
+        declared[$key]=1
+        continue 2
+      fi
+      if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?${key}([^A-Za-z0-9_]|$) ]]; then
+        fail "environment file has invalid $key"
+      fi
+    done
+  done < "$environment_file"
+  for key in "${processing_keys[@]}"; do
+    [[ -v "declared[$key]" ]] || fail "environment file is missing $key"
+  done
+}
+
+validate_processing_runtime() {
+  local runtime_directory="/run/slipstream-processing/$processing_instance"
+  local ancestor=/ component metadata owner mode entry socket claim helper_uid
+  local -a components=() entries=()
+
+  IFS='/' read -r -a components <<< "${runtime_directory#/}"
+  for component in "${components[@]}"; do
+    ancestor="${ancestor%/}/$component"
+    [[ ! -L "$ancestor" && -d "$ancestor" ]] \
+      || fail "processing runtime path contains a missing directory or symbolic link"
+    metadata=$(stat -c '%u:%a' -- "$ancestor") \
+      || fail "cannot inspect processing runtime path"
+    owner=${metadata%%:*}
+    mode=$((8#${metadata#*:}))
+    [[ "$owner" == 0 ]] && (( (mode & 0022) == 0 )) \
+      || fail "processing runtime path must be root-owned and not writable by Web"
+  done
+
+  [[ "$ancestor" == "$runtime_directory" ]] \
+    || fail "processing runtime path is not canonical"
+  metadata=$(stat -c '%a' -- "$runtime_directory") \
+    || fail "cannot inspect processing runtime directory"
+  mode=$((8#$metadata))
+  (( (mode & 0070) == 0010 && (mode & 0007) == 0001 )) \
+    || fail "processing runtime directory must allow search without listing"
+
+  shopt -s nullglob dotglob
+  entries=("$runtime_directory"/*)
+  shopt -u nullglob dotglob
+  socket="$runtime_directory/launcher.sock"
+  claim="$runtime_directory/launcher.sock-owner"
+  [[ ${#entries[@]} -eq 2 && -S "$socket" && ! -L "$socket" ]] \
+    || fail "processing runtime directory must contain only its launcher socket and owner claim"
+  [[ -f "$claim" && ! -L "$claim" ]] \
+    || fail "processing runtime owner claim is unavailable"
+  metadata=$(stat -c '%u:%h:%a:%s' -- "$claim") \
+    || fail "cannot inspect processing runtime owner claim"
+  [[ "$metadata" =~ ^0:1:600:[0-9]+$ ]] \
+    && (( ${metadata##*:} <= 4096 )) \
+    || fail "processing runtime owner claim must remain root-only"
+
+  [[ -x "$processing_launcher" ]] \
+    || fail "host production launcher checker is not installed"
+  helper_uid=$(id -u) || fail "cannot identify current user"
+  if [[ "$helper_uid" == 0 ]]; then
+    command -v setpriv >/dev/null || fail "setpriv is required to check launcher readiness as Web UID 1000"
+    setpriv --reuid=1000 --regid=1000 --clear-groups \
+      "$processing_launcher" --check-production "$processing_instance" "$processing_policy" "$processing_bundle" \
+      || fail "processing launcher did not prove production readiness"
+  elif [[ "$helper_uid" == 1000 ]]; then
+    "$processing_launcher" --check-production "$processing_instance" "$processing_policy" "$processing_bundle" \
+      || fail "processing launcher did not prove production readiness"
+  else
+    fail "processing-up must run as root or Web UID 1000"
+  fi
 }
 
 reject_engine_control_declarations() {
@@ -471,7 +570,7 @@ command -v cmp >/dev/null || fail "cmp is required for environment file validati
 command -v tr >/dev/null || fail "tr is required for environment file validation"
 
 if [[ $# -lt 3 || $1 != --env-file ]]; then
-  fail "usage: scripts/compose --env-file PATH [--qa 12_HEX_ID] {up [-d]|run --rm --no-deps slipstream expand-library|access-create|access-rotate|access-revoke|down}"
+  fail "usage: scripts/compose --env-file PATH [--qa 12_HEX_ID] {up [-d]|processing-up [-d]|run --rm --no-deps slipstream expand-library|access-create|access-rotate|access-revoke|down}"
 fi
 
 environment_file_input=$2
@@ -498,6 +597,8 @@ reject_engine_control_declarations "$environment_file"
 
 preflight=false
 server_start=false
+processing_selected=false
+processing_instance=''
 if [[ $# -eq 1 && $1 == up ]]; then
   compose_command=(up --no-build)
   preflight=true
@@ -506,6 +607,16 @@ elif [[ $# -eq 2 && $1 == up && $2 == -d ]]; then
   compose_command=(up -d --no-build)
   preflight=true
   server_start=true
+elif [[ $# -eq 1 && $1 == processing-up ]]; then
+  compose_command=(up --no-build)
+  preflight=true
+  server_start=true
+  processing_selected=true
+elif [[ $# -eq 2 && $1 == processing-up && $2 == -d ]]; then
+  compose_command=(up -d --no-build)
+  preflight=true
+  server_start=true
+  processing_selected=true
 elif [[ $# -eq 5 && $1 == run && $2 == --rm && $3 == --no-deps && $4 == slipstream && $5 == expand-library ]]; then
   compose_command=(run --rm --no-deps slipstream expand-library)
   preflight=true
@@ -524,6 +635,10 @@ elif [[ $# -eq 1 && $1 == down ]]; then
   compose_command=(down)
 else
   fail "unsupported Compose command"
+fi
+if [[ "$processing_selected" == true ]]; then
+  [[ "$qa_selected" == false ]] || fail "processing-up is not supported for QA instances"
+  parse_processing_configuration "$environment_file"
 fi
 
 resolve_existing_path "${BASH_SOURCE[0]}" \
@@ -554,6 +669,9 @@ fi
 if [[ "$server_start" == true ]]; then
   parse_public_origin "$environment_file"
 fi
+if [[ "$processing_selected" == true ]]; then
+  validate_processing_runtime
+fi
 
 require_local_docker
 unset COMPOSE_DISABLE_ENV_FILE COMPOSE_ENV_FILES COMPOSE_FILE COMPOSE_PATH_SEPARATOR
@@ -561,6 +679,8 @@ unset COMPOSE_PROFILES COMPOSE_PROJECT_NAME
 unset SLIPSTREAM_IMAGE SLIPSTREAM_BIND_ADDRESS
 unset SLIPSTREAM_PORT SLIPSTREAM_DATABASE_BASENAME SLIPSTREAM_PUBLIC_ORIGIN
 unset SLIPSTREAM_LIBRARY_ROOT SLIPSTREAM_STATE_DIRECTORY SLIPSTREAM_CACHE_DIRECTORY
+unset SLIPSTREAM_PROCESSING_INSTANCE SLIPSTREAM_PROCESSING_SOCKET
+unset SLIPSTREAM_PROCESSING_POLICY_SHA256 SLIPSTREAM_PROCESSING_BUNDLE_SHA256
 
 if [[ "$preflight" == true ]]; then
   export SLIPSTREAM_LIBRARY_ROOT="${storage_sources[library]}"
@@ -575,6 +695,15 @@ else
 fi
 
 compose_arguments=(--project-name slipstream --env-file "$environment_file" -f "$compose_file")
+if [[ "$processing_selected" == true ]]; then
+  processing_compose_file="$(dirname -- "$compose_file")/compose.processing.yaml"
+  [[ -f "$processing_compose_file" && ! -L "$processing_compose_file" ]] \
+    || fail "repository processing Compose overlay is unavailable"
+  compose_arguments+=(-f "$processing_compose_file")
+  export SLIPSTREAM_PROCESSING_INSTANCE="$processing_instance"
+  export SLIPSTREAM_PROCESSING_POLICY_SHA256="$processing_policy"
+  export SLIPSTREAM_PROCESSING_BUNDLE_SHA256="$processing_bundle"
+fi
 if [[ "$qa_selected" == true ]]; then
   qa_compose_file="$(dirname -- "$compose_file")/compose.qa.yaml"
   [[ -f "$qa_compose_file" && ! -L "$qa_compose_file" ]] \

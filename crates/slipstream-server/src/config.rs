@@ -20,6 +20,24 @@ pub struct Config {
     /// Tests and packaged deployments may provide a built Web directory. When
     /// absent, the binary uses the repository's conventional `apps/web/dist`.
     pub web_root: Option<PathBuf>,
+    /// Exact launcher identities for the opt-in processing deployment.
+    pub processing: Option<ProcessingConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessingConfig {
+    pub(crate) instance: String,
+    pub(crate) policy_sha256: String,
+    pub(crate) bundle_sha256: String,
+}
+
+impl ProcessingConfig {
+    pub(crate) fn socket_path(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/run/slipstream-processing/{}/launcher.sock",
+            self.instance
+        ))
+    }
 }
 
 pub type StartupConfig = Config;
@@ -82,6 +100,34 @@ impl Config {
                 .ok_or(ConfigError::Missing("SLIPSTREAM_PUBLIC_ORIGIN"))?,
         )
         .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
+        let processing_instance = get("SLIPSTREAM_PROCESSING_INSTANCE");
+        let processing_policy = get("SLIPSTREAM_PROCESSING_POLICY_SHA256");
+        let processing_bundle = get("SLIPSTREAM_PROCESSING_BUNDLE_SHA256");
+        let processing = match (processing_instance, processing_policy, processing_bundle) {
+            (None, None, None) => None,
+            (instance, policy, bundle) => {
+                let instance =
+                    instance.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_INSTANCE"))?;
+                let policy =
+                    policy.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_POLICY_SHA256"))?;
+                let bundle =
+                    bundle.ok_or(ConfigError::Missing("SLIPSTREAM_PROCESSING_BUNDLE_SHA256"))?;
+                if !is_lower_hex(&instance, 32) {
+                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_INSTANCE"));
+                }
+                if !is_lower_hex(&policy, 64) {
+                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_POLICY_SHA256"));
+                }
+                if !is_lower_hex(&bundle, 64) {
+                    return Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_BUNDLE_SHA256"));
+                }
+                Some(ProcessingConfig {
+                    instance,
+                    policy_sha256: policy,
+                    bundle_sha256: bundle,
+                })
+            }
+        };
         Ok(Self {
             public_origin,
             library_root,
@@ -91,6 +137,7 @@ impl Config {
             host,
             port,
             web_root,
+            processing,
         })
     }
 
@@ -99,6 +146,13 @@ impl Config {
             .clone()
             .unwrap_or_else(|| PathBuf::from("apps/web/dist"))
     }
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Configuration for the offline Library Expansion command. It deliberately

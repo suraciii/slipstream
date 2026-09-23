@@ -133,6 +133,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
         public_origin: "https://localhost".to_owned(),
         port: 0,
         web_root: Some(web),
+        processing: None,
     };
     (base, config)
 }

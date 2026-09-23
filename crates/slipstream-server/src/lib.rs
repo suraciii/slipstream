@@ -47,6 +47,7 @@ pub use access::administer_access;
 mod config;
 pub(crate) mod folders;
 mod http;
+mod processing_capability;
 mod queries;
 mod wire;
 
@@ -54,7 +55,8 @@ pub use app::Application;
 #[cfg(test)]
 pub(crate) use config::BROWSE_SNAPSHOT_IDLE;
 pub use config::{
-    Config, ConfigError, ExpansionConfig, HEALTH_PATH, ServerConfig, ServerError, StartupConfig,
+    Config, ConfigError, ExpansionConfig, HEALTH_PATH, ProcessingConfig, ServerConfig, ServerError,
+    StartupConfig,
 };
 pub(crate) use config::{
     MAXIMUM_HEADER_BYTES, MAXIMUM_MUTATION_BODY_BYTES, validate_expansion_storage_layout,

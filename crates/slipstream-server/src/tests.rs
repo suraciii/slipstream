@@ -38,6 +38,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
         public_origin: "https://camera.local".to_owned(),
         port,
         web_root: Some(web_root),
+        processing: None,
     }
 }
 
@@ -177,6 +178,7 @@ fn startup_defaults_to_loopback_and_allows_custom_host() {
     assert_eq!(defaults.library_root, PathBuf::from("/photos"));
     assert_eq!(defaults.database_basename, "library.sqlite");
     assert_eq!((defaults.host.as_str(), defaults.port), ("127.0.0.1", 3000));
+    assert_eq!(defaults.processing, None);
     let explicit = Config::from_env(environment(&[
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
@@ -189,6 +191,71 @@ fn startup_defaults_to_loopback_and_allows_custom_host() {
     .unwrap();
     assert_eq!(explicit.database_basename, "review.sqlite");
     assert_eq!((explicit.host.as_str(), explicit.port), ("0.0.0.0", 8080));
+}
+
+#[test]
+fn processing_startup_requires_complete_canonical_identity_pins() {
+    let base = vec![
+        ("SLIPSTREAM_LIBRARY_ROOT".to_owned(), "/photos".to_owned()),
+        ("SLIPSTREAM_STATE_DIRECTORY".to_owned(), "/state".to_owned()),
+        ("SLIPSTREAM_CACHE_DIRECTORY".to_owned(), "/cache".to_owned()),
+        (
+            "SLIPSTREAM_PUBLIC_ORIGIN".to_owned(),
+            "https://camera.local".to_owned(),
+        ),
+    ];
+    let mut values = base.clone();
+    values.extend([
+        (
+            "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+        (
+            "SLIPSTREAM_PROCESSING_POLICY_SHA256".to_owned(),
+            "b b".to_owned(),
+        ),
+        (
+            "SLIPSTREAM_PROCESSING_BUNDLE_SHA256".to_owned(),
+            "c".to_owned(),
+        ),
+    ]);
+    assert_eq!(
+        Config::from_env(values),
+        Err(ConfigError::Invalid("SLIPSTREAM_PROCESSING_POLICY_SHA256"))
+    );
+
+    let mut values = base.clone();
+    values.push((
+        "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
+        "0123456789abcdef0123456789abcdef".to_owned(),
+    ));
+    assert_eq!(
+        Config::from_env(values),
+        Err(ConfigError::Missing("SLIPSTREAM_PROCESSING_POLICY_SHA256"))
+    );
+
+    let mut values = base;
+    values.extend([
+        (
+            "SLIPSTREAM_PROCESSING_INSTANCE".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+        (
+            "SLIPSTREAM_PROCESSING_POLICY_SHA256".to_owned(),
+            "b".repeat(64),
+        ),
+        (
+            "SLIPSTREAM_PROCESSING_BUNDLE_SHA256".to_owned(),
+            "c".repeat(64),
+        ),
+    ]);
+    let config = Config::from_env(values).unwrap();
+    let processing = config.processing.unwrap();
+    assert_eq!(processing.instance, "0123456789abcdef0123456789abcdef");
+    assert_eq!(
+        processing.socket_path(),
+        PathBuf::from("/run/slipstream-processing/0123456789abcdef0123456789abcdef/launcher.sock")
+    );
 }
 
 #[test]
@@ -393,6 +460,7 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     let app = Router::new().fallback(static_web).with_state(HttpState {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
+        processing: None,
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
@@ -451,6 +519,7 @@ async fn installation_resources_revalidate_and_never_fall_back_to_html() {
     let app = Router::new().fallback(static_web).with_state(HttpState {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
+        processing: None,
     });
     for (path, content_type, expected) in [
         (
@@ -2311,6 +2380,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
         .with_state(HttpState {
             application: Arc::clone(&application),
             web_root: Arc::new(open_web_root(missing_web)),
+            processing: None,
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,
@@ -7201,6 +7271,66 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
             }
         })
     );
+    let processing = response_json(
+        send(
+            &router,
+            authenticated_request()
+                .uri("https://camera.local/api/processing/capability")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        processing,
+        serde_json::json!({
+            "state": "disabled",
+            "launcher": "disabled",
+            "source": "disabled",
+            "bundle": "disabled",
+            "reason": "operator-disabled"
+        })
+    );
+    let configured_router = crate::http::create_router_with_processing(
+        Arc::clone(&application),
+        open_web_root(config.web_root()),
+        Some(ProcessingConfig {
+            instance: "f".repeat(32),
+            policy_sha256: "b".repeat(64),
+            bundle_sha256: "c".repeat(64),
+        }),
+    );
+    let opted_in = response_json(
+        send(
+            &configured_router,
+            authenticated_request()
+                .uri("https://camera.local/api/processing/capability")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        opted_in,
+        serde_json::json!({
+            "state": "unavailable",
+            "launcher": "unavailable",
+            "source": "unavailable",
+            "bundle": "unavailable",
+            "reason": "launcher-unavailable"
+        })
+    );
+    let health = send(
+        &configured_router,
+        authenticated_request()
+            .uri("https://camera.local/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health.status(), StatusCode::OK);
     let status = response_json(
         send(
             &router,

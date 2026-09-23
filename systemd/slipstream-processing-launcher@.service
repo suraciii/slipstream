@@ -1,0 +1,31 @@
+[Unit]
+Description=Slipstream bounded processing launcher (%i)
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/etc/slipstream-processing/%i/config.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/libexec/slipstream-processing-launcher --config /etc/slipstream-processing/%i/config.json
+Restart=on-failure
+RestartSec=1s
+RuntimeDirectory=slipstream-processing/%i
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+StateDirectory=slipstream-processing/%i
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/slipstream-processing/%i /var/lib/slipstream-processing
+
+[Install]
+WantedBy=multi-user.target
