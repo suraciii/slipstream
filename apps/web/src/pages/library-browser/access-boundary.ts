@@ -243,6 +243,7 @@ export function mountAccessBoundary(
     }
     clearExpiryTimer();
     scheduleExpiry();
+    if (document.visibilityState === "hidden") return;
     const mountedEpoch = accessEpoch;
     const host = document.createElement("div");
     host.className = "private-library";
