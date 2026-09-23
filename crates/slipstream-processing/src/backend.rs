@@ -406,9 +406,9 @@ impl Backend {
             crate::slice::create(record.unit(), &expected, &record.receipt.limits)?;
         record.unit_invocation = Some(invocation);
         record.cgroup_inode = Some(inode);
-        record.manager_pending = None;
         let limits = self.limits_match(&expected, record.receipt.limits.memory_bytes);
         checked_setup_observation(record, &mut persist, limits)?;
+        record.manager_pending = None;
         record.receipt.evidence = Some(Evidence {
             peak_bytes: 0,
             exit_code: None,
