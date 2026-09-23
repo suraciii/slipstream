@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { mkdtemp, mkdir, copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createConnection } from "node:net";
+import { once } from "node:events";
 import { join } from "node:path";
 import {
   startBrowserServer,
@@ -227,3 +229,21 @@ for (const status of [307, 308]) {
     await expect(page.locator("img")).toHaveCount(0);
   });
 }
+
+test("HTTPS fixture closes connections that have not started their TLS handshake", async () => {
+  const socket = createConnection({
+    host: "127.0.0.1",
+    port: Number(new URL(server.url).port),
+  });
+  await once(socket, "connect");
+  let closed = false;
+  const closing = server.close().then(() => {
+    closed = true;
+  });
+  try {
+    await expect.poll(() => closed).toBe(true);
+  } finally {
+    socket.destroy();
+    await closing;
+  }
+});

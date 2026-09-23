@@ -6,9 +6,9 @@ import {
   createServer as createHttpsServer,
   request as httpsRequest,
 } from "node:https";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type ClientRequest } from "node:http";
 import { readFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 
 export type BrowserServer = Readonly<{
@@ -58,6 +58,8 @@ export async function startBrowserServer({
   for (let attempt = 1; attempt <= maxStartupAttempts; attempt += 1) {
     const port = await availablePort();
     const backendUrl = `http://127.0.0.1:${port}`;
+    const sockets = new Set<Socket>();
+    const upstreams = new Set<ClientRequest>();
     const proxy = createHttpsServer(
       {
         key: await readFile(resolve("tools/test-tls/server-key.pem")),
@@ -66,19 +68,38 @@ export async function startBrowserServer({
       (incoming, outgoing) => {
         const upstream = httpRequest(
           `${backendUrl}${incoming.url ?? "/"}`,
-          { method: incoming.method, headers: incoming.headers },
+          { method: incoming.method, headers: incoming.headers, agent: false },
           (response) => {
             outgoing.writeHead(response.statusCode ?? 502, response.headers);
             response.pipe(outgoing);
           },
         );
+        upstreams.add(upstream);
+        upstream.once("close", () => upstreams.delete(upstream));
+        outgoing.once("close", () => upstream.destroy());
+        incoming.once("aborted", () => upstream.destroy());
         upstream.on("error", () => {
-          outgoing.writeHead(502);
+          if (outgoing.destroyed) return;
+          if (!outgoing.headersSent) outgoing.writeHead(502);
           outgoing.end();
         });
         incoming.pipe(upstream);
       },
     );
+    // Browsers can preconnect without starting TLS. HTTP connection helpers
+    // do not own those raw sockets, so track the complete listener lifetime.
+    proxy.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    const closeProxy = async (): Promise<void> => {
+      const closed = new Promise<void>((done, reject) =>
+        proxy.close((error) => (error ? reject(error) : done())),
+      );
+      for (const socket of sockets) socket.destroy();
+      for (const upstream of upstreams) upstream.destroy();
+      await closed;
+    };
     await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
     const address = proxy.address();
     if (!address || typeof address === "string")
@@ -114,17 +135,21 @@ export async function startBrowserServer({
         close() {
           closing ??= (async () => {
             fixtureTokens.delete(url);
-            await stop(child);
-            proxy.closeAllConnections();
-            await new Promise<void>((done) => proxy.close(() => done()));
+            try {
+              await closeProxy();
+            } finally {
+              await stop(child);
+            }
           })();
           return closing;
         },
       };
     } catch (error) {
-      await stop(child);
-      proxy.closeAllConnections();
-      await new Promise<void>((done) => proxy.close(() => done()));
+      try {
+        await closeProxy();
+      } finally {
+        await stop(child);
+      }
       if (
         attempt === maxStartupAttempts ||
         !retryableStartupFailure(error, errors)
