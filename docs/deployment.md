@@ -34,9 +34,73 @@ source/bundle availability must be reported separately from `/healthz`.
 execution contract. The
 [qualification protocol reference](../design/processing-executor-protocol.md)
 defines the explicit fixture-only launcher configuration and command. This mode
-must report photo processing unavailable. Processing opt-in must be explicit in the supported operator
-entry point; alternate Compose overrides and a privileged Web container are not
-supported ways to enable it.
+must report photo processing unavailable. A fixture qualification run, installed
+launcher binary, systemd-active unit or reachable socket is not production
+readiness.
+
+Install the production launcher as a root-owned systemd service with a
+root-owned host configuration and persistent journal. The service must reconcile
+its durable attempt and manager identities before accepting new work. Its
+private socket may be reachable during reconciliation, but admission must stay
+unavailable until recovery succeeds; socket reachability is not readiness. A
+restart must not erase blocked ownership or reset an admission
+watermark. A policy or immutable image change requires the processing-enabled
+Web service to stop first. Keep the launcher running until all accepted
+attempts have settled and cleanup is confirmed, then stop the launcher before
+atomically replacing its host configuration. Restart it and reconcile the
+existing journal under the new policy before allowing admission or restarting
+the processing-enabled Web service.
+If reconciliation or any host, image, policy, headroom or resource check fails,
+processing remains unavailable and the Library service remains usable.
+
+The supported opt-in is the dedicated wrapper command:
+
+```sh
+./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
+```
+
+This command selects a repository-owned, fixed processing Compose overlay from
+inside the wrapper. The operator cannot supply a Compose file, override, extra
+mount or entrypoint. Ordinary `up` uses only the base Compose file and never
+mounts a launcher endpoint, even if a processing socket path is present in the
+operator environment. `processing-up` validates the configured endpoint identity
+and mounts the whole dedicated runtime directory read-only. The directory may
+contain only the fixed bounded Unix socket and its root-only persistent owner
+claim; it exposes no launcher configuration, journal, Docker socket, systemd
+control socket, host root or writable cgroup mount. The directory and its
+ancestors must be canonical, symlink-free, root-owned and not writable by the
+Web UID. That UID may search the directory and connect to the socket through a
+named ACL, but cannot list the directory or read the claim. The whole-directory
+mount makes a replacement socket pathname visible after launcher restart;
+mounting only one socket inode would not. The launcher also checks peer
+credentials and the exact instance, policy and bundle on every request.
+Neither this command nor any environment value enables work outside launcher
+admission.
+
+If the launcher endpoint or policy is unavailable, `processing-up` must fail
+closed without weakening Web isolation or changing an already-running Library
+service. The ordinary `up` command remains the recovery path for Library
+browsing. `/healthz` continues to report only Library service health; processing
+capability reports whether the operator disabled the
+path, whether an opted-in path is unavailable and why, or whether the exact
+deployed launcher, policy, bundle and resource boundary are available. It
+reports source and bundle availability separately and never advertises the
+qualification profile as production capability.
+
+Production acceptance tooling must exercise the packaged launcher and supported
+Compose path on the target host. It checks exact Web, launcher, worker, bundle
+and policy identities; socket and owner-claim ownership, parent mode/ACL,
+symlink-free path, read-only whole-directory mount, replacement socket inode
+after restart and peer UID; systemd/cgroup-v2/Docker
+topology; that the launcher and control service remain outside the processing
+subtree; and that complete attempts stay within their qualified finite memory,
+zero-swap, CPU, task and storage limits. It retains and checks allocation,
+OOM, cancellation, restart and cleanup evidence. It must also keep Library and
+Album reads responsive during a contained processing failure, then complete an
+exact subsequent successful attempt. A healthy endpoint, open socket, synthetic
+fixture qualification or ordinary repository gate is not a substitute for
+these deployment checks. Do not claim the RAW-to-TIFF-to-Film-to-JPEG workflow
+until its separate product acceptance Issues pass.
 
 ## Configuration
 

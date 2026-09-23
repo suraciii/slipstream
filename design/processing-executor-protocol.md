@@ -13,6 +13,15 @@ version-2 operator measurement syntax; it does not change this native protocol.
 
 ## Operator Configuration
 
+This configuration and protocol are qualification-only. The explicit
+`qualification` mode admits only the closed synthetic workloads below; it cannot
+be repurposed for Photo, TIFF or Film inputs. A successful kernel qualification
+does not make the profile a production processing service. This protocol version
+has no production mode or production policy fields. Production launcher
+configuration and admission must bind an independently approved policy and
+immutable workload identities; environment variables, IPC requests and Compose
+overrides cannot promote this fixture profile or bypass that admission.
+
 A host-only UTF-8 JSON file, maximum 16 KiB, rejects unknown/duplicate fields. Required fields:
 
 ```json
@@ -35,7 +44,7 @@ A host-only UTF-8 JSON file, maximum 16 KiB, rejects unknown/duplicate fields. R
 
 Reject a finite shared ancestor unless a qualified control/headroom allowance exists for it. The initial fixture profile supports only an unlimited shared ancestor above the capped processing subtree; it does not invent a production service reserve. Validate the host, launcher's and control service's actual cgroup placement; missing proof means unavailable processing. Do not represent this as protection from unrelated host-wide OOM.
 
-Host binary surface: `slipstream-processing-launcher --config /absolute/config.json`. Start disabled unless mode=qualification is explicit. A separate repository kernel-verification command creates a private config and starts this actual binary; it does not grant arbitrary Docker options through IPC. Native worker binary is part of the digest-pinned qualification image.
+Host binary surface: `slipstream-processing-launcher --config /absolute/config.json`. The qualification verifier must opt into this mode explicitly. A separate repository kernel-verification command creates a private config and starts this actual binary; it does not grant arbitrary Docker options through IPC. Native worker binary is part of the digest-pinned qualification image. Do not install this fixture configuration as the production system service configuration or mount its socket into a Photo-processing Web deployment.
 
 ## IPC
 
