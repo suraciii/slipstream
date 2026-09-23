@@ -1494,6 +1494,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "slipstream-core",
+ "slipstream-processing",
  "subtle",
  "time",
  "tokio",

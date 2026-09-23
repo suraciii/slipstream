@@ -1,0 +1,11 @@
+services:
+  slipstream:
+    environment:
+      SLIPSTREAM_PROCESSING_INSTANCE: ${SLIPSTREAM_PROCESSING_INSTANCE:?processing-up requires a launcher instance}
+      SLIPSTREAM_PROCESSING_POLICY_SHA256: ${SLIPSTREAM_PROCESSING_POLICY_SHA256:?processing-up requires an approved policy digest}
+      SLIPSTREAM_PROCESSING_BUNDLE_SHA256: ${SLIPSTREAM_PROCESSING_BUNDLE_SHA256:?processing-up requires an approved bundle digest}
+    volumes:
+      - type: bind
+        source: /run/slipstream-processing/${SLIPSTREAM_PROCESSING_INSTANCE}
+        target: /run/slipstream-processing/${SLIPSTREAM_PROCESSING_INSTANCE}
+        read_only: true

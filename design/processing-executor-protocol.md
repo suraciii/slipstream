@@ -108,6 +108,19 @@ profile. Start, inspect, and cancel return a result with `kind` (`receipt`) and
 `receipt`. Unknown future sequences return `unknown-attempt`; a known expired
 sequence returns `expired`.
 
+The supported deployment readiness check sends Reconcile over the fixed
+instance socket as Web UID 1000. It accepts only a version-1 capability result
+whose capability is `photo-processing`, instance matches the configured
+instance, incarnation is 32 lowercase hexadecimal digits, policy and bundle
+are each 64 lowercase hexadecimal digits, `next_sequence` is positive, and
+availability is `available`. It rejects `qualification-only`,
+`film-measurement-only`, malformed identities, errors, and blocked results. The
+check also requires the returned policy and bundle digests to match the exact
+operator-pinned values supplied to the host command. It does not start an
+attempt. This response proves launcher admission readiness only; it does not
+replace production deployment acceptance or prove the resource and Library
+responsiveness criteria in the deployment guide.
+
 A receipt has these exact fields:
 
 - `incarnation`, `sequence`, `workload`, `policy`, and `bundle`, with the same

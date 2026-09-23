@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  appendFile,
   chmod,
   lstat,
   mkdir,
@@ -68,6 +69,7 @@ interface CommandResult {
 async function dockerComposeConfig(
   environmentFile: string,
   profile?: string,
+  overlay?: string,
 ): Promise<Record<string, unknown>> {
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) {
@@ -90,6 +92,7 @@ async function dockerComposeConfig(
       ...(profile ? ["--profile", profile] : []),
       "-f",
       composeFile,
+      ...(overlay ? ["-f", overlay] : []),
       "config",
       "--format",
       "json",
@@ -125,6 +128,156 @@ async function dockerComposeConfig(
     });
   }
 }
+
+test("processing Compose overlay exposes only the fixed read-only launcher directory", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const instance = "0123456789abcdef0123456789abcdef";
+    await writeEnvironment(target, layout.sources);
+    await appendFile(
+      target.environmentFile,
+      [
+        "",
+        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
+        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
+        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        "",
+      ].join("\n"),
+    );
+
+    const base = await dockerComposeConfig(target.environmentFile);
+    const processing = await dockerComposeConfig(
+      target.environmentFile,
+      undefined,
+      join(repositoryRoot, "compose.processing.yaml"),
+    );
+    const baseService = (
+      base.services as Record<string, Record<string, unknown>>
+    ).slipstream;
+    const processingService = (
+      processing.services as Record<string, Record<string, unknown>>
+    ).slipstream;
+    const baseVolumes = baseService.volumes as Array<Record<string, unknown>>;
+    const processingVolumes = processingService.volumes as Array<
+      Record<string, unknown>
+    >;
+    const processingMount = processingVolumes.find(
+      (mount) => mount.target === `/run/slipstream-processing/${instance}`,
+    );
+
+    expect(baseService.environment).not.toHaveProperty(
+      "SLIPSTREAM_PROCESSING_SOCKET",
+    );
+    expect(baseVolumes).toHaveLength(3);
+    expect(processingMount).toMatchObject({
+      type: "bind",
+      source: `/run/slipstream-processing/${instance}`,
+      target: `/run/slipstream-processing/${instance}`,
+      read_only: true,
+    });
+    expect(processingVolumes).toHaveLength(4);
+    expect(processingService.environment).toMatchObject({
+      SLIPSTREAM_PROCESSING_INSTANCE: instance,
+      SLIPSTREAM_PROCESSING_POLICY_SHA256: "b".repeat(64),
+      SLIPSTREAM_PROCESSING_BUNDLE_SHA256: "c".repeat(64),
+    });
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("processing-up ignores ambient opt-in and requires the instance in its environment file", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    await writeEnvironment(target, layout.sources);
+    const result = await runCompose(target, ["processing-up", "-d"], {
+      environment: {
+        SLIPSTREAM_PROCESSING_INSTANCE: "0123456789abcdef0123456789abcdef",
+      },
+    });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      "environment file is missing SLIPSTREAM_PROCESSING_INSTANCE",
+    );
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("processing-up rejects a Web UID operator before host preflight", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const instance = randomBytes(16).toString("hex");
+    await writeEnvironment(target, layout.sources);
+    await appendFile(
+      target.environmentFile,
+      [
+        "",
+        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
+        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
+        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        "",
+      ].join("\n"),
+    );
+    const uid = process.getuid?.() === 0 ? 1000 : undefined;
+    if (uid !== undefined) {
+      await chmod(target.root, 0o755);
+    }
+
+    const result = await runCompose(target, ["processing-up", "-d"], { uid });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("processing-up must be run as root");
+    expect(result.stderr).not.toContain("processing runtime path");
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("processing-up requires root or refuses an unavailable launcher before invoking Compose", async () => {
+  const target = await fixture();
+  try {
+    const layout = await topology(target);
+    const instance = randomBytes(16).toString("hex");
+    await writeFile(
+      join(layout.sources.library, "preserved.ARW"),
+      originalBytes,
+    );
+    const before = await originalEvidence(layout.sources.library);
+    await writeEnvironment(target, layout.sources);
+    await appendFile(
+      target.environmentFile,
+      [
+        "",
+        `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
+        `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
+        `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runCompose(target, ["processing-up", "-d"]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(
+      process.getuid?.() === 0
+        ? "processing runtime path contains a missing directory or symbolic link"
+        : "processing-up must be run as root",
+    );
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    expect(await Bun.file(target.composeArguments).exists()).toBeFalse();
+    expect(await originalEvidence(layout.sources.library)).toEqual(before);
+  } finally {
+    await removeFixture(target);
+  }
+});
 
 interface MountCoordinate {
   endpoint: string;
@@ -347,6 +500,7 @@ async function runCompose(
     environmentFile?: string;
     environment?: Record<string, string>;
     terminal?: boolean;
+    uid?: number;
   } = {},
 ): Promise<CommandResult> {
   const environment = { ...process.env };
@@ -358,6 +512,17 @@ async function runCompose(
     options.environmentFile ?? target.environmentFile,
     ...command,
   ];
+  const setprivArguments =
+    options.uid === undefined
+      ? []
+      : [
+          "setpriv",
+          "--reuid",
+          `${options.uid}`,
+          "--regid",
+          `${options.uid}`,
+          "--clear-groups",
+        ];
   const shellQuote = (value: string): string =>
     `'${value.replaceAll("'", "'\\''")}'`;
   const child = Bun.spawn(
@@ -370,7 +535,7 @@ async function runCompose(
           commandArguments.map(shellQuote).join(" "),
           "/dev/null",
         ]
-      : commandArguments,
+      : [...setprivArguments, ...commandArguments],
     {
       cwd: repositoryRoot,
       env: {

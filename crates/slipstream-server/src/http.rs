@@ -29,6 +29,7 @@ pub(crate) struct WebRoot {
 pub(crate) struct HttpState {
     pub(crate) application: Arc<Application>,
     pub(crate) web_root: Arc<WebRoot>,
+    pub(crate) processing: Option<ProcessingConfig>,
 }
 
 pub(crate) struct CloseState {
@@ -117,7 +118,11 @@ pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> 
         }
     };
     let address = listener.local_addr()?;
-    let router = create_router_with_web_root(Arc::clone(&application), web_root);
+    let router = create_router_with_processing(
+        Arc::clone(&application),
+        web_root,
+        config.processing.clone(),
+    );
     let (sender, receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(
@@ -142,22 +147,28 @@ pub async fn start_server(config: Config) -> Result<RunningServer, ServerError> 
 }
 
 pub fn create_router(application: Arc<Application>, web_root: impl Into<PathBuf>) -> Router {
-    create_router_with_web_root(application, open_web_root(web_root.into()))
+    create_router_with_processing(application, open_web_root(web_root.into()), None)
 }
 
-pub(crate) fn create_router_with_web_root(
+pub(crate) fn create_router_with_processing(
     application: Arc<Application>,
     web_root: WebRoot,
+    processing: Option<ProcessingConfig>,
 ) -> Router {
     let state = HttpState {
         application,
         web_root: Arc::new(web_root),
+        processing,
     };
     Router::new()
         .route(HEALTH_PATH, get(healthz))
         .route("/api/overview", get(overview))
         .route("/api/status", get(status))
         .route("/api/capabilities", get(capabilities))
+        .route(
+            "/api/processing/capability",
+            get(crate::processing_capability::get_processing_capability),
+        )
         .route("/api/album-summaries", get(get_album_summaries))
         .route("/api/albums/{id}", get(get_album_summary))
         .route("/api/albums/{id}/changes", post(change_album))

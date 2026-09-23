@@ -38,8 +38,30 @@ must report photo processing unavailable. A fixture qualification run, installed
 launcher binary, systemd-active unit or reachable socket is not production
 readiness.
 
+The processing wrapper must be run as root. It uses GNU `stat` to verify the
+complete private runtime directory, then util-linux `setpriv` to make the
+readiness request as UID 1000. The ordinary Compose commands do not require
+these processing tools.
+
 Install the production launcher as a root-owned systemd service with a
-root-owned host configuration and persistent journal. The service must reconcile
+root-owned host configuration and persistent journal. The repository supplies
+[`slipstream-processing-launcher@.service`](../systemd/slipstream-processing-launcher%40.service);
+install it as `/etc/systemd/system/slipstream-processing-launcher@.service` and
+install the exact candidate's launcher binary at
+`/usr/local/libexec/slipstream-processing-launcher`. Configure each instance at
+`/etc/slipstream-processing/INSTANCE/config.json`, with its socket at
+`/run/slipstream-processing/INSTANCE/launcher.sock` and its persistent root at
+`/var/lib/slipstream-processing/INSTANCE`. Replace `INSTANCE` with the same 32
+lowercase hexadecimal identifier in the service name and configuration. The
+After an approved production configuration and its exact policy/bundle
+identities are installed, load the unit and start the instance:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now slipstream-processing-launcher@INSTANCE.service
+```
+
+The service must reconcile
 its durable attempt and manager identities before accepting new work. Its
 private socket may be reachable during reconciliation, but admission must stay
 unavailable until recovery succeeds; socket reachability is not readiness. A
@@ -56,15 +78,32 @@ processing remains unavailable and the Library service remains usable.
 The supported opt-in is the dedicated wrapper command:
 
 ```sh
-./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
+sudo ./scripts/compose --env-file /srv/slipstream/instance.env processing-up -d
 ```
+
+For this command, the environment file must contain exactly one literal value
+for each of `SLIPSTREAM_PROCESSING_INSTANCE` (32 lowercase hexadecimal
+characters), `SLIPSTREAM_PROCESSING_POLICY_SHA256` and
+`SLIPSTREAM_PROCESSING_BUNDLE_SHA256` (64 lowercase hexadecimal characters
+each). These values pin the approved deployment identities. The processing
+overlay passes the three pins to Web; they are identity data, not secrets or
+launcher configuration. The wrapper ignores ambient processing values and
+checks the fixed runtime path, root ownership, symlink-free ancestors,
+directory contents, and root-only owner claim before
+asking the launcher to reconcile as Web UID 1000. It proceeds only for the
+version-1 `photo-processing` capability with matching instance, policy and
+bundle, a valid incarnation, a positive admission sequence, and `available`
+admission. A qualification or Film measurement socket always fails this
+check, even when its own profile is available.
 
 This command selects a repository-owned, fixed processing Compose overlay from
 inside the wrapper. The operator cannot supply a Compose file, override, extra
 mount or entrypoint. Ordinary `up` uses only the base Compose file and never
 mounts a launcher endpoint, even if a processing socket path is present in the
 operator environment. `processing-up` validates the configured endpoint identity
-and mounts the whole dedicated runtime directory read-only. The directory may
+and mounts only the whole dedicated runtime directory read-only at its fixed
+container path. The overlay grants no Web access to the systemd or Docker socket.
+The directory may
 contain only the fixed bounded Unix socket and its root-only persistent owner
 claim; it exposes no launcher configuration, journal, Docker socket, systemd
 control socket, host root or writable cgroup mount. The directory and its
@@ -80,8 +119,8 @@ admission.
 If the launcher endpoint or policy is unavailable, `processing-up` must fail
 closed without weakening Web isolation or changing an already-running Library
 service. The ordinary `up` command remains the recovery path for Library
-browsing. `/healthz` continues to report only Library service health; processing
-capability reports whether the operator disabled the
+browsing. `/healthz` continues to report only Library service health.
+`GET /api/processing/capability` reports whether the operator disabled the
 path, whether an opted-in path is unavailable and why, or whether the exact
 deployed launcher, policy, bundle and resource boundary are available. It
 reports source and bundle availability separately and never advertises the

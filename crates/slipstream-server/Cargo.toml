@@ -19,6 +19,7 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slipstream-core = { path = "../slipstream-core" }
+slipstream-processing = { path = "../slipstream-processing" }
 time.workspace = true
 tokio.workspace = true
 
