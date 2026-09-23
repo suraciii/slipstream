@@ -1308,13 +1308,31 @@ mod tests {
     }
 
     fn fixture_with_original(original: Option<(&str, &[u8])>) -> Fixture {
+        let originals: Vec<(&str, &[u8])> = original.into_iter().collect();
+        fixture_with_originals(&originals, DEFAULT_PREVIEW_WORKERS)
+    }
+
+    fn fixture_with_originals(originals: &[(&str, &[u8])], workers: usize) -> Fixture {
+        fixture_with_options(
+            originals,
+            PreviewServiceOptions {
+                workers,
+                ..PreviewServiceOptions::default()
+            },
+        )
+    }
+
+    fn fixture_with_options(
+        originals: &[(&str, &[u8])],
+        options: PreviewServiceOptions,
+    ) -> Fixture {
         let base = std::env::temp_dir().join(format!(
             "slipstream-preview-service-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(base.join("originals")).unwrap();
-        if let Some((name, bytes)) = original {
+        for (name, bytes) in originals {
             fs::write(base.join("originals").join(name), bytes).unwrap();
         }
         let config = LibraryConfig {
@@ -1325,7 +1343,8 @@ mod tests {
             command_capacity: NonZeroUsize::new(64).unwrap(),
         };
         let library = Arc::new(Library::open(config).unwrap());
-        let service = PreviewService::new(library.clone(), base.join("cache")).unwrap();
+        let service =
+            PreviewService::with_options(library.clone(), base.join("cache"), options).unwrap();
         tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(library.scan())
@@ -1337,6 +1356,32 @@ mod tests {
         }
     }
 
+    /// The Photo identities for the given Original Locations, in the supplied
+    /// order, so a test names its demand deterministically.
+    fn photo_ids_by_location(library: &Library, locations: &[&str]) -> Vec<String> {
+        let snapshot = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(library.snapshot())
+            .unwrap();
+        locations
+            .iter()
+            .map(|location| {
+                let original = snapshot
+                    .originals
+                    .iter()
+                    .find(|original| original.relative_path.as_str() == *location)
+                    .expect("Original is discovered");
+                snapshot
+                    .photos
+                    .iter()
+                    .find(|photo| photo.original_id == original.id)
+                    .expect("Original has one Photo")
+                    .id
+                    .clone()
+            })
+            .collect()
+    }
+
     fn photo_id(library: &Library) -> String {
         tokio::runtime::Runtime::new()
             .unwrap()
@@ -1345,6 +1390,137 @@ mod tests {
             .photos[0]
             .id
             .clone()
+    }
+
+    /// CLI Preview demand is admitted at the Background lane, so it never runs
+    /// ahead of Web Photo View demand even when the CLI request arrives first.
+    /// The active Web Photo View job occupies the single worker and both shared
+    /// native-work slots, so the CLI request is admitted first and still runs
+    /// last.
+    #[test]
+    fn cli_preview_demand_ranks_below_active_web_photo_view_demand() {
+        let fixture = fixture_with_originals(
+            &[
+                ("active-a.JPG", &jpeg(80, 40)),
+                ("cli-b.JPG", &jpeg(80, 40)),
+                ("current-c.JPG", &jpeg(80, 40)),
+            ],
+            // One worker keeps this test about admission order only: that worker
+            // is inside generation, so queue selection is the only variable.
+            1,
+        );
+        let ids = photo_ids_by_location(
+            &fixture.library,
+            &["active-a.JPG", "cli-b.JPG", "current-c.JPG"],
+        );
+        let (active, cli, current) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // Both shared native-work slots are held, so the worker blocks inside
+        // generation instead of completing the active Web Photo View job.
+        let permit = fixture
+            .library
+            .try_admit_native_work()
+            .expect("first shared native-work slot");
+        let second_permit = (0..200)
+            .find_map(|_| {
+                let permit = fixture.library.try_admit_native_work();
+                if permit.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                permit
+            })
+            .expect("second shared native-work slot after initial inspection");
+        let completed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request = |label: &'static str, id: String, priority: DerivativePriority| {
+            let service = fixture.service.clone();
+            let recorded = Arc::clone(&completed);
+            runtime.spawn(async move {
+                let _ = service.review(id, priority).await;
+                recorded
+                    .lock()
+                    .expect("completion order poisoned")
+                    .push(label);
+            })
+        };
+        let active_request = request("active-a.JPG", active, DerivativePriority::Current);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        assert!(
+            completed.lock().unwrap().is_empty(),
+            "the active Web Photo View job must still wait for the shared budget"
+        );
+        // Both compared requests are admitted while the worker is busy, so the
+        // Background lane can only be selected after the Current lane.
+        let cli_request = request("cli-b.JPG", cli, DerivativePriority::Background);
+        let current_request = request("current-c.JPG", current, DerivativePriority::Current);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            completed.lock().unwrap().is_empty(),
+            "no request may complete while the shared budget is held"
+        );
+        drop((permit, second_permit));
+        runtime.block_on(async {
+            for handle in [active_request, cli_request, current_request] {
+                handle.await.expect("Preview request task joins");
+            }
+        });
+        let order = completed.lock().expect("completion order poisoned");
+        assert_eq!(
+            order.as_slice(),
+            ["active-a.JPG", "current-c.JPG", "cli-b.JPG"]
+        );
+    }
+
+    #[test]
+    fn shared_preview_waiter_pressure_refuses_background_demand() {
+        let fixture = fixture_with_options(
+            &[("web.JPG", &jpeg(80, 40)), ("cli.JPG", &jpeg(80, 40))],
+            PreviewServiceOptions {
+                workers: 1,
+                queue_capacity: 1,
+                waiter_capacity: 1,
+            },
+        );
+        let ids = photo_ids_by_location(&fixture.library, &["web.JPG", "cli.JPG"]);
+        let permit = fixture.library.try_admit_native_work().unwrap();
+        let second_permit = (0..200)
+            .find_map(|_| {
+                let permit = fixture.library.try_admit_native_work();
+                if permit.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                permit
+            })
+            .expect("second shared native-work slot after initial inspection");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let service = fixture.service.clone();
+        let web = ids[0].clone();
+        let active =
+            runtime.spawn(async move { service.review(web, DerivativePriority::Current).await });
+        runtime.block_on(async {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if fixture.service.inner.state.lock().unwrap().waiters == 1 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Web Preview occupies the shared waiter budget"
+                );
+                tokio::task::yield_now().await;
+            }
+            assert!(matches!(
+                fixture
+                    .service
+                    .review(ids[1].clone(), DerivativePriority::Background)
+                    .await,
+                Err(PreviewServiceError::Saturated)
+            ));
+        });
+        drop((permit, second_permit));
+        assert!(matches!(
+            runtime.block_on(active).unwrap(),
+            Ok(PreviewRequestResult::Current(_))
+        ));
     }
 
     #[test]

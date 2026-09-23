@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    app::CliPreviewRefusal,
     folders::valid_folder_location,
     queries::{
         CLI_CONTRACT_VERSION, CursorError, MAXIMUM_LIST_PAGE, MAXIMUM_RETAINED_IDS, QUERY_IDLE,
@@ -9,7 +10,8 @@ use crate::{
         AlbumListItemWire, CapabilitiesResponse, CapabilityLimitsWire, CliAlbumChangeWire,
         CliAlbumCreationWire, CliAlbumSummaryWire, CliFolderListResponse, CliListResponse,
         CliPhotoDecisionResultWire, CliPhotoGetWire, CliPhotoItemWire, CliPhotoMetadataWire,
-        CliScanStatusWire, CliStatusResponse, MissingItemWire, PhotoListItemWire,
+        CliPreviewResponse, CliScanStatusWire, CliStatusResponse, MissingItemWire,
+        PhotoListItemWire, derivative_target_name, photo_web_path,
     },
 };
 
@@ -2471,7 +2473,22 @@ pub(crate) fn rating_value(value: slipstream_core::PhotoStateValue) -> Value {
 pub(crate) async fn get_thumbnail(
     State(state): State<HttpState>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    request: Request<Body>,
 ) -> Response<Body> {
+    if request.headers().contains_key(CLI_CONTRACT_HEADER) {
+        if let Err(response) = require_cli_contract(&request) {
+            return *response;
+        }
+        if let Err(response) = require_published(&state.application) {
+            return *response;
+        }
+        return cli_preview_response(
+            Arc::clone(&state.application),
+            &id,
+            DerivativeTarget::Thumbnail512,
+        )
+        .await;
+    }
     match state.application.thumbnail(&id).await {
         Ok(result) => {
             let status = if result.state == "ready" {
@@ -2516,6 +2533,20 @@ pub(crate) async fn get_preview(
     axum::extract::Path(id): axum::extract::Path<String>,
     request: Request<Body>,
 ) -> Response<Body> {
+    if request.headers().contains_key(CLI_CONTRACT_HEADER) {
+        if let Err(response) = require_cli_contract(&request) {
+            return *response;
+        }
+        if let Err(response) = require_published(&state.application) {
+            return *response;
+        }
+        return cli_preview_response(
+            Arc::clone(&state.application),
+            &id,
+            DerivativeTarget::Review2560,
+        )
+        .await;
+    }
     let priority = if request.uri().query() == Some("priority=adjacent") {
         slipstream_core::DerivativePriority::Adjacent
     } else {
@@ -2531,6 +2562,70 @@ pub(crate) async fn get_preview(
             json_response(status, &result)
         }
         Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+/// Answers one CLI Preview request. The CLI contract header is already validated
+/// by the request policy, so a request that carries it never reaches the Web
+/// answer.
+pub(crate) async fn cli_preview_response(
+    application: Arc<Application>,
+    photo_id: &str,
+    target: DerivativeTarget,
+) -> Response<Body> {
+    if !valid_id(photo_id) {
+        return invalid_cli("photoId", "The Photo ID is invalid.");
+    }
+    match application.cli_preview(photo_id, target).await {
+        Ok(ready) => json_response(
+            StatusCode::OK,
+            &CliPreviewResponse {
+                photo_id: ready.photo_id,
+                state: "ready",
+                source: Some(ready.source.wire_name()),
+                source_revision: Some(ready.source_revision),
+                width: Some(ready.width),
+                height: Some(ready.height),
+                detail_limited: Some(ready.width.max(ready.height) < 2560),
+                url: Some(format!(
+                    "/api/private/derivatives/{}/{}/{}.jpg",
+                    photo_id,
+                    derivative_target_name(target),
+                    ready.cache_key
+                )),
+                web_path: photo_web_path(photo_id),
+            },
+        ),
+        Err(refusal) => cli_preview_refusal(photo_id, refusal),
+    }
+}
+
+fn cli_preview_refusal(photo_id: &str, refusal: CliPreviewRefusal) -> Response<Body> {
+    match refusal {
+        CliPreviewRefusal::Missing => cli_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Query Photos and use a current Photo ID.",
+            serde_json::json!({"resource": "photo", "reference": photo_id}),
+        ),
+        CliPreviewRefusal::Busy => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_busy",
+            "Preview work is at its shared limit; try again.",
+            serde_json::json!({"operation": "photos-preview", "retryAfterSeconds": null}),
+        ),
+        CliPreviewRefusal::Unavailable => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "preview_unavailable",
+            "No allowed source can produce a current Preview for this Photo.",
+            serde_json::json!({"photoId": photo_id, "state": "unavailable"}),
+        ),
+        CliPreviewRefusal::NotReady(state) => cli_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "preview_unavailable",
+            "Request the current Preview again for this Photo.",
+            serde_json::json!({"photoId": photo_id, "state": state}),
+        ),
     }
 }
 
@@ -2554,11 +2649,29 @@ pub(crate) async fn get_derivative(
     if !is_hex_key(key) {
         return api_error(StatusCode::NOT_FOUND, "Derivative not found");
     }
-    let delivery = match state.application.derivative(&photo_id, key, target).await {
+    let cli_request = request.headers().contains_key(CLI_CONTRACT_HEADER);
+    if cli_request {
+        if let Err(response) = require_cli_contract(&request) {
+            return *response;
+        }
+        if let Err(response) = require_published(&state.application) {
+            return *response;
+        }
+    }
+    let delivery = if cli_request {
+        state
+            .application
+            .cli_derivative(&photo_id, key, target)
+            .await
+    } else {
+        state.application.derivative(&photo_id, key, target).await
+    };
+    let delivery = match delivery {
         Ok(Some(delivery)) => delivery,
         Ok(None) => return api_error(StatusCode::NOT_FOUND, "Derivative not found"),
         Err(error) => return ApiError::from(error).into_response(),
     };
+    let repeated = cli_preview_headers(&delivery);
     let entity_tag = format!("\"{}\"", delivery.cache_key);
     if request
         .headers()
@@ -2566,11 +2679,13 @@ pub(crate) async fn get_derivative(
         .and_then(|value| value.to_str().ok())
         == Some(entity_tag.as_str())
     {
-        return Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::NOT_MODIFIED)
-            .header(header::ETAG, entity_tag)
-            .body(Body::empty())
-            .expect("valid response");
+            .header(header::ETAG, entity_tag);
+        for (name, value) in &repeated {
+            response = response.header(*name, value.clone());
+        }
+        return response.body(Body::empty()).expect("valid response");
     }
     let length = delivery.bytes.len().to_string();
     let body = if request.method() == ::http::Method::HEAD {
@@ -2578,15 +2693,27 @@ pub(crate) async fn get_derivative(
     } else {
         Body::from(delivery.bytes)
     };
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/jpeg")
         .header(header::CONTENT_LENGTH, length)
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::ETAG, entity_tag)
-        .header("x-content-type-options", "nosniff")
-        .body(body)
-        .expect("valid derivative response")
+        .header("x-content-type-options", "nosniff");
+    for (name, value) in &repeated {
+        response = response.header(*name, value.clone());
+    }
+    response.body(body).expect("valid derivative response")
+}
+
+/// The repeated typed facts one CLI derivative download must match against the
+/// metadata it was admitted with. The Web derivative response adds nothing.
+pub(crate) fn cli_preview_headers(delivery: &DerivativeDelivery) -> Vec<(&'static str, String)> {
+    delivery
+        .cli_facts
+        .as_ref()
+        .map(|facts| facts.headers().to_vec())
+        .unwrap_or_default()
 }
 
 pub(crate) async fn mutate_album_route(

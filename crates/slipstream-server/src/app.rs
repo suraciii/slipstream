@@ -2,6 +2,7 @@ use super::*;
 use crate::config::{MAX_BROWSE_WINDOW, NEXT_BROWSE_NAMESPACE};
 use crate::http::{is_hex_key, valid_id};
 use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
+use crate::wire::CliDerivativeFacts;
 /// The published Library plus id indices, rebuilt atomically on each snapshot
 /// replacement so bounded window requests never rescan the whole Library.
 pub(crate) struct Published {
@@ -32,6 +33,49 @@ pub(crate) struct PublishedPhotoDetail {
     pub(crate) photo: slipstream_core::PhotoRead,
     metadata_source: Option<PublishedMetadataSource>,
 }
+
+/// The current derivative one admitted CLI Preview request may download. Every
+/// fact belongs to the bytes the caller is about to read.
+pub(crate) struct CliPreviewReady {
+    pub(crate) photo_id: String,
+    pub(crate) source: slipstream_core::PreviewSource,
+    pub(crate) source_revision: String,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) cache_key: String,
+}
+
+/// Why one admitted CLI Preview request has no current derivative.
+pub(crate) enum CliPreviewRefusal {
+    /// The Photo is unknown to the Published Library.
+    Missing,
+    /// No allowed source can produce a current Preview for the admitted
+    /// revision.
+    Unavailable,
+    /// The Photo's own published Preview state when the request did not produce
+    /// a current derivative. It is the state the Published Library publishes,
+    /// so a CLI caller reads the same state the browser facts use.
+    NotReady(&'static str),
+    /// The shared Preview owner has no room for more demand.
+    Busy,
+}
+
+impl CliPreviewRefusal {
+    /// Reports the published Preview state for one Photo whose admitted request
+    /// produced no current derivative. A Library that still claims a ready
+    /// Preview the request did not produce is reported as `failed` rather than
+    /// as a not-yet-completed inspection.
+    fn published_state(published_facts: Option<&PreviewFacts>) -> Self {
+        Self::NotReady(
+            match published_facts.map(|facts| facts.photo.preview_state) {
+                Some(state) if state != PreviewState::Ready => crate::wire::preview_state(state),
+                _ => "failed",
+            },
+        )
+    }
+}
+
+pub(crate) type CliPreviewOutcome = Result<CliPreviewReady, CliPreviewRefusal>;
 
 #[cfg(test)]
 type MetadataInspectionTestHook = dyn Fn(&slipstream_core::RelativeOriginalPath) + Send + Sync;
@@ -2045,40 +2089,166 @@ impl Application {
         cache_key: &str,
         target: DerivativeTarget,
     ) -> Result<Option<DerivativeDelivery>, ServerError> {
+        self.admitted_derivative(
+            photo_id,
+            cache_key,
+            target,
+            slipstream_core::DerivativePriority::Current,
+            false,
+        )
+        .await
+    }
+
+    /// Answers one CLI Preview request with the current supported derivative for
+    /// the requested target, or the reason no current derivative exists. CLI
+    /// demand is admitted at the shared Background lane, below every Web lane.
+    pub(crate) async fn cli_preview(
+        &self,
+        photo_id: &str,
+        target: DerivativeTarget,
+    ) -> CliPreviewOutcome {
+        if !valid_id(photo_id) {
+            return Err(CliPreviewRefusal::Missing);
+        }
+        let published_facts = self.published_preview_facts(photo_id);
+        let result = if let Some(facts) = published_facts.clone() {
+            self.preview
+                .request_with_facts(
+                    facts,
+                    target,
+                    slipstream_core::DerivativePriority::Background,
+                )
+                .await
+        } else {
+            return Err(CliPreviewRefusal::Missing);
+        };
+        let ready = match result {
+            Ok(slipstream_core::PreviewRequestResult::Current(ready)) => ready,
+            // Current generation failed for the admitted source, or the source
+            // changed while it ran. Older bytes are never a current Preview.
+            Ok(slipstream_core::PreviewRequestResult::Stale(_))
+            | Ok(slipstream_core::PreviewRequestResult::StaleIgnored)
+            | Ok(slipstream_core::PreviewRequestResult::Failed(_)) => {
+                return Err(CliPreviewRefusal::published_state(published_facts.as_ref()));
+            }
+            Ok(slipstream_core::PreviewRequestResult::Unavailable(unavailable)) => {
+                return Err(match unavailable.reason {
+                    slipstream_core::PreviewUnavailableReason::PhotoNotFound => {
+                        CliPreviewRefusal::Missing
+                    }
+                    slipstream_core::PreviewUnavailableReason::OriginalUnavailable
+                    | slipstream_core::PreviewUnavailableReason::NoUsableSource => {
+                        CliPreviewRefusal::Unavailable
+                    }
+                });
+            }
+            // The shared Preview owner is saturated or closed; the caller may
+            // ask again once the shared bounds have room.
+            Err(slipstream_core::PreviewServiceError::Saturated)
+            | Err(slipstream_core::PreviewServiceError::Closed) => {
+                return Err(CliPreviewRefusal::Busy);
+            }
+            Err(_) => {
+                return Err(CliPreviewRefusal::published_state(published_facts.as_ref()));
+            }
+        };
+        // A current derivative whose admitted source revision cannot be
+        // established must not be offered as one.
+        let source_revision = published_facts
+            .as_ref()
+            .and_then(|facts| preview_source_revision(facts, ready.source))
+            .ok_or_else(|| CliPreviewRefusal::published_state(published_facts.as_ref()))?;
+        Ok(CliPreviewReady {
+            photo_id: photo_id.to_owned(),
+            source: ready.source,
+            source_revision,
+            width: ready.width,
+            height: ready.height,
+            cache_key: ready.cache_key,
+        })
+    }
+
+    /// Reads the exact derivative one admitted CLI request was given, refuses
+    /// bytes that are no longer current, and repeats the admitted facts.
+    pub(crate) async fn cli_derivative(
+        &self,
+        photo_id: &str,
+        cache_key: &str,
+        target: DerivativeTarget,
+    ) -> Result<Option<DerivativeDelivery>, ServerError> {
+        self.admitted_derivative(
+            photo_id,
+            cache_key,
+            target,
+            slipstream_core::DerivativePriority::Background,
+            true,
+        )
+        .await
+    }
+
+    /// Admits one derivative delivery under one Preview request. `current_only`
+    /// refuses a stale result for a caller that must not receive older bytes as
+    /// a current Preview, and repeats that caller's typed facts.
+    async fn admitted_derivative(
+        &self,
+        photo_id: &str,
+        cache_key: &str,
+        target: DerivativeTarget,
+        priority: slipstream_core::DerivativePriority,
+        current_only: bool,
+    ) -> Result<Option<DerivativeDelivery>, ServerError> {
         if !valid_id(photo_id) || !is_hex_key(cache_key) {
             return Ok(None);
         }
-        let result = if let Some(facts) = self.published_preview_facts(photo_id) {
+        let published_facts = self.published_preview_facts(photo_id);
+        let result = if let Some(facts) = published_facts.clone() {
             self.preview
-                .request_with_facts(facts, target, slipstream_core::DerivativePriority::Current)
+                .request_with_facts(facts, target, priority)
                 .await
         } else {
             self.preview
-                .request(
-                    photo_id.to_owned(),
-                    target,
-                    slipstream_core::DerivativePriority::Current,
-                )
+                .request(photo_id.to_owned(), target, priority)
                 .await
         };
         let ready = match result {
-            Ok(slipstream_core::PreviewRequestResult::Current(ready))
-            | Ok(slipstream_core::PreviewRequestResult::Stale(ready))
-                if ready.cache_key == cache_key =>
-            {
-                ready
-            }
+            Ok(slipstream_core::PreviewRequestResult::Current(ready)) => ready,
+            Ok(slipstream_core::PreviewRequestResult::Stale(ready)) if !current_only => ready,
             _ => return Ok(None),
         };
+        if ready.cache_key != cache_key {
+            return Ok(None);
+        }
+        let source_revision = published_facts
+            .as_ref()
+            .and_then(|facts| preview_source_revision(facts, ready.source));
+        if current_only && source_revision.is_none() {
+            return Ok(None);
+        }
         let cache = self.preview.scheduler().cache().clone();
         let cache_key = cache_key.to_owned();
         let bytes = tokio::task::spawn_blocking(move || cache.read_derivative(&cache_key, target))
             .await
             .map_err(|error| ServerError::Join(error.to_string()))?
             .ok();
-        Ok(bytes.map(|bytes| DerivativeDelivery {
-            cache_key: ready.cache_key,
-            bytes,
+        Ok(bytes.map(|bytes| {
+            // A CLI caller compares these facts with the metadata it was
+            // admitted with, so an unlabelled current derivative is refused
+            // rather than served without them.
+            let cli_facts = match (current_only, source_revision) {
+                (true, Some(source_revision)) => Some(CliDerivativeFacts {
+                    photo_id: photo_id.to_owned(),
+                    source: ready.source.wire_name(),
+                    source_revision,
+                    width: ready.width,
+                    height: ready.height,
+                }),
+                _ => None,
+            };
+            DerivativeDelivery {
+                cache_key: ready.cache_key,
+                bytes,
+                cli_facts,
+            }
         }))
     }
 
