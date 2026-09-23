@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { rejects } from "node:assert/strict";
 import {
   createPrivateFetcher,
+  createAuthenticatedFetcher,
   exchangeAccessToken,
   readAccessStatus,
   revokeBrowserSession,
@@ -255,7 +256,31 @@ describe("private browser fetch", () => {
     expect(requests).toBe(0);
   });
 
-  test("admits only the keepalive Browse release as teardown cleanup", async () => {
+  test("cleanup transport captures credentials before synchronous disposal closes the epoch", async () => {
+    let csrf: string | undefined = csrfToken;
+    let captured: RequestInit | undefined;
+    const cleanup = createAuthenticatedFetcher(
+      fetcher((_input, init) => {
+        captured = init;
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+      () => csrf,
+      () => {},
+    );
+    const released = cleanup("/api/browse/lease", {
+      method: "DELETE",
+      keepalive: true,
+    });
+    csrf = undefined;
+    await released;
+    expect(new Headers(captured?.headers).get("X-CSRF-Token")).toBe(csrfToken);
+    expect(captured?.redirect).toBe("error");
+    expect(captured?.credentials).toBe("same-origin");
+    expect(captured?.cache).toBe("no-store");
+    await rejects(cleanup("/api/browse/lease", { method: "DELETE" }));
+  });
+
+  test("closed admission rejects all private requests including lease URLs", async () => {
     const calls: Array<{
       input: RequestInfo | URL;
       init?: RequestInit | undefined;
@@ -270,20 +295,8 @@ describe("private browser fetch", () => {
       () => Promise.resolve(false),
     );
 
-    const released = await privateFetch("/api/browse/browse-token", {
-      method: "DELETE",
-      keepalive: true,
-    });
-    expect(released.status).toBe(204);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.init?.method).toBe("DELETE");
-    expect(calls[0]?.init?.keepalive).toBe(true);
-    expect(new Headers(calls[0]?.init?.headers).get("X-CSRF-Token")).toBe(
-      csrfToken,
-    );
-
     for (const [input, init] of [
-      ["/api/browse/browse-token", { method: "DELETE" }],
+      ["/api/browse/browse-token", { method: "DELETE", keepalive: true }],
       ["/api/other", { method: "DELETE", keepalive: true }],
       ["/api/decision", { method: "POST", keepalive: true }],
     ] as const) {
@@ -297,6 +310,6 @@ describe("private browser fetch", () => {
       }
       expect(closed).toBe(true);
     }
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 });

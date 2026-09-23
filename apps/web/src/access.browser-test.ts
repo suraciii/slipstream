@@ -97,7 +97,9 @@ for (const viewport of [
     ).toBeAttached();
     await page.bringToFront();
     // Revalidation of this same session must leave the mounted fetcher usable.
-    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.evaluate(() =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
     await expect(
       page.getByRole("navigation", { name: "Sources", includeHidden: true }),
     ).toBeAttached();
@@ -140,6 +142,12 @@ test("cookie writes reject missing CSRF and revoked session cannot restore priva
       })
     ).status(),
   ).toBe(403);
+  const second = await context.newPage();
+  await second.goto(server.url);
+  await expect(
+    second.getByRole("navigation", { name: "Sources", includeHidden: true }),
+  ).toBeAttached();
+  await page.bringToFront();
   const status = (await (
     await context.request.get(`${server.url}/api/access/session`)
   ).json()) as { csrfToken: string };
@@ -150,9 +158,14 @@ test("cookie writes reject missing CSRF and revoked session cannot restore priva
       })
     ).status(),
   ).toBe(204);
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.evaluate(() =>
+    window.dispatchEvent(new PopStateEvent("popstate")),
+  );
   await expect(page.getByLabel("Access Token", { exact: true })).toBeVisible();
   await expect(page.locator("img")).toHaveCount(0);
+  await expect(
+    second.getByLabel("Access Token", { exact: true }),
+  ).toBeVisible();
 });
 
 test("known expiry hides private content while disconnected", async ({
@@ -245,5 +258,66 @@ test("HTTPS fixture closes connections that have not started their TLS handshake
   } finally {
     socket.destroy();
     await closing;
+  }
+});
+
+test("visible window focus changes do not hide the Library or check access", async ({
+  page,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  let checks = 0;
+  await page.route("**/api/access/session", async (route) => {
+    checks++;
+    await route.abort();
+  });
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event("blur"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  await expect(page.locator(".access-check-overlay")).toHaveCount(0);
+  expect(checks).toBe(0);
+});
+
+test("image and history restoration share one status check", async ({
+  page,
+  context,
+}) => {
+  await page.goto(server.url);
+  await page.getByLabel("Access Token", { exact: true }).fill(server.token);
+  await page.getByRole("button", { name: "Open library", exact: true }).click();
+  await expect(page.getByRole("navigation", { name: "Sources" })).toBeVisible();
+  const image = page.locator('img[src*="/api/private/derivatives/"]').first();
+  await expect(image).toBeVisible();
+  const status: unknown = await (
+    await context.request.get(`${server.url}/api/access/session`)
+  ).json();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let checks = 0;
+  await page.route("**/api/access/session", async (route) => {
+    checks++;
+    await held;
+    await route.fulfill({ json: status });
+  });
+  try {
+    await image.evaluate((node) => node.dispatchEvent(new Event("error")));
+    await expect.poll(() => checks).toBe(1);
+    await page.evaluate(() =>
+      window.dispatchEvent(new PopStateEvent("popstate")),
+    );
+    await expect(page.locator(".access-check-overlay")).toBeVisible();
+    release();
+    await expect(
+      page.getByRole("navigation", { name: "Sources" }),
+    ).toBeVisible();
+    expect(checks).toBe(1);
+  } finally {
+    release();
   }
 });

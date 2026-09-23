@@ -158,6 +158,17 @@ CSRF tokens must compare in constant time and belong to the presented session.
 The browser fetches status at startup, foreground/history restoration, and
 before reconnecting private views. Apply existing request-generation ownership
 so a stale status or image completion cannot restore access after local logout.
+Status checks share one in-flight request and one session transition owner.
+Image failure checks preserve a valid view when the server is unreachable;
+foreground and history restoration keep private content hidden until verified.
+Foreground restoration means returning from a hidden document or restoring a
+persisted page, not a focus change while the document remains visible.
+
+Browse owns lease release, including disposal. The page supplies its explicit
+release callback with authenticated transport before closing the access epoch.
+Authentication transport owns credentials, CSRF and redirect policy without
+recognizing Browse routes. Ordinary requests remain subject to view admission;
+cleanup does not grant a general request-admission bypass.
 
 ## Private Content and Transport
 

@@ -40,7 +40,7 @@ import {
   type SourceGridSource,
   type SourceWindowOperation,
 } from "./model/source-grid-owner.js";
-import type { SourceViewOrder } from "./api/source-grid.js";
+import { releaseBrowse, type SourceViewOrder } from "./api/source-grid.js";
 import {
   createAlbumActionOwner,
   type AlbumActionAdmission,
@@ -124,8 +124,13 @@ export function mountLibraryBrowser(
   return mountAccessBoundary(
     root,
     fetcher,
-    (privateRoot, privateFetcher, signOut) =>
-      mountPrivateLibraryBrowser(privateRoot, privateFetcher, signOut),
+    (privateRoot, privateFetcher, signOut, cleanupFetcher) =>
+      mountPrivateLibraryBrowser(
+        privateRoot,
+        privateFetcher,
+        signOut,
+        (token) => releaseBrowse(cleanupFetcher, token),
+      ),
   );
 }
 
@@ -133,10 +138,11 @@ function mountPrivateLibraryBrowser(
   root: HTMLElement,
   fetcher: BrowserFetch,
   signOut: () => void,
+  releaseLease: (token: string) => Promise<void>,
 ): () => void {
   let applicationAlive = true;
   const recoveryGate = new RecoveryGate();
-  const sourceGrid = createSourceGridOwner(fetcher);
+  const sourceGrid = createSourceGridOwner(fetcher, releaseLease);
   let photoMetadataAbort: AbortController | undefined;
   // The page-local navigation owner. Its traversal callback is bound once the
   // page controller's coordination functions exist, so the owner can be

@@ -50,21 +50,6 @@ function isSameOriginRequest(input: RequestInfo | URL): boolean {
   }
 }
 
-function isBrowseReleaseRequest(
-  input: RequestInfo | URL,
-  init: RequestInit | undefined,
-  method: string,
-): boolean {
-  if (method !== "DELETE" || init?.keepalive !== true) return false;
-  const origin = currentOrigin();
-  try {
-    const url = new URL(requestUrl(input), origin);
-    return url.origin === origin && /^\/api\/browse\/[^/]+$/.test(url.pathname);
-  } catch {
-    return false;
-  }
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -201,26 +186,35 @@ export function createPrivateFetcher(
   onUnauthorized: () => void,
   beforeRequest: () => Promise<boolean>,
 ): BrowserFetch {
+  const authenticatedFetch = createAuthenticatedFetcher(
+    fetcher,
+    getCsrfToken,
+    onUnauthorized,
+  );
   return async (input, init) => {
     if (!isSameOriginRequest(input))
       throw new Error("private requests must use the current origin");
 
-    const requestMethod =
-      init?.method ??
-      (typeof Request !== "undefined" && input instanceof Request
-        ? input.method
-        : "GET");
-    const method = requestMethod.toUpperCase();
-    // A Browse token is a server-side lease. Its exact keepalive DELETE is
-    // cleanup, not a Photo mutation; allow the request issued synchronously by
-    // owner disposal to finish while closing the rest of the private boundary.
-    const browseRelease = isBrowseReleaseRequest(input, init, method);
-    const releaseCsrfToken = browseRelease ? getCsrfToken() : undefined;
-    if (browseRelease) {
-      if (!releaseCsrfToken) throw new Error("browser session is closed");
-    } else if (!(await beforeRequest())) {
-      throw new Error("browser session is closed");
-    }
+    if (!(await beforeRequest())) throw new Error("browser session is closed");
+    return authenticatedFetch(input, init);
+  };
+}
+
+// The authenticated transport owns credential policy, independently of view
+// admission. Only the composition root supplies it to lease cleanup.
+export function createAuthenticatedFetcher(
+  fetcher: BrowserFetch,
+  getCsrfToken: () => string | undefined,
+  onUnauthorized: () => void,
+): BrowserFetch {
+  return async (input, init) => {
+    if (!isSameOriginRequest(input))
+      throw new Error("private requests must use the current origin");
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) throw new Error("browser session is closed");
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     const inputHeaders =
       typeof Request !== "undefined" && input instanceof Request
         ? input.headers
@@ -231,8 +225,6 @@ export function createPrivateFetcher(
     );
 
     if (MUTATING_METHODS.has(method)) {
-      const csrfToken = browseRelease ? releaseCsrfToken : getCsrfToken();
-      if (!csrfToken) throw new Error("browser session has no CSRF token");
       headers.set("X-CSRF-Token", csrfToken);
     }
 

@@ -1,6 +1,7 @@
 import "./ui/access-entry.css";
 import {
   createPrivateFetcher,
+  createAuthenticatedFetcher,
   exchangeAccessToken,
   readAccessStatus,
   revokeBrowserSession,
@@ -20,6 +21,7 @@ type MountPrivateLibrary = (
   root: HTMLElement,
   fetcher: BrowserFetch,
   signOut: () => void,
+  cleanupFetcher: BrowserFetch,
 ) => () => void;
 
 const ACCESS_CHANNEL = "slipstream:browser-access";
@@ -54,7 +56,7 @@ export function mountAccessBoundary(
   let privateDispose: (() => void) | undefined;
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   let validation: Promise<boolean> | undefined;
-  let imageValidation: Promise<void> | undefined;
+  let validationBlocksViews = false;
   let logoutPending = false;
   let accessEpoch = 0;
   let currentEntry: EntryOptions = { checking: true };
@@ -222,7 +224,7 @@ export function mountAccessBoundary(
   };
 
   const attachPrivateHost = (): void => {
-    if (!alive || !privateHost) return;
+    if (!alive || !privateHost || document.visibilityState === "hidden") return;
     if (!privateHost.isConnected) root.append(privateHost);
     privateHost.inert = false;
     privateHost.removeAttribute("aria-hidden");
@@ -265,17 +267,26 @@ export function mountAccessBoundary(
       host,
       privateFetcher,
       () => void signOut(),
+      createAuthenticatedFetcher(
+        fetcher,
+        () => (mountedEpoch === accessEpoch ? session?.csrfToken : undefined),
+        () => {},
+      ),
     );
   };
 
-  const loseAccess = (message: string): void => {
-    if (!alive) return;
-    accessEpoch++;
+  const broadcastInvalidAccess = (): void => {
     try {
       channel?.postMessage({ type: "access-invalid" });
     } catch {
       // This tab still removes its own private content below.
     }
+  };
+
+  const loseAccess = (message: string): void => {
+    if (!alive) return;
+    accessEpoch++;
+    broadcastInvalidAccess();
     clearExpiryTimer();
     session = undefined;
     disposePrivate();
@@ -291,7 +302,7 @@ export function mountAccessBoundary(
 
   async function beforePrivateRequest(): Promise<boolean> {
     if (!alive || logoutPending) return false;
-    if (validation) {
+    if (validation && validationBlocksViews) {
       const valid = await validation;
       return (
         valid &&
@@ -309,8 +320,9 @@ export function mountAccessBoundary(
     return true;
   }
 
-  async function checkCurrentAccess(): Promise<boolean> {
+  async function checkCurrentAccess(blockViews = true): Promise<boolean> {
     if (!alive) return false;
+    validationBlocksViews ||= blockViews;
     if (validation) return validation;
     const requestedEpoch = accessEpoch;
     const priorSession = session;
@@ -336,11 +348,13 @@ export function mountAccessBoundary(
         }
         session = status.session;
         scheduleExpiry();
-        if (privateDispose) attachPrivateHost();
-        else startPrivateLibrary();
+        if (privateDispose) {
+          if (validationBlocksViews) attachPrivateHost();
+        } else startPrivateLibrary();
         return true;
       }
       if (status.kind === "anonymous") {
+        if (priorSession) broadcastInvalidAccess();
         accessEpoch++;
         clearExpiryTimer();
         session = undefined;
@@ -374,6 +388,7 @@ export function mountAccessBoundary(
         }
         return false;
       }
+      if (!validationBlocksViews) return false;
       if (priorSession) {
         const message =
           "Could not verify access. Check the server connection and try again.";
@@ -391,7 +406,10 @@ export function mountAccessBoundary(
     try {
       return await promise;
     } finally {
-      if (validation === promise) validation = undefined;
+      if (validation === promise) {
+        validation = undefined;
+        validationBlocksViews = false;
+      }
     }
   }
 
@@ -412,53 +430,7 @@ export function mountAccessBoundary(
     } catch {
       return;
     }
-    void validateAfterPrivateImageError();
-  }
-
-  async function validateAfterPrivateImageError(): Promise<void> {
-    if (!alive || !session || logoutPending || imageValidation) return;
-    const promise = (async () => {
-      if (validation) await validation;
-      if (!alive || !session || logoutPending) return;
-      const requestedEpoch = accessEpoch;
-      const priorSession = session;
-      if (priorSession.expiresAt <= Date.now()) {
-        expireLocally();
-        return;
-      }
-      const status = await readAccessStatus(fetcher);
-      if (!alive || requestedEpoch !== accessEpoch || logoutPending || !session)
-        return;
-      if (status.kind === "anonymous") {
-        loseAccess(
-          "Your Browser Session is no longer valid. Enter the Access Token to continue.",
-        );
-        return;
-      }
-      if (status.kind !== "authenticated") return;
-      if (status.session.expiresAt <= Date.now()) {
-        expireLocally();
-        return;
-      }
-      const sessionChanged =
-        priorSession.csrfToken !== status.session.csrfToken ||
-        priorSession.expiresAt !== status.session.expiresAt;
-      if (sessionChanged) {
-        accessEpoch++;
-        disposePrivate();
-        session = status.session;
-        startPrivateLibrary();
-      } else {
-        session = status.session;
-        scheduleExpiry();
-      }
-    })();
-    imageValidation = promise;
-    try {
-      await promise;
-    } finally {
-      if (imageValidation === promise) imageValidation = undefined;
-    }
+    void checkCurrentAccess(false);
   }
 
   async function submitToken(rawToken: string): Promise<void> {
@@ -672,7 +644,7 @@ export function mountAccessBoundary(
   }
 
   const onResumeBoundary = (): void => {
-    if (!session || !alive) return;
+    if (!session || !alive || document.visibilityState === "hidden") return;
     detachPrivateHost();
     void checkCurrentAccess();
   };
@@ -699,16 +671,12 @@ export function mountAccessBoundary(
       },
     );
   };
-  const onWindowBlur = (): void => {
-    if (session && alive) detachPrivateHost();
-  };
   const onVisibilityChange = (): void => {
-    if (document.visibilityState === "visible") onResumeBoundary();
+    if (document.visibilityState === "hidden") {
+      if (session && alive) detachPrivateHost();
+    } else onResumeBoundary();
   };
-
   window.addEventListener("popstate", onHistoryTraversal);
-  window.addEventListener("focus", onResumeBoundary);
-  window.addEventListener("blur", onWindowBlur);
   window.addEventListener("online", onResumeBoundary);
   document.addEventListener("visibilitychange", onVisibilityChange);
 
@@ -719,8 +687,6 @@ export function mountAccessBoundary(
     if (!alive) return;
     clearExpiryTimer();
     window.removeEventListener("popstate", onHistoryTraversal);
-    window.removeEventListener("focus", onResumeBoundary);
-    window.removeEventListener("blur", onWindowBlur);
     window.removeEventListener("online", onResumeBoundary);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     channel?.removeEventListener("message", onChannelMessage);

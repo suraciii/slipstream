@@ -358,6 +358,8 @@ type PhotoDecision = Readonly<{
 
 export function createSourceGridOwner(
   fetcher: SourceGridFetch,
+  releaseLease: (token: string) => Promise<void> = (token) =>
+    releaseBrowse(fetcher, token),
 ): SourceGridOwner {
   let closed = false;
   let generation = 0;
@@ -423,7 +425,7 @@ export function createSourceGridOwner(
     if (!released || releasesStarted.has(released)) return;
     releasesStarted.add(released);
     knownTokens.delete(released);
-    void releaseBrowse(fetcher, released);
+    void releaseLease(released);
   };
 
   const detachImages = () => {
