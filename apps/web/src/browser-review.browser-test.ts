@@ -56,7 +56,8 @@ test.beforeEach(({ context, page }) => {
   });
 });
 
-test.afterEach(async ({}, testInfo) => {
+test.afterEach(async () => {
+  const testInfo = test.info();
   if (testInfo.status !== testInfo.expectedStatus) {
     await testInfo.attach("transport-failures", {
       body: JSON.stringify(transportFailures, null, 2),
