@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -1500,6 +1500,9 @@ test("environment-file configuration wins over ambient values", async () => {
     }
     expect(service.restart).toBeUndefined();
     expect(service.restart_policy).toBeUndefined();
+    expect(service.mem_limit).toBeUndefined();
+    expect(service.cpus).toBeUndefined();
+    expect(service.pids_limit).toBeUndefined();
   } finally {
     await removeFixture(target);
   }
@@ -1915,6 +1918,449 @@ test("the access-admin profile shares pinned storage but disables container logs
     expect(admin.profiles).toEqual(["access-admin"]);
     expect(admin.volumes).toEqual(server.volumes);
     expect(admin.environment).toEqual(server.environment);
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+const qaComposeFile = join(repositoryRoot, "compose.qa.yaml");
+const qaResourceLimits = {
+  mem_limit: "2147483648",
+  cpus: 2,
+  pids_limit: 256,
+} as const;
+
+function qaInstanceId(): string {
+  return randomBytes(6).toString("hex");
+}
+
+function qaFixturePaths(id: string): Record<StorageRole | "root", string> {
+  const root = join(repositoryRoot, "dist", `qa-${id}`);
+  return {
+    root,
+    library: join(root, "originals"),
+    state: join(root, "state"),
+    cache: join(root, "cache"),
+  };
+}
+
+async function createQaFixture(
+  id: string,
+): Promise<Record<StorageRole | "root", string>> {
+  const paths = qaFixturePaths(id);
+  await mkdir(paths.library, { recursive: true });
+  await mkdir(paths.state);
+  await mkdir(paths.cache);
+  return paths;
+}
+
+async function writeQaEnvironment(
+  target: Fixture,
+  options: {
+    bindAddress?: string | null;
+    port?: string | null;
+    includeOrigin?: boolean;
+    extraLines?: readonly string[];
+  } = {},
+): Promise<void> {
+  const lines = [`SLIPSTREAM_IMAGE=${immutableImage}`];
+  if (options.bindAddress !== null) {
+    lines.push(`SLIPSTREAM_BIND_ADDRESS=${options.bindAddress ?? "127.0.0.1"}`);
+  }
+  if (options.port !== null) {
+    lines.push(`SLIPSTREAM_PORT=${options.port ?? "3101"}`);
+  }
+  if (options.includeOrigin ?? true) {
+    lines.push(`SLIPSTREAM_PUBLIC_ORIGIN=${publicOrigin}`);
+  }
+  lines.push(...(options.extraLines ?? []));
+  await writeFile(target.environmentFile, lines.join("\n"));
+}
+
+async function rawComposeConfig(
+  environmentFile: string,
+  files: readonly string[],
+  environment: Record<string, string>,
+  profile?: string,
+): Promise<Record<string, unknown>> {
+  const clean = { ...process.env } as Record<string, string | undefined>;
+  for (const key of Object.keys(clean)) {
+    if (
+      key.startsWith("SLIPSTREAM_") ||
+      key.startsWith("COMPOSE_") ||
+      key.startsWith("DOCKER_")
+    ) {
+      delete clean[key];
+    }
+  }
+  const child = Bun.spawn(
+    [
+      "docker",
+      "compose",
+      "--env-file",
+      environmentFile,
+      ...files.flatMap((file) => ["-f", file]),
+      ...(profile ? ["--profile", profile] : []),
+      "config",
+      "--format",
+      "json",
+    ],
+    {
+      cwd: repositoryRoot,
+      env: { ...clean, ...environment },
+      stderr: "pipe",
+      stdout: "pipe",
+    },
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(
+      `Docker Compose config failed with exit code ${exitCode}: ${stderr.trim()}`,
+    );
+  }
+  return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+test("QA startup derives fixture storage and applies only the QA override", async () => {
+  const target = await fixture();
+  const id = qaInstanceId();
+  const paths = await createQaFixture(id);
+  try {
+    await writeQaEnvironment(target);
+    const result = await runCompose(target, ["--qa", id, "up"], {
+      environment: { FAKE_DOCKER_REAL_CONFIG: "1" },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(await Bun.file(target.composeArguments).text()).toBe(
+      [
+        "--project-name",
+        `slipstream-qa-${id}`,
+        "--env-file",
+        await realpath(target.environmentFile),
+        "-f",
+        composeFile,
+        "-f",
+        qaComposeFile,
+        "up",
+        "--no-build",
+        "",
+      ].join("\n"),
+    );
+    expect(await Bun.file(target.composeEnvironment).text()).toBe("\n\n\n\n");
+    expect(await Bun.file(target.composeSources).text()).toBe(
+      `${paths.library}\n${paths.state}\n${paths.cache}\n`,
+    );
+
+    const configuration = JSON.parse(result.stdout) as Record<string, unknown>;
+    const services = configuration.services as Record<string, unknown>;
+    expect(Object.keys(services)).toEqual(["slipstream"]);
+    const service = services.slipstream as Record<string, unknown>;
+    expect(service.mem_limit).toBe(qaResourceLimits.mem_limit);
+    expect(service.cpus).toBe(qaResourceLimits.cpus);
+    expect(service.pids_limit).toBe(qaResourceLimits.pids_limit);
+    expect(service.restart).toBeUndefined();
+    const environment = service.environment as Record<string, unknown>;
+    const ports = service.ports as Array<Record<string, unknown>>;
+    const volumes = service.volumes as Array<Record<string, unknown>>;
+
+    expect(environment.SLIPSTREAM_PUBLIC_ORIGIN).toBe(publicOrigin);
+    expect(
+      ports.some(
+        (port) =>
+          port.host_ip === "127.0.0.1" &&
+          port.published === "3101" &&
+          port.target === 3000,
+      ),
+    ).toBeTrue();
+
+    for (const role of ["library", "state", "cache"] as const) {
+      const source = paths[role];
+      const key = storageEnvironmentKeys[role];
+      const volume = volumes.find(
+        (candidate) =>
+          candidate.type === "bind" &&
+          candidate.source === source &&
+          candidate.target === source,
+      );
+
+      expect(environment[key]).toBe(source);
+      expect(volume).toBeDefined();
+      expect(volume?.read_only ?? false).toBe(role === "library");
+    }
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+    await removeFixture(target);
+  }
+});
+
+test("the QA override limits both containers without changing the ordinary service", async () => {
+  const target = await fixture();
+  const id = qaInstanceId();
+  const paths = await createQaFixture(id);
+  try {
+    await writeQaEnvironment(target);
+    const storageEnvironment = {
+      SLIPSTREAM_LIBRARY_ROOT: paths.library,
+      SLIPSTREAM_STATE_DIRECTORY: paths.state,
+      SLIPSTREAM_CACHE_DIRECTORY: paths.cache,
+    };
+
+    const qaConfiguration = await rawComposeConfig(
+      target.environmentFile,
+      [composeFile, qaComposeFile],
+      storageEnvironment,
+      "access-admin",
+    );
+    const qaServices = qaConfiguration.services as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(qaServices).sort()).toEqual([
+      "slipstream",
+      "slipstream-admin",
+    ]);
+    for (const name of ["slipstream", "slipstream-admin"] as const) {
+      expect(qaServices[name].mem_limit).toBe(qaResourceLimits.mem_limit);
+      expect(qaServices[name].cpus).toBe(qaResourceLimits.cpus);
+      expect(qaServices[name].pids_limit).toBe(qaResourceLimits.pids_limit);
+      expect(qaServices[name].restart).toBeUndefined();
+      expect(qaServices[name].build).toBeUndefined();
+    }
+
+    const ordinaryConfiguration = await rawComposeConfig(
+      target.environmentFile,
+      [composeFile],
+      storageEnvironment,
+    );
+    const ordinaryServices = ordinaryConfiguration.services as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(Object.keys(ordinaryServices)).toEqual(["slipstream"]);
+    expect(ordinaryServices.slipstream.mem_limit).toBeUndefined();
+    expect(ordinaryServices.slipstream.cpus).toBeUndefined();
+    expect(ordinaryServices.slipstream.pids_limit).toBeUndefined();
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+    await removeFixture(target);
+  }
+});
+
+test("QA rejects invalid identities, storage declarations, endpoints, and fixture shapes before Docker", async () => {
+  const target = await fixture();
+  try {
+    for (const id of ["0123456789AB", "0123456789abc", "xyz", ""]) {
+      const result = await runCompose(target, ["--qa", id, "up"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("QA instance ID");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    }
+
+    const id = qaInstanceId();
+    await writeQaEnvironment(target);
+    for (const command of [
+      ["up", "--qa", id],
+      ["--qa", id, "--qa", id, "up"],
+    ]) {
+      const result = await runCompose(target, command);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("unsupported Compose command");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    }
+
+    const paths = await createQaFixture(id);
+    try {
+      await writeQaEnvironment(target, {
+        extraLines: ["SLIPSTREAM_STATE_DIRECTORY=/srv/slipstream/state"],
+      });
+      const declared = await runCompose(target, ["--qa", id, "up"]);
+      expect(declared.exitCode).toBe(2);
+      expect(declared.stderr).toContain("must not declare storage paths");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+
+      for (const options of [
+        { bindAddress: "127.0.0.2" },
+        { bindAddress: "0.0.0.0" },
+        { bindAddress: null },
+        { port: "80" },
+        { port: "65536" },
+        { port: "310x" },
+        { port: null },
+      ] as const) {
+        await writeQaEnvironment(target, options);
+        const result = await runCompose(target, ["--qa", id, "up"]);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("QA ");
+        expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+      }
+
+      await writeQaEnvironment(target, {
+        extraLines: ["SLIPSTREAM_BIND_ADDRESS=127.0.0.1"],
+      });
+      const duplicate = await runCompose(target, ["--qa", id, "up"]);
+      expect(duplicate.exitCode).toBe(2);
+      expect(duplicate.stderr).toContain("127.0.0.1");
+    } finally {
+      await rm(paths.root, { recursive: true, force: true });
+    }
+
+    await writeQaEnvironment(target);
+    const missingId = qaInstanceId();
+    const missing = await runCompose(target, ["--qa", missingId, "up"]);
+    expect(missing.exitCode).toBe(2);
+    expect(missing.stderr).toContain("QA fixture root must exist");
+    expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+
+    const linkId = qaInstanceId();
+    const linkPaths = qaFixturePaths(linkId);
+    const realRoot = join(target.root, "qa-real");
+    await mkdir(join(realRoot, "originals"), { recursive: true });
+    await mkdir(join(realRoot, "state"));
+    await mkdir(join(realRoot, "cache"));
+    await symlink(realRoot, linkPaths.root);
+    try {
+      const linked = await runCompose(target, ["--qa", linkId, "up"]);
+      expect(linked.exitCode).toBe(2);
+      expect(linked.stderr).toContain("symbolic links");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    } finally {
+      await rm(linkPaths.root, { force: true });
+    }
+
+    const aliasId = qaInstanceId();
+    const aliasPaths = await createQaFixture(aliasId);
+    try {
+      await writeMountCoordinates(target, [
+        { endpoint: aliasPaths.root, target: "/", fsroot: "/", device: "7:42" },
+        { endpoint: repositoryRoot, target: "/", fsroot: "/", device: "8:43" },
+      ]);
+      const alias = await runCompose(target, ["--qa", aliasId, "up"]);
+      expect(alias.exitCode).toBe(2);
+      expect(alias.stderr).toContain("bind mount alias");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    } finally {
+      await rm(aliasPaths.root, { recursive: true, force: true });
+      await rm(target.findmntData, { force: true });
+    }
+
+    const nestedId = qaInstanceId();
+    const nestedPaths = await createQaFixture(nestedId);
+    try {
+      await writeMountCoordinates(target, [
+        {
+          endpoint: nestedPaths.root,
+          target: "/",
+          fsroot: "/",
+          device: "7:42",
+        },
+        {
+          endpoint: nestedPaths.root,
+          target: join(nestedPaths.root, "state"),
+          fsroot: "/",
+          device: "7:42",
+        },
+        { endpoint: repositoryRoot, target: "/", fsroot: "/", device: "7:42" },
+      ]);
+      const nested = await runCompose(target, ["--qa", nestedId, "up"]);
+      expect(nested.exitCode).toBe(2);
+      expect(nested.stderr).toContain("nested mounts");
+      expect(await Bun.file(target.dockerCalls).exists()).toBeFalse();
+    } finally {
+      await rm(nestedPaths.root, { recursive: true, force: true });
+      await rm(target.findmntData, { force: true });
+    }
+  } finally {
+    await removeFixture(target);
+  }
+});
+
+test("QA stop and access administration target only the QA project", async () => {
+  const target = await fixture();
+  const id = qaInstanceId();
+  try {
+    await writeFile(
+      target.environmentFile,
+      "SLIPSTREAM_IMAGE=slipstream:mutable\n",
+    );
+    const down = await runCompose(target, ["--qa", id, "down"]);
+    expect(down.exitCode).toBe(0);
+    expect(await Bun.file(target.composeArguments).text()).toBe(
+      [
+        "--project-name",
+        `slipstream-qa-${id}`,
+        "--env-file",
+        await realpath(target.environmentFile),
+        "-f",
+        composeFile,
+        "-f",
+        qaComposeFile,
+        "down",
+        "",
+      ].join("\n"),
+    );
+    expect(
+      (await Bun.file(target.composeConfiguration).text()).split("\n")[0],
+    ).toBe(downImageSentinel);
+
+    const paths = await createQaFixture(id);
+    try {
+      await writeQaEnvironment(target, {
+        bindAddress: null,
+        port: null,
+        includeOrigin: false,
+      });
+      const withoutTerminal = await runCompose(target, [
+        "--qa",
+        id,
+        "access-create",
+      ]);
+      expect(withoutTerminal.exitCode).toBe(2);
+      expect(withoutTerminal.stderr).toContain(
+        "require an interactive terminal",
+      );
+
+      const created = await runCompose(target, ["--qa", id, "access-create"], {
+        terminal: true,
+      });
+      expect(created.exitCode).toBe(0);
+      expect(await Bun.file(target.composeArguments).text()).toBe(
+        [
+          "--project-name",
+          `slipstream-qa-${id}`,
+          "--env-file",
+          await realpath(target.environmentFile),
+          "-f",
+          composeFile,
+          "-f",
+          qaComposeFile,
+          "--profile",
+          "access-admin",
+          "run",
+          "--rm",
+          "--no-deps",
+          "--interactive",
+          "--tty",
+          "slipstream-admin",
+          "access-create",
+          "",
+        ].join("\n"),
+      );
+
+      const revoked = await runCompose(target, ["--qa", id, "access-revoke"]);
+      expect(revoked.exitCode).toBe(0);
+      const revokeArguments = await Bun.file(target.composeArguments).text();
+      expect(revokeArguments).toContain(`slipstream-qa-${id}`);
+      expect(revokeArguments).toContain(
+        "--no-TTY\nslipstream-admin\naccess-revoke\n",
+      );
+    } finally {
+      await rm(paths.root, { recursive: true, force: true });
+    }
   } finally {
     await removeFixture(target);
   }

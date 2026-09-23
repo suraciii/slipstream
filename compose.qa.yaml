@@ -1,0 +1,9 @@
+services:
+  slipstream:
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
+  slipstream-admin:
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
