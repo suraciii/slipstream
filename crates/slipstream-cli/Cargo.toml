@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,4 +20,8 @@ tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
+rustls = "=0.23.45"
+rustls-pemfile = "=2.2.0"
+sha2.workspace = true
 slipstream-server = { path = "../slipstream-server" }

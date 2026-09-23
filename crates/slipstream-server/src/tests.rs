@@ -35,6 +35,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
         cache_directory: base.join("cache"),
         database_basename: "library.sqlite".to_owned(),
         host: "127.0.0.1".to_owned(),
+        public_origin: "https://camera.local".to_owned(),
         port,
         web_root: Some(web_root),
     }
@@ -45,6 +46,7 @@ fn test_config(base: &Path, web_root: PathBuf, port: u16) -> Config {
 /// once startup work settles. Deterministic even when the scan finishes
 /// between status polls.
 async fn wait_for_scan_settled(application: &Application) {
+    application.access.seed_test_token();
     let started = application.shared.runs_started.load(Ordering::Relaxed);
     wait_for_scan_runs(application, started.max(1)).await;
 }
@@ -169,6 +171,7 @@ fn startup_defaults_to_loopback_and_allows_custom_host() {
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
         ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
     ]))
     .unwrap();
     assert_eq!(defaults.library_root, PathBuf::from("/photos"));
@@ -178,6 +181,7 @@ fn startup_defaults_to_loopback_and_allows_custom_host() {
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
         ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
         ("SLIPSTREAM_DATABASE_BASENAME", "review.sqlite"),
         ("SLIPSTREAM_HOST", "0.0.0.0"),
         ("SLIPSTREAM_PORT", "8080"),
@@ -307,6 +311,7 @@ fn startup_vectors_reject_relative_paths_and_invalid_ports() {
         ("SLIPSTREAM_LIBRARY_ROOT", "photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
         ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
     ]));
     assert_eq!(
         relative,
@@ -316,6 +321,7 @@ fn startup_vectors_reject_relative_paths_and_invalid_ports() {
         ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
         ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
         ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
+        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
         ("SLIPSTREAM_PORT", "65536"),
     ]));
     assert_eq!(invalid, Err(ConfigError::Invalid("SLIPSTREAM_PORT")));
@@ -326,12 +332,12 @@ async fn post_to_static_path_is_rejected_without_reading_or_mutating() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let response = tower::ServiceExt::oneshot(
         router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/")
+            .uri("https://camera.local/")
             .body(Body::from(b"not-json".as_slice()))
             .unwrap(),
     )
@@ -351,11 +357,11 @@ async fn static_file_symlink_is_not_followed() {
     std::os::unix::fs::symlink(&outside, base.join("web").join("escape.txt")).unwrap();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let response = tower::ServiceExt::oneshot(
         router,
-        Request::builder()
-            .uri("http://camera.local/escape.txt")
+        authenticated_request()
+            .uri("https://camera.local/escape.txt")
             .body(Body::empty())
             .unwrap(),
     )
@@ -390,8 +396,8 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
-        Request::builder()
-            .uri("http://camera.local/")
+        authenticated_request()
+            .uri("https://camera.local/")
             .body(Body::empty())
             .unwrap(),
     )
@@ -401,9 +407,9 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
     let response = tower::ServiceExt::oneshot(
         app,
-        Request::builder()
+        authenticated_request()
             .method("HEAD")
-            .uri("http://camera.local/assets/app.js")
+            .uri("https://camera.local/assets/app.js")
             .body(Body::empty())
             .unwrap(),
     )
@@ -461,7 +467,7 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let vectors: Vec<serde_json::Value> = serde_json::from_slice(
         &fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compatibility/protocol/vectors.json"),
@@ -475,9 +481,9 @@ async fn shared_protocol_vectors_execute_all_requests_with_exact_results() {
         let request_definition = &vector["request"];
         let method = request_definition["method"].as_str().unwrap();
         let path = request_definition["path"].as_str().unwrap();
-        let mut builder = Request::builder()
+        let mut builder = authenticated_request()
             .method(method)
-            .uri(format!("http://camera.local{path}"));
+            .uri(format!("https://camera.local{path}"));
         if let Some(headers) = request_definition["headers"].as_object() {
             for (name, value) in headers {
                 builder = builder.header(name, value.as_str().unwrap());
@@ -658,7 +664,7 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         let thumbnail = application.thumbnail(photo_id).await.unwrap();
         assert_eq!(thumbnail.state, "ready", "fixture Thumbnail must be ready");
     }
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let vectors: Vec<serde_json::Value> = serde_json::from_slice(
         &fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -689,9 +695,9 @@ async fn browse_protocol_fixtures_execute_with_captured_token() {
         .as_str()
         .unwrap()
         .to_owned();
-        let mut builder = Request::builder()
+        let mut builder = authenticated_request()
             .method(method)
-            .uri(format!("http://camera.local{path}"));
+            .uri(format!("https://camera.local{path}"));
         if let Some(headers) = request_definition["headers"].as_object() {
             for (header_name, value) in headers {
                 builder = builder.header(header_name, value.as_str().unwrap());
@@ -908,7 +914,7 @@ async fn response_goldens_match_real_serialized_routes() {
     oversized_jpeg_fixture(&root.join("failed.JPG"));
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let summaries = browse_summaries(&application, BrowseSourceRequest::Library).await;
     let photo_id_for = |filename: &str| {
         summaries
@@ -927,7 +933,7 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             "/api/albums",
             serde_json::json!({"name":"Review"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -938,7 +944,7 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             &format!("/api/albums/{album_id}/members"),
             serde_json::json!({"photoIds":[photo_id.clone()]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -954,7 +960,7 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             "/api/browse",
             serde_json::json!({"source":"album","albumId":captures["albumId"]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -963,9 +969,9 @@ async fn response_goldens_match_real_serialized_routes() {
     let pending = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=1"
+                    "https://camera.local/api/browse/{token}?start=0&limit=1"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -978,8 +984,10 @@ async fn response_goldens_match_real_serialized_routes() {
     let pair_current = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -995,8 +1003,10 @@ async fn response_goldens_match_real_serialized_routes() {
     let current = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{later_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1014,9 +1024,9 @@ async fn response_goldens_match_real_serialized_routes() {
     let thumbnail = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/thumbnail"
+                    "https://camera.local/api/photos/{photo_id}/thumbnail"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1032,9 +1042,9 @@ async fn response_goldens_match_real_serialized_routes() {
     let ready = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=1"
+                    "https://camera.local/api/browse/{token}?start=0&limit=1"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1050,7 +1060,7 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             &format!("/api/photos/{photo_id}/state"),
             serde_json::json!({"field":"rating","value":2}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -1061,7 +1071,7 @@ async fn response_goldens_match_real_serialized_routes() {
             &router,
             &format!("/api/photos/{photo_id}/state"),
             serde_json::json!({"field":"rating","value":4}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -1078,7 +1088,7 @@ async fn response_goldens_match_real_serialized_routes() {
                 ],
                 "selectionState":"selected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -1089,10 +1099,10 @@ async fn response_goldens_match_real_serialized_routes() {
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/scan")
-                .header(header::ORIGIN, "http://camera.local")
+                .uri("https://camera.local/api/scan")
+                .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1103,8 +1113,10 @@ async fn response_goldens_match_real_serialized_routes() {
     let changed = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{later_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1121,9 +1133,9 @@ async fn response_goldens_match_real_serialized_routes() {
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local{}",
+                    "https://camera.local{}",
                     changed["url"].as_str().unwrap()
                 ))
                 .body(Body::empty())
@@ -1138,10 +1150,10 @@ async fn response_goldens_match_real_serialized_routes() {
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/scan")
-                .header(header::ORIGIN, "http://camera.local")
+                .uri("https://camera.local/api/scan")
+                .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1152,8 +1164,10 @@ async fn response_goldens_match_real_serialized_routes() {
     let stale = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{later_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1165,9 +1179,9 @@ async fn response_goldens_match_real_serialized_routes() {
     let failed = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{failed_id}/preview"
+                    "https://camera.local/api/photos/{failed_id}/preview"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1181,10 +1195,10 @@ async fn response_goldens_match_real_serialized_routes() {
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/scan")
-                .header(header::ORIGIN, "http://camera.local")
+                .uri("https://camera.local/api/scan")
+                .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1195,8 +1209,10 @@ async fn response_goldens_match_real_serialized_routes() {
     let unavailable = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{later_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{later_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1239,7 +1255,7 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
     fs::write(web_root.join("assets/app.js"), b"console.log(1)").unwrap();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let vectors: Vec<serde_json::Value> = serde_json::from_slice(
         &fs::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1257,8 +1273,10 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
     let preview = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1275,11 +1293,11 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
         let target = match vector["setup"].as_str().unwrap() {
             "jpeg-original" => {
                 assert_eq!(request_definition["target"], "generated-derivative");
-                format!("http://camera.local{preview_url}")
+                format!("https://camera.local{preview_url}")
             }
             "web-asset" => {
                 assert_eq!(request_definition["path"], "/assets/app.js");
-                "http://camera.local/assets/app.js".to_owned()
+                "https://camera.local/assets/app.js".to_owned()
             }
             other => panic!("unknown cache fixture setup {other}"),
         };
@@ -1297,7 +1315,7 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
         );
         let response = send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method(method)
                 .uri(target.clone())
                 .body(Body::empty())
@@ -1349,7 +1367,7 @@ async fn cache_protocol_fixtures_execute_with_declared_headers() {
             assert_eq!(revalidation["header"], "if-none-match");
             let revalidated = send(
                 &router,
-                Request::builder()
+                authenticated_request()
                     .method(method)
                     .uri(target)
                     .header(header::IF_NONE_MATCH, etag.unwrap())
@@ -1579,8 +1597,8 @@ async fn photo_ids_by_location(
 async fn get_json(router: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let response = send(
         router,
-        Request::builder()
-            .uri(format!("http://camera.local{uri}"))
+        authenticated_request()
+            .uri(format!("https://camera.local{uri}"))
             .body(Body::empty())
             .unwrap(),
     )
@@ -1801,12 +1819,12 @@ async fn browse_open_rejects_unknown_and_source_invalid_order() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let unknown = post_json(
         &router,
         "/api/browse",
         serde_json::json!({"source": "library", "order": "newest-first"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
@@ -1818,7 +1836,7 @@ async fn browse_open_rejects_unknown_and_source_invalid_order() {
         &router,
         "/api/browse",
         serde_json::json!({"source": "library", "order": "album-order"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(album_order_on_library.status(), StatusCode::BAD_REQUEST);
@@ -1835,7 +1853,7 @@ async fn browse_open_rejects_unknown_and_source_invalid_order() {
             "publication": "0123456789abcdef",
             "order": "album-order"
         }),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(folder_album_order.status(), StatusCode::BAD_REQUEST);
@@ -1843,7 +1861,7 @@ async fn browse_open_rejects_unknown_and_source_invalid_order() {
         &router,
         "/api/browse",
         serde_json::json!({"source": "library", "order": "capture-time-desc"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
@@ -1887,7 +1905,7 @@ async fn photo_albums_route_reports_true_membership_from_the_owner() {
     jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_ids_in_order(
         &application,
         BrowseSourceRequest::Library,
@@ -2148,11 +2166,11 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let response = tower::ServiceExt::oneshot(
         router.clone(),
-        Request::builder()
-            .uri("http://camera.local/healthz")
+        authenticated_request()
+            .uri("https://camera.local/healthz")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2176,8 +2194,8 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,
-        Request::builder()
-            .uri("http://camera.local/healthz")
+        authenticated_request()
+            .uri("https://camera.local/healthz")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2186,9 +2204,9 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let response = tower::ServiceExt::oneshot(
         router,
-        Request::builder()
+        authenticated_request()
             .method("HEAD")
-            .uri("http://camera.local/api/overview")
+            .uri("https://camera.local/api/overview")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2211,12 +2229,18 @@ async fn header_limit_rejects_only_values_over_sixteen_kib() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
-    let exact = "x".repeat(MAXIMUM_HEADER_BYTES - "x-test".len());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let exact = "x".repeat(
+        MAXIMUM_HEADER_BYTES
+            - "x-test".len()
+            - "authorization".len()
+            - 7
+            - crate::access::TEST_TOKEN.len(),
+    );
     let response = tower::ServiceExt::oneshot(
         router.clone(),
-        Request::builder()
-            .uri("http://camera.local/api/overview")
+        authenticated_request()
+            .uri("https://camera.local/api/overview")
             .header("x-test", exact)
             .body(Body::empty())
             .unwrap(),
@@ -2224,11 +2248,18 @@ async fn header_limit_rejects_only_values_over_sixteen_kib() {
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let over = "x".repeat(MAXIMUM_HEADER_BYTES - "x-test".len() + 1);
+    let over = "x".repeat(
+        MAXIMUM_HEADER_BYTES
+            - "x-test".len()
+            - "authorization".len()
+            - 7
+            - crate::access::TEST_TOKEN.len()
+            + 1,
+    );
     let response = tower::ServiceExt::oneshot(
         router,
-        Request::builder()
-            .uri("http://camera.local/api/overview")
+        authenticated_request()
+            .uri("https://camera.local/api/overview")
             .header("x-test", over)
             .body(Body::empty())
             .unwrap(),
@@ -2327,12 +2358,12 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     application.rescan().await.unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let overview_response = send(
         &router,
-        Request::builder()
-            .uri("http://camera.local/api/overview")
+        authenticated_request()
+            .uri("https://camera.local/api/overview")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2349,7 +2380,7 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -2357,9 +2388,9 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
     let token = opened["token"].as_str().unwrap();
     let window = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/browse/{}?start=39940&limit=60",
+                "https://camera.local/api/browse/{}?start=39940&limit=60",
                 token
             ))
             .body(Body::empty())
@@ -2374,9 +2405,9 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
 
     let oversized = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/browse/{}?start=0&limit=61",
+                "https://camera.local/api/browse/{}?start=0&limit=61",
                 token
             ))
             .body(Body::empty())
@@ -2594,7 +2625,7 @@ async fn file_location_queries_decode_spaces_and_report_exact_expiry() {
     wait_for_scan_settled(&application).await;
     application.rescan().await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let publication = application
         .file_locations(None, "", 0, 60)
         .await
@@ -2604,10 +2635,10 @@ async fn file_location_queries_decode_spaces_and_report_exact_expiry() {
     // `+` decodes as space in query values, so the spaced Folder opens.
     let response = tower::ServiceExt::oneshot(
         router.clone(),
-        Request::builder()
+        authenticated_request()
             .method("GET")
             .uri(format!(
-                "http://camera.local/api/file-locations?publication={publication}&parent=My+Photos&start=0&limit=60"
+                "https://camera.local/api/file-locations?publication={publication}&parent=My+Photos&start=0&limit=60"
             ))
             .body(Body::empty())
             .unwrap(),
@@ -2626,9 +2657,9 @@ async fn file_location_queries_decode_spaces_and_report_exact_expiry() {
     // A superseded publication reports the exact expiry contract.
     let response = tower::ServiceExt::oneshot(
         router.clone(),
-        Request::builder()
+        authenticated_request()
             .method("GET")
-            .uri("http://camera.local/api/file-locations?publication=0000000000000000&start=0&limit=60")
+            .uri("https://camera.local/api/file-locations?publication=0000000000000000&start=0&limit=60")
             .body(Body::empty())
             .unwrap(),
     )
@@ -2806,7 +2837,7 @@ async fn folder_album_add_uses_recursive_publication_and_is_idempotent() {
     wait_for_scan_settled(&application).await;
     application.rescan().await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let publication = application
         .file_locations(None, "", 0, 60)
         .await
@@ -3025,13 +3056,13 @@ async fn browse_delete_releases_the_snapshot() {
     jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let opened = response_json(
         post_json(
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3040,9 +3071,9 @@ async fn browse_delete_releases_the_snapshot() {
     async fn window(router: &Router, token: &str) -> Response<Body> {
         send(
             router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=10"
+                    "https://camera.local/api/browse/{token}?start=0&limit=10"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3052,15 +3083,30 @@ async fn browse_delete_releases_the_snapshot() {
     assert_eq!(window(&router, &token).await.status(), StatusCode::OK);
     let foreign_origin = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("DELETE")
-            .uri(format!("http://camera.local/api/browse/{token}"))
+            .uri(format!("https://camera.local/api/browse/{token}"))
             .header(header::ORIGIN, "http://elsewhere.example")
             .body(Body::empty())
             .unwrap(),
     )
     .await;
-    assert_eq!(foreign_origin.status(), StatusCode::NO_CONTENT);
+    assert_eq!(foreign_origin.status(), StatusCode::FORBIDDEN);
+    assert_eq!(window(&router, &token).await.status(), StatusCode::OK);
+    let deleted = send(
+        &router,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/browse/{token}"))
+            .header(
+                "Authorization",
+                format!("Bearer {}", crate::access::TEST_TOKEN),
+            )
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     assert_eq!(
         window(&router, &token).await.status(),
         StatusCode::NOT_FOUND
@@ -3138,12 +3184,12 @@ async fn browse_open_honors_preferred_photo_and_rejects_invalid_ids() {
         .await
         .unwrap();
     assert_eq!(preferred.position, 2);
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let invalid = post_json(
         &router,
         "/api/browse",
         serde_json::json!({"source":"library","photoId":"NOT-A-ID"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
@@ -3160,26 +3206,29 @@ async fn browse_position_resolves_identity_within_one_snapshot() {
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let opened = response_json(
         post_json(
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
     .await;
     let token = opened["token"].as_str().unwrap().to_owned();
     let get_position = |photo_id: String| {
-        let uri = format!("http://camera.local/api/browse/{token}/position?photoId={photo_id}");
+        let uri = format!("https://camera.local/api/browse/{token}/position?photoId={photo_id}");
         let router = &router;
         async move {
             response_json(
                 send(
                     router,
-                    Request::builder().uri(uri).body(Body::empty()).unwrap(),
+                    authenticated_request()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
                 )
                 .await,
             )
@@ -3191,9 +3240,9 @@ async fn browse_position_resolves_identity_within_one_snapshot() {
 
     let invalid = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/browse/{token}/position?photoId=bad"
+                "https://camera.local/api/browse/{token}/position?photoId=bad"
             ))
             .body(Body::empty())
             .unwrap(),
@@ -3204,9 +3253,9 @@ async fn browse_position_resolves_identity_within_one_snapshot() {
     application.browse_close(&token);
     let expired = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/browse/{token}/position?photoId={}",
+                "https://camera.local/api/browse/{token}/position?photoId={}",
                 ids[0]
             ))
             .body(Body::empty())
@@ -3226,14 +3275,14 @@ async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let opened = response_json(
         post_json(
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3243,9 +3292,9 @@ async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
         response_json(
             send(
                 &router,
-                Request::builder()
+                authenticated_request()
                     .uri(format!(
-                        "http://camera.local/api/browse/{token}?start=0&limit=10"
+                        "https://camera.local/api/browse/{token}?start=0&limit=10"
                     ))
                     .body(Body::empty())
                     .unwrap(),
@@ -3259,9 +3308,9 @@ async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "selectionState", "value": "selected"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -3289,7 +3338,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     assert_eq!(ids.len(), 3);
     let opened = response_json(
@@ -3297,7 +3346,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3316,7 +3365,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
                     .collect::<Vec<_>>(),
                 "selectionState": "rejected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3334,9 +3383,9 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     let window = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=10"
+                    "https://camera.local/api/browse/{token}?start=0&limit=10"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3363,7 +3412,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
                 "value": "selected",
                 "expectedCurrent": "rejected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3380,7 +3429,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
                     .collect::<Vec<_>>(),
                 "selectionState": "selected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3394,9 +3443,9 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     let changed_window = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=10"
+                    "https://camera.local/api/browse/{token}?start=0&limit=10"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3425,7 +3474,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
                     .collect::<Vec<_>>(),
                 "selectionState": "selected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3442,7 +3491,7 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3464,7 +3513,7 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let missing = "00000000-0000-4000-8000-000000000000";
 
@@ -3480,7 +3529,7 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
                 ],
                 "selectionState": "selected"
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3506,7 +3555,7 @@ async fn batch_photo_state_reports_a_missing_photo_without_blocking_the_rest() {
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3525,7 +3574,7 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
     jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
 
     let over_limit: Vec<String> = (0..=slipstream_core::PHOTO_STATE_BATCH_MAX)
@@ -3579,7 +3628,7 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
                 &router,
                 "/api/photos/state",
                 body,
-                Some("http://camera.local")
+                Some("https://camera.local")
             )
             .await
             .status(),
@@ -3593,7 +3642,7 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
             &router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3609,9 +3658,9 @@ async fn batch_photo_state_rejects_over_limit_duplicate_and_unknown_requests() {
 async fn decide_selection(router: &Router, photo_id: &str, value: &str) -> StatusCode {
     post_json(
         router,
-        &format!("http://camera.local/api/photos/{photo_id}/state"),
+        &format!("https://camera.local/api/photos/{photo_id}/state"),
         serde_json::json!({"field": "selectionState", "value": value}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await
     .status()
@@ -3664,7 +3713,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     for (name, value) in [
@@ -3756,7 +3805,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
         &router,
         "/api/browse",
         serde_json::json!({"source": "library", "selection": "maybe"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
@@ -3769,7 +3818,7 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
             &router,
             "/api/browse",
             serde_json::json!({"source": "library", "selection": "rejected"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -3783,9 +3832,9 @@ async fn browse_selection_filter_selects_from_the_source_order_with_source_count
     let routed_window = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{routed_token}?start=0&limit=60"
+                    "https://camera.local/api/browse/{routed_token}?start=0&limit=60"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -3811,7 +3860,7 @@ async fn browse_selection_filter_projects_album_and_folder_sources_without_write
     jpeg_fixture(&root.join("outside.jpg"), 8, 4, [12, 24, 36]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     application
@@ -3935,7 +3984,7 @@ async fn album_view_change_anchors_the_current_photo_instead_of_the_saved_positi
     capture_metadata_fixture(&root.join("c.jpg"), "2026:01:01 11:00:00");
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     let (a, b, c) = (
@@ -4038,7 +4087,7 @@ async fn browse_selection_filter_membership_is_frozen_until_the_source_reopens()
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
     assert_eq!(
@@ -4145,13 +4194,13 @@ async fn metadata_saturation_uses_shared_admission_and_safe_capture_fallback() {
             .expect("saturation fallback must not wait")
             .unwrap();
     assert_eq!(saturated, slipstream_core::CaptureReviewMetadata::default());
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let direct = tokio::time::timeout(
         Duration::from_secs(1),
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{known_id}"))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/photos/{known_id}"))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -4189,7 +4238,27 @@ async fn cancelled_raw_metadata_requests_retain_admission_until_native_work_fini
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     let by_location = photo_ids_by_location(&application, &ids).await;
 
+    // Enrollment shares native capacity. Wait for its actual completion before
+    // asserting that both slots belong to these controlled metadata workers.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while application.library.fingerprint_counts().enrolled != 3 {
+        assert!(
+            Instant::now() < deadline,
+            "fingerprint enrollment did not settle"
+        );
+        tokio::task::yield_now().await;
+    }
     let gate = Arc::new((Mutex::new((0_usize, false)), Condvar::new()));
+    struct ReleaseGate(Arc<(Mutex<(usize, bool)>, Condvar)>);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            let (lock, signal) = &*self.0;
+            lock.lock().unwrap().1 = true;
+            signal.notify_all();
+        }
+    }
+    // A failed assertion must also release native workers before Tokio teardown.
+    let _release = ReleaseGate(Arc::clone(&gate));
     let hook_gate = Arc::clone(&gate);
     let _hook = crate::app::install_metadata_inspection_test_hook(move |path| {
         if !path.as_str().starts_with("cancel-") {
@@ -4321,13 +4390,13 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     assert_eq!(replaced_metadata.modified().unwrap(), original_mtime);
     assert_ne!(replaced_metadata.ino(), original_metadata.ino());
 
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let unpublished_metadata = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/metadata"
+                    "https://camera.local/api/photos/{photo_id}/metadata"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -4339,8 +4408,8 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     let unpublished_direct = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/photos/{photo_id}"))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -4385,9 +4454,9 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     let gated_metadata = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/metadata"
+                    "https://camera.local/api/photos/{photo_id}/metadata"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -4399,8 +4468,8 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     let gated = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/photos/{photo_id}"))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -4449,9 +4518,9 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     let fresh_metadata = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/metadata"
+                    "https://camera.local/api/photos/{photo_id}/metadata"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -4466,8 +4535,8 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
     let fresh = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}"))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/photos/{photo_id}"))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -4551,14 +4620,14 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
         })
         .await
         .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let prior = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/photo-queries")
+                .uri("https://camera.local/api/photo-queries")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"selection":"selected","limit":60}"#))
@@ -4576,8 +4645,8 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
 
     let unpublished = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local/api/photos/{new_id}"))
+        authenticated_request()
+            .uri(format!("https://camera.local/api/photos/{new_id}"))
             .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
             .unwrap(),
@@ -4586,9 +4655,9 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
     assert_eq!(unpublished.status(), StatusCode::NOT_FOUND);
     let unpublished_folder = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/photo-queries")
+            .uri("https://camera.local/api/photo-queries")
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -4604,9 +4673,9 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
     let published = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/photo-queries")
+                .uri("https://camera.local/api/photo-queries")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"limit":60}"#))
@@ -4657,8 +4726,8 @@ async fn cli_photo_reads_keep_prior_membership_until_scan_publication() {
     );
     let published_new = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local/api/photos/{new_id}"))
+        authenticated_request()
+            .uri(format!("https://camera.local/api/photos/{new_id}"))
             .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
             .unwrap(),
@@ -4689,7 +4758,7 @@ async fn publication_preserves_facts_committed_between_scan_and_publication() {
         Application::open_with_gate(&config, ScanLimits::default(), None, Some(publish_receiver))
             .await
             .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
 
     // Commit a Selection State and a Review Preview seed while the
@@ -4697,9 +4766,9 @@ async fn publication_preserves_facts_committed_between_scan_and_publication() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "selectionState", "value": "selected"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -4813,12 +4882,12 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
             .await
             .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let health = send(
         &router,
-        Request::builder()
-            .uri("http://camera.local/healthz")
+        authenticated_request()
+            .uri("https://camera.local/healthz")
             .body(Body::empty())
             .unwrap(),
     )
@@ -4828,8 +4897,8 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4843,8 +4912,8 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     let status: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/status")
+            authenticated_request()
+                .uri("https://camera.local/api/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4856,8 +4925,8 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4871,7 +4940,7 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -4895,7 +4964,7 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         &router,
         "/api/browse",
         serde_json::json!({"source":"album","albumId": early_album}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(rejected_album.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -4905,8 +4974,8 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4918,8 +4987,8 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
     let status: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/status")
+            authenticated_request()
+                .uri("https://camera.local/api/status")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -4932,7 +5001,7 @@ async fn fresh_service_is_healthy_while_library_initializes_then_status_reaches_
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -4990,15 +5059,15 @@ async fn persisted_library_serves_immediately_while_background_rescan_runs() {
         Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
             .await
             .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     // The published Library must be served before the background rescan
     // has run at all.
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5013,7 +5082,7 @@ async fn persisted_library_serves_immediately_while_background_rescan_runs() {
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -5025,8 +5094,8 @@ async fn persisted_library_serves_immediately_while_background_rescan_runs() {
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5058,14 +5127,14 @@ async fn background_scan_failure_keeps_prior_published_library_and_reports_faile
     .await
     .unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     assert_eq!(application.scan_status().state, "failed");
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5086,10 +5155,10 @@ async fn background_scan_failure_keeps_prior_published_library_and_reports_faile
     // and keeps the prior published Library browsable.
     let rescanned = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/scan")
-            .header(header::ORIGIN, "http://camera.local")
+            .uri("https://camera.local/api/scan")
+            .header(header::ORIGIN, "https://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
@@ -5299,13 +5368,13 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
         Application::open_with_gate(&config, ScanLimits::default(), Some(gate_receiver), None)
             .await
             .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     // Served from the persisted Library before the background rescan runs.
     let overview_response = send(
         &router,
-        Request::builder()
-            .uri("http://camera.local/api/overview")
+        authenticated_request()
+            .uri("https://camera.local/api/overview")
             .body(Body::empty())
             .unwrap(),
     )
@@ -5323,7 +5392,7 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -5332,9 +5401,9 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
     let window: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=39940&limit=60"
+                    "https://camera.local/api/browse/{token}?start=39940&limit=60"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -5351,8 +5420,8 @@ async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_r
     let overview: serde_json::Value = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/overview")
+            authenticated_request()
+                .uri("https://camera.local/api/overview")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5425,7 +5494,7 @@ async fn library_window(router: &Router) -> serde_json::Value {
             router,
             "/api/browse",
             serde_json::json!({"source":"library"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5434,9 +5503,9 @@ async fn library_window(router: &Router) -> serde_json::Value {
     response_json(
         send(
             router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/browse/{token}?start=0&limit=60"
+                    "https://camera.local/api/browse/{token}?start=0&limit=60"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -5451,7 +5520,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
     let (base, config) = recovery_http_fixture(false);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     // The moved file appears only after the settled scan, so no automatic
     // recovery can act and the persisted record stays unavailable.
@@ -5461,8 +5530,8 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
     let unavailable = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/recovery/unavailable")
+            authenticated_request()
+                .uri("https://camera.local/api/recovery/unavailable")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5483,7 +5552,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5498,7 +5567,7 @@ async fn recovery_http_restores_unavailable_photo_without_fingerprint() {
             &router,
             "/api/recovery/apply",
             serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5529,7 +5598,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
     fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     // Both records are visible: the remembered unavailable Photo and the
     // newly discovered occupier.
@@ -5548,7 +5617,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5562,7 +5631,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
         &router,
         "/api/recovery/apply",
         serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
@@ -5572,7 +5641,7 @@ async fn recovery_http_retires_discovered_destination_photo() {
             &router,
             "/api/recovery/apply",
             serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG","retireDestination":true}]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5595,7 +5664,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
     let (base, config) = recovery_http_fixture(true);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     fs::create_dir_all(config.library_root.join("moved")).unwrap();
     // Different content than the enrolled fingerprint.
     fs::write(config.library_root.join("moved/a.JPG"), b"other-bytes").unwrap();
@@ -5605,7 +5674,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5616,7 +5685,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
         &router,
         "/api/recovery/apply",
         serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
@@ -5630,7 +5699,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5643,7 +5712,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5656,7 +5725,7 @@ async fn recovery_http_verifies_fingerprints_and_rejects_mismatches() {
             &router,
             "/api/recovery/apply",
             serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5671,7 +5740,7 @@ async fn recovery_http_rejects_duplicate_source_mappings() {
     let (base, config) = recovery_http_fixture(false);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     fs::create_dir_all(config.library_root.join("moved")).unwrap();
     fs::write(config.library_root.join("moved/a.JPG"), b"jpeg-bytes-a").unwrap();
     fs::write(config.library_root.join("moved/b.JPG"), b"jpeg-bytes-b").unwrap();
@@ -5685,7 +5754,7 @@ async fn recovery_http_rejects_duplicate_source_mappings() {
             {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"},
             {"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/b.JPG"}
         ]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
@@ -5696,8 +5765,8 @@ async fn recovery_http_rejects_duplicate_source_mappings() {
     let unavailable = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/recovery/unavailable")
+            authenticated_request()
+                .uri("https://camera.local/api/recovery/unavailable")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5714,13 +5783,13 @@ async fn recovery_http_validates_requests() {
     let (base, config) = recovery_http_fixture(false);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let escape = post_json(
         &router,
         "/api/recovery/propose",
         serde_json::json!({"oldPrefix":"..","newPrefix":"moved"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(escape.status(), StatusCode::BAD_REQUEST);
@@ -5729,7 +5798,7 @@ async fn recovery_http_validates_requests() {
         &router,
         "/api/recovery/propose",
         serde_json::json!({"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
@@ -5738,7 +5807,7 @@ async fn recovery_http_validates_requests() {
         &router,
         "/api/recovery/apply",
         serde_json::json!({"relocations":[]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
@@ -5747,7 +5816,7 @@ async fn recovery_http_validates_requests() {
         &router,
         "/api/recovery/apply",
         serde_json::json!({"relocations":[{"originalId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","newLocation":"moved/a.JPG"}]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(stale.status(), StatusCode::CONFLICT);
@@ -5763,7 +5832,7 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
     let (base, config) = recovery_http_fixture(false);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     // Nothing exists at the destination: the batch must not present it as a
     // usable mapping, and it must stay explicitly unverified.
@@ -5772,7 +5841,7 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
             &router,
             "/api/recovery/propose",
             serde_json::json!({"oldPrefix":"shoot","newPrefix":"moved"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -5789,7 +5858,7 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
         &router,
         "/api/recovery/apply",
         serde_json::json!({"relocations":[{"originalId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","newLocation":"moved/a.JPG"}]}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(refused.status(), StatusCode::CONFLICT);
@@ -5799,8 +5868,8 @@ async fn recovery_http_reports_missing_destination_without_fingerprint() {
     let unavailable = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/recovery/unavailable")
+            authenticated_request()
+                .uri("https://camera.local/api/recovery/unavailable")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -5835,13 +5904,13 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
         .id;
     let before_photo = application.library.photo(&photo_id).await.unwrap().unwrap();
     let before_album = application.library.album(&album_id).await.unwrap().unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let unsupported = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri(format!("http://camera.local/api/photos/{photo_id}/state"))
+            .uri(format!("https://camera.local/api/photos/{photo_id}/state"))
             .header("Slipstream-CLI-Contract", "2")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"field":"rating","value":4}"#))
@@ -5852,9 +5921,9 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
 
     let malformed = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri(format!("http://camera.local/api/albums/{album_id}/rename"))
+            .uri(format!("https://camera.local/api/albums/{album_id}/rename"))
             .header(
                 "Slipstream-CLI-Contract",
                 header::HeaderValue::from_bytes(&[0xff]).unwrap(),
@@ -5868,9 +5937,9 @@ async fn cli_contract_header_rejects_reused_writes_before_domain_admission() {
 
     let duplicate = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri(format!("http://camera.local/api/photos/{photo_id}/state"))
+            .uri(format!("https://camera.local/api/photos/{photo_id}/state"))
             .header("Slipstream-CLI-Contract", "1")
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
@@ -5903,7 +5972,7 @@ async fn cli_album_routes_map_checked_atomic_results_and_keep_web_shapes() {
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let legacy = post_json(
         &router,
@@ -6168,7 +6237,7 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .remove(0);
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let created = response_json(
         post_cli_json(
             &router,
@@ -6203,9 +6272,9 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
     ] {
         let rejected = send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/albums")
+                .uri("https://camera.local/api/albums")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body))
@@ -6238,10 +6307,10 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
 
     let duplicate_key = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
             .uri(format!(
-                "http://camera.local/api/albums/{album_id}/changes"
+                "https://camera.local/api/albums/{album_id}/changes"
             ))
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
@@ -6324,7 +6393,7 @@ async fn cli_album_reorder_refuses_an_album_larger_than_the_complete_order_bound
     wait_for_scan_settled(&application).await;
     let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     assert_eq!(photo_ids.len(), 101);
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let created = response_json(
         post_cli_json(&router, "/api/albums", serde_json::json!({"name": "Large"})).await,
     )
@@ -6447,13 +6516,13 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         .add_album_members(&first_album, vec![ids[0].clone(), ids[1].clone()])
         .await
         .unwrap();
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let year_zero = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/photo-queries")
+            .uri("https://camera.local/api/photo-queries")
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"capturedFrom":"0000-01-01T00:00:00"}"#))
@@ -6468,8 +6537,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
 
     let incompatible = send(
         &router,
-        Request::builder()
-            .uri("http://camera.local/api/capabilities")
+        authenticated_request()
+            .uri("https://camera.local/api/capabilities")
             .header("Slipstream-CLI-Contract", "2")
             .body(Body::empty())
             .unwrap(),
@@ -6494,8 +6563,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let capabilities = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/capabilities")
+            authenticated_request()
+                .uri("https://camera.local/api/capabilities")
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6520,8 +6589,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let status = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/status")
+            authenticated_request()
+                .uri("https://camera.local/api/status")
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6540,8 +6609,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let album_page = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/album-summaries?limit=1")
+            authenticated_request()
+                .uri("https://camera.local/api/album-summaries?limit=1")
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6587,9 +6656,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let album_page_two = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/album-summaries?cursor={album_cursor}"
+                    "https://camera.local/api/album-summaries?cursor={album_cursor}"
                 ))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
@@ -6619,9 +6688,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let photo_page = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/photo-queries")
+                .uri("https://camera.local/api/photo-queries")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -6698,9 +6767,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let photo_page_two = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photo-queries/{photo_cursor}"
+                    "https://camera.local/api/photo-queries/{photo_cursor}"
                 ))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
@@ -6716,9 +6785,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let photo_page_three = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photo-queries/{photo_cursor_two}"
+                    "https://camera.local/api/photo-queries/{photo_cursor_two}"
                 ))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
@@ -6746,8 +6815,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let direct = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{}", ids[2]))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/photos/{}", ids[2]))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6766,8 +6835,8 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let direct_album = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/albums/{retained_album}"))
+            authenticated_request()
+                .uri(format!("https://camera.local/api/albums/{retained_album}"))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6804,9 +6873,9 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     let missing_page = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photo-queries/{missing_cursor}"
+                    "https://camera.local/api/photo-queries/{missing_cursor}"
                 ))
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
@@ -6840,12 +6909,12 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     }
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let folders = response_json(
         send(
             &router,
-            Request::builder()
-                .uri("http://camera.local/api/file-locations?limit=1")
+            authenticated_request()
+                .uri("https://camera.local/api/file-locations?limit=1")
                 .header("Slipstream-CLI-Contract", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -6861,9 +6930,9 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     application.rescan().await.unwrap();
     let expired_folder = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/file-locations?cursor={folder_cursor}"
+                "https://camera.local/api/file-locations?cursor={folder_cursor}"
             ))
             .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
@@ -6879,9 +6948,9 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     let query = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/photo-queries")
+                .uri("https://camera.local/api/photo-queries")
                 .header("Slipstream-CLI-Contract", "1")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"limit":1}"#))
@@ -6902,8 +6971,8 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
     }
     let expired_query = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local/api/photo-queries/{cursor}"))
+        authenticated_request()
+            .uri(format!("https://camera.local/api/photo-queries/{cursor}"))
             .header("Slipstream-CLI-Contract", "1")
             .body(Body::empty())
             .unwrap(),
@@ -6941,11 +7010,11 @@ async fn post_json(
     origin: Option<&str>,
 ) -> Response<Body> {
     let uri = if uri.starts_with('/') {
-        format!("http://camera.local{uri}")
+        format!("https://camera.local{uri}")
     } else {
         uri.to_owned()
     };
-    let mut builder = Request::builder()
+    let mut builder = authenticated_request()
         .method("POST")
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json");
@@ -6958,9 +7027,9 @@ async fn post_json(
 async fn post_cli_json(router: &Router, uri: &str, body: serde_json::Value) -> Response<Body> {
     send(
         router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri(format!("http://camera.local{uri}"))
+            .uri(format!("https://camera.local{uri}"))
             .header("Slipstream-CLI-Contract", "1")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
@@ -7061,7 +7130,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
     config.port = 0;
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
     assert_eq!(ids.len(), 3);
 
@@ -7070,7 +7139,7 @@ async fn album_and_state_protocol_persists_across_reopen() {
             &router,
             "/api/albums",
             serde_json::json!({"name": " Picks "}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7085,11 +7154,11 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri(format!("http://camera.local/api/albums/{album_a}/members"))
+                .uri(format!("https://camera.local/api/albums/{album_a}/members"))
                 .header(header::CONTENT_TYPE, "application/json")
-                .header(header::ORIGIN, "http://camera.local")
+                .header(header::ORIGIN, "https://camera.local")
                 .body(Body::from(serde_json::json!({"photoIds": ids}).to_string()))
                 .unwrap(),
         )
@@ -7100,9 +7169,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_a}/order"),
+            &format!("https://camera.local/api/albums/{album_a}/order"),
             serde_json::json!({"photoIds": [&ids[2], &ids[0], &ids[1]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7111,9 +7180,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_a}/progress"),
+            &format!("https://camera.local/api/albums/{album_a}/progress"),
             serde_json::json!({"photoId": ids[0]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7122,9 +7191,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let created_b = response_json(
         post_json(
             &router,
-            "http://camera.local/api/albums",
+            "https://camera.local/api/albums",
             serde_json::json!({"name": "Other"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7141,9 +7210,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let first_b_add = response_json(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members"),
+            &format!("https://camera.local/api/albums/{album_b}/members"),
             serde_json::json!({"photoIds": [&ids[0]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7155,9 +7224,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let mixed_b_add = response_json(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members"),
+            &format!("https://camera.local/api/albums/{album_b}/members"),
             serde_json::json!({"photoIds": [&ids[0], &ids[1]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7170,9 +7239,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/progress"),
+            &format!("https://camera.local/api/albums/{album_b}/progress"),
             serde_json::json!({"photoId": ids[1]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7181,9 +7250,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let removed_b = response_json(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": [ids[1]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7202,9 +7271,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let repeated_removed_b = response_json(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": [ids[1]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7217,9 +7286,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members"),
+            &format!("https://camera.local/api/albums/{album_b}/members"),
             serde_json::json!({"photoIds": [&ids[2], &ids[2]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7228,9 +7297,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": [&ids[0], &ids[0]]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7239,9 +7308,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": []}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7253,9 +7322,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": over_limit}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7264,9 +7333,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_b}/members/batch-remove"),
+            &format!("https://camera.local/api/albums/{album_b}/members/batch-remove"),
             serde_json::json!({"photoIds": ["00000000-0000-4000-8000-00000000dead"]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7276,9 +7345,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let selected = response_json(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "selectionState", "value": "selected", "albumId": album_a}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await,
     )
@@ -7288,9 +7357,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "rating", "value": 4}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7315,13 +7384,13 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({
                 "field": undo["field"],
                 "value": undo["priorValue"],
                 "expectedCurrent": undo["expectedCurrent"]
             }),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7330,9 +7399,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/photos/{}/state", ids[0]),
+            &format!("https://camera.local/api/photos/{}/state", ids[0]),
             serde_json::json!({"field": "selectionState", "value": "rejected"}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7341,9 +7410,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     let conflict = response_json(
             post_json(
                 &router,
-                &format!("http://camera.local/api/photos/{}/state", ids[0]),
+                &format!("https://camera.local/api/photos/{}/state", ids[0]),
                 serde_json::json!({"field": "selectionState", "value": "selected", "expectedCurrent": "undecided"}),
-                Some("http://camera.local"),
+                Some("https://camera.local"),
             )
             .await,
         )
@@ -7356,9 +7425,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_a}/members/remove"),
+            &format!("https://camera.local/api/albums/{album_a}/members/remove"),
             serde_json::json!({"photoId": ids[0]}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7379,9 +7448,9 @@ async fn album_and_state_protocol_persists_across_reopen() {
     assert_eq!(
         post_json(
             &router,
-            &format!("http://camera.local/api/albums/{album_a}/delete"),
+            &format!("https://camera.local/api/albums/{album_a}/delete"),
             serde_json::json!({}),
-            Some("http://camera.local"),
+            Some("https://camera.local"),
         )
         .await
         .status(),
@@ -7423,14 +7492,17 @@ async fn unbounded_library_routes_are_retired() {
     jpeg_fixture(&config.library_root.join("a.jpg"), 8, 4, [32, 64, 192]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     for uri in [
-        "http://camera.local/api/photos",
-        "http://camera.local/api/albums",
+        "https://camera.local/api/photos",
+        "https://camera.local/api/albums",
     ] {
         let response = send(
             &router,
-            Request::builder().uri(uri).body(Body::empty()).unwrap(),
+            authenticated_request()
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
@@ -7442,9 +7514,9 @@ async fn unbounded_library_routes_are_retired() {
     }
     let deleted = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("DELETE")
-            .uri("http://camera.local/api/photos")
+            .uri("https://camera.local/api/photos")
             .body(Body::empty())
             .unwrap(),
     )
@@ -7458,11 +7530,11 @@ async fn unbounded_library_routes_are_retired() {
 }
 
 #[tokio::test]
-async fn mutations_do_not_require_origin_and_scan_has_no_body() {
+async fn bearer_mutations_without_origin_work_but_foreign_origins_are_rejected() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     for (name, origin) in [
         ("No Origin", None),
         ("Foreign Origin", Some("https://foreign.example")),
@@ -7478,7 +7550,11 @@ async fn mutations_do_not_require_origin_and_scan_has_no_body() {
             )
             .await
             .status(),
-            StatusCode::OK,
+            if origin.is_none() {
+                StatusCode::OK
+            } else {
+                StatusCode::FORBIDDEN
+            },
             "{name}"
         );
     }
@@ -7506,16 +7582,16 @@ async fn mutations_do_not_require_origin_and_scan_has_no_body() {
 }
 
 #[tokio::test]
-async fn trusted_network_listener_does_not_use_request_metadata_as_access_control() {
+async fn bearer_access_ignores_forwarded_host_but_enforces_browser_origin() {
     let (base, mut config) = prepare_fixture();
     config.host = "0.0.0.0".to_owned();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let overview = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri("https://attacker.example/api/overview")
             .header(header::HOST, "camera.local")
             .header("forwarded", "host=photos.example;proto=https")
@@ -7527,7 +7603,7 @@ async fn trusted_network_listener_does_not_use_request_metadata_as_access_contro
 
     let mutation = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
             .uri("/api/albums")
             .header(header::HOST, "attacker.example")
@@ -7539,11 +7615,11 @@ async fn trusted_network_listener_does_not_use_request_metadata_as_access_contro
             .unwrap(),
     )
     .await;
-    assert_eq!(mutation.status(), StatusCode::OK);
+    assert_eq!(mutation.status(), StatusCode::FORBIDDEN);
 
     let health = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri("/healthz")
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
@@ -7553,7 +7629,7 @@ async fn trusted_network_listener_does_not_use_request_metadata_as_access_contro
     assert_eq!(health.status(), StatusCode::OK);
     let health_mutation = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
             .uri("/healthz")
             .header(header::HOST, "attacker.example")
@@ -7572,11 +7648,11 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
     let (base, config) = prepare_fixture();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let request = |body: Body, length: Option<&str>| {
-        let mut builder = Request::builder()
+        let mut builder = authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/albums")
+            .uri("https://camera.local/api/albums")
             .header(header::CONTENT_TYPE, "application/json");
         if let Some(length) = length {
             builder = builder.header(header::CONTENT_LENGTH, length);
@@ -7623,9 +7699,9 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
     let scan = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/scan")
+                .uri("https://camera.local/api/scan")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7649,7 +7725,7 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     jpeg_fixture(&original, 90, 45, [192, 64, 32]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .into_iter()
@@ -7658,8 +7734,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     let preview = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7676,18 +7754,15 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(summary.preview.url.as_deref(), Some(url.as_str()));
     let derivative = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local{url}"))
+        authenticated_request()
+            .uri(format!("https://camera.local{url}"))
             .body(Body::empty())
             .unwrap(),
     )
     .await;
     assert_eq!(derivative.status(), StatusCode::OK);
     assert_eq!(derivative.headers()[header::CONTENT_TYPE], "image/jpeg");
-    assert_eq!(
-        derivative.headers()[header::CACHE_CONTROL],
-        "public, max-age=31536000, immutable"
-    );
+    assert_eq!(derivative.headers()[header::CACHE_CONTROL], "no-store");
     assert_eq!(derivative.headers()["x-content-type-options"], "nosniff");
     let etag = derivative.headers()[header::ETAG]
         .to_str()
@@ -7711,8 +7786,8 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     fs::write(&cache_path, marker_complete_corrupt_jpeg(90, 45)).unwrap();
     let repaired = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local{url}"))
+        authenticated_request()
+            .uri(format!("https://camera.local{url}"))
             .body(Body::empty())
             .unwrap(),
     )
@@ -7728,8 +7803,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     let cached = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7741,8 +7818,8 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local{url}"))
+            authenticated_request()
+                .uri(format!("https://camera.local{url}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7753,9 +7830,9 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     jpeg_fixture(&original, 90, 45, [192, 64, 32]);
     let head = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("HEAD")
-            .uri(format!("http://camera.local{url}"))
+            .uri(format!("https://camera.local{url}"))
             .body(Body::empty())
             .unwrap(),
     )
@@ -7770,8 +7847,8 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     );
     let not_modified = send(
         &router,
-        Request::builder()
-            .uri(format!("http://camera.local{url}"))
+        authenticated_request()
+            .uri(format!("https://camera.local{url}"))
             .header(header::IF_NONE_MATCH, etag)
             .body(Body::empty())
             .unwrap(),
@@ -7791,10 +7868,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .method("POST")
-                .uri("http://camera.local/api/scan")
-                .header(header::ORIGIN, "http://camera.local")
+                .uri("https://camera.local/api/scan")
+                .header(header::ORIGIN, "https://camera.local")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7805,8 +7882,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     let changed = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7819,8 +7898,8 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local{url}"))
+            authenticated_request()
+                .uri(format!("https://camera.local{url}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7831,8 +7910,8 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     assert_eq!(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local{changed_url}"))
+            authenticated_request()
+                .uri(format!("https://camera.local{changed_url}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7845,10 +7924,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     fs::write(&original, b"malformed replacement").unwrap();
     send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/scan")
-            .header(header::ORIGIN, "http://camera.local")
+            .uri("https://camera.local/api/scan")
+            .header(header::ORIGIN, "https://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
@@ -7856,8 +7935,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     let stale = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7874,10 +7955,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     fs::remove_file(&original).unwrap();
     send(
         &router,
-        Request::builder()
+        authenticated_request()
             .method("POST")
-            .uri("http://camera.local/api/scan")
-            .header(header::ORIGIN, "http://camera.local")
+            .uri("https://camera.local/api/scan")
+            .header(header::ORIGIN, "https://camera.local")
             .body(Body::empty())
             .unwrap(),
     )
@@ -7885,8 +7966,10 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
     let unavailable = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7914,7 +7997,7 @@ async fn photo_metadata_protocol_returns_capture_time_when_available() {
     );
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .into_iter()
@@ -7922,9 +8005,9 @@ async fn photo_metadata_protocol_returns_capture_time_when_available() {
         .unwrap();
     let response = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/photos/{photo_id}/metadata"
+                "https://camera.local/api/photos/{photo_id}/metadata"
             ))
             .body(Body::empty())
             .unwrap(),
@@ -7937,9 +8020,9 @@ async fn photo_metadata_protocol_returns_capture_time_when_available() {
     fs::remove_file(config.library_root.join("metadata.jpg")).unwrap();
     let unavailable = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/photos/{photo_id}/metadata"
+                "https://camera.local/api/photos/{photo_id}/metadata"
             ))
             .body(Body::empty())
             .unwrap(),
@@ -7958,7 +8041,7 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
     fs::write(&original, b"not jpeg").unwrap();
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .into_iter()
@@ -7968,8 +8051,10 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
     let first = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -8007,8 +8092,10 @@ async fn no_usable_source_seed_is_short_circuited_from_published_facts() {
     let second = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -8032,13 +8119,13 @@ async fn browse_windows_report_the_ordering_original_filename() {
     jpeg_fixture(&root.join("shoot/IMG_4522.JPG"), 8, 4, [32, 64, 192]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
 
     let opened = post_json(
         &router,
         "/api/browse",
         serde_json::json!({"source":"library"}),
-        Some("http://camera.local"),
+        Some("https://camera.local"),
     )
     .await;
     assert_eq!(opened.status(), StatusCode::OK);
@@ -8046,9 +8133,9 @@ async fn browse_windows_report_the_ordering_original_filename() {
     let token = opened["token"].as_str().unwrap();
     let window = send(
         &router,
-        Request::builder()
+        authenticated_request()
             .uri(format!(
-                "http://camera.local/api/browse/{}?start=0&limit=60",
+                "https://camera.local/api/browse/{}?start=0&limit=60",
                 token
             ))
             .body(Body::empty())
@@ -8094,7 +8181,7 @@ async fn browse_windows_hydrate_only_current_thumbnail_manifests() {
 
     let thumbnail = application.thumbnail(&photo_id).await.unwrap();
     let thumbnail_url = thumbnail.url.unwrap();
-    assert!(thumbnail_url.starts_with("/api/derivatives/"));
+    assert!(thumbnail_url.starts_with("/api/private/derivatives/"));
     assert!(thumbnail_url.contains("/thumbnail/"));
     let hydrated = published_photo_summary(&application, &photo_id).await;
     assert_eq!(
@@ -8120,7 +8207,7 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     jpeg_fixture(&original, 90, 45, [192, 64, 32]);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
         .await
         .into_iter()
@@ -8129,8 +8216,10 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let preview = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -8166,9 +8255,9 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let thumbnail = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/thumbnail"
+                    "https://camera.local/api/photos/{photo_id}/thumbnail"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -8192,13 +8281,13 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     assert_eq!(facts(&application, &photo_id).await, established);
-    let router = create_router(Arc::clone(&application), config.web_root());
+    let router = authorized_router(Arc::clone(&application), config.web_root());
     let reopened = response_json(
         send(
             &router,
-            Request::builder()
+            authenticated_request()
                 .uri(format!(
-                    "http://camera.local/api/photos/{photo_id}/thumbnail"
+                    "https://camera.local/api/photos/{photo_id}/thumbnail"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -8210,8 +8299,10 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     let review = response_json(
         send(
             &router,
-            Request::builder()
-                .uri(format!("http://camera.local/api/photos/{photo_id}/preview"))
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/preview"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -8222,4 +8313,16 @@ async fn thumbnail_requests_keep_review_preview_facts_exact() {
     assert_eq!(facts(&application, &photo_id).await, established);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
+}
+
+fn authorized_router(application: Arc<Application>, web_root: impl Into<PathBuf>) -> Router {
+    application.access.seed_test_token();
+    create_router(application, web_root)
+}
+
+fn authenticated_request() -> ::http::request::Builder {
+    Request::builder().header(
+        "Authorization",
+        format!("Bearer {}", crate::access::TEST_TOKEN),
+    )
 }

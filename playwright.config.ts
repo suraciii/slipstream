@@ -6,6 +6,7 @@ export default defineConfig({
   use: {
     browserName: "chromium",
     headless: true,
+    ignoreHTTPSErrors: true,
     ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
       ? {
           launchOptions: {

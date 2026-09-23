@@ -58,7 +58,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -223,7 +223,7 @@
     "name": "browse-close",
     "request": {
       "headers": {
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "DELETE",
       "path": "/api/browse/$token"
@@ -249,7 +249,7 @@
     "name": "browse-close-idempotent",
     "request": {
       "headers": {
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "DELETE",
       "path": "/api/browse/$token"
@@ -269,7 +269,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -290,7 +290,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -311,7 +311,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -331,7 +331,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -339,19 +339,12 @@
   },
   {
     "expected": {
+      "status": 403,
       "body": {
-        "position": 0,
-        "selectionCounts": {
-          "rejected": 0,
-          "selected": 0,
-          "undecided": 3
-        },
-        "token": "$token",
-        "total": 3
-      },
-      "status": 200
+        "error": "access_denied"
+      }
     },
-    "name": "browse-open-foreign-origin-is-admitted",
+    "name": "browse-open-foreign-origin-is-rejected",
     "request": {
       "body": {
         "source": "library"
@@ -366,9 +359,12 @@
   },
   {
     "expected": {
-      "status": 204
+      "status": 403,
+      "body": {
+        "error": "access_denied"
+      }
     },
-    "name": "browse-close-foreign-origin-is-admitted",
+    "name": "browse-close-foreign-origin-is-rejected",
     "request": {
       "headers": {
         "origin": "https://foreign.example"
@@ -476,7 +472,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -497,7 +493,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -519,7 +515,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -541,7 +537,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -569,7 +565,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -660,7 +656,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -681,7 +677,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -704,7 +700,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -732,7 +728,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -760,7 +756,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -781,7 +777,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -848,7 +844,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/photos/state"
@@ -878,7 +874,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/photos/state"
@@ -906,7 +902,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -959,7 +955,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/browse"
@@ -1124,7 +1120,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/rename"
@@ -1154,7 +1150,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/members"
@@ -1181,7 +1177,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/order"
@@ -1208,7 +1204,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/progress"
@@ -1235,7 +1231,7 @@
       },
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/members/remove"
@@ -1253,7 +1249,7 @@
       "body": {},
       "headers": {
         "content-type": "application/json",
-        "origin": "http://camera.local"
+        "origin": "https://camera.local"
       },
       "method": "POST",
       "path": "/api/albums/$albumId/delete"

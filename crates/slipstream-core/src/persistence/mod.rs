@@ -12,7 +12,9 @@ pub use crate::domain::{
     PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
     ScanSnapshot, SelectionState,
 };
-pub use admission::{DatabaseName, StateDirectory, StateError, StateFileIdentity};
+pub use admission::{
+    DatabaseName, StateDatabaseLock, StateDirectory, StateError, StateFileIdentity,
+};
 pub(crate) use owner::expand_library_binding;
 pub use owner::{
     AlbumWriteError, DiscoveredFingerprint, FingerprintCounts, FingerprintTarget, MutationError,

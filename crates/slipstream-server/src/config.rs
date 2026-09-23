@@ -15,6 +15,7 @@ pub struct Config {
     pub cache_directory: PathBuf,
     pub database_basename: String,
     pub host: String,
+    pub public_origin: String,
     pub port: u16,
     /// Tests and packaged deployments may provide a built Web directory. When
     /// absent, the binary uses the repository's conventional `apps/web/dist`.
@@ -76,7 +77,13 @@ impl Config {
         {
             return Err(ConfigError::Invalid("SLIPSTREAM_WEB_ROOT"));
         }
+        let public_origin = crate::access::canonical_origin(
+            &get("SLIPSTREAM_PUBLIC_ORIGIN")
+                .ok_or(ConfigError::Missing("SLIPSTREAM_PUBLIC_ORIGIN"))?,
+        )
+        .ok_or(ConfigError::Invalid("SLIPSTREAM_PUBLIC_ORIGIN"))?;
         Ok(Self {
+            public_origin,
             library_root,
             state_directory,
             cache_directory,

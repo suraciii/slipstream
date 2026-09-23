@@ -123,6 +123,7 @@ export type GridProgressViewModel = Readonly<{
 
 export type LibraryBrowserIntent =
   | Readonly<{ kind: "summary-action"; presentationId: number }>
+  | Readonly<{ kind: "sign-out" }>
   /// Commits the View options draft once. A size-only change never reaches the
   /// page model: it is Grid presentation and keeps the open Snapshot and its
   /// anchor.
@@ -631,7 +632,7 @@ export function createLibraryBrowserView(
             <p data-summary-status role="status">Loading Library…</p>
             <p class="recovery-notice" data-recovery-notice hidden role="status"></p>
             <div class="source-list" data-source-list></div>
-            <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button></footer>
+            <footer class="source-footer"><button type="button" data-retry hidden>Retry connection</button><button type="button" class="quiet" data-access-sign-out>Sign out</button></footer>
           </nav>
         </dialog>
         <div class="source-resizer" data-source-resizer role="separator" aria-label="Resize sources" aria-orientation="vertical" tabindex="0"></div>
@@ -881,6 +882,7 @@ export function createLibraryBrowserView(
   };
   const sourceList = required<HTMLElement>(root, "[data-source-list]");
   const retry = required<HTMLButtonElement>(root, "[data-retry]");
+  const signOut = required<HTMLButtonElement>(root, "[data-access-sign-out]");
   const refresh = required<HTMLButtonElement>(root, "[data-refresh]");
   const gridView = required<HTMLElement>(root, "[data-grid-view]");
   const gridTitle = required<HTMLElement>(root, "[data-grid-title]");
@@ -3998,6 +4000,7 @@ export function createLibraryBrowserView(
     ),
   );
   retry.addEventListener("click", () => send({ kind: "retry-source" }));
+  signOut.addEventListener("click", () => send({ kind: "sign-out" }));
   retryPhoto.addEventListener("click", () => send({ kind: "retry-photo" }));
   dockPrevious.addEventListener("click", () => send({ kind: "previous" }));
   dockNext.addEventListener("click", () => send({ kind: "next" }));

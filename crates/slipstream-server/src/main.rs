@@ -11,6 +11,21 @@ async fn main() {
     }
 
     if let Some(command) = command {
+        if matches!(
+            command.to_str(),
+            Some("access-create" | "access-rotate" | "access-revoke")
+        ) {
+            let result = ExpansionConfig::from_process_environment()
+                .map_err(slipstream_server::ServerError::from)
+                .and_then(|config| {
+                    slipstream_server::administer_access(config, command.to_str().unwrap())
+                });
+            if let Err(error) = result {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if command != "expand-library" {
             eprintln!("Slipstream startup failed: unknown command");
             std::process::exit(1);

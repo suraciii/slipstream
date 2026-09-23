@@ -112,6 +112,12 @@ The verifier creates a fresh private root under
 `/var/lib/slipstream-processing-qualification`, exact-owned containers and slices,
 and small capped tmpfs mounts. It removes its runtime resources and reverse
 checks cleanup. It does not inspect or stop existing Slipstream deployments.
+Its Web fixture seeds a fresh synthetic token digest in that isolated state and
+sends Bearer credentials only to private API probes on the `127.0.0.1`-published
+HTTP backend, without an `Origin` header. The configured
+`https://qualification.invalid` origin is reserved fixture configuration; this
+internal readiness and survivor check is not evidence of public HTTPS, proxy, or
+TLS behavior.
 Evidence includes binary/image identities, receipts, pressure counters, retained
 storage accounting, crash boundaries, permitted UID/socket proof, and repeated
 Web Library reads. A synthetic Album must survive pressure, a rename, and a Web
