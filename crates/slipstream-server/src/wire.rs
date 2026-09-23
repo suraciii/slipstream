@@ -347,7 +347,7 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
         let capture_time = (value.capture.state == slipstream_core::CaptureMetadataState::Known)
             .then_some(value.capture.order_key)
             .flatten();
-        let web_path = format!("/?photoId={}", value.id);
+        let web_path = photo_web_path(&value.id);
         Self {
             id: value.id,
             filename: value.filename,
@@ -385,6 +385,64 @@ pub(crate) struct CliPreviewFactsWire {
     pub height: Option<u32>,
     pub detail_limited: Option<bool>,
 }
+
+/// The current supported derivative one admitted CLI Preview request may
+/// download. Every fact belongs to the bytes the caller is about to read.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliPreviewResponse {
+    pub photo_id: String,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_limited: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub web_path: String,
+}
+
+/// The typed facts a CLI derivative download repeats so the caller can compare
+/// them with the metadata it was admitted with. The response body is JPEG bytes,
+/// so these travel as custom headers.
+#[derive(Clone, Debug)]
+pub(crate) struct CliDerivativeFacts {
+    pub photo_id: String,
+    pub source: &'static str,
+    pub source_revision: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CliDerivativeFacts {
+    /// The repeated facts as header name and value pairs. `source_revision`
+    /// separates its fields with NUL, which is not a legal header value, so the
+    /// revision is hexadecimal.
+    pub(crate) fn headers(&self) -> [(&'static str, String); 5] {
+        [
+            (PREVIEW_PHOTO_HEADER, self.photo_id.clone()),
+            (PREVIEW_SOURCE_HEADER, self.source.to_owned()),
+            (
+                PREVIEW_REVISION_HEADER,
+                crate::queries::hex_encode(self.source_revision.as_bytes()),
+            ),
+            (PREVIEW_WIDTH_HEADER, self.width.to_string()),
+            (PREVIEW_HEIGHT_HEADER, self.height.to_string()),
+        ]
+    }
+}
+
+pub(crate) const PREVIEW_PHOTO_HEADER: &str = "slipstream-preview-photo";
+pub(crate) const PREVIEW_SOURCE_HEADER: &str = "slipstream-preview-source";
+pub(crate) const PREVIEW_REVISION_HEADER: &str = "slipstream-preview-revision";
+pub(crate) const PREVIEW_WIDTH_HEADER: &str = "slipstream-preview-width";
+pub(crate) const PREVIEW_HEIGHT_HEADER: &str = "slipstream-preview-height";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -822,6 +880,12 @@ pub(crate) fn derivative_target_name(target: DerivativeTarget) -> &'static str {
     }
 }
 
+/// The canonical browser Destination for one Photo, shared by every wire that
+/// hands a Photo to a client.
+pub(crate) fn photo_web_path(photo_id: &str) -> String {
+    format!("/?photoId={photo_id}")
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewResponse {
@@ -896,6 +960,9 @@ impl PreviewResponse {
 pub struct DerivativeDelivery {
     pub cache_key: String,
     pub bytes: Vec<u8>,
+    /// The repeated typed facts for a CLI download. The Web derivative route
+    /// leaves this empty, so its response stays unchanged.
+    pub(crate) cli_facts: Option<CliDerivativeFacts>,
 }
 
 /// One unavailable Photo listed by the bounded recovery review entry.

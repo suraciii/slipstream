@@ -1417,6 +1417,7 @@ name = "slipstream-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "image",
  "libc",
  "reqwest",
  "rusqlite",
@@ -1428,6 +1429,8 @@ dependencies = [
  "slipstream-server",
  "tokio",
  "url",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

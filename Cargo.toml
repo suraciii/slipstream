@@ -26,3 +26,5 @@ pkg-config = "=0.3.32"
 reqwest = { version = "=0.13.3", default-features = false, features = ["json", "rustls"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 url = "=2.5.8"
+zune-core = "=0.5.3"
+zune-jpeg = "=0.5.15"

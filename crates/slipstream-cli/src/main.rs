@@ -12,6 +12,7 @@ use std::{
 
 async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant) -> u8 {
     let exit_code = result.exit_code;
+    let committed_path = result.committed_preview_path.clone();
     let (result_send, result_receive) = mpsc::sync_channel(1);
     let (completion_send, mut completion_receive) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
@@ -36,29 +37,69 @@ async fn publish_until(result: InvocationResult, deadline: tokio::time::Instant)
         let scheduling_settlement = std::time::Instant::now() + Duration::from_millis(25);
         while std::time::Instant::now() < scheduling_settlement {
             match completion_receive.try_recv() {
-                Ok(result) => return if result.is_ok() { exit_code } else { 6 },
+                Ok(result) => {
+                    return if result.is_ok() {
+                        exit_code
+                    } else {
+                        publication_failure(
+                            committed_path.as_deref(),
+                            if exit_code == 130 { 130 } else { 6 },
+                        )
+                    };
+                }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     std::thread::yield_now();
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return 6;
+                    return publication_failure(
+                        committed_path.as_deref(),
+                        if exit_code == 130 { 130 } else { 6 },
+                    );
                 }
             }
         }
-        std::process::exit(if exit_code == 130 { 130 } else { 6 });
+        std::process::exit(i32::from(publication_failure(
+            committed_path.as_deref(),
+            if exit_code == 130 { 130 } else { 6 },
+        )));
     }
 
     tokio::select! {
         completion = &mut completion_receive => {
-            if completion.is_ok_and(|result| result.is_ok()) { exit_code } else { 6 }
+            if completion.is_ok_and(|result| result.is_ok()) {
+                exit_code
+            } else {
+                publication_failure(
+                    committed_path.as_deref(),
+                    if exit_code == 130 { 130 } else { 6 },
+                )
+            }
         }
         _ = tokio::time::sleep_until(deadline) => {
-            std::process::exit(if exit_code == 130 { 130 } else { 6 });
+            std::process::exit(i32::from(publication_failure(committed_path.as_deref(), 6)));
         }
         _ = tokio::signal::ctrl_c() => {
-            std::process::exit(130);
+            std::process::exit(i32::from(publication_failure(committed_path.as_deref(), 130)));
         }
     }
+}
+
+fn publication_failure(committed_path: Option<&str>, exit_code: u8) -> u8 {
+    if let Some(path) = committed_path {
+        let escaped = serde_json::to_string(path).expect("path serialization is infallible");
+        let message = format!(
+            "Preview file was already published at {escaped}; inspect it before retrying.\n"
+        );
+        // The stdout deadline must not turn into an unbounded stderr write.
+        unsafe {
+            let flags = libc::fcntl(libc::STDERR_FILENO, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                libc::write(libc::STDERR_FILENO, message.as_ptr().cast(), message.len());
+            }
+        }
+    }
+    exit_code
 }
 
 #[tokio::main]

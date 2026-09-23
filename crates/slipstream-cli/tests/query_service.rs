@@ -1,10 +1,14 @@
 use serde_json::Value;
 use slipstream_server::Config;
 mod common;
+#[allow(dead_code)]
+#[path = "../../slipstream-core/src/test_support.rs"]
+mod raw_fixture;
 use std::{
     fs,
     io::{ErrorKind, Read, Write},
     net::TcpListener,
+    os::unix::fs::{MetadataExt, symlink},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -15,6 +19,14 @@ use std::{
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 fn fake_service(response: Value) -> (String, JoinHandle<()>) {
+    fake_service_with_scan_delay(response, false, false)
+}
+
+fn fake_service_with_scan_delay(
+    response: Value,
+    stall_scan: bool,
+    failed_scan: bool,
+) -> (String, JoinHandle<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
@@ -23,6 +35,11 @@ fn fake_service(response: Value) -> (String, JoinHandle<()>) {
             let mut request = [0_u8; 8192];
             let count = stream.read(&mut request).unwrap();
             common::assert_bearer(&request[..count]);
+            if stall_scan && request_index == 1 {
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("POST /api/scan "));
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
             let body = if request_index == 0 {
                 serde_json::json!({
                     "serverVersion": "0.0.0",
@@ -39,13 +56,78 @@ fn fake_service(response: Value) -> (String, JoinHandle<()>) {
                 response.clone()
             };
             let bytes = serde_json::to_vec(&body).unwrap();
+            let status = if request_index == 1 && failed_scan {
+                "503 Service Unavailable"
+            } else {
+                "200 OK"
+            };
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 bytes.len()
             )
             .unwrap();
             stream.write_all(&bytes).unwrap();
+        }
+    });
+    (format!("https://127.0.0.1:{}", address.port()), handle)
+}
+
+fn fake_preview_service(
+    jpeg: Vec<u8>,
+    echoed_revision: &'static str,
+    pause_after_partial_body: bool,
+    declared_length: Option<usize>,
+) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let photo_id = "00000000-0000-4000-8000-000000000001";
+        let key = "a".repeat(64);
+        for step in 0..3 {
+            let (mut stream, _) = common::accept_tls(&listener);
+            let mut request = [0_u8; 8192];
+            let count = stream.read(&mut request).unwrap();
+            common::assert_bearer(&request[..count]);
+            if step < 2 {
+                let response = if step == 0 {
+                    serde_json::json!({
+                        "serverVersion": "0.0.0",
+                        "supportedCliContractVersions": [1],
+                        "limits": {
+                            "listPageMaximum": 60,
+                            "mutationPhotoIdsMaximum": 100,
+                            "albumReorderMembersMaximum": 100,
+                            "retainedQueryIdsMaximum": 1000000,
+                            "retainedQueryIdleSeconds": 900
+                        }
+                    })
+                } else {
+                    serde_json::json!({
+                        "photoId": photo_id, "state": "ready", "source": "jpeg-original",
+                        "sourceRevision": "v1", "width": 8, "height": 4,
+                        "detailLimited": true,
+                        "url": format!("/api/private/derivatives/{photo_id}/review/{key}.jpg"),
+                        "webPath": format!("/?photoId={photo_id}")
+                    })
+                };
+                let bytes = serde_json::to_vec(&response).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                stream.write_all(&bytes).unwrap();
+            } else {
+                let length = declared_length.unwrap_or(if pause_after_partial_body {
+                    jpeg.len() + 20
+                } else {
+                    jpeg.len()
+                });
+                write!(stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {length}\r\nslipstream-preview-photo: {photo_id}\r\nslipstream-preview-source: jpeg-original\r\nslipstream-preview-revision: {echoed_revision}\r\nslipstream-preview-width: 8\r\nslipstream-preview-height: 4\r\nConnection: close\r\n\r\n"
+                ).unwrap();
+                stream.write_all(&jpeg).unwrap();
+                if pause_after_partial_body {
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }
         }
     });
     (format!("https://127.0.0.1:{}", address.port()), handle)
@@ -220,6 +302,47 @@ fn executable_parser_error_output_obeys_the_recovered_deadline() {
 }
 
 #[tokio::test]
+async fn interrupted_library_check_reports_unknown_and_directs_a_status_read() {
+    let (server, handle) = fake_service_with_scan_delay(Value::Null, true, false);
+    let (exit, result) = command(&server, &["--timeout", "1", "library", "check"]).await;
+    assert_eq!(exit, 7);
+    assert_eq!(result["error"]["code"], "outcome_unknown");
+    assert_eq!(result["error"]["effect"], "unknown");
+    assert_eq!(result["error"]["details"]["operation"], "library-check");
+    handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn failed_library_check_carries_service_scan_state_without_claiming_success() {
+    let scan = serde_json::json!({
+        "state": "failed",
+        "publication": null,
+        "completed": 0,
+        "total": 0,
+        "lastRecovery": null,
+        "fingerprints": null
+    });
+    let (server, handle) = fake_service_with_scan_delay(
+        serde_json::json!({
+            "error": {
+                "code": "library_unavailable",
+                "message": "Inspect the returned scan status before trying another Library check.",
+                "effect": "none",
+                "details": {"scan": scan}
+            }
+        }),
+        false,
+        true,
+    );
+    let (exit, result) = command(&server, &["library", "check"]).await;
+    handle.join().unwrap();
+    assert_eq!(exit, 6);
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["error"]["code"], "library_unavailable");
+    assert_eq!(result["data"]["scan"], scan);
+}
+
+#[tokio::test]
 async fn client_rejects_folder_album_and_photo_pages_over_the_requested_limit() {
     let cases = [
         (
@@ -380,6 +503,274 @@ async fn whole_command_deadline_covers_capability_negotiation() {
 }
 
 #[tokio::test]
+async fn published_preview_survives_broken_stdout_with_escaped_recovery_path() {
+    let (base, _config) = fixture();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[50; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let (server, handle) = fake_preview_service(jpeg, "7631", false, None);
+    let path = base.join("completed\npreview.jpg");
+    let mut child = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
+        .arg("--server")
+        .arg(server)
+        .args([
+            "photos",
+            "preview",
+            "00000000-0000-4000-8000-000000000001",
+            "--file",
+            path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(6));
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostic.contains("Preview file was already published"));
+    assert!(diagnostic.contains("completed\\npreview.jpg"));
+    assert!(!diagnostic.contains("completed\npreview.jpg"));
+    assert!(image::load_from_memory(&fs::read(&path).unwrap()).is_ok());
+    handle.join().unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn non_utf8_preview_destination_fails_before_network_or_staging() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let (base, _config) = fixture();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let before = fs::read_dir(&base).unwrap().count();
+    let path = base.join(std::ffi::OsString::from_vec(b"invalid-\xff.jpg".to_vec()));
+    let output = common::cli_command()
+        .arg("--token-file")
+        .arg(common::credential_file())
+        .arg("--server")
+        .arg(format!("https://{}", listener.local_addr().unwrap()))
+        .args([
+            "photos",
+            "preview",
+            "00000000-0000-4000-8000-000000000001",
+            "--file",
+        ])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "invalid_input");
+    assert_eq!(response["error"]["details"]["argument"], "file");
+    assert!(!path.exists());
+    assert_eq!(fs::read_dir(&base).unwrap().count(), before);
+    assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn cli_preview_refuses_unverified_bytes_and_discards_interrupted_transfer() {
+    let (base, _config) = fixture();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[50; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let photo_id = "00000000-0000-4000-8000-000000000001";
+    for (name, bytes, revision, slow, declared_length, expected) in [
+        (
+            "wrong-revision",
+            jpeg.clone(),
+            "wrong",
+            false,
+            None,
+            "transport_failed",
+        ),
+        (
+            "duplicate-revision",
+            jpeg.clone(),
+            "7631\r\nslipstream-preview-revision: wrong",
+            false,
+            None,
+            "transport_failed",
+        ),
+        (
+            "broken-jpeg",
+            b"not a JPEG".to_vec(),
+            "7631",
+            false,
+            None,
+            "transport_failed",
+        ),
+        (
+            "oversized-declaration",
+            jpeg.clone(),
+            "7631",
+            false,
+            Some(64 * 1024 * 1024 + 1),
+            "transport_failed",
+        ),
+        ("interrupted", jpeg, "7631", true, None, "transport_failed"),
+    ] {
+        let (server, handle) = fake_preview_service(bytes, revision, slow, declared_length);
+        let path = base.join(format!("{name}.jpg"));
+        let args = [
+            "--timeout",
+            if slow { "1" } else { "5" },
+            "photos",
+            "preview",
+            photo_id,
+            "--file",
+            path.to_str().unwrap(),
+        ];
+        let (exit, result) = command(&server, &args).await;
+        assert_eq!(exit, 6, "{result:?}");
+        assert_eq!(result["error"]["code"], expected);
+        assert!(!path.exists(), "no incomplete download may look committed");
+        handle.join().unwrap();
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn cli_preview_downloads_each_generated_original_without_replacing_local_files() {
+    let (base, config) = fixture();
+    let jpeg_path = config.library_root.join("trip/one.JPG");
+    let raw_path = config.library_root.join("trip/own.DNG");
+    let sibling_path = config.library_root.join("trip/own.JPG");
+    let jpeg = |width: u32, height: u32| {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+            .encode(
+                &vec![85; (width * height * 3) as usize],
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        bytes
+    };
+    fs::write(&jpeg_path, jpeg(90, 45)).unwrap();
+    fs::write(&raw_path, raw_fixture::generated_dng(&jpeg(120, 80), 6)).unwrap();
+    fs::write(&sibling_path, jpeg(100, 70)).unwrap();
+    let originals = [&jpeg_path, &raw_path, &sibling_path].map(|path| {
+        let metadata = fs::metadata(path).unwrap();
+        (
+            fs::read(path).unwrap(),
+            (
+                metadata.len(),
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            ),
+        )
+    });
+    let server = common::start_authenticated_server(config).await;
+    wait_until_idle(&server.url).await;
+    let (exit, page) = command(&server.url, &["photos", "list", "--limit", "60"]).await;
+    assert_eq!(exit, 0);
+    let items = page["data"]["items"].as_array().unwrap();
+
+    for (name, source, dimensions, size) in [
+        ("one.JPG", "jpeg-original", (90, 45), "review"),
+        ("own.DNG", "raw-embedded-jpeg", (80, 120), "review"),
+        ("own.DNG", "raw-embedded-jpeg", (80, 120), "thumbnail"),
+    ] {
+        let id = items.iter().find(|item| item["filename"] == name).unwrap()["id"]
+            .as_str()
+            .unwrap();
+        let path = base.join(format!("{name}.{size}.preview.jpg"));
+        let (exit, result) = command(
+            &server.url,
+            &[
+                "photos",
+                "preview",
+                id,
+                "--file",
+                path.to_str().unwrap(),
+                "--size",
+                size,
+            ],
+        )
+        .await;
+        assert_eq!(exit, 0, "{result:?}");
+        assert_eq!(result["data"]["source"], source);
+        assert_eq!(result["data"]["photoId"], id);
+        assert_eq!(result["data"]["fileCommitted"], true);
+        assert_eq!(result["data"]["width"], dimensions.0);
+        assert_eq!(result["data"]["height"], dimensions.1);
+        let decoded = image::load_from_memory(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), dimensions);
+
+        let (exit, existing) = command(
+            &server.url,
+            &["photos", "preview", id, "--file", path.to_str().unwrap()],
+        )
+        .await;
+        assert_eq!(exit, 2);
+        assert_eq!(existing["error"]["code"], "invalid_input");
+    }
+
+    let id = items
+        .iter()
+        .find(|item| item["filename"] == "one.JPG")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let sentinel = base.join("sentinel");
+    fs::write(&sentinel, b"untouched").unwrap();
+    let symlink_path = base.join("symlink-preview.jpg");
+    symlink(&sentinel, &symlink_path).unwrap();
+    let (exit, result) = command(
+        &server.url,
+        &[
+            "photos",
+            "preview",
+            id,
+            "--file",
+            symlink_path.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert_eq!(exit, 2);
+    assert_eq!(result["error"]["code"], "invalid_input");
+    assert_eq!(fs::read(&sentinel).unwrap(), b"untouched");
+    assert!(
+        fs::symlink_metadata(&symlink_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    for (path, (bytes, stable)) in [&jpeg_path, &raw_path, &sibling_path].iter().zip(originals) {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(
+            (
+                metadata.len(),
+                metadata.dev(),
+                metadata.ino(),
+                metadata.mode(),
+                metadata.uid(),
+                metadata.gid(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+            ),
+            stable
+        );
+    }
+    server.close().await.unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
 async fn executable_queries_the_real_service_with_fixed_multi_page_membership() {
     let (base, config) = fixture();
     let server = common::start_authenticated_server(config).await;
@@ -390,6 +781,14 @@ async fn executable_queries_the_real_service_with_fixed_multi_page_membership() 
     assert_eq!(status["schemaVersion"], 1);
     assert_eq!(status["data"]["cliContractVersion"], 1);
     assert_eq!(status["data"]["photoCount"], 5);
+
+    let (exit, check) = command(&server.url, &["library", "check"]).await;
+    assert_eq!(exit, 0);
+    assert_eq!(check["data"]["scan"]["state"], "idle");
+    assert_eq!(check["data"]["scan"]["total"], 5);
+    let (exit, status_after_check) = command(&server.url, &["status"]).await;
+    assert_eq!(exit, 0);
+    assert_eq!(check["data"]["scan"], status_after_check["data"]["scan"]);
 
     let (exit, folders) = command(&server.url, &["folders", "list", "--limit", "1"]).await;
     assert_eq!(exit, 0);

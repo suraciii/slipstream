@@ -13,6 +13,8 @@ use std::{
 };
 use url::Url;
 
+mod preview_download;
+
 const CLI_CONTRACT_VERSION: u16 = 1;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_LIST_PAGE: usize = 50;
@@ -86,6 +88,11 @@ pub fn parse_error_preferences(arguments: &[OsString]) -> ParseErrorPreferences 
 pub enum Command {
     /// Inspect service compatibility and current Library status.
     Status,
+    /// Request one Library check through the service-owned scan cycle.
+    Library {
+        #[command(subcommand)]
+        command: LibraryCommand,
+    },
     /// Discover read-only Original Folders.
     Folders {
         #[command(subcommand)]
@@ -101,6 +108,12 @@ pub enum Command {
         #[command(subcommand)]
         command: PhotoCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LibraryCommand {
+    /// Check the Library using the service-owned scan cycle.
+    Check,
 }
 
 #[derive(Debug, Subcommand)]
@@ -206,6 +219,23 @@ pub enum PhotoCommand {
     /// decision versions observed by a prior read. One command changes one
     /// field and reports changed, unchanged, conflict, or missing per Photo.
     Set(PhotoDecisionArgs),
+    /// Download one current Photo Preview to a new local JPEG file (at most 64 MiB).
+    Preview {
+        #[arg(value_parser = nonempty)]
+        photo_id: String,
+        /// New local JPEG path; an existing file or symbolic link is never replaced.
+        #[arg(long, value_name = "PATH", required = true)]
+        file: PathBuf,
+        /// Requested Preview target.
+        #[arg(long, value_enum, default_value_t = PreviewSize::Review)]
+        size: PreviewSize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PreviewSize {
+    Thumbnail,
+    Review,
 }
 
 #[derive(Debug, Args)]
@@ -385,16 +415,19 @@ fn local_time(value: &str) -> Result<String, String> {
 pub struct InvocationResult {
     pub exit_code: u8,
     pub stdout: String,
+    pub committed_preview_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum Operation {
     Status,
+    LibraryCheck,
     FoldersList,
     AlbumsList,
     AlbumsGet,
     PhotosList,
     PhotosGet,
+    PhotosPreview,
     PhotosSet,
     AlbumsCreate,
     AlbumsRename,
@@ -408,11 +441,13 @@ impl Operation {
     fn wire(self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::LibraryCheck => "library-check",
             Self::FoldersList => "folders-list",
             Self::AlbumsList => "albums-list",
             Self::AlbumsGet => "albums-get",
             Self::PhotosList => "photos-list",
             Self::PhotosGet => "photos-get",
+            Self::PhotosPreview => "photos-preview",
             Self::PhotosSet => "photos-set",
             Self::AlbumsCreate => "albums-create",
             Self::AlbumsRename => "albums-rename",
@@ -427,6 +462,7 @@ impl Operation {
 fn command_operation(command: &Command) -> Operation {
     match command {
         Command::Status => Operation::Status,
+        Command::Library { .. } => Operation::LibraryCheck,
         Command::Folders { .. } => Operation::FoldersList,
         Command::Albums { command } => match command {
             AlbumCommand::List(_) => Operation::AlbumsList,
@@ -441,6 +477,7 @@ fn command_operation(command: &Command) -> Operation {
         Command::Photos { command } => match command {
             PhotoCommand::List(_) => Operation::PhotosList,
             PhotoCommand::Get { .. } => Operation::PhotosGet,
+            PhotoCommand::Preview { .. } => Operation::PhotosPreview,
             PhotoCommand::Set(_) => Operation::PhotosSet,
         },
     }
@@ -494,6 +531,27 @@ struct MutationIdentity {
 #[derive(Debug, Default)]
 struct AdmissionState {
     identity: std::sync::Mutex<Option<MutationIdentity>>,
+}
+
+#[derive(Debug, Default)]
+struct PublicationState {
+    committed: std::sync::Mutex<Option<Value>>,
+}
+
+impl PublicationState {
+    fn record(&self, data: Value) {
+        *self
+            .committed
+            .lock()
+            .expect("publication state is lockable") = Some(data);
+    }
+
+    fn committed(&self) -> Option<Value> {
+        self.committed
+            .lock()
+            .expect("publication state is lockable")
+            .clone()
+    }
 }
 
 impl AdmissionState {
@@ -651,6 +709,24 @@ impl CommandFailure {
                 }),
             },
         )
+    }
+
+    fn published_preview(data: Value, interrupted: bool) -> Self {
+        Self::from_payload(
+            if interrupted { 130 } else { 6 },
+            ErrorPayload {
+                code: "local_io_failed".to_owned(),
+                message: "The Preview file was published; inspect it before trying again."
+                    .to_owned(),
+                effect: "partial".to_owned(),
+                details: json!({
+                    "operation": "write-output",
+                    "path": data["path"],
+                    "fileCommitted": true,
+                }),
+            },
+        )
+        .with_data(data)
     }
 
     fn local_credential(path: Option<&str>) -> Self {
@@ -1570,6 +1646,13 @@ fn validated_route_failure(
             required_keys(&["scan"])
                 && serde_json::from_value::<ScanStatus>(details["scan"].clone()).is_ok()
         }
+        "preview_unavailable" => {
+            required_keys(&["photoId", "state"])
+                && string("photoId").is_some()
+                && string("state").is_some_and(|value| {
+                    matches!(value, "inspection-pending" | "failed" | "unavailable")
+                })
+        }
         "server_busy" => {
             required_keys(&["operation", "retryAfterSeconds"])
                 && string("operation") == Some(operation.wire())
@@ -2197,9 +2280,16 @@ async fn execute(
     cli: &Cli,
     environment: Option<&str>,
     admission: &AdmissionState,
+    publication: &PublicationState,
 ) -> Result<Value, CommandFailure> {
     let operation = command_operation(&cli.command);
     validate_command(&cli.command)?;
+    let preview_destination = match &cli.command {
+        Command::Photos {
+            command: PhotoCommand::Preview { file, .. },
+        } => Some(preview_download::Destination::preflight(file)?),
+        _ => None,
+    };
     let origin = service_origin(cli, environment)?;
     let token_path = access_token_path(cli)?;
     let token = read_access_token(token_path).await?;
@@ -2248,6 +2338,33 @@ async fn execute(
                     return Err(CommandFailure::transport(operation));
                 }
                 serde_json::to_value(data).map_err(|_| CommandFailure::transport(operation))
+            }
+            Command::Library {
+                command: LibraryCommand::Check,
+            } => {
+                let identity = MutationIdentity {
+                    operation,
+                    photo_ids: Vec::new(),
+                    album_id: None,
+                    album_name: None,
+                };
+                let scan: ScanStatus = match client
+                    .mutation(
+                        &identity,
+                        admission,
+                        client.endpoint(&["api", "scan"]),
+                        json!({}),
+                    )
+                    .await
+                {
+                    Ok(scan) => scan,
+                    Err(failure) if failure.payload.code == "library_unavailable" => {
+                        let data = json!({ "scan": failure.payload.details["scan"] });
+                        return Err(failure.with_data(data));
+                    }
+                    Err(failure) => return Err(failure),
+                };
+                Ok(json!({ "scan": scan }))
             }
             Command::Folders {
                 command: FolderCommand::List(args),
@@ -2571,6 +2688,18 @@ async fn execute(
                 Ok(value)
             }
             Command::Photos {
+                command: PhotoCommand::Preview { photo_id, size, .. },
+            } => {
+                preview_download::download(
+                    &client,
+                    photo_id,
+                    *size,
+                    preview_destination.expect("Preview destination was checked"),
+                    publication,
+                )
+                .await
+            }
+            Command::Photos {
                 command: PhotoCommand::Set(args),
             } => {
                 // The decision document was validated before connecting; the
@@ -2844,14 +2973,18 @@ pub async fn invoke_until(
     let output = cli.output;
     let operation = command_operation(&cli.command);
     let admission = AdmissionState::default();
-    let command = tokio::time::timeout_at(deadline, execute(&cli, environment, &admission));
+    let publication = PublicationState::default();
+    let command = tokio::time::timeout_at(
+        deadline,
+        execute(&cli, environment, &admission, &publication),
+    );
     tokio::pin!(command);
     let (exit_code, envelope) = tokio::select! {
         result = &mut command => match result {
             Ok(Ok(data)) => (0, Envelope::success(data)),
             Ok(Err(failure)) => {
                 let envelope = match failure.data {
-                    Some(data) if failure.payload.code == "partial_result" => {
+                    Some(data) if failure.payload.effect == "partial" => {
                         Envelope::partial(*data, failure.payload)
                     }
                     Some(data) => Envelope::error_with_data(*data, failure.payload),
@@ -2860,15 +2993,26 @@ pub async fn invoke_until(
                 (failure.exit_code, envelope)
             }
             Err(_) => {
-                let failure = match admission.admitted() {
-                    Some(identity) => CommandFailure::unknown(&identity),
-                    None => CommandFailure::transport(operation),
+                let failure = match publication.committed() {
+                    Some(data) => CommandFailure::published_preview(data, false),
+                    None => match admission.admitted() {
+                        Some(identity) => CommandFailure::unknown(&identity),
+                        None => CommandFailure::transport(operation),
+                    },
                 };
-                (failure.exit_code, Envelope::error(failure.payload))
+                let envelope = match failure.data {
+                    Some(data) => Envelope::partial(*data, failure.payload),
+                    None => Envelope::error(failure.payload),
+                };
+                (failure.exit_code, envelope)
             }
         },
         _ = tokio::signal::ctrl_c() => {
-            let failure = match admission.admitted() {
+            if let Some(data) = publication.committed() {
+                let failure = CommandFailure::published_preview(data, true);
+                (130, Envelope::partial(*failure.data.unwrap(), failure.payload))
+            } else {
+                let failure = match admission.admitted() {
                 Some(identity) => CommandFailure::interrupted_unknown(&identity),
                 None => {
                     let mut failure = CommandFailure::transport(operation);
@@ -2879,17 +3023,35 @@ pub async fn invoke_until(
             // A handled interruption exits 130 whether or not a request may
             // have been admitted; only the envelope distinguishes the cases.
             (130, Envelope::error(failure.payload))
+            }
         }
     };
-    render_invocation(output, exit_code, &envelope)
+    render_invocation(
+        output,
+        exit_code,
+        &envelope,
+        publication
+            .committed()
+            .and_then(|value| value["path"].as_str().map(str::to_owned)),
+    )
 }
 
 pub fn invalid_invocation(output: OutputFormat, reason: impl Into<String>) -> InvocationResult {
     let failure = CommandFailure::invalid("arguments", reason);
-    render_invocation(output, failure.exit_code, &Envelope::error(failure.payload))
+    render_invocation(
+        output,
+        failure.exit_code,
+        &Envelope::error(failure.payload),
+        None,
+    )
 }
 
-fn render_invocation(output: OutputFormat, exit_code: u8, envelope: &Envelope) -> InvocationResult {
+fn render_invocation(
+    output: OutputFormat,
+    exit_code: u8,
+    envelope: &Envelope,
+    committed_preview_path: Option<String>,
+) -> InvocationResult {
     let stdout = match output {
         OutputFormat::Json => format!(
             "{}\n",
@@ -2897,7 +3059,11 @@ fn render_invocation(output: OutputFormat, exit_code: u8, envelope: &Envelope) -
         ),
         OutputFormat::Text => render_text(envelope),
     };
-    InvocationResult { exit_code, stdout }
+    InvocationResult {
+        exit_code,
+        stdout,
+        committed_preview_path,
+    }
 }
 
 fn render_text(envelope: &Envelope) -> String {
@@ -2924,6 +3090,8 @@ mod tests {
 
     #[test]
     fn parser_rejects_duplicates_abbreviations_and_cursor_combinations() {
+        assert!(Cli::try_parse_from(["slipstream", "library", "check"]).is_ok());
+        assert!(Cli::try_parse_from(["slipstream", "library", "check", "extra"]).is_err());
         assert!(Cli::try_parse_from(["slipstream", "--time", "3", "status"]).is_err());
         assert!(
             Cli::try_parse_from(["slipstream", "--timeout", "3", "--timeout", "4", "status"])

@@ -111,7 +111,7 @@ bun run test:fast
 bun run verify
 ```
 
-`test:cli` runs the focused command parser, output, and real CLI-to-service query tests. It covers the `status`, Folder, Album, and Photo read commands without running the complete repository gate.
+`test:cli` runs the focused command parser, output, and real CLI-to-service tests. It covers `status`, Library checks, Folder, Album, and Photo commands, including Preview downloads, without running the complete repository gate.
 
 Install the Playwright Chromium browser once before running the gates:
 
