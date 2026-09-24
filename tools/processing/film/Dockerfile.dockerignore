@@ -34,3 +34,5 @@ design/**
 design/schemas/**
 !design/schemas/processing-film-measurement.schema.json
 !design/schemas/processing-film-measurement-canonical-vectors.json
+!design/schemas/processing-film-envelope.schema.json
+!design/schemas/processing-film-envelope-vectors.json

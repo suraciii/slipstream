@@ -2,8 +2,8 @@
 use sha2::{Digest, Sha256};
 use slipstream_processing::{
     film::{
-        self, Detail, EngineGrant, Phase, ProducerResult, Stage, WorkerFailure, WorkerResult,
-        WorkerSuccess,
+        self, Detail, Phase, ProducerResult, RuntimeGrant as EngineGrant, Stage, WorkerFailure,
+        WorkerResult, WorkerSuccess,
     },
     protocol::{Outcome, digest, now},
     staging,
@@ -325,6 +325,7 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
     {
         return Err(bad("engine permit"));
     }
+    grant.validate().map_err(|_| bad("grant plan"))?;
     // Keep the pre-ack channel alive through native failure publication. The
     // engine closes it immediately after a successful EngineStarted packet.
     let mut engine_channel = Some(channel);

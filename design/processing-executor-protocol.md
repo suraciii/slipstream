@@ -138,11 +138,25 @@ A receipt has these exact fields:
   and `storage_inodes` (64);
 - `evidence`: null or an object with `peak_bytes`, `exit_code` (null or 0–255),
   `docker_oom_killed` (Boolean or null), `attempt_before`, `attempt_after`,
-  `parent_before`, `parent_after`, and `populated` (Boolean or null); and
+  `parent_before`, `parent_after`, `populated` (Boolean or null), and
+  `terminal_snapshot` (null or the verified attempt-cgroup snapshot); and
 - `cleanup`: `pending`, `complete`, or `uncertain`.
 
 Each before/after event object is null or has exactly `oom`, `oom_kill`,
 `oom_group_kill`, `local_oom`, `local_oom_kill`, and `local_oom_group_kill`.
+A non-null `terminal_snapshot` has exactly `cgroup_path`, `cgroup_inode`,
+`unit_invocation`, `launch_id`, `container_id`, `attempt_unit`, `incarnation`,
+`sequence`, `memory_peak_raw`, `memory_max_raw`, `memory_swap_current_raw`,
+`memory_swap_max_raw`, `memory_events_raw`, and `memory_events_local_raw`.
+The six raw values retain their exact cgroup file text, including trailing
+newlines, with an aggregate 4 KiB byte bound. The launcher validates the
+snapshot's identity against the bound attempt before and after reading it,
+derives `peak_bytes` and `attempt_after` from those same raw values, and checks
+the enforced memory and zero-swap limits. Once a container ID is bound to an
+attempt, its evidence requires this snapshot before persistence or cleanup;
+a missing, oversized, malformed, or inconsistent snapshot leaves settlement
+uncertain and retains ownership. Evidence for an attempt that never bound a
+container ID may carry a null snapshot, even when its slice was created.
 A missing observation is null, never synthesized as a zero counter. Kernel
 counters and byte quantities are unsigned 64-bit integers. `peer_uid` is an
 unsigned 32-bit integer other than the Linux invalid UID value 4294967295.

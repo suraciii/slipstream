@@ -658,7 +658,10 @@ fn audit_snapshot_writers(base: &Path, snapshot: &FileIdentity, may_close: bool)
     }
     Ok(())
 }
-pub(crate) fn read_result(file: &File, grant: &EngineGrant) -> Result<Option<film::WorkerResult>> {
+pub(crate) fn read_result<P: Serialize>(
+    file: &File,
+    grant: &EngineGrant<P>,
+) -> Result<Option<film::WorkerResult>> {
     use std::os::unix::fs::FileExt;
     let mut bytes = [0u8; film::FRAME];
     file.read_exact_at(&mut bytes, 0).map_err(fail)?;

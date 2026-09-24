@@ -61,9 +61,11 @@ fn main() {
         file.take(16385).read_to_end(&mut bytes).map_err(|_| ())?;
         let executor = match Config::parse(&bytes) {
             Ok(config) => Executor::open(config),
-            Err(_) => {
-                slipstream_processing::film::Config::parse(&bytes).and_then(Executor::open_film)
-            }
+            Err(_) => match slipstream_processing::film::Config::parse(&bytes) {
+                Ok(config) => Executor::open_film(config),
+                Err(_) => slipstream_processing::qualified::Config::parse(&bytes)
+                    .and_then(Executor::open_qualified),
+            },
         }
         .map_err(|_| ())?;
         serve(executor).map_err(|_| ())

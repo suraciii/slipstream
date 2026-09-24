@@ -11,7 +11,10 @@ with the deployment, not in this repository.
 
 Photo processing requires a separate digest-pinned engine image and an
 operator-owned host launcher. The supported host must provide cgroup v2,
-systemd, and a local Docker daemon using the systemd cgroup driver. The launcher
+systemd, and a local Docker daemon using the systemd cgroup driver. The host
+must make the memory, CPU, task and I/O controllers available to the delegated
+processing scope. Missing delegation must prevent processing from starting;
+ordinary Library operations must remain available. The launcher
 is a privileged component trusted by the operator. The Web container receives
 only its private Unix socket; it must not receive the Docker socket, host root
 privilege, or a writable cgroup mount.

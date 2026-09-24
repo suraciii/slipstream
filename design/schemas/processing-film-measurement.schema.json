@@ -621,6 +621,74 @@
         }
       }
     },
+    "TerminalSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cgroup_path",
+        "cgroup_inode",
+        "unit_invocation",
+        "launch_id",
+        "container_id",
+        "attempt_unit",
+        "incarnation",
+        "sequence",
+        "memory_peak_raw",
+        "memory_max_raw",
+        "memory_swap_current_raw",
+        "memory_swap_max_raw",
+        "memory_events_raw",
+        "memory_events_local_raw"
+      ],
+      "properties": {
+        "cgroup_path": { "$ref": "#/$defs/AbsolutePath" },
+        "cgroup_inode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "unit_invocation": { "$ref": "#/$defs/Id" },
+        "launch_id": { "$ref": "#/$defs/Id" },
+        "container_id": { "$ref": "#/$defs/Sha256" },
+        "attempt_unit": { "$ref": "#/$defs/Runtime/properties/attempt_unit" },
+        "incarnation": { "$ref": "#/$defs/Id" },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "memory_peak_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memory_max_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memory_swap_current_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memory_swap_max_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memory_events_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memory_events_local_raw": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
     "Evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -632,7 +700,8 @@
         "attempt_after",
         "parent_before",
         "parent_after",
-        "populated"
+        "populated",
+        "terminal_snapshot"
       ],
       "properties": {
         "peak_bytes": {
@@ -709,6 +778,9 @@
               "type": "boolean"
             }
           ]
+        },
+        "terminal_snapshot": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/TerminalSnapshot" }]
         }
       }
     },

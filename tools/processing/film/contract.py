@@ -1,4 +1,4 @@
-"""Closed metadata boundary for the fixed Film measurement adapter."""
+"""Closed metadata boundary for the shared measurement/qualified Film adapter."""
 
 from functools import lru_cache
 import hashlib
@@ -17,6 +17,7 @@ if VALIDATOR_DEPS.is_dir():
     sys.path.insert(0, str(VALIDATOR_DEPS))
 
 from jsonschema import Draft202012Validator
+from referencing import Registry, Resource
 
 
 MAX_BYTES = 16 * 1024
@@ -108,26 +109,49 @@ def digest(value):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-@lru_cache(maxsize=1)
-def schema():
-    installed = Path("/opt/film-measurement/schema.json")
+def schema_path(version):
+    names = {
+        2: ("schema.json", "processing-film-measurement.schema.json"),
+        3: ("envelope-schema.json", "processing-film-envelope.schema.json"),
+    }
+    if type(version) is not int or version not in names:
+        raise ContractError()
+    packaged, source = names[version]
+    installed = Path("/opt/film-measurement") / packaged
     if not installed.is_file():
-        installed = Path(__file__).resolve().parents[3] / "design/schemas/processing-film-measurement.schema.json"
-    return json.loads(installed.read_text())
+        installed = Path(__file__).resolve().parents[3] / "design/schemas" / source
+    return installed
 
 
-@lru_cache(maxsize=3)
-def validator(name):
-    reference = schema()
-    return Draft202012Validator({
-        "$schema": reference["$schema"], "$defs": reference["$defs"],
-        "$ref": "#/$defs/" + name,
-    })
+@lru_cache(maxsize=2)
+def schema(version=2):
+    return json.loads(schema_path(version).read_text())
 
 
-def validate(name, value):
+@lru_cache(maxsize=1)
+def schema_registry():
+    # Registry's default retrieval rejects unknown resources. Never fetch a URI
+    # from the network or turn a schema reference into an arbitrary file read.
+    measurement = Resource.from_contents(schema(2))
+    envelope_path = schema_path(3)
+    return Registry().with_resources([
+        (schema_path(2).as_uri(), measurement),
+        (envelope_path.as_uri(), Resource.from_contents(schema(3))),
+        (envelope_path.with_name("processing-film-measurement.schema.json").as_uri(), measurement),
+    ])
+
+
+@lru_cache(maxsize=16)
+def validator(name, version=2):
+    return Draft202012Validator(
+        {"$ref": schema_path(version).as_uri() + "#/$defs/" + name},
+        registry=schema_registry(),
+    )
+
+
+def validate(name, value, *, version=2):
     _check_values(value)
-    if not validator(name).is_valid(value):
+    if not validator(name, version).is_valid(value):
         raise ContractError()
 
 
@@ -146,7 +170,14 @@ def read_grant():
     if len(data) != metadata.st_size or hashlib.sha256(data).hexdigest() != expected:
         raise ContractError()
     grant = parse_json(data)
-    validate("EngineGrant", grant)
+    if type(grant) is not dict:
+        raise ContractError()
+    version = grant.get("version")
+    expected_kind = {2: "film-measurement-grant", 3: "film-qualified-grant"}
+    if (type(version) is not int or version not in expected_kind
+            or grant.get("kind") != expected_kind[version]):
+        raise ContractError()
+    validate("EngineGrant", grant, version=version)
     if canonical_bytes(grant) != data:
         raise ContractError()
     if (grant["numerical_bundle"] != NUMERICAL_BUNDLE or grant["recipe"] != RECIPE

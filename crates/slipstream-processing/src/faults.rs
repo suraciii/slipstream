@@ -77,7 +77,7 @@ fn writer_fault(config: &Config) -> Result<Option<WriterFault>, ErrorCode> {
     let selected =
         read::<WriterFault>(&Path::new(&config.root).join("faults/retain-snapshot-writer.json"))?;
     if let Some(fault) = &selected
-        && (config.mode != "film-measurement"
+        && (!["film-measurement", "film-qualified-fixtures"].contains(&config.mode.as_str())
             || fault.sequence == 0
             || fault.incarnation.len() != 32
             || !fault
@@ -118,7 +118,13 @@ pub(crate) fn at(config: &Config, record: &Record, phase: Phase) -> Result<(), E
     let Some(arm) = read::<Arm>(&directory.join("arm.json"))? else {
         return Ok(());
     };
-    if !["qualification", "film-measurement"].contains(&config.mode.as_str()) {
+    if ![
+        "qualification",
+        "film-measurement",
+        "film-qualified-fixtures",
+    ]
+    .contains(&config.mode.as_str())
+    {
         return Err(ErrorCode::Uncertain);
     }
     if arm.phase != phase

@@ -102,6 +102,13 @@ stable and non-writable by the Web, engine, or other untrusted identities. Rejec
 traversal, links, foreign ownership, and stale incarnation references. A one-time
 path validation followed by a bind of a mutable Web directory is insufficient.
 
+Each attempt workspace is mode `0700`. Its `/control` bind source is mode
+`0755` so the fixed UID-1000 worker can traverse the read-only bind, and the
+native startup gate FIFO is mode `0644` so that worker can open it. Set these
+modes explicitly after creation; inherited process umask must not narrow them.
+The private workspace still prevents other host users from reaching these
+objects.
+
 Admission copies the input and manifest into a launcher-owned immutable snapshot
 and verifies the captured input size and digest before engine release. Use
 confined descriptors to acquire supplied bytes; never re-resolve an untrusted
@@ -237,8 +244,15 @@ A failed or ambiguous creation never permits adoption or a second creation call.
 An ordinary exited scope does not retain accounting. Docker owns its scope.
 The launcher creates and controls only the
 workload leaf within that delegated scope. It moves the blocked bootstrap into
-the leaf, enables the required controllers, applies and reads back limits, and
-checks membership before release. Future engine descendants inherit the leaf.
+the leaf, enables the memory, CPU, task and I/O controllers, applies and reads
+back limits, and checks membership before release. I/O delegation supplies
+workload accounting; it does not set an I/O limit or weight. Before release,
+the launcher must verify that the leaf's `io.stat` is readable. An empty file
+is valid before the workload performs I/O. A missing controller, failed
+delegation or unreadable accounting file must stop setup without releasing
+the workload. The launcher must not enable controllers on any ancestor above
+the exact verified delegated Docker scope to repair missing delegation.
+Future engine descendants inherit the leaf.
 The finite enclosing attempt slice already accounts for the bootstrap and
 charges that do not migrate with its PID. Both launcher and Web remain outside
 the entire processing slice.
@@ -264,6 +278,16 @@ attempt and aggregate boundaries to locate pressure; leaf-local evidence may
 vanish. Distinguish ancestor and host pressure and correlate event deltas with
 the exact owned runtime identity. Retain terminal container
 state plus kernel evidence before stopping the accounting boundary.
+
+Confirm an OOM when the retained attempt has a positive checked `oom_kill`
+delta and terminal Docker state reports `OOMKilled=true`. Also confirm it for
+exit 137 when that kill delta accompanies limit pressure inside the owned
+boundary: a positive checked hierarchical `oom` delta at the attempt, or a
+positive checked `local_oom` delta at its exact owned processing parent.
+Docker's flag can remain false for a descendant leaf OOM. Missing or regressing
+counters cannot supply a positive delta. Exit 137 alone and kill counters
+without terminal confirmation are insufficient; a kill counter alone does not
+locate pressure because it can include an unrelated host OOM.
 
 A launcher receipt records requested/captured policy, bundle and manifest
 identity, owned runtime identities, actual limits, start/exit facts, resource

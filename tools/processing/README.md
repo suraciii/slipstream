@@ -222,6 +222,60 @@ Host-side document and fixture-preparation checks run without Docker or root:
 bun run test:processing-tools
 ```
 
+## Qualified fixture admission
+
+The separate [qualified envelope contract](../../design/processing-film-envelope.md)
+uses a root-provisioned version 3 instance. Supply reviewed envelope bytes bound
+to the exact launcher, worker image, environment and catalogue. This profile
+does not fit a model, accept arbitrary Photos, or reinterpret measurement
+authority as permission to run below the approved requirement.
+
+Run its opt-in verifier with an explicit fixture selection and a new private
+evidence directory. The budget below is only an example probe setting:
+
+```sh
+sudo python3 tools/processing/verify-qualified-film.py \
+  --launcher /absolute/target/debug/slipstream-processing-launcher \
+  --worker-image sha256:FILM_IMAGE_ID \
+  --web-image sha256:WEB_IMAGE_ID \
+  --catalogue /absolute/private/catalogue.json \
+  --envelope /absolute/private/envelope.json \
+  --fixtures /absolute/private/fixtures \
+  --fixture REGISTERED_FIXTURE_ID \
+  --memory-gib 16 \
+  --output /absolute/private/qualified-film-evidence
+```
+
+The same source preparation rules apply. `--expect-error` selects an explicitly
+expected admission refusal. The verifier checks unchanged registry bytes,
+sequence, workspaces and owned manager inventory; it does not relabel a failed
+execution as a refusal. `--expect-qualification-failure` names an expected
+withdrawal from an independently reviewed fault case, while `--expect-outcome`
+keeps the image execution outcome separate. Such deliberately contradictory
+test envelopes cannot serve as supported resource models. A positive
+`--recovery-fixture` proves that an unaffected small case remains usable.
+
+`--alternate-envelope` adds an explicit A/B/A withdrawal check. It requires one
+selected fixture and an expected qualification failure. The alternate document
+must be independently approved for that fixture; the verifier never changes
+E, reserve, identities or evidence automatically. Old accepted requests must
+replay unchanged after restart and envelope replacement. Returning to the first
+document must preserve its withdrawal.
+`--mismatched-envelope` supplies a separate, deliberately incompatible environment
+document. New work must be unavailable while an old accepted request still
+replays its captured receipt. The verifier then restores the original explicit
+document; no host environment or manager configuration is changed by that check.
+
+`--lifecycle-fixture` adds crash/cancellation recovery and an owned-attempt CPU
+quota change before each heavy permit. Drift must interrupt execution without
+inventing a memory qualification failure, then allow a subsequent exact result.
+`--failure-fixture` adds byte/inode exhaustion and per-file-limit failure followed
+by success. Both options require a different registered case of at most two
+million pixels; the failure case must be a TIFF. These faults do not contribute
+to memory fitting. The verifier also checks continued Web operation and Album
+persistence across Web restart. Host checks remain `bun run test:processing-tools`;
+they do not establish actual kernel acceptance.
+
 ## Quarantine and recovery
 
 A blocked capability never means that work may run without limits. Inspect the
