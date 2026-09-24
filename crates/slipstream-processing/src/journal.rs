@@ -1631,7 +1631,7 @@ fn random_id() -> Result<String, ErrorCode> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
+pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
     let namespace = Path::new("/var/lib/slipstream-processing/instances");
     for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
         if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {

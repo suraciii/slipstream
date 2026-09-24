@@ -23,3 +23,7 @@ path = "src/worker.rs"
 [[bin]]
 name = "slipstream-processing-film-worker"
 path = "src/film_worker.rs"
+
+[[bin]]
+name = "slipstream-processing-photo-worker"
+path = "src/photo_worker.rs"
