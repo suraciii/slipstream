@@ -117,13 +117,63 @@ all failure criteria. Derive E and freeze it before revealing held-out results.
 R cannot be adjusted to hide a failed held-out observation. Qualification must
 show every required valid memory-fit observation at or below E itself; neither
 R nor the overlapping S/F reservations may conceal an E miss. Each such
-observation requires complete reference output, exact retained peak/events,
-confirmed terminal cleanup and healthy control-state operations. Low-limit OOM
-experiments establish containment; they cannot be discarded or relabeled as
-successful samples. A changed scope, eligibility/observer protocol or fitted
-rule requires independent review and a fresh campaign; observations from
-different protocols cannot be combined. No observation in a syntax example
+observation requires complete reference output, the terminal attempt-memory
+snapshot below, confirmed cleanup and healthy control-state operations.
+Low-limit OOM experiments establish containment; they cannot be discarded or
+relabeled as successful samples. A changed scope, eligibility/observer protocol
+or fitted rule requires independent review and a fresh campaign; observations
+from different protocols cannot be combined. No observation in a syntax example
 qualifies a fixture or recommends a deployment budget.
+
+### Terminal Attempt-Memory Snapshot
+
+For each memory-fit observation, the launcher captures a bounded snapshot from
+the verified attempt cgroup after worker exit and confirmation that it is
+unpopulated, before cleanup removes it. Verify the exact path, inode and unit
+invocation before and after reading; bind them with launch, container, attempt
+unit, incarnation and sequence. Retain the raw ASCII text, including trailing
+newlines, for `memory.peak`, `memory.max`, `memory.swap.current`,
+`memory.swap.max`, `memory.events` and `memory.events.local`. Enforce a 4,096-byte
+read limit per file and a 4,096-byte aggregate limit; each value must conform to
+its strict ASCII cgroup counter grammar. The parsed terminal peak is the sole
+value used for fitting. The receipt peak and its six hierarchical
+and local OOM fields (`oom`, `oom_kill`, `oom_group_kill`) must equal the parsed
+snapshot values, and all six OOM fields must be zero.
+
+From engine release through terminal capture, `memory.max` is frozen at the
+captured attempt limit and `memory.swap.max` at zero; both are checked in every
+retained observer sample and the terminal snapshot. `memory.swap.current` must
+remain zero. Every retained observer sample must bind the same attempt identity
+and have `memory.peak` no greater than the terminal peak; no comparable clock is
+required. Only the trusted launcher and host runtime may write cgroup controls.
+Workers and descendants have no writable cgroup filesystem. No actor may change
+the limits, reset peak or OOM counters, or remove/recreate the attempt cgroup
+before terminal capture. Any observed limit change, counter regression or
+identity mismatch makes the row ineligible. No tolerance, imputed counter, or
+parent/ancestor memory value can repair it.
+
+An absent, unreadable, malformed, identity-mismatched or receipt-inconsistent
+terminal snapshot cannot establish settlement. In that case the launcher cannot
+persist successful terminal evidence, claim cleanup or release the slot; it
+retains ownership and accounting in the existing blocked/uncertain settlement
+path until recovery can prove them safe, as defined by [Processing Executor evidence and settlement](processing-executor.md#evidence-and-settlement).
+Incomplete output, observer-window or cleanup proof also makes the row ineligible.
+
+A synchronous observer read after worker exit but before launcher cleanup was
+considered and rejected: it would require a new cross-process handoff at the
+cleanup boundary, with additional timeout and failure states, to reproduce a
+value already captured by the launcher. Using only a scalar receipt peak was
+also rejected because it lacks terminal limits, swap state and raw event
+counters needed to audit the attempt. The launcher-owned snapshot uses its
+existing verified evidence read; observer samples independently corroborate it.
+
+A change to this eligibility protocol or its terminal evidence contract requires
+independent review and a fresh campaign identity. Freeze the launcher, Film and
+Web images, observer and protocol, runtime, and reference/corpus identities for
+that campaign; collect its calibration, repeat and held-out observations under
+the same contract. Do not combine observations from a prior eligibility
+protocol or a different bound identity, or retroactively reclassify their rows
+under the changed rule.
 
 ### Campaign Evidence Eligibility
 
@@ -134,8 +184,7 @@ campaign row:
 
 - `memory_fit_eligible` is the final row-level E/R fitting decision. It requires
   exact fixture, source, reference, executable, launcher and environment
-  identity; retained attempt-slice memory peak, limits, memory events and
-  zero-swap evidence equal to the terminal receipt; successful
+  identity; the terminal attempt-memory snapshot contract above; successful
   reference-matching output; confirmed cleanup and exact ownership; a complete
   observer window; and every predeclared Web/Album and host/ancestor headroom
   criterion to pass. Attempt-memory proof alone is necessary but not sufficient.
@@ -162,10 +211,11 @@ false and records its reason; missing evidence never implies a pass.
 The fitter consumes only final `memory_fit_eligible` rows and independently
 checks their retained attempt-memory proof, exact fixture/source/reference and
 candidate/runtime identities, and true `observer_window_eligible` result before
-using their peaks. It reports I/O diagnostic coverage separately. A missing
-terminal I/O diagnostic may therefore leave memory fitting valid while the full
-campaign row remains ineligible; it cannot be imputed, copied from a parent
-without the proof above, or presented as complete release evidence. Per the
+using each row's terminal-snapshot peak. It reports I/O diagnostic coverage
+separately. A missing terminal I/O diagnostic may therefore leave memory
+fitting valid while the full campaign row remains ineligible. The missing value
+cannot be imputed or copied from a parent without the proof above, and the row
+cannot be presented as complete release evidence. Per the
 [Processing Executor](processing-executor.md), the launcher must establish its
 I/O release precondition before work is released. Meeting that precondition does
 not make terminal I/O diagnostics a memory-fit input.

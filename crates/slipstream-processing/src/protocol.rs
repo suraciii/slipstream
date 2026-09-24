@@ -4,6 +4,7 @@ use std::{path::Path, time::SystemTime};
 
 pub const REQUEST_BYTES: usize = 16 * 1024;
 pub const RESPONSE_BYTES: usize = 64 * 1024;
+pub const TERMINAL_SNAPSHOT_BYTES: usize = 4 * 1024;
 pub const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const PROFILE: &str = "slipstream-native-qualification-v1";
 
@@ -368,6 +369,25 @@ pub struct Events {
     pub local_oom_group_kill: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalSnapshot {
+    pub cgroup_path: String,
+    pub cgroup_inode: u64,
+    pub unit_invocation: String,
+    pub launch_id: String,
+    pub container_id: String,
+    pub attempt_unit: String,
+    pub incarnation: String,
+    pub sequence: u64,
+    pub memory_peak_raw: String,
+    pub memory_max_raw: String,
+    pub memory_swap_current_raw: String,
+    pub memory_swap_max_raw: String,
+    pub memory_events_raw: String,
+    pub memory_events_local_raw: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Evidence {
@@ -379,6 +399,7 @@ pub struct Evidence {
     pub parent_before: Option<Events>,
     pub parent_after: Option<Events>,
     pub populated: Option<bool>,
+    pub terminal_snapshot: Option<TerminalSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

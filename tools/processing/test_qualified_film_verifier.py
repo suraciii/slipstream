@@ -139,6 +139,7 @@ class QualifiedVerifierTests(unittest.TestCase):
 
     def test_terminal_binds_approval_and_detects_unreported_peak_miss(self):
         probe = verifier.QualifiedFilmQualification.__new__(verifier.QualifiedFilmQualification)
+        probe.instance = 'a' * 32
         fixture_id = 'a' * 32
         case = dict(status='qualified', fixture_id=fixture_id,
                     empirical_ceiling_bytes=1024**3, safety_reserve_bytes=1024**3,
@@ -159,8 +160,27 @@ class QualifiedVerifierTests(unittest.TestCase):
                                                        separators=(',', ':')).encode()),
                     attempt_limit_bytes=8 * 1024**3, envelope_sha256='b' * 64,
                     required_bytes=6 * 1024**3 + 1234)
-        receipt = dict(intent, plan=plan, limits={'memory_bytes': 8 * 1024**3},
-                       evidence={'peak_bytes': 100}, qualification_failure=None)
+        launch_id = 'b' * 32
+        container_id = 'c' * 64
+        attempt_unit = f'slipstreamprocessing{probe.instance}-{launch_id}.slice'
+        events = {key: 0 for key in ('oom', 'oom_kill', 'oom_group_kill',
+                                     'local_oom', 'local_oom_kill', 'local_oom_group_kill')}
+        raw_events = 'low 0\nhigh 0\nmax 0\nfuture2 0\noom 0\noom_kill 0\noom_group_kill 0\n'
+        snapshot = dict(
+            cgroup_path=f'/sys/fs/cgroup/slipstreamprocessing{probe.instance}.slice/{attempt_unit}',
+            cgroup_inode=10, unit_invocation='d' * 32, launch_id=launch_id,
+            container_id=container_id, attempt_unit=attempt_unit,
+            incarnation=intent['incarnation'], sequence=intent['sequence'],
+            memory_peak_raw='100\n', memory_max_raw=f'{8 * 1024**3}\n',
+            memory_swap_current_raw='0\n', memory_swap_max_raw='0\n',
+            memory_events_raw=raw_events, memory_events_local_raw=raw_events)
+        receipt = dict(intent, plan=plan, outcome='completed',
+                       runtime=dict(launch_id=launch_id, container_id=container_id,
+                                    attempt_unit=attempt_unit),
+                       limits={'memory_bytes': 8 * 1024**3, 'swap_bytes': 0},
+                       evidence={'peak_bytes': 100, 'populated': False,
+                                 'attempt_after': events, 'terminal_snapshot': snapshot},
+                       qualification_failure=None)
         with patch.object(verifier.FILM.FilmQualification, 'terminal', return_value=receipt):
             self.assertEqual(probe.terminal(intent), receipt)
         for key, value in [('empirical_ceiling_bytes', 2 * 1024**3),
@@ -177,11 +197,34 @@ class QualifiedVerifierTests(unittest.TestCase):
                 probe.terminal(intent)
         changed = copy.deepcopy(receipt)
         changed['evidence']['peak_bytes'] = case['empirical_ceiling_bytes'] + 1
+        changed['evidence']['terminal_snapshot']['memory_peak_raw'] = (
+            str(changed['evidence']['peak_bytes']) + '\n')
         with patch.object(verifier.FILM.FilmQualification, 'terminal', return_value=changed):
             with self.assertRaises(AssertionError):
                 probe.terminal(intent)
             changed['qualification_failure'] = 'peak-exceeded'
             self.assertEqual(probe.terminal(intent), changed)
+
+        tampered = (
+            ('missing snapshot', lambda row: row['evidence'].update(terminal_snapshot=None)),
+            ('identity', lambda row: row['evidence']['terminal_snapshot'].update(cgroup_inode=0)),
+            ('peak', lambda row: row['evidence']['terminal_snapshot'].update(memory_peak_raw='101\n')),
+            ('limit', lambda row: row['evidence']['terminal_snapshot'].update(memory_max_raw='1\n')),
+            ('swap', lambda row: row['evidence']['terminal_snapshot'].update(memory_swap_max_raw='1\n')),
+            ('overflow', lambda row: row['evidence']['terminal_snapshot'].update(
+                memory_peak_raw=f'{2**64}\n')),
+            ('events', lambda row: row['evidence']['terminal_snapshot'].update(
+                memory_events_local_raw=raw_events.replace('oom_kill 0', 'oom_kill 1'))),
+            ('aggregate bound', lambda row: row['evidence']['terminal_snapshot'].update(
+                memory_events_raw='x' * 4096)),
+        )
+        for label, mutate in tampered:
+            changed = copy.deepcopy(receipt)
+            mutate(changed)
+            with self.subTest(label=label), patch.object(
+                    verifier.FILM.FilmQualification, 'terminal', return_value=changed), \
+                    self.assertRaises(AssertionError):
+                probe.terminal(intent)
 
 
 if __name__ == '__main__':

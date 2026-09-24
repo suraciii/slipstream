@@ -1285,6 +1285,12 @@ impl Executor {
         self.verify_parent()?;
         record.receipt.state = State::Settling;
         self.update(&record)?;
+        let has_container = record
+            .receipt
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.container_id.as_ref())
+            .is_some();
         if record.receipt.outcome.is_some()
             && record
                 .receipt
@@ -1292,6 +1298,7 @@ impl Executor {
                 .as_ref()
                 .is_some_and(|evidence| evidence.populated == Some(false))
         {
+            self.backend.validate_terminal_evidence(&record)?;
             drop(session);
             self.backend
                 .cleanup(&mut record, |record| self.update(record))?;
@@ -1300,12 +1307,6 @@ impl Executor {
             record.settled_at_unix_ms = Some(now()?);
             return self.update(&record);
         }
-        let has_container = record
-            .receipt
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.container_id.as_ref())
-            .is_some();
         if has_container {
             if self.backend.live(&record)?.running {
                 if record.termination_reason.is_none() {
@@ -1390,7 +1391,19 @@ impl Executor {
                 parent_before: None,
                 parent_after: None,
                 populated: Some(false),
+                terminal_snapshot: None,
             });
+        }
+        let response = Response::Result {
+            version: self.config.version,
+            result: Box::new(record.result_body()),
+        };
+        if serde_json::to_vec(&response)
+            .map_err(|_| ErrorCode::Uncertain)?
+            .len()
+            > RESPONSE_BYTES
+        {
+            return Err(ErrorCode::Uncertain);
         }
         self.update(&record)?;
         drop(session);
@@ -1922,6 +1935,7 @@ pub(crate) mod tests {
             parent_before: None,
             parent_after: None,
             populated: Some(false),
+            terminal_snapshot: None,
         }
     }
     #[test]
@@ -2731,6 +2745,36 @@ pub(crate) mod tests {
                 local_oom_kill: u64::MAX,
                 local_oom_group_kill: u64::MAX,
             };
+            let memory_peak_raw = format!("{}\n", u64::MAX);
+            let memory_max_raw = format!("{}\n", record.receipt.limits.memory_bytes);
+            let memory_swap_current_raw = "0\n".to_owned();
+            let memory_swap_max_raw = "0\n".to_owned();
+            let mut memory_events_raw = format!(
+                "oom {}\noom_kill {}\noom_group_kill {}\n",
+                u64::MAX,
+                u64::MAX,
+                u64::MAX
+            );
+            let mut memory_events_local_raw = memory_events_raw.clone();
+            let mut padding_index = 0_u64;
+            loop {
+                let total = memory_peak_raw.len()
+                    + memory_max_raw.len()
+                    + memory_swap_current_raw.len()
+                    + memory_swap_max_raw.len()
+                    + memory_events_raw.len()
+                    + memory_events_local_raw.len();
+                let line = format!("future_{padding_index} 0\n");
+                if total + line.len() > TERMINAL_SNAPSHOT_BYTES {
+                    break;
+                }
+                if padding_index.is_multiple_of(2) {
+                    memory_events_raw.push_str(&line);
+                } else {
+                    memory_events_local_raw.push_str(&line);
+                }
+                padding_index += 1;
+            }
             record.receipt.evidence = Some(Evidence {
                 peak_bytes: u64::MAX,
                 exit_code: Some(0),
@@ -2740,6 +2784,32 @@ pub(crate) mod tests {
                 parent_before: Some(events.clone()),
                 parent_after: Some(events),
                 populated: Some(false),
+                terminal_snapshot: Some(TerminalSnapshot {
+                    cgroup_path: format!(
+                        "/sys/fs/cgroup/slipstreamprocessing0.slice/{}",
+                        record.unit()
+                    ),
+                    cgroup_inode: u64::MAX,
+                    unit_invocation: "6".repeat(32),
+                    launch_id: record.launch_id.clone(),
+                    container_id: record
+                        .receipt
+                        .runtime
+                        .as_ref()
+                        .unwrap()
+                        .container_id
+                        .clone()
+                        .unwrap(),
+                    attempt_unit: record.unit().to_owned(),
+                    incarnation: registry.incarnation.clone(),
+                    sequence: record.receipt.sequence,
+                    memory_peak_raw,
+                    memory_max_raw,
+                    memory_swap_current_raw,
+                    memory_swap_max_raw,
+                    memory_events_raw,
+                    memory_events_local_raw,
+                }),
             });
         }
         registry

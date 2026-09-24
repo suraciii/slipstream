@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from verify import Qualification, await_condition, command
@@ -38,6 +39,70 @@ def checked_requirement(known, empirical, source, reserve):
     if raw >= 2**64 or result >= 2**64:
         raise ValueError('total requirement overflow')
     return result
+
+
+def verify_terminal_snapshot(receipt, instance):
+    evidence = receipt['evidence']
+    runtime = receipt['runtime']
+    snapshot = evidence['terminal_snapshot']
+    if runtime is None or runtime['container_id'] is None:
+        assert snapshot is None, receipt
+        return
+    assert isinstance(snapshot, dict), receipt
+    raw_names = ('memory_peak_raw', 'memory_max_raw', 'memory_swap_current_raw',
+                 'memory_swap_max_raw', 'memory_events_raw', 'memory_events_local_raw')
+    assert set(snapshot) == {
+        'cgroup_path', 'cgroup_inode', 'unit_invocation', 'launch_id',
+        'container_id', 'attempt_unit', 'incarnation', 'sequence', *raw_names}, receipt
+    assert all(type(snapshot.get(name)) is str and snapshot[name].isascii()
+               for name in raw_names), receipt
+    assert sum(len(snapshot[name].encode('ascii')) for name in raw_names) <= 4096, receipt
+
+    unit = runtime['attempt_unit']
+    assert snapshot['cgroup_path'] == (
+        f'/sys/fs/cgroup/slipstreamprocessing{instance}.slice/{unit}'), receipt
+    assert unit == f'slipstreamprocessing{instance}-{runtime["launch_id"]}.slice', receipt
+    assert (type(snapshot['cgroup_inode']) is int and snapshot['cgroup_inode'] > 0
+            and len(snapshot['unit_invocation']) == 32
+            and all(char in '0123456789abcdef' for char in snapshot['unit_invocation'])), receipt
+    for key in ('launch_id', 'container_id', 'attempt_unit'):
+        assert snapshot[key] == runtime[key], receipt
+    for key in ('incarnation', 'sequence'):
+        assert snapshot[key] == receipt[key], receipt
+
+    def number(value):
+        assert re.fullmatch(r'[0-9]+\n', value), receipt
+        parsed = int(value[:-1])
+        assert parsed < 2**64, receipt
+        return parsed
+
+    def events(value):
+        parsed = {}
+        for line in value.splitlines(keepends=True):
+            match = re.fullmatch(r'([a-z0-9_]+) ([0-9]+)\n', line)
+            assert match is not None and match[1] not in parsed, receipt
+            parsed[match[1]] = int(match[2])
+            assert parsed[match[1]] < 2**64, receipt
+        assert all(key in parsed for key in ('oom', 'oom_kill', 'oom_group_kill')), receipt
+        return parsed
+
+    peak = number(snapshot['memory_peak_raw'])
+    maximum = number(snapshot['memory_max_raw'])
+    swap_current = number(snapshot['memory_swap_current_raw'])
+    swap_max = number(snapshot['memory_swap_max_raw'])
+    all_events = events(snapshot['memory_events_raw'])
+    local_events = events(snapshot['memory_events_local_raw'])
+    assert peak == evidence['peak_bytes'] and evidence['populated'] is False, receipt
+    assert maximum == receipt['limits']['memory_bytes'] == receipt['plan']['attempt_limit_bytes'], receipt
+    assert swap_current == swap_max == receipt['limits']['swap_bytes'] == 0, receipt
+    after = evidence['attempt_after']
+    assert isinstance(after, dict), receipt
+    for key in ('oom', 'oom_kill', 'oom_group_kill'):
+        assert all_events[key] == after[key] and local_events[key] == after['local_' + key], receipt
+    if receipt['outcome'] == 'completed':
+        assert all(after[key] == 0 for key in
+                   ('oom', 'oom_kill', 'oom_group_kill', 'local_oom',
+                    'local_oom_kill', 'local_oom_group_kill')), receipt
 
 
 class QualifiedFilmQualification(FILM.FilmQualification):
@@ -183,6 +248,7 @@ class QualifiedFilmQualification(FILM.FilmQualification):
         assert plan['attempt_limit_bytes'] == receipt['limits']['memory_bytes'], receipt
         assert plan['envelope_sha256'] == receipt['envelope'], receipt
         assert plan['storage_reserve_bytes'] == 4 * FILM.GIB, receipt
+        verify_terminal_snapshot(receipt, self.instance)
         if receipt['qualification_failure'] == 'peak-exceeded':
             assert receipt['evidence']['peak_bytes'] > plan['empirical_ceiling_bytes'], receipt
         if (intent['sequence'] not in getattr(self, 'injected_drift', set())
