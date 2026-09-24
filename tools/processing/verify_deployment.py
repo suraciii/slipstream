@@ -113,7 +113,7 @@ class DeploymentSnapshot:
         passed = all(check.ok for check in checks)
         return {
             "scope": "read-only-deployment-snapshot",
-            "status": "snapshot-passed" if passed else "snapshot-failed",
+            "status": "read-only-checks-passed" if passed else "read-only-checks-failed",
             "production_ready": False,
             "checks": [check.as_dict() for check in checks],
         }
@@ -286,9 +286,10 @@ class DeploymentSnapshot:
             has_credentials = parsed.username is not None or parsed.password is not None
         except ValueError:
             return [Check("web-capability", False, "web-url-invalid")]
+        if parsed.scheme != "https":
+            return [Check("web-capability", False, "web-url-must-use-https")]
         if (
-            parsed.scheme not in {"http", "https"}
-            or not has_authority
+            not has_authority
             or has_credentials
             or parsed.path not in {"", "/"}
             or parsed.query
@@ -388,7 +389,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--attempt-cgroup", type=Path)
     parser.add_argument("--web-url", default=os.environ.get("SLIPSTREAM_DEPLOYMENT_WEB_URL"))
     parser.add_argument("--web-token-file", type=Path)
-    parser.add_argument("--output", type=Path)
     return parser.parse_args(argv)
 
 
@@ -403,11 +403,8 @@ def main(argv: list[str] | None = None) -> int:
         web_token_file=arguments.web_token_file,
     ).run()
     rendered = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
-    if arguments.output:
-        arguments.output.parent.mkdir(parents=True, exist_ok=True)
-        arguments.output.write_text(rendered)
     print(rendered, end="")
-    return 0 if snapshot["status"] == "snapshot-passed" else 1
+    return 0 if snapshot["status"] == "read-only-checks-passed" else 1
 
 
 if __name__ == "__main__":

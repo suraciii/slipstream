@@ -29,17 +29,24 @@ sudo python3 tools/processing/verify-deployment.py \
   --web-token-file /run/secrets/slipstream-cli-token
 ```
 
-The report is a `read-only-deployment-snapshot`. It checks cgroup v2
+The report is a `read-only-deployment-snapshot` with a status of
+`read-only-checks-passed` or `read-only-checks-failed`. It checks cgroup v2
 controllers, systemd, Docker's systemd cgroup driver, the root-owned launcher
 binary/unit/configuration, the exact runtime socket and owner claim, a running
 launcher unit, finite attempt memory with zero swap, and authenticated Library,
 Album, health, and processing-capability reads. It reports distinct failure
 reasons such as `launcher-installation-missing`, `launcher-socket-missing`,
 `attempt-memory-unlimited`, and `web-capability-unavailable`.
+JSON is printed to standard output; the checker has no report-path option and
+does not write to the host.
 
 The checker never claims production readiness by itself. A successful snapshot
 still needs the complete launch, failure, recovery, cleanup, source, Export,
 and supported-host evidence required by the deployment and processing specs.
+It does not prove exact Web/worker/policy identity binding, canonical ancestor
+ownership, retained receipt settlement, failure/recovery behavior, or the RAW,
+TIFF, Film, and Export workflow. Those checks remain open in #375 and its
+independent dependencies.
 
 ## Build
 

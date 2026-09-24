@@ -59,7 +59,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             snapshot = checker.run()
             launcher = next(item for item in snapshot["checks"] if item["name"] == "launcher-installation")
             self.assertEqual(launcher["reason"], "launcher-installation-missing")
-            self.assertEqual(snapshot["status"], "snapshot-failed")
+            self.assertEqual(snapshot["status"], "read-only-checks-failed")
             self.assertFalse(snapshot["production_ready"])
 
     def test_missing_socket_is_distinct(self):
@@ -148,13 +148,32 @@ class DeploymentVerifierTests(unittest.TestCase):
                 instance=INSTANCE,
                 policy=POLICY,
                 bundle=BUNDLE,
-                web_url="http://127.0.0.1:3000",
+                web_url="https://photos.example.com",
                 web_token_file=token_file,
                 urlopen=urlopen,
             )
             checks = checker._web_checks()
             self.assertEqual(checks[0].reason, "web-capability-unavailable")
             self.assertEqual(checks[0].detail, "source-unavailable")
+
+    def test_web_rejects_plain_http_before_sending_bearer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            token_file = Path(directory) / "token"
+            token_file.write_text("synthetic-token\n")
+
+            def unexpected_urlopen(*_args, **_kwargs):
+                raise AssertionError("bearer must not be sent over HTTP")
+
+            checker = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="http://photos.example.com",
+                web_token_file=token_file,
+                urlopen=unexpected_urlopen,
+            )
+            checks = checker._web_checks()
+            self.assertEqual(checks[0].reason, "web-url-must-use-https")
 
 
 if __name__ == "__main__":
