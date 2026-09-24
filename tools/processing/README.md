@@ -12,6 +12,35 @@ Photo Library service retains its domain state and publication authority. The
 Web container receives no Docker socket, controller-write mount, or privileged
 container settings.
 
+## Read-only deployment snapshot
+
+`verify-deployment.py` checks the fixed supported-host paths and topology without
+starting, stopping, or reconfiguring a service. It requires the exact instance,
+policy, and bundle identities from the operator configuration. Supply an active
+attempt cgroup and a read-only Web token file when checking a deployed instance:
+
+```sh
+sudo python3 tools/processing/verify-deployment.py \
+  --instance 0123456789abcdef0123456789abcdef \
+  --policy POLICY_SHA256 \
+  --bundle BUNDLE_SHA256 \
+  --attempt-cgroup /sys/fs/cgroup/slipstreamprocessing0123456789abcdef0123456789abcdef/ATTEMPT.slice \
+  --web-url https://photos.example.com \
+  --web-token-file /run/secrets/slipstream-cli-token
+```
+
+The report is a `read-only-deployment-snapshot`. It checks cgroup v2
+controllers, systemd, Docker's systemd cgroup driver, the root-owned launcher
+binary/unit/configuration, the exact runtime socket and owner claim, a running
+launcher unit, finite attempt memory with zero swap, and authenticated Library,
+Album, health, and processing-capability reads. It reports distinct failure
+reasons such as `launcher-installation-missing`, `launcher-socket-missing`,
+`attempt-memory-unlimited`, and `web-capability-unavailable`.
+
+The checker never claims production readiness by itself. A successful snapshot
+still needs the complete launch, failure, recovery, cleanup, source, Export,
+and supported-host evidence required by the deployment and processing specs.
+
 ## Build
 
 Build on the repository's Rust toolchain. A separate worker image has a fixed
