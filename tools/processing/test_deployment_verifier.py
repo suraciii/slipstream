@@ -131,6 +131,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
             token_file.write_text("synthetic-token\n")
+            token_file.chmod(0o600)
 
             def urlopen(request, timeout):
                 path = request.full_url.split("/", 3)[-1]
@@ -160,6 +161,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
             token_file.write_text("synthetic-token\n")
+            token_file.chmod(0o600)
 
             def unexpected_urlopen(*_args, **_kwargs):
                 raise AssertionError("bearer must not be sent over HTTP")

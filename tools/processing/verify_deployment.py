@@ -27,6 +27,7 @@ DEFAULT_CONFIG_ROOT = Path("/etc/slipstream-processing")
 DEFAULT_RUNTIME_ROOT = Path("/run/slipstream-processing")
 DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
 MAX_WEB_BYTES = 1024 * 1024
+MAX_WEB_TOKEN_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,16 @@ def run_command(arguments: tuple[str, ...], timeout: float = 5.0) -> CommandResu
     return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def open_web(request, timeout: float = 5.0):
+    """Open one endpoint without forwarding the bearer token to a redirect."""
+    return urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+
+
 class DeploymentSnapshot:
     def __init__(
         self,
@@ -87,7 +98,7 @@ class DeploymentSnapshot:
         web_url: str | None = None,
         web_token_file: Path | None = None,
         command=run_command,
-        urlopen=urllib.request.urlopen,
+        urlopen=open_web,
     ):
         self.instance = instance
         self.policy = policy
@@ -275,9 +286,16 @@ class DeploymentSnapshot:
         if self.web_token_file is None:
             return [Check("web-capability", False, "web-token-required")]
         try:
-            token = self.web_token_file.read_text().strip()
+            token_stat = self.web_token_file.lstat()
+            if not stat.S_ISREG(token_stat.st_mode) or token_stat.st_mode & 0o022:
+                return [Check("web-capability", False, "web-token-file-ownership")]
+            with self.web_token_file.open(encoding="utf-8") as stream:
+                raw_token = stream.read(MAX_WEB_TOKEN_BYTES + 1)
         except OSError:
             return [Check("web-capability", False, "web-token-unreadable")]
+        if len(raw_token) > MAX_WEB_TOKEN_BYTES:
+            return [Check("web-capability", False, "web-token-too-large")]
+        token = raw_token.strip()
         if not token or any(char.isspace() for char in token):
             return [Check("web-capability", False, "web-token-invalid")]
         try:
