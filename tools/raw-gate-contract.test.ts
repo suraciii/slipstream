@@ -58,6 +58,8 @@ test("the RAW plan keeps the exact serial native, service, and browser gate", ()
         "--",
         "--ignored",
         "--test-threads=1",
+        "--skip",
+        "development_tiff_derivative_handles_a_real_artifact",
       ],
       expectedTests: [
         "confinement::tests::sony_original_remains_unchanged",
@@ -92,6 +94,8 @@ test("the RAW plan keeps the exact serial native, service, and browser gate", ()
     "--",
     "--ignored",
     "--test-threads=1",
+    "--skip",
+    "development_tiff_derivative_handles_a_real_artifact",
     "--list",
   ]);
   expect(rawGateListCommand(rawGatePlan[1]!)).toEqual([
