@@ -10,6 +10,7 @@ use std::{
     fmt,
     fs::{File, OpenOptions},
     io,
+    io::Write,
     mem::MaybeUninit,
     os::{
         fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
@@ -418,6 +419,75 @@ impl OriginalCapability {
             consumed += u64::try_from(count)
                 .map_err(|_| ConfinementError::Io("Original File could not be read completely"))?;
         }
+        let after = stat_regular(file.as_raw_fd())?;
+        if !same_revision(&before, &after) {
+            return Err(ConfinementError::Changed);
+        }
+        Ok(RevisionCheckedDigest {
+            digest: format!("{:x}", hasher.finalize()),
+            facts: facts_from_stat(&before)?,
+        })
+    }
+
+    /// Copies the complete Original through the retained confined descriptor
+    /// into a caller-owned writer while hashing the exact bytes that were
+    /// written. The caller must discard partial output when this returns an
+    /// error and publish only after the returned digest and facts are accepted.
+    /// The bounded buffer keeps staging memory independent of the Original's
+    /// size, and a source revision change before or after the copy is rejected.
+    pub fn copy_revision_checked<W: Write>(
+        &self,
+        mut writer: W,
+    ) -> Result<RevisionCheckedDigest, ConfinementError> {
+        use sha2::{Digest as _, Sha256};
+
+        let file = self.root.open_confined(&self.path, false)?;
+        let before = stat_regular(file.as_raw_fd())?;
+        let size = validated_size(&before)?;
+        if size > MAXIMUM_DIGEST_BYTES {
+            return Err(ConfinementError::ResourceLimit(
+                "Original File exceeds staging read limit",
+            ));
+        }
+
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; DIGEST_CHUNK_BYTES];
+        let mut consumed = 0_u64;
+        while consumed < size {
+            let length = buffer
+                .len()
+                .min(usize::try_from(size - consumed).map_err(|_| {
+                    ConfinementError::ResourceLimit("Original File exceeds staging read limit")
+                })?);
+            let chunk = &mut buffer[..length];
+            let count = match sys::pread(file.as_raw_fd(), chunk, consumed) {
+                Ok(count) => count,
+                Err(_) => {
+                    return Err(read_failure_after_revision_check(
+                        file.as_raw_fd(),
+                        &before,
+                        "Original File could not be read completely",
+                    ));
+                }
+            };
+            if count == 0 {
+                return Err(read_failure_after_revision_check(
+                    file.as_raw_fd(),
+                    &before,
+                    "Original File could not be read completely",
+                ));
+            }
+            writer
+                .write_all(&chunk[..count])
+                .map_err(|_| ConfinementError::Io("Staging output could not be written"))?;
+            hasher.update(&chunk[..count]);
+            consumed += u64::try_from(count)
+                .map_err(|_| ConfinementError::Io("Original File could not be read completely"))?;
+        }
+        writer
+            .flush()
+            .map_err(|_| ConfinementError::Io("Staging output could not be flushed"))?;
+
         let after = stat_regular(file.as_raw_fd())?;
         if !same_revision(&before, &after) {
             return Err(ConfinementError::Changed);
@@ -1182,6 +1252,61 @@ mod tests {
                 .facts()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn copies_a_confined_original_with_bounded_revision_checked_hashing() {
+        use sha2::Digest as _;
+
+        let tree = TempTree::new();
+        tree.write("photo.JPG", b"staged bytes");
+        let root = LibraryRoot::open(tree.path()).unwrap();
+        let original = root
+            .original(RelativeOriginalPath::parse("photo.JPG").unwrap())
+            .unwrap();
+        let mut staged = Vec::new();
+        let result = original.copy_revision_checked(&mut staged).unwrap();
+
+        assert_eq!(staged, b"staged bytes");
+        assert_eq!(result.facts.size, staged.len() as u64);
+        assert_eq!(
+            result.digest,
+            format!("{:x}", sha2::Sha256::digest(&staged))
+        );
+    }
+
+    #[test]
+    fn rejects_an_original_that_changes_during_staging() {
+        struct MutatingWriter {
+            path: std::path::PathBuf,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for MutatingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                std::fs::write(&self.path, b"changed during staging")?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let tree = TempTree::new();
+        tree.write("photo.JPG", b"original bytes");
+        let path = tree.path().join("photo.JPG");
+        let root = LibraryRoot::open(tree.path()).unwrap();
+        let original = root
+            .original(RelativeOriginalPath::parse("photo.JPG").unwrap())
+            .unwrap();
+        let result = original.copy_revision_checked(MutatingWriter {
+            path,
+            bytes: Vec::new(),
+        });
+
+        assert!(matches!(result, Err(ConfinementError::Changed)));
     }
 
     #[test]
