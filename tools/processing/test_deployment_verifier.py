@@ -246,6 +246,12 @@ class DeploymentVerifierTests(unittest.TestCase):
             (attempt / "io.stat").unlink()
             self.assertEqual(checker._cgroup_check().reason, "attempt-io-accounting-unavailable")
 
+            (attempt / "io.stat").write_text("x" * (deployment.MAX_CGROUP_IO_BYTES + 1))
+            self.assertEqual(checker._cgroup_check().reason, "attempt-io-accounting-unavailable")
+
+            (attempt / "io.stat").write_bytes(b"\xff")
+            self.assertEqual(checker._cgroup_check().reason, "attempt-io-accounting-unavailable")
+
     def test_web_capability_requires_all_available_states(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"

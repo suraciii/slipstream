@@ -28,6 +28,7 @@ DEFAULT_RUNTIME_ROOT = Path("/run/slipstream-processing")
 DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
 MAX_WEB_BYTES = 1024 * 1024
 MAX_WEB_TOKEN_BYTES = 4096
+MAX_CGROUP_IO_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -323,8 +324,10 @@ class DeploymentSnapshot:
         # subtree has I/O accounting enabled. The contents are interpreted by
         # the retained terminal receipt, not this static snapshot.
         try:
-            io_stat.read_text()
-        except OSError:
+            with io_stat.open(encoding="ascii") as stream:
+                if len(stream.read(MAX_CGROUP_IO_BYTES + 1)) > MAX_CGROUP_IO_BYTES:
+                    return Check("attempt-cgroup", False, "attempt-io-accounting-unavailable")
+        except (OSError, UnicodeDecodeError):
             return Check("attempt-cgroup", False, "attempt-io-accounting-unavailable")
         cpu_parts = cpu_value.split()
         if len(cpu_parts) != 2 or any(part == "max" for part in cpu_parts):
