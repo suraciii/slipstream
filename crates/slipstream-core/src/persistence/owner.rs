@@ -9,15 +9,17 @@ use crate::{
     CaptureFact, CaptureMetadataState, CaptureTimeField, CheckedAlbumMutation,
     CheckedAlbumMutationResult, CheckedPhotoDecisionCounts, CheckedPhotoDecisionItemResult,
     CheckedPhotoDecisionMutation, CheckedPhotoDecisionOutcome, CheckedPhotoDecisionResult,
-    DiscoveredOriginal, LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING,
-    OriginalErrorCategory, OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord,
-    OriginalScanError, PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery,
+    DiscoveredOriginal, EditRecipe, EditRecipeRead, EditRecipeSettings, EditRecipeWriteOutcome,
+    LibraryRoot, MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory,
+    OriginalFacts, OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError,
+    PhotoAlbumMembership, PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery,
     PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
     PhotoRead, PhotoRecord, PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere,
     PhotoStateBatchMissing, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField,
     PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
-    PreviewSeedResult, PreviewState, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
-    ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
+    PreviewSeedResult, PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath,
+    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState,
+    UnavailablePhotoRecord, WhiteBalanceIntent,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -639,6 +641,12 @@ enum Command {
         photo_id: String,
         reply: Reply<Option<PhotoRead>>,
     },
+    ReadEditRecipe {
+        photo_id: String,
+        reply: Reply<Option<EditRecipeRead>>,
+    },
+    SaveEditRecipe(SaveEditRecipe, Reply<EditRecipeWriteOutcome>),
+    RebindEditRecipe(RebindEditRecipe, Reply<EditRecipeWriteOutcome>),
     ReadPhotos {
         photo_ids: Vec<String>,
         projection: Arc<PhotoQueryProjection>,
@@ -1076,6 +1084,39 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn edit_recipe_receiver(
+        &self,
+        photo_id: &str,
+    ) -> Result<oneshot::Receiver<Result<Option<EditRecipeRead>, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ReadEditRecipe {
+            photo_id: photo_id.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    pub(crate) fn save_edit_recipe_receiver(
+        &self,
+        mutation: SaveEditRecipe,
+    ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::SaveEditRecipe(mutation, send))?;
+        Ok(receive)
+    }
+
+    pub(crate) fn rebind_edit_recipe_receiver(
+        &self,
+        mutation: RebindEditRecipe,
+    ) -> Result<oneshot::Receiver<Result<EditRecipeWriteOutcome, PersistenceError>>, PersistenceError>
+    {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RebindEditRecipe(mutation, send))?;
+        Ok(receive)
+    }
+
     pub(crate) fn photos_by_id_receiver(
         &self,
         photo_ids: Vec<String>,
@@ -1443,6 +1484,17 @@ fn owner_main(
             Command::ReadPhoto { photo_id, reply } => {
                 let _ = reply.send(read_photo(&connection, &versions, &photo_id));
             }
+            Command::ReadEditRecipe { photo_id, reply } => {
+                let _ = reply.send(read_edit_recipe(&connection, &photo_id));
+            }
+            Command::SaveEditRecipe(mutation, reply) => {
+                let result = save_edit_recipe(&state, &database_name, &mut connection, mutation);
+                let _ = reply.send(result);
+            }
+            Command::RebindEditRecipe(mutation, reply) => {
+                let result = rebind_edit_recipe(&state, &database_name, &mut connection, mutation);
+                let _ = reply.send(result);
+            }
             Command::ReadPhotos {
                 photo_ids,
                 projection,
@@ -1639,7 +1691,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 6)
+    preflight_schema_for_max_version(connection, canonical_root, 7)
 }
 
 fn preflight_schema_for_max_version(
@@ -1668,6 +1720,8 @@ fn preflight_schema_for_max_version(
         5 => validate_canonical_schema(connection, SchemaVersion::V5)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         6 => validate_canonical_schema(connection, SchemaVersion::V6)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        7 => validate_canonical_schema(connection, SchemaVersion::V7)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -1705,7 +1759,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 6 {
+    if version > 7 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -1750,10 +1804,15 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         6 => validate_canonical_schema(&transaction, SchemaVersion::V6)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        7 => validate_canonical_schema(&transaction, SchemaVersion::V7)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
-    if version != 6 {
+    if version < 6 {
         migrate_v5(&transaction)?;
+    }
+    if version != 7 {
+        migrate_v6(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -1772,7 +1831,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V6)
+    validate_canonical_schema(&transaction, SchemaVersion::V7)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -2137,6 +2196,25 @@ fn migrate_v5(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
+fn migrate_v6(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V6)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE edit_recipes(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               revision TEXT NOT NULL CHECK(length(revision) > 0),
+               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+               exposure_ev REAL NOT NULL CHECK(exposure_ev BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308),
+               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot')
+             );
+             PRAGMA user_version = 7;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V7)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
 struct LegacyPhotoRow {
     id: String,
     raw_original_id: Option<String>,
@@ -2404,7 +2482,13 @@ fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey, Persistenc
     let mut referenced_photo_ids = HashSet::new();
     {
         let mut statement = connection
-            .prepare("SELECT DISTINCT photo_id FROM album_members")
+            .prepare(
+                "SELECT DISTINCT photo_id FROM (
+                   SELECT photo_id FROM album_members
+                   UNION ALL
+                   SELECT photo_id FROM edit_recipes
+                 )",
+            )
             .map_err(|_| PersistenceError::Storage)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -2511,20 +2595,23 @@ fn apply_manual_relocations(
                 }
                 let occupant = transaction
                     .query_row(
-                        "SELECT id,rating,selection_state FROM photos WHERE original_id=?",
+                        "SELECT id,rating,selection_state,
+                            EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=photos.id)
+                     FROM photos WHERE original_id=?",
                         params![owner_id],
                         |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, i64>(1)?,
                                 row.get::<_, String>(2)?,
+                                row.get::<_, i64>(3)? != 0,
                             ))
                         },
                     )
                     .optional()
                     .map_err(|_| PersistenceError::Storage)?;
-                if let Some((photo_id, rating, selection_state)) = occupant {
-                    if rating != 0 || selection_state != "undecided" {
+                if let Some((photo_id, rating, selection_state, has_saved_edits)) = occupant {
+                    if rating != 0 || selection_state != "undecided" || has_saved_edits {
                         return Err(PersistenceError::InvalidRecoveryMapping {
                             original_id: relocation.original_id.clone(),
                             reason: "occupied",
@@ -2711,7 +2798,7 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&readonly, SchemaVersion::V6)
+    validate_canonical_schema(&readonly, SchemaVersion::V7)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     let stored_root = required_root_binding(&readonly)?;
     drop(readonly);
@@ -2762,7 +2849,7 @@ pub(crate) fn expand_library_binding(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&connection, SchemaVersion::V6)
+    validate_canonical_schema(&connection, SchemaVersion::V7)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
@@ -2775,7 +2862,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V6)
+    validate_canonical_schema(&transaction, SchemaVersion::V7)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -2825,7 +2912,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V6)
+    validate_canonical_schema(&transaction, SchemaVersion::V7)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3014,7 +3101,8 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
         .prepare(
             "SELECT p.id,p.original_id,p.available,p.preview_state,
                     p.preview_source_revision,p.preview_width,p.preview_height,p.cache_revision,
-                    p.sort_path,p.selection_state,p.rating
+                    p.sort_path,p.selection_state,p.rating,
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
              FROM photos p
              LEFT JOIN original_files o ON o.id=p.original_id
              ORDER BY CASE WHEN o.capture_order_key IS NULL THEN 1 ELSE 0 END,
@@ -3038,6 +3126,7 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
                     .get::<_, i64>(10)?
                     .try_into()
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                has_saved_edits: row.get::<_, i64>(11)? != 0,
             })
         })
         .map_err(|_| PersistenceError::Storage)?
@@ -3604,6 +3693,230 @@ fn write_transaction<T>(
     Ok(result)
 }
 
+fn read_edit_recipe(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<Option<EditRecipeRead>, PersistenceError> {
+    let row = connection
+        .query_row(
+            "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
+                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode
+             FROM photos p JOIN original_files o ON o.id=p.original_id
+             LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
+            [photo_id],
+            |row| {
+                let relative_path: String = row.get(0)?;
+                let size = u64::try_from(row.get::<_, i64>(1)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let mtime_ms: f64 = row.get(2)?;
+                let source_available = row.get::<_, i64>(3)? != 0 && row.get::<_, i64>(4)? != 0;
+                let recipe_revision: Option<String> = row.get(5)?;
+                let recipe_source_revision: Option<String> = row.get(6)?;
+                let exposure_ev: Option<f64> = row.get(7)?;
+                let white_balance_mode: Option<String> = row.get(8)?;
+                let recipe = match (
+                    recipe_revision,
+                    recipe_source_revision,
+                    exposure_ev,
+                    white_balance_mode,
+                ) {
+                    (None, None, None, None) => None,
+                    (Some(revision), Some(source_revision), Some(exposure_ev), Some(mode)) => {
+                        Some(EditRecipe {
+                            photo_id: photo_id.to_owned(),
+                            revision,
+                            source_revision,
+                            settings: EditRecipeSettings {
+                                exposure_ev,
+                                white_balance: parse_white_balance_intent(&mode)?,
+                            },
+                        })
+                    }
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok((relative_path, size, mtime_ms, source_available, recipe))
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)?;
+    let Some((relative_path, size, mtime_ms, source_available, recipe)) = row else {
+        return Ok(None);
+    };
+    let current_source_revision = crate::source_revision(&relative_path, size, mtime_ms)
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(Some(EditRecipeRead {
+        recipe,
+        current_source_revision,
+        source_available,
+    }))
+}
+
+fn save_edit_recipe(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: SaveEditRecipe,
+) -> Result<EditRecipeWriteOutcome, PersistenceError> {
+    if !mutation.settings.exposure_ev.is_finite() || mutation.expected_source_revision.is_empty() {
+        return Ok(EditRecipeWriteOutcome::InvalidSettings);
+    }
+    write_transaction(state, database_name, connection, |transaction| {
+        let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
+            return Ok(EditRecipeWriteOutcome::MissingPhoto);
+        };
+        let Some((kind, available)) = photo_processing_source(transaction, &mutation.photo_id)?
+        else {
+            return Ok(EditRecipeWriteOutcome::MissingPhoto);
+        };
+        if kind != crate::OriginalKind::Raw {
+            return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
+        }
+        if !available || !current.source_available {
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
+        if current.current_source_revision != mutation.expected_source_revision {
+            return Ok(EditRecipeWriteOutcome::SourceChanged(current));
+        }
+        if current
+            .recipe
+            .as_ref()
+            .map(|recipe| recipe.revision.as_str())
+            != mutation.expected_recipe_revision.as_deref()
+        {
+            return Ok(EditRecipeWriteOutcome::Conflict(current));
+        }
+        if current
+            .recipe
+            .as_ref()
+            .is_some_and(|recipe| recipe.source_revision != mutation.expected_source_revision)
+        {
+            return Ok(EditRecipeWriteOutcome::RequiresRebind(current));
+        }
+        if let Some(recipe) = &current.recipe
+            && recipe.settings == mutation.settings
+        {
+            return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
+        }
+
+        let revision = random_uuid_v4()?;
+        transaction
+            .execute(
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+                 VALUES(?,?,?,?,?)
+                 ON CONFLICT(photo_id) DO UPDATE SET revision=excluded.revision,
+                    source_revision=excluded.source_revision,exposure_ev=excluded.exposure_ev,
+                    white_balance_mode=excluded.white_balance_mode",
+                params![
+                    mutation.photo_id,
+                    revision,
+                    mutation.expected_source_revision,
+                    mutation.settings.exposure_ev,
+                    white_balance_intent_name(mutation.settings.white_balance),
+                ],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        Ok(EditRecipeWriteOutcome::Saved(EditRecipe {
+            photo_id: mutation.photo_id,
+            revision,
+            source_revision: mutation.expected_source_revision,
+            settings: mutation.settings,
+        }))
+    })
+}
+
+fn rebind_edit_recipe(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: RebindEditRecipe,
+) -> Result<EditRecipeWriteOutcome, PersistenceError> {
+    if mutation.expected_source_revision.is_empty() {
+        return Ok(EditRecipeWriteOutcome::InvalidSettings);
+    }
+    write_transaction(state, database_name, connection, |transaction| {
+        let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
+            return Ok(EditRecipeWriteOutcome::MissingPhoto);
+        };
+        let Some((kind, available)) = photo_processing_source(transaction, &mutation.photo_id)?
+        else {
+            return Ok(EditRecipeWriteOutcome::MissingPhoto);
+        };
+        if kind != crate::OriginalKind::Raw {
+            return Ok(EditRecipeWriteOutcome::UnsupportedPhoto);
+        }
+        if !available || !current.source_available {
+            return Ok(EditRecipeWriteOutcome::Unavailable);
+        }
+        let Some(recipe) = current.recipe.as_ref() else {
+            return Ok(EditRecipeWriteOutcome::MissingRecipe);
+        };
+        if recipe.revision != mutation.expected_recipe_revision {
+            return Ok(EditRecipeWriteOutcome::Conflict(current));
+        }
+        if current.current_source_revision != mutation.expected_source_revision {
+            return Ok(EditRecipeWriteOutcome::SourceChanged(current));
+        }
+        if recipe.source_revision == mutation.expected_source_revision {
+            return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
+        }
+        let revision = random_uuid_v4()?;
+        let changed = transaction
+            .execute(
+                "UPDATE edit_recipes SET revision=?,source_revision=?
+                 WHERE photo_id=? AND revision=?",
+                params![
+                    revision,
+                    mutation.expected_source_revision,
+                    mutation.photo_id,
+                    mutation.expected_recipe_revision,
+                ],
+            )
+            .map_err(|_| PersistenceError::Storage)?;
+        if changed != 1 {
+            return Ok(EditRecipeWriteOutcome::Conflict(current));
+        }
+        Ok(EditRecipeWriteOutcome::Saved(EditRecipe {
+            photo_id: mutation.photo_id,
+            revision,
+            source_revision: mutation.expected_source_revision,
+            settings: recipe.settings,
+        }))
+    })
+}
+
+fn photo_processing_source(
+    connection: &Connection,
+    photo_id: &str,
+) -> Result<Option<(crate::OriginalKind, bool)>, PersistenceError> {
+    connection
+        .query_row(
+            "SELECT o.kind,o.available,p.available FROM photos p
+             JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
+            [photo_id],
+            |row| {
+                Ok((
+                    parse_kind(&row.get::<_, String>(0)?)?,
+                    row.get::<_, i64>(1)? != 0 && row.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| PersistenceError::Storage)
+}
+
+fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
+    match intent {
+        WhiteBalanceIntent::AsShot => "as-shot",
+    }
+}
+
+fn parse_white_balance_intent(value: &str) -> rusqlite::Result<WhiteBalanceIntent> {
+    match value {
+        "as-shot" => Ok(WhiteBalanceIntent::AsShot),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn random_uuid_v4() -> Result<String, PersistenceError> {
     let mut bytes = [0_u8; 16];
     let mut offset = 0;
@@ -3868,7 +4181,8 @@ fn read_photo(
             "SELECT p.id,o.relative_path,o.kind,o.available,p.selection_state,p.rating,
                     o.capture_metadata_state,o.capture_order_key,o.capture_time_field,
                     o.capture_offset_minutes,o.capture_source_revision,p.preview_state,
-                    p.preview_source_revision,p.preview_width,p.preview_height
+                    p.preview_source_revision,p.preview_width,p.preview_height,
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
              FROM photos p JOIN original_files o ON o.id=p.original_id WHERE p.id=?",
             [photo_id],
             |row| {
@@ -3902,6 +4216,7 @@ fn read_photo(
                     preview_source_revision: ready.then_some(preview_source_revision).flatten(),
                     preview_width: ready.then_some(preview_width).flatten(),
                     preview_height: ready.then_some(preview_height).flatten(),
+                    has_saved_edits: row.get::<_, i64>(15)? != 0,
                 })
             },
         )
@@ -3921,13 +4236,21 @@ fn read_projected_photo(
     };
     let decisions = connection
         .query_row(
-            "SELECT selection_state,rating FROM photos WHERE id=?",
+            "SELECT p.selection_state,p.rating,
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
+             FROM photos p WHERE p.id=?",
             [photo_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            },
         )
         .optional()
         .map_err(|_| PersistenceError::Storage)?;
-    let Some((selection_state, rating)) = decisions else {
+    let Some((selection_state, rating, has_saved_edits)) = decisions else {
         return Ok(None);
     };
     let selection_state =
@@ -3955,6 +4278,7 @@ fn read_projected_photo(
             .flatten(),
         preview_width: ready.then_some(candidate.preview_width).flatten(),
         preview_height: ready.then_some(candidate.preview_height).flatten(),
+        has_saved_edits,
     }))
 }
 
@@ -5480,8 +5804,47 @@ mod tests {
         connection.execute_batch(sql).unwrap();
     }
 
+    struct RecipeTestPhoto<'a> {
+        original_id: &'a str,
+        photo_id: &'a str,
+        relative_path: &'a str,
+        kind: &'a str,
+        available: bool,
+        size: i64,
+        mtime_ms: f64,
+    }
+
+    fn add_recipe_test_photo(connection: &Connection, photo: RecipeTestPhoto<'_>) {
+        connection
+            .execute(
+                "INSERT INTO original_files(id,relative_path,kind,size,mtime_ms,available,capture_metadata_state)
+                 VALUES(?,?,?,?,?,?,'pending')",
+                params![
+                    photo.original_id,
+                    photo.relative_path,
+                    photo.kind,
+                    photo.size,
+                    photo.mtime_ms,
+                    i64::from(photo.available)
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating)
+                 VALUES(?,?,?,'inspection-pending',?,'undecided',0)",
+                params![
+                    photo.photo_id,
+                    photo.original_id,
+                    i64::from(photo.available),
+                    photo.relative_path
+                ],
+            )
+            .unwrap();
+    }
+
     #[tokio::test]
-    async fn initializes_exact_v5_and_runs_fifo_writes() {
+    async fn initializes_current_schema_and_runs_fifo_writes() {
         let (_base, library, state, name, path) = fixture();
         let persistence = Persistence::open(
             state,
@@ -5502,12 +5865,495 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+    }
+
+    #[tokio::test]
+    async fn v6_to_v7_migration_preserves_existing_library_rows() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO original_fingerprints(original_id,digest,size,mtime_ms) VALUES(?,?,?,?)",
+                params!["raw-original", "a".repeat(64), 17_i64, 1_000.0_f64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO albums(id,name,created_at) VALUES('album-one','Preserved',9)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO album_members(album_id,photo_id,position) VALUES('album-one','raw-photo',0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='selected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence.snapshot().await.unwrap();
+        assert_eq!(snapshot.originals.len(), 1);
+        assert_eq!(snapshot.originals[0].id, "raw-original");
+        assert_eq!(
+            snapshot.originals[0].relative_path.as_str(),
+            "shoot/one.ARW"
+        );
+        assert_eq!(snapshot.originals[0].facts.size, 17);
+        assert_eq!(snapshot.photos.len(), 1);
+        assert_eq!(snapshot.photos[0].id, "raw-photo");
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Selected);
+        assert_eq!(snapshot.photos[0].rating, 4);
+        assert!(!snapshot.photos[0].has_saved_edits);
+        assert_eq!(
+            persistence.list_albums().await.unwrap()[0].members[0].photo_id,
+            "raw-photo"
+        );
+        persistence.shutdown().unwrap();
+
+        let connection = Connection::open(path).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT digest,size,mtime_ms FROM original_fingerprints WHERE original_id='raw-original'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?)),
+                )
+                .unwrap(),
+            ("a".repeat(64), 17, 1_000.0)
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM edit_recipes", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_recipe_compare_and_set_rebind_and_read_model_are_guarded() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let initial_source = source_revision("shoot/one.ARW", 17, 1_000.0).unwrap();
+        let initial = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(initial.recipe.is_none());
+        assert!(initial.source_available);
+        assert_eq!(initial.current_source_revision, initial_source);
+
+        let mutation = SaveEditRecipe {
+            photo_id: "raw-photo".to_owned(),
+            expected_recipe_revision: None,
+            expected_source_revision: initial_source.clone(),
+            settings: EditRecipeSettings {
+                exposure_ev: 0.0,
+                white_balance: WhiteBalanceIntent::AsShot,
+            },
+        };
+        let first = persistence
+            .save_edit_recipe_receiver(mutation.clone())
+            .unwrap();
+        let concurrent = persistence.save_edit_recipe_receiver(mutation).unwrap();
+        let (first, concurrent) = tokio::join!(first, concurrent);
+        let first = first.unwrap().unwrap();
+        let concurrent = concurrent.unwrap().unwrap();
+        let recipe = match first {
+            EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            outcome => panic!("first compare-and-set should save, got {outcome:?}"),
+        };
+        assert!(matches!(
+            concurrent,
+            EditRecipeWriteOutcome::Conflict(EditRecipeRead {
+                recipe: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(recipe.settings.exposure_ev, 0.0);
+
+        let unchanged = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                expected_recipe_revision: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source.clone(),
+                settings: recipe.settings,
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged, EditRecipeWriteOutcome::Unchanged(recipe.clone()));
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE original_files SET size=18,mtime_ms=2_000.0 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let changed_source = source_revision("shoot/one.ARW", 18, 2_000.0).unwrap();
+        let stale_save = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                expected_recipe_revision: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source,
+                settings: EditRecipeSettings {
+                    exposure_ev: 1.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stale_save,
+            EditRecipeWriteOutcome::SourceChanged(EditRecipeRead {
+                recipe: Some(_),
+                ..
+            })
+        ));
+        let rebound = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                expected_recipe_revision: recipe.revision.clone(),
+                expected_source_revision: changed_source.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let rebound = match rebound {
+            EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            outcome => panic!("explicit rebind should save, got {outcome:?}"),
+        };
+        assert_ne!(rebound.revision, recipe.revision);
+        assert_eq!(rebound.source_revision, changed_source);
+        assert_eq!(rebound.settings, recipe.settings);
+        assert!(matches!(
+            persistence
+                .save_edit_recipe_receiver(SaveEditRecipe {
+                    photo_id: "raw-photo".to_owned(),
+                    expected_recipe_revision: Some(recipe.revision),
+                    expected_source_revision: changed_source,
+                    settings: EditRecipeSettings {
+                        exposure_ev: 2.0,
+                        white_balance: WhiteBalanceIntent::AsShot,
+                    },
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            EditRecipeWriteOutcome::Conflict(_)
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE original_files SET available=0 WHERE id='raw-original'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE photos SET available=0 WHERE id='raw-photo'", [])
+            .unwrap();
+        drop(connection);
+        let photo = persistence
+            .photo_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!photo.original_available);
+        assert!(photo.has_saved_edits);
+        let edit_read = persistence
+            .edit_recipe_receiver("raw-photo")
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!edit_read.source_available);
+        assert!(persistence.snapshot().await.unwrap().photos[0].has_saved_edits);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn edit_recipe_writes_reject_missing_unavailable_and_non_raw_photos() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v6.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-raw-original",
+                photo_id: "missing-raw-photo",
+                relative_path: "shoot/missing.ARW",
+                kind: "raw",
+                available: false,
+                size: 13,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "jpeg-original",
+                photo_id: "jpeg-photo",
+                relative_path: "shoot/one.JPG",
+                kind: "jpeg",
+                available: true,
+                size: 11,
+                mtime_ms: 2_000.0,
+            },
+        );
+        drop(connection);
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        let unavailable = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "missing-raw-photo".to_owned(),
+                expected_recipe_revision: None,
+                expected_source_revision: source_revision("shoot/missing.ARW", 13, 1_000.0)
+                    .unwrap(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unavailable, EditRecipeWriteOutcome::Unavailable);
+
+        let unsupported = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "jpeg-photo".to_owned(),
+                expected_recipe_revision: None,
+                expected_source_revision: source_revision("shoot/one.JPG", 11, 2_000.0).unwrap(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsupported, EditRecipeWriteOutcome::UnsupportedPhoto);
+
+        let missing = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "not-a-photo".to_owned(),
+                expected_recipe_revision: None,
+                expected_source_revision: "source-revision".to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(missing, EditRecipeWriteOutcome::MissingPhoto);
+        persistence.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retire_and_bind_refuses_a_photo_with_saved_recipe() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v7.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "missing-original",
+                photo_id: "missing-photo",
+                relative_path: "shoot/missing.ARW",
+                kind: "raw",
+                available: false,
+                size: 11,
+                mtime_ms: 1_000.0,
+            },
+        );
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "occupant-original",
+                photo_id: "occupant-photo",
+                relative_path: "moved/occupied.ARW",
+                kind: "raw",
+                available: true,
+                size: 19,
+                mtime_ms: 2_000.0,
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+                 VALUES(?,?,?,?, 'as-shot')",
+                params![
+                    "occupant-photo",
+                    "recipe-revision",
+                    source_revision("moved/occupied.ARW", 19, 2_000.0).unwrap(),
+                    0.0_f64
+                ],
+            )
+            .unwrap();
+
+        let result = apply_manual_relocations(
+            &state,
+            &name,
+            &mut Connection::open(&path).unwrap(),
+            &[RequestedRelocation {
+                original_id: "missing-original".to_owned(),
+                to_location: "moved/occupied.ARW".to_owned(),
+                facts: crate::OriginalFacts {
+                    size: 19,
+                    mtime_ms: 2_000.0,
+                    device: 0,
+                    inode: 0,
+                },
+                retire_destination: true,
+            }],
+        );
+        assert!(matches!(
+            result,
+            Err(PersistenceError::InvalidRecoveryMapping {
+                reason: "occupied",
+                ..
+            })
+        ));
+
+        let connection = Connection::open(path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM photos WHERE id IN ('missing-photo','occupant-photo')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM edit_recipes WHERE photo_id='occupant-photo'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
     }
 
     // album-language-legacy:start v4-migration-test
     #[tokio::test]
-    async fn v4_migration_to_v5_preserves_album_state_in_one_step() {
+    async fn v4_migration_preserves_album_state_through_current_schema() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -5605,9 +6451,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            6
+            7
         );
-        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -5616,7 +6462,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v7_database_is_rejected_without_changes() {
+    fn newer_v8_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -5624,7 +6470,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 7)
+            .pragma_update(None, "user_version", 8)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -5693,7 +6539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_shared_v0_and_v1_to_v5_and_rejects_malformed_v2() {
+    async fn migrates_shared_v0_and_v1_to_current_schema_and_rejects_malformed_v2() {
         for sql in [
             include_str!("../../../../compatibility/sqlite/v0.sql"),
             include_str!("../../../../compatibility/sqlite/v1.sql"),
@@ -5708,7 +6554,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -5879,7 +6725,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V6).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 

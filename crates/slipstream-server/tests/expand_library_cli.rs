@@ -54,7 +54,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
     let database = state.join("library.sqlite");
     let connection = Connection::open(&database).unwrap();
     connection
-        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v7.sql"))
         .unwrap();
     connection
         .execute(
@@ -100,7 +100,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        6
+        7
     );
     assert_eq!(
         connection

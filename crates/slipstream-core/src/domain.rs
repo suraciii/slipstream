@@ -166,6 +166,7 @@ pub struct PhotoRecord {
     pub sort_path: String,
     pub selection_state: SelectionState,
     pub rating: u8,
+    pub has_saved_edits: bool,
 }
 
 /// One persisted content fingerprint for an Original File at one observed
@@ -234,6 +235,68 @@ pub struct PhotoRead {
     pub preview_source_revision: Option<String>,
     pub preview_width: Option<u32>,
     pub preview_height: Option<u32>,
+    pub has_saved_edits: bool,
+}
+
+/// White-balance intent currently supported by the engine-independent state
+/// layer. Custom temperature and tint values remain unavailable until their
+/// processing mapping and ranges are qualified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WhiteBalanceIntent {
+    AsShot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditRecipeSettings {
+    pub exposure_ev: f64,
+    pub white_balance: WhiteBalanceIntent,
+}
+
+/// The one saved recipe for a Photo and the Library source revision to which
+/// it is currently bound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditRecipe {
+    pub photo_id: String,
+    pub revision: String,
+    pub source_revision: String,
+    pub settings: EditRecipeSettings,
+}
+
+/// Current recipe and source facts from one serialized persistence read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditRecipeRead {
+    pub recipe: Option<EditRecipe>,
+    pub current_source_revision: String,
+    pub source_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SaveEditRecipe {
+    pub photo_id: String,
+    pub expected_recipe_revision: Option<String>,
+    pub expected_source_revision: String,
+    pub settings: EditRecipeSettings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebindEditRecipe {
+    pub photo_id: String,
+    pub expected_recipe_revision: String,
+    pub expected_source_revision: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EditRecipeWriteOutcome {
+    Saved(EditRecipe),
+    Unchanged(EditRecipe),
+    Conflict(EditRecipeRead),
+    SourceChanged(EditRecipeRead),
+    RequiresRebind(EditRecipeRead),
+    MissingPhoto,
+    MissingRecipe,
+    UnsupportedPhoto,
+    Unavailable,
+    InvalidSettings,
 }
 
 /// A validated camera-local query boundary. It deliberately contains no
