@@ -38,6 +38,12 @@ Temperature and tint mapping, range, and direction must be validated against
 reference engine output for supported cameras. Missing required camera
 information must fail the affected capability rather than invent a baseline.
 
+RAW qualification is scoped to an explicit source class, capture mode, and
+processing bundle. A recognized file extension or camera-family label alone
+does not grant development support. Full-resolution Export support requires a
+full-resolution qualification; reduced-size evidence does not establish it.
+The service must reject a source or mode outside the qualified capability.
+
 Module ordering, parameter versions, and encoding must be explicit in the
 adapter. Unsupported module versions must fail. The adapter must generate a
 complete bounded internal history and explicitly supply it to darktable.
@@ -98,8 +104,14 @@ before that processing configuration is qualified.
 ## Display and Comparison
 
 Development display must operate on a copy of the Development Result through
-a fixed, versioned conversion to sRGB. Any required view mapping must remain in
-that display branch. It must never enter the Development TIFF or Film input.
+a fixed, versioned conversion from linear ProPhoto RGB to sRGB. Convert to
+linear sRGB using the pinned profile primaries, white points, and chromatic
+adaptation. Clip each linear sRGB channel independently to the interval from
+zero to one, then apply the sRGB transfer function. This clipping is the
+defined display behavior for negative, over-range, and out-of-gamut values; it
+may change their hue or brightness in the view. It must not alter the
+Development Result. This display branch must never enter the Development TIFF
+or Film input.
 
 Film display must use the Film Result's defined output encoding and a matching
 ICC profile. Comparison must keep the stage, geometry, bundle, and display
@@ -134,6 +146,24 @@ keeps engine representation out of Web, CLI, and persistence contracts.
 Exposing engine internals would make clients responsible for module ordering,
 color defaults, compatibility, and unsafe input. The current workflow needs only
 exposure, white balance, and a fixed Film Recipe.
+
+### Selected: Fixed Display-Only sRGB Conversion
+
+The editor needs a deterministic view for a scene-linear ProPhoto image.
+Clipping after conversion to linear sRGB defines predictable handling of
+display-boundary values without changing the TIFF handoff or Film input.
+
+### Rejected: Perceptual Gamut Mapping in the Development Handoff
+
+A perceptual mapper would introduce another look into the scene-referred
+pipeline. The Development view is for inspection; its bounded conversion must
+remain isolated from saved image data and downstream processing.
+
+### Rejected: Reuse the Display Rendition as TIFF or Film Input
+
+The sRGB conversion clips scene-linear values and adds a display transfer
+function. Reusing it would discard information and violate the Development TIFF
+and Film input contracts.
 
 ## Verification
 

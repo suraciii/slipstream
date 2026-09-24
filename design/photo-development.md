@@ -132,10 +132,11 @@ After Export acceptance, subsequent edits may advance the Photo's recipe. They
 must not mutate the captured snapshot. Cancellation, polling, reconnect and
 download address the Export identity, not the current Edit Recipe.
 
-Request-identity retention must cover the documented reconciliation window.
-Expired receipts must produce an explicit outcome instead of treating an
-uncertain repeated submission as a new export. The public protocol must define
-this window and errors before its implementation.
+For a successful Development TIFF, the request receipt and captured snapshot
+must share the artifact's seven-day retention period from publication. A retry
+within that period must resolve to the existing Export. An expired receipt
+must produce an explicit outcome instead of treating an uncertain repeated
+submission as a new Export.
 
 ## Preview Scheduling
 
@@ -174,6 +175,11 @@ atomically publish. Database/artifact recovery must handle a crash between file
 publication and state commit by validating and reconciling the recorded attempt.
 Neither orphan files nor a database flag alone establish success.
 
+Remove an attempt's private workspace only after its workload has settled and
+terminal evidence is durable. [Processing Executor](processing-executor.md)
+owns the settlement and cleanup contract; retained Development TIFFs follow a
+separate lifecycle.
+
 Failed film work may retain a valid Development Result. It must not mark the
 Film Result or Finished JPEG successful. A previously completed Export remains
 bound to its captured source even if the current Original later changes.
@@ -202,10 +208,16 @@ geometry and stochastic policy. Active inputs, outputs and downloads require
 leases so eviction cannot remove them mid-operation. Disk exhaustion must leave
 saved intent and published artifacts coherent.
 
-The deployment must define finite output/receipt retention and disclose download
-expiry. Retained Export snapshots and corresponding downloadable artifacts must
-have coherent lifecycles. After expiry, regeneration validates the original
-snapshot; missing source or processing assets must fail explicitly.
+The Development TIFF, its captured snapshot, and its success receipt form one
+retention unit. Keep them for seven days from successful publication. An active
+download lease delays their removal until its response stream settles. Before
+accepting a new Development TIFF Export, reserve capacity for the complete
+artifact within the deployment's finite retained-output allowance. If that
+reservation fails, refuse the new Export without evicting an unexpired or
+leased artifact. After expiry and release of all leases, the artifact and its
+snapshot may be removed; regeneration must validate the captured source and
+bundle and fail explicitly when either is unavailable. Other Export targets
+must use their own disclosed bounded retention period.
 
 Edit Recipe state belongs in backup. Rebuildable derivatives need not. A saved
 recipe must retain its processing bundle identity; an engine update must either
@@ -256,6 +268,19 @@ intent. It needs neither user-visible versions nor an event-sourced history.
 
 Queue delay would change output after the Photographer submitted it. That makes
 retry, CLI composition and visual inspection unreliable.
+
+### Selected: Seven-Day Development TIFF Retention with Admission Reservation
+
+A fixed retention window keeps the handoff and the exact request intent
+available for retries and later download while bounding retained growth.
+Capacity is reserved before accepting new work. An active download lease
+protects a valid artifact from expiry cleanup until that transfer settles.
+
+### Rejected: Unbounded Retention or Pressure-Driven Early Eviction
+
+Unbounded retention cannot uphold finite storage. Early eviction under pressure
+breaks the disclosed download window, so the service refuses new Exports when
+the retained-output allowance cannot admit them.
 
 ## Verification
 
