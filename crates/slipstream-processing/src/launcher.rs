@@ -60,24 +60,62 @@ fn main() {
         }
         let mut bytes = Vec::new();
         file.take(16385).read_to_end(&mut bytes).map_err(|_| ())?;
-        if let Ok(config) = photo::Config::parse(&bytes) {
-            return photo::serve(config).map_err(|_| ());
+        match selected_authority(&bytes) {
+            Some(Authority::Photo) => {
+                let config = photo::Config::parse(&bytes).map_err(|_| ())?;
+                photo::serve(config).map_err(|_| ())
+            }
+            Some(Authority::Qualification) => {
+                let config = Config::parse(&bytes).map_err(|_| ())?;
+                let executor = Executor::open(config).map_err(|_| ())?;
+                serve(executor).map_err(|_| ())
+            }
+            Some(Authority::Film) => {
+                let config = slipstream_processing::film::Config::parse(&bytes).map_err(|_| ())?;
+                let executor = Executor::open_film(config).map_err(|_| ())?;
+                serve(executor).map_err(|_| ())
+            }
+            Some(Authority::Qualified) => {
+                let config =
+                    slipstream_processing::qualified::Config::parse(&bytes).map_err(|_| ())?;
+                let executor = Executor::open_qualified(config).map_err(|_| ())?;
+                serve(executor).map_err(|_| ())
+            }
+            None => Err(()),
         }
-        let executor = match Config::parse(&bytes) {
-            Ok(config) => Executor::open(config),
-            Err(_) => match slipstream_processing::film::Config::parse(&bytes) {
-                Ok(config) => Executor::open_film(config),
-                Err(_) => slipstream_processing::qualified::Config::parse(&bytes)
-                    .and_then(Executor::open_qualified),
-            },
-        }
-        .map_err(|_| ())?;
-        serve(executor).map_err(|_| ())
     })();
     if result.is_err() {
         eprintln!("Processing launcher unavailable; no image processing capability was enabled");
         std::process::exit(1);
     }
+}
+
+/// The processing authority a root-owned configuration selects. The production
+/// Photo capability is matched first and the decision is exclusive: a
+/// photo-processing configuration can never fall through to the fixture,
+/// Film, or qualified executor, and no configuration selects two authorities.
+fn selected_authority(bytes: &[u8]) -> Option<Authority> {
+    if photo::Config::parse(bytes).is_ok() {
+        return Some(Authority::Photo);
+    }
+    if Config::parse(bytes).is_ok() {
+        return Some(Authority::Qualification);
+    }
+    if slipstream_processing::film::Config::parse(bytes).is_ok() {
+        return Some(Authority::Film);
+    }
+    if slipstream_processing::qualified::Config::parse(bytes).is_ok() {
+        return Some(Authority::Qualified);
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Authority {
+    Photo,
+    Qualification,
+    Film,
+    Qualified,
 }
 
 fn check_production(
@@ -242,5 +280,116 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn photo_configuration() -> Vec<u8> {
+        let instance = "0123456789abcdef0123456789abcdef";
+        let config = photo::Config {
+            version: 1,
+            mode: "photo-processing".into(),
+            instance: instance.into(),
+            root: format!("/var/lib/slipstream-processing/{instance}"),
+            socket: format!("/run/slipstream-processing/{instance}/launcher.sock"),
+            peer_uid: 1000,
+            image: format!("sha256:{}", "1".repeat(64)),
+            bundle: "2".repeat(64),
+            policy: "3".repeat(64),
+            source_bytes_max: 4 * 1024 * 1024 * 1024,
+            staged_storage_bytes_max: 4 * 1024 * 1024 * 1024 + 4 * 1024 * 1024 * 1024,
+            staged_storage_inodes_max: 4096,
+            output_bytes_max: 4 * 1024 * 1024 * 1024,
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            cpu_quota_us: 400_000,
+            tasks: 256,
+            swap_bytes: 0,
+            control_reserve_bytes: 256 * 1024 * 1024,
+            shared_ancestor_headroom_bytes: 512 * 1024 * 1024,
+            receipt_retention_seconds: 86_400,
+        };
+        serde_json::to_vec(&config).unwrap()
+    }
+
+    fn qualification_configuration() -> Vec<u8> {
+        let config = Config {
+            version: 1,
+            mode: "qualification".into(),
+            instance: "0123456789abcdef0123456789abcdef".into(),
+            root: "/var/lib/slipstream-processing/qualification".into(),
+            socket: "/run/slipstream-processing/qualification/launcher.sock".into(),
+            peer_uid: 1000,
+            image: format!("sha256:{}", "1".repeat(64)),
+            memory_bytes: 128 * 1024 * 1024,
+            receipt_retention_seconds: 86_400,
+        };
+        serde_json::to_vec(&config).unwrap()
+    }
+
+    fn film_configuration() -> Vec<u8> {
+        let config = slipstream_processing::film::Config {
+            version: 2,
+            mode: "film-measurement".into(),
+            instance: "0123456789abcdef0123456789abcdef".into(),
+            root: "/var/lib/slipstream-processing/film".into(),
+            socket: "/run/slipstream-processing/film/launcher.sock".into(),
+            peer_uid: 0,
+            image: format!("sha256:{}", "1".repeat(64)),
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            receipt_retention_seconds: 86_400,
+            catalogue_sha256: "2".repeat(64),
+            resource_model_sha256: "3".repeat(64),
+        };
+        serde_json::to_vec(&config).unwrap()
+    }
+
+    fn qualified_configuration() -> Vec<u8> {
+        let config = slipstream_processing::qualified::Config {
+            version: 3,
+            mode: "film-qualified-fixtures".into(),
+            instance: "0123456789abcdef0123456789abcdef".into(),
+            root: "/var/lib/slipstream-processing/qualified".into(),
+            socket: "/run/slipstream-processing/qualified/launcher.sock".into(),
+            peer_uid: 0,
+            image: format!("sha256:{}", "1".repeat(64)),
+            memory_bytes: 8 * 1024 * 1024 * 1024,
+            receipt_retention_seconds: 86_400,
+            catalogue_sha256: "2".repeat(64),
+            envelope_sha256: "3".repeat(64),
+        };
+        serde_json::to_vec(&config).unwrap()
+    }
+
+    #[test]
+    fn a_photo_processing_configuration_selects_only_the_photo_authority() {
+        let bytes = photo_configuration();
+        assert_eq!(selected_authority(&bytes), Some(Authority::Photo));
+        // The production Photo configuration is never accepted by another
+        // authority's parser, so it can never open a fixture, Film, or
+        // qualified executor.
+        assert!(Config::parse(&bytes).is_err());
+        assert!(slipstream_processing::film::Config::parse(&bytes).is_err());
+        assert!(slipstream_processing::qualified::Config::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn every_other_authority_selects_its_own_executor() {
+        let bytes = qualification_configuration();
+        assert_eq!(selected_authority(&bytes), Some(Authority::Qualification));
+
+        let film = film_configuration();
+        assert_eq!(selected_authority(&film), Some(Authority::Film));
+        assert_eq!(
+            selected_authority(&qualified_configuration()),
+            Some(Authority::Qualified)
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_configuration_selects_no_authority() {
+        assert_eq!(selected_authority(b"{}"), None);
+        assert_eq!(selected_authority(b""), None);
+        // A fixture-mode or Film-mode envelope with the production workload
+        // value is still that authority's configuration, never Photo's.
+        let bytes = qualification_configuration();
+        assert_eq!(selected_authority(&bytes), Some(Authority::Qualification));
     }
 }
