@@ -983,6 +983,37 @@ mod tests {
     }
 
     #[test]
+    fn development_tiff_derivative_refuses_an_oversized_input() {
+        use std::os::fd::AsRawFd;
+        // The declared size is checked before anything is decoded, so the
+        // fixture is a sparse file and no gigabyte of data touches the disk.
+        let path = std::env::temp_dir().join(format!(
+            "slipstream-display-oversized-{}",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAXIMUM_DEVELOPMENT_TIFF_BYTES + 1).unwrap();
+        drop(file);
+        let file = std::fs::File::open(&path).unwrap();
+        let outcome = process_development_tiff(file.as_raw_fd(), DerivativeTarget::Thumbnail512);
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(outcome, Err(DerivativeError::ResourceLimit));
+    }
+
+    #[test]
+    fn development_tiff_derivative_refuses_an_oversized_raster() {
+        // The declared geometry exceeds the pixel ceiling, which is enforced
+        // after the header is read and before any sample is decoded, so the
+        // strip stays one patch long.
+        let pixels = vec![0u8; PATCH as usize * PATCH as usize * 3 * 4];
+        let fixture = tiff_fixture(&pixels, 20_000, 20_000, 32, 3, SOURCE_PROFILE_ASSET);
+        let outcome =
+            fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
+        assert_eq!(outcome, Err(DerivativeError::ResourceLimit));
+    }
+
+    #[test]
     fn development_tiff_derivative_never_upscales() {
         let fixture = float_fixture(&[[0.18, 0.18, 0.18], [1.0, 1.0, 1.0]], SOURCE_PROFILE_ASSET);
         let derivative = fixture
@@ -991,16 +1022,18 @@ mod tests {
         assert_eq!((derivative.width, derivative.height), (PATCH, PATCH * 2));
     }
 
-    /// Runs the display branch over a real Development TIFF when one is named.
-    /// `SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE` points at an artifact produced by
-    /// the qualified development adapter, so this test is skipped by default
-    /// and cannot pass on a fixture.
+    /// Runs the display branch over a real Development TIFF. Ignored by
+    /// default because no fixture can stand in for it: run it with a qualified
+    /// artifact and `--ignored`, for example
+    /// `SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE=/path/development.tif cargo test
+    /// -p slipstream-core --lib development_tiff_derivative_handles_a_real_artifact
+    /// -- --ignored`. It fails rather than passes when the variable is missing.
     #[test]
+    #[ignore = "requires a qualified Development TIFF and --ignored"]
     fn development_tiff_derivative_handles_a_real_artifact() {
-        let Some(path) = std::env::var_os("SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE") else {
-            return;
-        };
         use std::os::fd::AsRawFd;
+        let path = std::env::var_os("SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE")
+            .expect("SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE must name a qualified Development TIFF");
         let file = std::fs::File::open(path).unwrap();
         let derivative =
             process_development_tiff(file.as_raw_fd(), DerivativeTarget::Thumbnail512).unwrap();
