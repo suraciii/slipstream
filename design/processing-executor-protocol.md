@@ -147,16 +147,25 @@ Each before/after event object is null or has exactly `oom`, `oom_kill`,
 A non-null `terminal_snapshot` has exactly `cgroup_path`, `cgroup_inode`,
 `unit_invocation`, `launch_id`, `container_id`, `attempt_unit`, `incarnation`,
 `sequence`, `memory_peak_raw`, `memory_max_raw`, `memory_swap_current_raw`,
-`memory_swap_max_raw`, `memory_events_raw`, and `memory_events_local_raw`.
-The six raw values retain their exact cgroup file text, including trailing
-newlines, with an aggregate 4 KiB byte bound. The launcher validates the
-snapshot's identity against the bound attempt before and after reading it,
-derives `peak_bytes` and `attempt_after` from those same raw values, and checks
+`memory_swap_max_raw`, `memory_events_raw`, `memory_events_local_raw`, and
+`io_stat_raw`. The six required memory values retain their exact cgroup file
+text, including trailing newlines, with an aggregate 4 KiB byte bound. The
+optional `io_stat_raw` is null or the exact ASCII text from the same attempt
+cgroup's `io.stat`, including its trailing newline; it contains only printable
+ASCII bytes and LF, with no other control bytes. It shares the 4 KiB
+per-file and aggregate bound; the launcher omits it when unreadable, non-ASCII,
+or too large for the remaining aggregate space. The launcher preserves the raw
+text without interpreting I/O counter keys. Older persisted snapshots that
+omit `io_stat_raw` deserialize it as null. This diagnostic field does not
+affect memory evidence validation or settlement. The launcher validates the
+snapshot's identity against the bound attempt before and after reading it, derives
+`peak_bytes` and `attempt_after` from the six required memory values, and checks
 the enforced memory and zero-swap limits. Once a container ID is bound to an
-attempt, its evidence requires this snapshot before persistence or cleanup;
-a missing, oversized, malformed, or inconsistent snapshot leaves settlement
-uncertain and retains ownership. Evidence for an attempt that never bound a
-container ID may carry a null snapshot, even when its slice was created.
+attempt, its required memory snapshot is needed before persistence or cleanup;
+a missing, oversized, malformed, or inconsistent required memory snapshot
+leaves settlement uncertain and retains ownership. Evidence for an attempt that
+never bound a container ID may carry a null snapshot, even when its slice was
+created.
 A missing observation is null, never synthesized as a zero counter. Kernel
 counters and byte quantities are unsigned 64-bit integers. `peer_uid` is an
 unsigned 32-bit integer other than the Linux invalid UID value 4294967295.

@@ -2809,6 +2809,7 @@ pub(crate) mod tests {
                     memory_swap_max_raw,
                     memory_events_raw,
                     memory_events_local_raw,
+                    io_stat_raw: None,
                 }),
             });
         }

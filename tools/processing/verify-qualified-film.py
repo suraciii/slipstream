@@ -51,12 +51,21 @@ def verify_terminal_snapshot(receipt, instance):
     assert isinstance(snapshot, dict), receipt
     raw_names = ('memory_peak_raw', 'memory_max_raw', 'memory_swap_current_raw',
                  'memory_swap_max_raw', 'memory_events_raw', 'memory_events_local_raw')
-    assert set(snapshot) == {
+    required_snapshot_names = {
         'cgroup_path', 'cgroup_inode', 'unit_invocation', 'launch_id',
-        'container_id', 'attempt_unit', 'incarnation', 'sequence', *raw_names}, receipt
+        'container_id', 'attempt_unit', 'incarnation', 'sequence', *raw_names}
+    assert set(snapshot) in (required_snapshot_names,
+                             required_snapshot_names | {'io_stat_raw'}), receipt
     assert all(type(snapshot.get(name)) is str and snapshot[name].isascii()
                for name in raw_names), receipt
-    assert sum(len(snapshot[name].encode('ascii')) for name in raw_names) <= 4096, receipt
+    io_stat_raw = snapshot.get('io_stat_raw')
+    if io_stat_raw is not None:
+        assert (type(io_stat_raw) is str and io_stat_raw.isascii() and
+                all(char == '\n' or ' ' <= char <= '~' for char in io_stat_raw)), receipt
+    raw_total = sum(len(snapshot[name].encode('ascii')) for name in raw_names)
+    if io_stat_raw is not None:
+        raw_total += len(io_stat_raw.encode('ascii'))
+    assert raw_total <= 4096, receipt
 
     unit = runtime['attempt_unit']
     assert snapshot['cgroup_path'] == (
