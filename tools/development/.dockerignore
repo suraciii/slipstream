@@ -3,6 +3,7 @@
 !requirements.lock
 !film.py
 !probe.py
+!history.py
 !bounded_gamut.py
 !bounded_output.py
 !bundle.py

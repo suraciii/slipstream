@@ -9,12 +9,10 @@ import os
 from pathlib import Path
 import resource
 import shutil
-import sqlite3
 import struct
 import subprocess
 import sys
 import time
-import xml.etree.ElementTree as ET
 
 import numpy as np
 import OpenImageIO as oiio
@@ -22,22 +20,15 @@ import tifffile
 
 from film import make_simulator, pixel_digest, render, reset_random_state
 from bundle import load_bundle
+from history import generated_history, validate_imported_history
 
 WORK = Path("/work")
 RAW = Path("/input") / os.environ["PROBE_RAW_NAME"]
-DT = "http://darktable.sf.net/"
-RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 ICC = Path("/opt/spektrafilm/src/spektrafilm/data/icc/ellelstone/LargeRGB-elle-V2-g10.icc")
 ICC_SHA256 = "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed"
 # Reading the description through LittleCMS parses and reserializes its legacy
 # desc tag. This pinned output differs only in that tag's representation.
 OUTPUT_ICC_SHA256 = "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe"
-VERSIONS = {
-    "rawprepare": 2, "demosaic": 6, "colorin": 7, "colorout": 5,
-    "gamma": 1, "temperature": 4, "highlights": 4, "flip": 2,
-}
-
-
 def emit(event, **facts):
     print(json.dumps({"event": event, **facts}, allow_nan=False), flush=True)
 
@@ -128,48 +119,6 @@ def darktable(output, *, xmp=None, full=False, database="reference.db"):
          full_resolution=full, **inspect_tiff(output))
 
 
-def generated_history(exposure):
-    """Probe the pinned private format and engine serialization behavior."""
-    with sqlite3.connect(f"file:{WORK / 'reference.db'}?mode=ro", uri=True) as db:
-        db.row_factory = sqlite3.Row
-        rows = list(db.execute("SELECT * FROM history WHERE imgid=1 ORDER BY num"))
-        assert {r["operation"]: r["module"] for r in rows} == VERSIONS
-        order = db.execute("SELECT version FROM module_order WHERE imgid=1").fetchone()[0]
-        assert order == 4
-    for prefix, uri in [("x", "adobe:ns:meta/"), ("rdf", RDF), ("darktable", DT)]:
-        ET.register_namespace(prefix, uri)
-    root = ET.Element("{adobe:ns:meta/}xmpmeta")
-    rdf = ET.SubElement(root, f"{{{RDF}}}RDF")
-    desc = ET.SubElement(rdf, f"{{{RDF}}}Description", {
-        f"{{{RDF}}}about": "", f"{{{DT}}}xmp_version": "5",
-        f"{{{DT}}}history_end": str(len(rows) + 1),
-        f"{{{DT}}}iop_order_version": "4", f"{{{DT}}}auto_presets_applied": "1",
-    })
-    sequence = ET.SubElement(ET.SubElement(desc, f"{{{DT}}}history"), f"{{{RDF}}}Seq")
-    mapping = {
-        "num": "num", "operation": "operation", "enabled": "enabled",
-        "modversion": "module", "params": "op_params",
-        "blendop_params": "blendop_params", "blendop_version": "blendop_version",
-        "multi_priority": "multi_priority", "multi_name": "multi_name",
-        "multi_name_hand_edited": "multi_name_hand_edited",
-    }
-    for row in rows:
-        values = {key: row[column] for key, column in mapping.items()}
-        ET.SubElement(sequence, f"{{{RDF}}}li", {
-            f"{{{DT}}}{key}": value.hex() if isinstance(value, bytes) else str(value)
-            for key, value in values.items() if value is not None
-        })
-    values = {
-        "num": str(len(rows)), "operation": "exposure", "enabled": "1",
-        "modversion": "7", "params": struct.pack("<iffffii", 0, 0, exposure, 50, -4, 0, 0).hex(),
-        "multi_priority": "0", "multi_name": "", "multi_name_hand_edited": "0",
-    }
-    ET.SubElement(sequence, f"{{{RDF}}}li", {f"{{{DT}}}{k}": v for k, v in values.items()})
-    output = WORK / f"exposure-{exposure}.xmp"
-    ET.ElementTree(root).write(output, encoding="utf-8", xml_declaration=True)
-    return output
-
-
 def raw_probe(full):
     source_digest = hashlib.file_digest(RAW.open("rb"), "sha256").hexdigest()
     darktable(WORK / "baseline.tif")
@@ -185,22 +134,32 @@ def raw_probe(full):
     np.testing.assert_array_equal(sentinel, load_image_oiio(str(interchange)))
     emit("tiff_interchange", compressed_roundtrip_exact=True,
          negative_and_over_range_preserved=True, spektrafilm_reader_exact=True)
-    # Generate both before a later run can change a reference database.
-    histories = [generated_history(ev) for ev in (0, 1)]
-    for ev, history in enumerate(histories):
-        darktable(WORK / f"exposure-{ev}.tif", xmp=history, database=f"ev-{ev}.db")
-    zero = read_image(WORK / "exposure-0.tif")
-    one = read_image(WORK / "exposure-1.tif")
+    # Keep this history probe separate from any independent authoring reference.
+    cases = [(0.0, False), (1.0, False), (1.0, True)]
+    histories = []
+    for ev, custom_wb in cases:
+        suffix = f"ev-{ev:g}" + ("-custom-wb" if custom_wb else "")
+        history = generated_history(
+            WORK / "reference.db", WORK / f"{suffix}.xmp", ev, custom_wb=custom_wb
+        )
+        histories.append(history)
+        darktable(WORK / f"{suffix}.tif", xmp=history, database=f"{suffix}.db")
+        facts = validate_imported_history(
+            WORK / f"{suffix}.db", ev, custom_wb=custom_wb
+        )
+        emit("raw_edit_history", **facts)
+    zero = read_image(WORK / "ev-0.tif")
+    one = read_image(WORK / "ev-1.tif")
+    one_custom_wb = read_image(WORK / "ev-1-custom-wb.tif")
     np.testing.assert_array_equal(zero, baseline)
-    with sqlite3.connect(f"file:{WORK / 'ev-1.db'}?mode=ro", uri=True) as db:
-        row = db.execute("SELECT op_params,enabled,module FROM history WHERE operation='exposure'").fetchone()
-        assert row == (struct.pack("<iffffii", 0, 0, 1, 50, -4, 0, 0), 1, 7)
-    # A fresh CLI reads the saved database without the generated XMP carrier.
-    darktable(WORK / "reference-ev-1.tif", database="ev-1.db")
-    np.testing.assert_array_equal(one, read_image(WORK / "reference-ev-1.tif"))
-    emit("exposure", baseline_exact=True, database_reload_exact=True,
+    assert not np.array_equal(one_custom_wb, one), "Custom white balance did not alter the output"
+    # A fresh CLI reads the saved custom history without the generated XMP carrier.
+    darktable(WORK / "history-roundtrip.tif", database="ev-1-custom-wb.db")
+    np.testing.assert_array_equal(one_custom_wb, read_image(WORK / "history-roundtrip.tif"))
+    emit("exposure_white_balance", baseline_exact=True, database_reload_exact=True,
          doubling_residual=float(np.max(np.abs(one - 2 * zero))),
-         note="Whole-pipeline exact doubling is not asserted: the pinned Lab conversion approximates cube roots.")
+         custom_wb_changed_output=True,
+         note="This is a generated-history check, not an independently authored reference. Whole-pipeline exact doubling is not asserted because the pinned Lab conversion approximates cube roots.")
     if full:
         darktable(WORK / "development.tif", full=True, xmp=histories[0], database="full.db")
         pixels = read_image(WORK / "development.tif")
@@ -291,7 +250,8 @@ def main():
         film_probe(args.mode, args.repetitions)
     assert not any(name.startswith(("napari", "PySide", "PyQt")) for name in sys.modules)
     emit("probe_complete", qualification="incomplete",
-         remaining=["camera WB mapping corpus", "independent EV numerical oracle",
+         remaining=["independently authored nonzero-EV/custom-WB reference",
+                    "camera WB mapping corpus and temperature/tint mapping",
                     "LUT accuracy versus direct spectral reference", "fresh-process repeats",
                     "browse contention and resource defaults", "product latency decision"])
 
