@@ -128,7 +128,7 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
+`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
@@ -149,16 +149,18 @@ check, so the gate keeps one runner and reuses work instead of adding runners:
   leaving it out shortens compilation and linking and keeps the cache near
   220 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
   backtraces, reproduce it locally without those variables.
-- The bundled browser suite keeps the default worker layout, so its scenarios
-  still run one file at a time. Running it with `fullyParallel` and all four
-  runner CPUs is 2.2× faster (6.5m to 3.0m on the runner), but the window,
-  scroll, and rendered-thumbnail scenarios then fail intermittently: at four
-  workers, run [36050307251](https://github.com/suraciii/slipstream/actions/runs/36050307251)
-  failed `out-of-order window settlements render every loaded Photo position`,
-  and three local runs on four CPUs failed two to seven scenarios each. Every
-  failure was a time or rendered-state assertion (`expect` default 5s,
-  `page.clock` targets) that holds under the serial layout. Enable full
-  parallelism only after those scenarios tolerate concurrent load.
+- The bundled browser suite is a smoke gate over the real stack and runs with
+  `fullyParallel` on the runner's four CPUs. The behavior and race scenarios
+  that could not tolerate concurrent load were removed by the smoke-suite
+  change (issue [#399](https://github.com/suraciii/slipstream/issues/399));
+  their rules remain covered by the page-model unit tests. Keep the suite at
+  smoke depth so full parallelism stays valid.
+
+### Browser suite policy
+
+The browser suite is a smoke gate, not a behavior suite. It proves that the real stack works end to end: the access boundary, startup scan and Grid rendering, Photo View, decisions persisted through the real write path, Album management, responsive surfaces, the CLI-to-Web flow, and the opt-in real-camera scenario. Keep it small enough to run on every change; a new browser scenario needs a reason that only a real browser against the real server can prove.
+
+Logic regression belongs to the page-model unit tests (`bun run --cwd apps/web test:unit`), which characterize each owner's policy: async ownership and recovery claims, Browse Snapshot windows and retention, Photo and batch writes with Undo, Album writes, saved positions, navigation codecs, and the access session. When a rule is expressible against a model owner, add a unit test instead of a browser scenario. Presentational rules that still live inside the page UI — pointer and gesture state, Grid geometry, focus movement, filmstrip presentation — keep browser smoke coverage until they are extracted into testable modules.
 
 ## Photo fixtures
 
