@@ -1,5 +1,7 @@
-import importlib.util
 import copy
+import contextlib
+import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -14,6 +16,70 @@ SPEC.loader.exec_module(verifier)
 
 
 class QualifiedVerifierTests(unittest.TestCase):
+    def test_main_prints_pass_only_after_cleanup_succeeds(self):
+        for fail_cleanup in [False, True]:
+            with self.subTest(fail_cleanup=fail_cleanup), tempfile.TemporaryDirectory() as directory:
+                launcher = Path(directory) / 'launcher'
+                launcher.write_bytes(b'fixture launcher')
+                fixture_id = 'f' * 32
+                worker_image = 'sha256:' + 'a' * 64
+                catalogue_data = b'catalogue'
+                envelope_data = b'envelope'
+                arguments = type('Arguments', (), dict(
+                    launcher=str(launcher), worker_image=worker_image,
+                    web_image='sha256:' + 'b' * 64, output=str(Path(directory) / 'output'),
+                    catalogue='catalogue.json', envelope='envelope.json', memory_gib=8,
+                    fixture=[fixture_id], expect_outcome='completed', expect_error=None,
+                    expect_qualification_failure=None, alternate_envelope=None,
+                    mismatched_envelope=None, recovery_fixture=None,
+                    lifecycle_fixture=None, failure_fixture=None))()
+                catalogue = dict(fixtures=[dict(id=fixture_id)])
+                envelope = dict(catalogue_sha256=verifier.digest(catalogue_data),
+                                image=worker_image,
+                                launcher_sha256=verifier.digest(launcher.read_bytes()), cases=[])
+                events = []
+                cleanup_output = []
+                stdout = io.StringIO()
+
+                class FakeQualification:
+                    def __init__(self, _arguments, *_documents):
+                        self.results = [dict()]
+                        self.refusals = []
+
+                    def prepare(self):
+                        events.append('prepare')
+
+                    def verify(self):
+                        events.append('verify')
+
+                    def cleanup(self):
+                        events.append('cleanup')
+                        cleanup_output.append(stdout.getvalue())
+                        if fail_cleanup:
+                            raise verifier.subprocess.TimeoutExpired(['systemctl', 'revert'], 15)
+
+                with patch.object(verifier.argparse.ArgumentParser, 'parse_args',
+                                  return_value=arguments), \
+                        patch.object(verifier.FILM, 'document',
+                                     side_effect=[(catalogue_data, catalogue),
+                                                  (envelope_data, envelope)]), \
+                        patch.object(verifier, 'QualifiedFilmQualification', FakeQualification), \
+                        patch.object(verifier.os, 'geteuid', return_value=0), \
+                        contextlib.redirect_stdout(stdout):
+                    if fail_cleanup:
+                        with self.assertRaises(verifier.subprocess.TimeoutExpired):
+                            verifier.main()
+                    else:
+                        verifier.main()
+
+                self.assertEqual(events, ['prepare', 'verify', 'cleanup'])
+                self.assertEqual(cleanup_output, [''])
+                if fail_cleanup:
+                    self.assertEqual(stdout.getvalue(), '')
+                else:
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(result, dict(status='passed', attempts=1, refusals=0))
+
     def test_independent_formula_consumes_authoritative_arithmetic_vectors(self):
         path = Path(__file__).resolve().parents[2] / 'design/schemas/processing-film-envelope-vectors.json'
         vectors = json.loads(path.read_text())['arithmetic']
