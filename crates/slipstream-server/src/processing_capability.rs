@@ -1,8 +1,13 @@
-use crate::{ProcessingConfig, http::HttpState};
+use crate::{
+    ProcessingConfig,
+    edit_recipe::{ExposureRangeWire, approved_exposure_range},
+    http::HttpState,
+};
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 use slipstream_processing::{
     photo::{self, Response, ResultBody},
+    photo_profile::approved_profile_ids,
     protocol::{Availability, PHOTO_CAPABILITY},
 };
 
@@ -14,6 +19,43 @@ pub(crate) struct ProcessingCapabilityResponse {
     source: &'static str,
     bundle: &'static str,
     reason: Option<&'static str>,
+    stages: StageStatesWire,
+    profile_ids: Vec<&'static str>,
+    exposure: ExposureRangeWire,
+}
+
+/// One closed state per pipeline stage. `develop` follows the RAW
+/// qualification of the configured bundle; `film` stays unavailable until
+/// that stage is qualified.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StageStatesWire {
+    develop: &'static str,
+    film: &'static str,
+}
+
+impl StageStatesWire {
+    fn new(develop: &'static str) -> Self {
+        Self {
+            develop,
+            film: "unavailable",
+        }
+    }
+}
+
+/// A launcher that does not expose the photo-processing capability leaves
+/// the develop stage unsupported; every other refusal is an availability
+/// failure of an otherwise supported stage.
+fn stage_state_for(reason: &str) -> &'static str {
+    if reason == "unsupported-capability" {
+        "unsupported"
+    } else {
+        "unavailable"
+    }
+}
+
+fn approved_profile_list() -> Vec<&'static str> {
+    approved_profile_ids().collect()
 }
 
 impl ProcessingCapabilityResponse {
@@ -24,6 +66,9 @@ impl ProcessingCapabilityResponse {
             source: "disabled",
             bundle: "disabled",
             reason: Some("operator-disabled"),
+            stages: StageStatesWire::new("unavailable"),
+            profile_ids: approved_profile_list(),
+            exposure: approved_exposure_range(),
         }
     }
 
@@ -34,6 +79,9 @@ impl ProcessingCapabilityResponse {
             source: "unavailable",
             bundle: "unavailable",
             reason: Some(reason),
+            stages: StageStatesWire::new(stage_state_for(reason)),
+            profile_ids: approved_profile_list(),
+            exposure: approved_exposure_range(),
         }
     }
 
@@ -44,6 +92,11 @@ impl ProcessingCapabilityResponse {
             source: "unavailable",
             bundle: "available",
             reason: Some("source-unavailable"),
+            // The launcher accepted the reconcile, so the qualified develop
+            // stage is ready even while the source layer stays disconnected.
+            stages: StageStatesWire::new("ready"),
+            profile_ids: approved_profile_list(),
+            exposure: approved_exposure_range(),
         }
     }
 
@@ -54,6 +107,9 @@ impl ProcessingCapabilityResponse {
             source: "unavailable",
             bundle,
             reason: Some(reason),
+            stages: StageStatesWire::new(stage_state_for(reason)),
+            profile_ids: approved_profile_list(),
+            exposure: approved_exposure_range(),
         }
     }
 }
@@ -184,6 +240,17 @@ mod tests {
         assert_eq!(response.bundle, "available");
         assert_eq!(response.source, "unavailable");
         assert_eq!(response.reason, Some("source-unavailable"));
+        // The accepted reconcile proves the qualified develop stage; the
+        // film stage stays unavailable until its own qualification.
+        assert_eq!(response.stages.develop, "ready");
+        assert_eq!(response.stages.film, "unavailable");
+        assert_eq!(
+            response.profile_ids,
+            vec!["sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"]
+        );
+        assert_eq!(response.exposure.min_ev, 0.0);
+        assert_eq!(response.exposure.max_ev, 1.0);
+        assert_eq!(response.exposure.step_ev, 0.001);
     }
 
     #[test]
@@ -192,7 +259,15 @@ mod tests {
             let response =
                 map_reconcile_response(&config(), capability(name, Availability::Available));
             assert_eq!(response.reason, Some("unsupported-capability"));
+            assert_eq!(response.stages.develop, "unsupported");
         }
+    }
+
+    #[test]
+    fn disabled_capability_reports_unavailable_stages() {
+        let disabled = ProcessingCapabilityResponse::disabled();
+        assert_eq!(disabled.stages.develop, "unavailable");
+        assert_eq!(disabled.stages.film, "unavailable");
     }
 
     #[test]

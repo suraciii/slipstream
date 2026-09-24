@@ -331,6 +331,7 @@ pub(crate) struct CliPhotoItemWire {
     pub selection_state: &'static str,
     pub rating: u8,
     pub decision_version: String,
+    pub has_saved_edits: bool,
     pub capture_time: Option<String>,
     pub preview: CliPreviewFactsWire,
     pub web_path: String,
@@ -359,6 +360,7 @@ impl From<slipstream_core::PhotoRead> for CliPhotoItemWire {
             selection_state: selection_state(value.selection_state),
             rating: value.rating,
             decision_version: value.decision_version,
+            has_saved_edits: value.has_saved_edits,
             capture_time,
             preview: CliPreviewFactsWire {
                 state: preview_state(value.preview_state),
@@ -461,6 +463,8 @@ pub(crate) struct CliPhotoMetadataWire {
     pub shutter_speed: Option<String>,
     pub focal_length: Option<String>,
     pub iso: Option<u32>,
+    pub make: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -714,6 +718,7 @@ pub struct PhotoSummary {
     pub original_filename: Option<String>,
     pub selection_state: &'static str,
     pub rating: u8,
+    pub has_saved_edits: bool,
     pub preview: PreviewWire,
 }
 
@@ -757,6 +762,10 @@ pub struct PhotoMetadataWire {
     pub shutter_speed: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_length: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub make: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl From<slipstream_core::CaptureReviewMetadata> for PhotoMetadataWire {
@@ -767,6 +776,8 @@ impl From<slipstream_core::CaptureReviewMetadata> for PhotoMetadataWire {
             iso: value.iso,
             shutter_speed: value.shutter_speed,
             focal_length: value.focal_length,
+            make: value.make,
+            model: value.model,
         }
     }
 }
@@ -808,6 +819,7 @@ pub(crate) fn photo_summary_indexed_with_url(
         original_filename,
         selection_state: selection_state(photo.selection_state),
         rating: photo.rating,
+        has_saved_edits: photo.has_saved_edits,
         preview: PreviewWire {
             state,
             source,
