@@ -33,21 +33,9 @@ pub fn request(socket: impl AsRef<Path>, request: &Request) -> Result<Response, 
 pub fn serve(executor: Arc<Executor>) -> Result<(), ErrorCode> {
     let config = executor.config();
     let path = Path::new(&config.socket);
-    let mut socket_claim = claim_socket(path, config)?;
+    let mut socket_claim = claim_socket(path, &config.instance, &config.root)?;
     let listener = UnixListener::bind(path).map_err(|_| ErrorCode::Unavailable)?;
-    let metadata = fs::symlink_metadata(path).map_err(|_| ErrorCode::Unavailable)?;
-    let claim = SocketClaim {
-        instance: config.instance.clone(),
-        root: config.root.clone(),
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    };
-    let bytes = serde_json::to_vec(&claim).map_err(|_| ErrorCode::Unavailable)?;
-    socket_claim
-        .set_len(0)
-        .and_then(|_| socket_claim.write_all(&bytes))
-        .and_then(|_| socket_claim.sync_all())
-        .map_err(|_| ErrorCode::Unavailable)?;
+    record_socket_claim(&mut socket_claim, path, &config.instance, &config.root)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|_| ErrorCode::Unavailable)?;
     allow_peer(path, config.peer_uid)?;
@@ -70,7 +58,7 @@ pub fn serve(executor: Arc<Executor>) -> Result<(), ErrorCode> {
         thread::spawn(move || {
             let result = (|| {
                 timeouts(&stream)?;
-                let (uid, pid) = peer(&stream)?;
+                let (uid, pid) = peer(stream.as_raw_fd())?;
                 if uid != executor.config().peer_uid {
                     return Err(ErrorCode::Unauthorized);
                 }
@@ -109,7 +97,7 @@ struct SocketClaim {
     inode: u64,
 }
 
-fn claim_socket(path: &Path, config: &Config) -> Result<File, ErrorCode> {
+pub(crate) fn claim_socket(path: &Path, instance: &str, root: &str) -> Result<File, ErrorCode> {
     let mut claim = OpenOptions::new()
         .read(true)
         .write(true)
@@ -144,7 +132,7 @@ fn claim_socket(path: &Path, config: &Config) -> Result<File, ErrorCode> {
     };
     if previous
         .as_ref()
-        .is_some_and(|value| value.instance != config.instance || value.root != config.root)
+        .is_some_and(|value| value.instance != instance || value.root != root)
     {
         return Err(ErrorCode::Uncertain);
     }
@@ -165,6 +153,27 @@ fn claim_socket(path: &Path, config: &Config) -> Result<File, ErrorCode> {
     }
     std::io::Seek::rewind(&mut claim).map_err(|_| ErrorCode::Uncertain)?;
     Ok(claim)
+}
+
+pub(crate) fn record_socket_claim(
+    claim_file: &mut File,
+    path: &Path,
+    instance: &str,
+    root: &str,
+) -> Result<(), ErrorCode> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ErrorCode::Unavailable)?;
+    let claim = SocketClaim {
+        instance: instance.to_owned(),
+        root: root.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    let bytes = serde_json::to_vec(&claim).map_err(|_| ErrorCode::Unavailable)?;
+    claim_file
+        .set_len(0)
+        .and_then(|_| claim_file.write_all(&bytes))
+        .and_then(|_| claim_file.sync_all())
+        .map_err(|_| ErrorCode::Unavailable)
 }
 
 fn timeouts(stream: &UnixStream) -> Result<(), ErrorCode> {
@@ -270,14 +279,14 @@ fn receive_exact(
     Ok(())
 }
 
-fn peer(stream: &UnixStream) -> Result<(u32, u32), ErrorCode> {
+pub(crate) fn peer(fd: i32) -> Result<(u32, u32), ErrorCode> {
     // SAFETY: ucred is a C POD struct initialized by getsockopt.
     let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
     // SAFETY: credentials is an appropriately sized writable buffer.
     if unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            fd,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
             (&mut credentials as *mut libc::ucred).cast(),
@@ -291,7 +300,7 @@ fn peer(stream: &UnixStream) -> Result<(u32, u32), ErrorCode> {
     Ok((credentials.uid, credentials.pid as u32))
 }
 
-fn allow_peer(path: &Path, uid: u32) -> Result<(), ErrorCode> {
+pub(crate) fn allow_peer(path: &Path, uid: u32) -> Result<(), ErrorCode> {
     if uid == 0 {
         return Ok(());
     }

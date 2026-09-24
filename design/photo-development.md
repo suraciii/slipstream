@@ -230,6 +230,13 @@ task-level enforcement, engine workspace plans, buffer lifetimes, and memory
 failure evidence. These are execution policies independent of the Edit Recipe.
 The deployment must qualify that boundary before processing is enabled.
 
+[Production Photo Processing Protocol](processing-photo-protocol.md) defines
+the typed production admission between this service boundary and the host
+launcher. It keeps Photo/source/recipe and Export authority in the service,
+passes a confined staged descriptor rather than a path, and admits only the
+closed `development-tiff` workload until a separate Film capability is
+qualified.
+
 A cache entry's identity includes content evidence, stage settings, exact bundle,
 geometry and stochastic policy. Active inputs, outputs and downloads require
 leases so eviction cannot remove them mid-operation. Disk exhaustion must leave
