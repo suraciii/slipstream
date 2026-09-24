@@ -96,26 +96,32 @@ def generated_history(database, output, exposure_ev, *, custom_wb=False):
 def validate_imported_history(database, exposure_ev, *, custom_wb=False):
     with sqlite3.connect(f"file:{Path(database)}?mode=ro", uri=True) as db:
         rows = list(db.execute(
-            "SELECT operation, enabled, module, op_params "
+            "SELECT num, operation, enabled, module, op_params "
             "FROM history WHERE imgid=1 ORDER BY num"
         ))
-    operations = Counter(row[0] for row in rows)
-    expected = Counter({operation: 1 for operation in (*VERSIONS, "exposure")})
+    expected_order = (*VERSIONS, "exposure")
+    operations = Counter(row[1] for row in rows)
+    expected = Counter({operation: 1 for operation in expected_order})
     if operations != expected:
         raise RuntimeError(
             "Unexpected imported darktable history; duplicate adaptation or automatic/look module: "
             f"{dict(operations)}"
         )
-    by_operation = {row[0]: row for row in rows}
+    numbers = [row[0] for row in rows]
+    ordered_operations = [row[1] for row in rows]
+    if numbers != list(range(len(expected_order))) or ordered_operations != list(expected_order):
+        raise RuntimeError(
+            "Unexpected imported darktable history sequence or numbering: "
+            f"num={numbers}, operations={ordered_operations}"
+        )
+    by_operation = {row[1]: row for row in rows}
     temperature = by_operation["temperature"]
-    if temperature[2] != VERSIONS["temperature"] or not temperature[1]:
+    if temperature[3] != VERSIONS["temperature"] or not temperature[2]:
         raise RuntimeError("darktable white-balance module is disabled or has an unknown version")
-    if custom_wb and temperature[3] != custom_wb_params():
+    if custom_wb and temperature[4] != custom_wb_params():
         raise RuntimeError("darktable did not import the requested custom white-balance coefficients")
     exposure = by_operation["exposure"]
-    if exposure != (
-        "exposure", 1, 7, exposure_params(exposure_ev)
-    ):
+    if exposure[2:] != (1, 7, exposure_params(exposure_ev)):
         raise RuntimeError("darktable did not import the requested manual exposure parameters")
     return {
         "operations": dict(operations),

@@ -90,6 +90,25 @@ class HistoryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "duplicate adaptation or automatic/look module"):
                 validate_imported_history(bad, 1.0, custom_wb=True)
 
+    def test_imported_history_requires_module_order_and_contiguous_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reversed_history = root / "reversed.db"
+            create_database(reversed_history, custom_wb=True, exposure_ev=1.0)
+            with sqlite3.connect(reversed_history) as db:
+                db.execute("UPDATE history SET num=9 WHERE operation='temperature'")
+                db.execute("UPDATE history SET num=5 WHERE operation='exposure'")
+                db.execute("UPDATE history SET num=8 WHERE operation='temperature'")
+            with self.assertRaisesRegex(RuntimeError, "sequence or numbering"):
+                validate_imported_history(reversed_history, 1.0, custom_wb=True)
+
+            gap = root / "gap.db"
+            create_database(gap, custom_wb=True, exposure_ev=1.0)
+            with sqlite3.connect(gap) as db:
+                db.execute("UPDATE history SET num=9 WHERE operation='exposure'")
+            with self.assertRaisesRegex(RuntimeError, "sequence or numbering"):
+                validate_imported_history(gap, 1.0, custom_wb=True)
+
     def test_exposure_rejects_non_finite_ev(self):
         for value in (float("nan"), float("inf"), float("-inf")):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "must be finite"):
