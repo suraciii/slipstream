@@ -105,17 +105,32 @@ struct SourceFacts<'a> {
 }
 
 fn derive_support(facts: SourceFacts<'_>, source_available: bool) -> SupportWire {
-    let profile = (facts.kind == OriginalKind::Raw)
+    // A JPEG source is known-unapproved by its kind. For a RAW source the
+    // class identity needs the filename container and the observed camera
+    // make and model. The metadata read deliberately returns defaults when
+    // inspection is saturated, the source changed mid-read, or it cannot be
+    // opened, so a missing identity means the class is unavailable to
+    // observe rather than unlisted.
+    let Some(container) = (facts.kind == OriginalKind::Raw)
         .then(|| photo_profile::container_of_filename(facts.filename))
         .flatten()
-        .and_then(|container| {
-            photo_profile::classify(
-                facts.make.unwrap_or(""),
-                facts.model.unwrap_or(""),
-                &container,
-            )
-        });
-    match profile {
+    else {
+        return SupportWire {
+            state: "unavailable",
+            profile_id: None,
+            reason: Some("source-class-unobservable"),
+        };
+    };
+    let (Some(make), Some(model)) = (facts.make, facts.model) else {
+        return SupportWire {
+            state: "unavailable",
+            profile_id: None,
+            reason: Some("camera-identity-unavailable"),
+        };
+    };
+    match photo_profile::classify(make, model, &container) {
+        // The identity is observed, so a failed match is a known-unapproved
+        // class.
         None => SupportWire {
             state: "unsupported",
             profile_id: None,
@@ -139,7 +154,7 @@ fn derive_support(facts: SourceFacts<'_>, source_available: bool) -> SupportWire
     }
 }
 
-/// True when the enabled execution payload can represent the stored value:
+// True when the enabled execution payload can represent the stored value:
 /// a finite multiple of one thousandth of an EV inside the approved range.
 fn representable(settings: &EditRecipeSettings) -> bool {
     let milli = settings.exposure_ev * 1000.0;
@@ -261,9 +276,10 @@ struct RebindEditRecipeBody {
 }
 
 /// Reads one typed body. CLI requests use the CLI reader; Web requests use
-/// the plain reader. Every body-shape refusal on these routes is
-/// `invalid_settings`, so a client cannot confuse a malformed payload with
-/// out-of-range settings.
+/// the plain reader. Every body failure on these routes maps onto the closed
+/// error-code set: an oversize body is `limit_exceeded` and every other
+/// shape refusal is `invalid_settings`, so a client cannot confuse a
+/// malformed payload with out-of-range settings.
 async fn read_recipe_body<T: serde::de::DeserializeOwned>(
     request: Request<Body>,
 ) -> Result<T, Response<Body>> {
@@ -271,17 +287,35 @@ async fn read_recipe_body<T: serde::de::DeserializeOwned>(
     let parsed = if cli {
         read_cli_json_body(request).await
     } else {
-        let value = read_json_body(request).await?;
-        serde_json::from_value(value)
-            .map_err(|_| crate::http::api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
+        let value = read_json_body(request)
+            .await
+            .map_err(|response| closed_body_error(response.status()))?;
+        serde_json::from_value(value).map_err(|_| body_shape_error())
     };
-    parsed.map_err(|response| {
-        if response.status() == StatusCode::BAD_REQUEST {
-            settings_error("body", "The body is malformed or contains unknown fields.")
-        } else {
-            response
-        }
-    })
+    parsed.map_err(|response| closed_body_error(response.status()))
+}
+
+/// Maps one body-read failure onto the closed error-code set: an oversize
+/// body is `limit_exceeded` and every other refusal is `invalid_settings`.
+fn closed_body_error(status: StatusCode) -> Response<Body> {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        cli_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "limit_exceeded",
+            "Reduce the request body and try again.",
+            serde_json::json!({
+                "limitName": "requestBodyBytesMaximum",
+                "limit": crate::MAXIMUM_MUTATION_BODY_BYTES,
+                "actual": crate::MAXIMUM_MUTATION_BODY_BYTES + 1
+            }),
+        )
+    } else {
+        body_shape_error()
+    }
+}
+
+fn body_shape_error() -> Response<Body> {
+    settings_error("body", "The body is malformed or contains unknown fields.")
 }
 
 // ---------------------------------------------------------------- error mapping
@@ -304,11 +338,14 @@ fn unknown_photo(photo_id: &str) -> Response<Body> {
     )
 }
 
+/// Persistence and read failures are service-availability failures of these
+/// routes, so they carry the closed `processing_unavailable` code with the
+/// operation named in the details.
 fn storage_error(operation: &'static str) -> Response<Body> {
     cli_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "storage_failed",
-        "Inspect server health and the current facts before trying again.",
+        "processing_unavailable",
+        "The service cannot read or write the current facts; inspect server health before trying again.",
         serde_json::json!({"operation": operation}),
     )
 }
@@ -412,12 +449,9 @@ pub(crate) async fn get_edit_recipe(
     if !valid_id(&photo_id) {
         return invalid_cli("photoId", "The Photo ID is invalid.");
     }
-    let read = match state.application.library.edit_recipe(&photo_id).await {
-        Ok(Some(read)) => read,
-        Ok(None) => return unknown_photo(&photo_id),
-        Err(_) => return storage_error("edit-recipe-read"),
-    };
-    let (photo, metadata, _) = match load_facts(&state, &photo_id).await {
+    // One serialized recipe read owns every response fact, so a rescan
+    // between reads cannot mix an old recipe with newer support facts.
+    let (photo, metadata, read) = match load_facts(&state, &photo_id).await {
         Ok(facts) => facts,
         Err(response) => return response,
     };
@@ -482,7 +516,7 @@ pub(crate) async fn post_edit_recipe(
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-save"),
     };
-    map_write_outcome(&photo_id, facts, read, outcome)
+    map_write_outcome(&state, &photo_id, facts, read, outcome).await
 }
 
 /// `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
@@ -537,7 +571,7 @@ pub(crate) async fn post_edit_recipe_rebind(
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-rebind"),
     };
-    map_write_outcome(&photo_id, facts, read, outcome)
+    map_write_outcome(&state, &photo_id, facts, read, outcome).await
 }
 
 // ---------------------------------------------------------------- validation
@@ -587,25 +621,35 @@ fn invalid_settings_response() -> Response<Body> {
 /// Maps one core write outcome onto the closed outcome and error-code sets.
 /// Conflict-family responses carry the current recipe revision, source
 /// revision, and support state.
-fn map_write_outcome(
+async fn map_write_outcome(
+    state: &HttpState,
     photo_id: &str,
     facts: SourceFacts<'_>,
     read: EditRecipeRead,
     outcome: EditRecipeWriteOutcome,
 ) -> Response<Body> {
     let source_available = read.source_available;
-    let current_revision = read.recipe.as_ref().map(|recipe| recipe.revision.as_str());
+    let pre_write_revision = read.recipe.map(|recipe| recipe.revision);
     match outcome {
         EditRecipeWriteOutcome::Saved(recipe) => {
-            // A committed save always creates a new revision. The same
-            // revision as the pre-write read means the request identity
-            // replayed its receipt, so the wire reports `unchanged` instead
-            // of implying a second commit.
-            let outcome_name = if current_revision == Some(recipe.revision.as_str()) {
-                "unchanged"
-            } else {
-                "saved"
-            };
+            // `Saved` covers a fresh commit and a receipt replay, and a
+            // replay must report `unchanged` because no write occurred. One
+            // post-write read separates them: a fresh commit installs a
+            // revision that was not current before, while a replay leaves
+            // either the superseded receipt revision or the pre-write
+            // revision in place.
+            let current_revision = state
+                .application
+                .library
+                .edit_recipe(photo_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|current| current.recipe.map(|recipe| recipe.revision));
+            let installed = current_revision.as_deref() == Some(recipe.revision.as_str());
+            let replayed =
+                !installed || pre_write_revision.as_deref() == Some(recipe.revision.as_str());
+            let outcome_name = if replayed { "unchanged" } else { "saved" };
             write_response(outcome_name, recipe, facts, source_available)
         }
         EditRecipeWriteOutcome::Unchanged(recipe) => {

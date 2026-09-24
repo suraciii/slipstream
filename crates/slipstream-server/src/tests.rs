@@ -9967,12 +9967,34 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&request_conflict), "request_conflict");
 
+    // A replayed identity after a later write reports the stored receipt as
+    // unchanged: no write occurs for the replay.
+    let (status, second) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("save-2", Some(&revision), &source_revision, 0.75),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["outcome"], "saved");
+    let second_revision = second["recipe"]["revision"].as_str().unwrap().to_owned();
+    assert_ne!(second_revision, revision);
+    let (status, stale_replay) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("save-1", None, &source_revision, 0.25),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stale_replay["outcome"], "unchanged");
+    assert_eq!(stale_replay["recipe"]["revision"], revision);
+
     // A stale recipe revision conflicts and carries current facts.
     let (status, recipe_conflict) = save_recipe(
         &router,
         &photo_id,
         save_body(
-            "save-2",
+            "stale-revision",
             Some("00000000-0000-4000-8000-000000000000"),
             &source_revision,
             0.5,
@@ -9983,7 +10005,7 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     assert_eq!(error_code(&recipe_conflict), "recipe_conflict");
     assert_eq!(
         recipe_conflict["error"]["details"]["recipeRevision"],
-        revision
+        second_revision
     );
     assert_eq!(
         recipe_conflict["error"]["details"]["sourceRevision"],
@@ -10024,14 +10046,15 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     let (status, source_changed) = save_recipe(
         &router,
         &photo_id,
-        save_body("save-3", Some(&revision), &source_revision, 0.25),
+        save_body("changed-source", Some(&revision), &source_revision, 0.25),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&source_changed), "source_changed");
+    // The carried facts name the currently committed recipe revision.
     assert_eq!(
         source_changed["error"]["details"]["recipeRevision"],
-        revision
+        second_revision
     );
     assert_eq!(
         source_changed["error"]["details"]["sourceRevision"],
@@ -10044,7 +10067,7 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
         &router,
         &photo_id,
         serde_json::json!({
-            "expectedRecipeRevision": revision,
+            "expectedRecipeRevision": second_revision,
             "expectedSourceRevision": new_source,
         }),
     )
@@ -10052,9 +10075,10 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rebound["outcome"], "saved");
     let rebound_revision = rebound["recipe"]["revision"].as_str().unwrap().to_owned();
-    assert_ne!(rebound_revision, revision);
+    assert_ne!(rebound_revision, second_revision);
     assert_eq!(rebound["recipe"]["sourceRevision"], new_source);
-    assert_eq!(rebound["recipe"]["settings"]["exposureEv"], 0.25);
+    // The rebind carries the committed settings of the rebound recipe.
+    assert_eq!(rebound["recipe"]["settings"]["exposureEv"], 0.75);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -10107,6 +10131,53 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(error_code(&rebound), "unsupported_photo");
     }
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A RAW Photo whose camera identity cannot be observed reads as
+/// unavailable, not unsupported, and its writes are not blocked.
+#[tokio::test]
+async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
+    let (base, config) = prepare_fixture();
+    generated_non_tiff_raw_fixture(&config.library_root.join("opaque.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(
+        read["support"],
+        serde_json::json!({"state": "unavailable", "reason": "camera-identity-unavailable"})
+    );
+    assert_eq!(
+        read["processing"],
+        serde_json::json!({"state": "unavailable", "reason": "camera-identity-unavailable"})
+    );
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    // The write is admitted: the class is unobservable, not refused.
+    let (status, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body("opaque-save", None, &source_revision, 0.4),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["outcome"], "saved");
+    assert_eq!(saved["recipe"]["settings"]["exposureEv"], 0.4);
+
+    // The metadata response reports the absent camera identity as absent
+    // values, not as a failure.
+    let detail = cli_photo_read(&router, &photo_id).await;
+    assert!(detail["metadata"]["make"].is_null());
+    assert!(detail["metadata"]["model"].is_null());
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -10210,6 +10281,22 @@ async fn edit_recipe_validates_settings_before_the_write() {
     )
     .await;
     assert_eq!(wrong.status(), StatusCode::UPGRADE_REQUIRED);
+
+    // A Web-shaped malformed body answers with the closed invalid_settings
+    // code instead of the legacy error shape.
+    let web_malformed = send(
+        &router,
+        authenticated_request()
+            .method("POST")
+            .uri(edit_recipe_uri(&photo_id))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{not json"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(web_malformed.status(), StatusCode::BAD_REQUEST);
+    let refused = response_json(web_malformed).await;
+    assert_eq!(error_code(&refused), "invalid_settings");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
