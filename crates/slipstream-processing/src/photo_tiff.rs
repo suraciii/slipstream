@@ -97,6 +97,7 @@ impl Reader {
 
 struct Entry {
     kind: u16,
+    field_type: u16,
     count: u32,
     /// Absolute offset of the value: inline in the entry or external.
     offset: u64,
@@ -142,6 +143,7 @@ fn first_ifd(reader: &mut Reader) -> Result<Vec<Entry>, ErrorCode> {
         let _ = inline;
         entries.push(Entry {
             kind,
+            field_type,
             count,
             offset,
         });
@@ -151,6 +153,29 @@ fn first_ifd(reader: &mut Reader) -> Result<Vec<Entry>, ErrorCode> {
 
 fn entry(entries: &[Entry], kind: u16) -> Option<&Entry> {
     entries.iter().find(|entry| entry.kind == kind)
+}
+
+/// Read one full SHORT/LONG array value, such as the strip layout arrays.
+/// Any other element encoding is not the qualified writer's output.
+fn array_values(reader: &mut Reader, entry: &Entry) -> Result<Vec<u64>, ErrorCode> {
+    let count = usize::try_from(entry.count).map_err(|_| ErrorCode::Uncertain)?;
+    if count == 0 || count > 4096 {
+        return Err(ErrorCode::Uncertain);
+    }
+    let element = match entry.field_type {
+        3 => 2usize,
+        4 => 4,
+        _ => return Err(ErrorCode::Uncertain),
+    };
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        let at = entry.offset + (index * element) as u64;
+        values.push(match element {
+            2 => u64::from(reader.u16(at)?),
+            _ => u64::from(reader.u32(at)?),
+        });
+    }
+    Ok(values)
 }
 
 fn short_values(reader: &mut Reader, entry: &Entry) -> Result<Vec<u16>, ErrorCode> {
@@ -253,15 +278,64 @@ fn validate_for_icc(
     if sample_format != [3, 3, 3] {
         return Err(ErrorCode::Uncertain);
     }
-    // Strip layout must describe the declared full geometry.
+    // The embedded profile is pinned byte identity; its extent also bounds
+    // where strip payload may begin.
+    let icc = entry(&entries, ICC_TAG).ok_or(ErrorCode::Uncertain)?;
+    let bytes = reader.value(icc.offset, icc.count, ICC_BYTES_MAX)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != icc_sha256 {
+        return Err(ErrorCode::Uncertain);
+    }
+    let head_end = (icc
+        .offset
+        .checked_add(u64::from(icc.count))
+        .ok_or(ErrorCode::Uncertain)?)
+    .max(
+        u64::from(reader.u32(4)?)
+            + 2
+            + 12 * u64::try_from(entries.len()).map_err(|_| ErrorCode::Uncertain)?
+            + 4,
+    );
+    // Strip layout must describe the declared full geometry. StripByteCounts
+    // are the compressed byte counts of the pinned Deflate producer, so this
+    // check proves structure and declared coverage — parsed types and values,
+    // in-file, ascending, non-overlapping ranges above the IFD/ICC region,
+    // every declared row accounted for, and no unaccounted trailing payload —
+    // but not that the compressed payload inflates to the declared
+    // `rows × width × 3 × 4` bytes: decode-verification of the artifact is
+    // the consumer's gate.
     let strips = entry(&entries, 273).ok_or(ErrorCode::Uncertain)?;
     let counts = entry(&entries, 279).ok_or(ErrorCode::Uncertain)?;
     if strips.count == 0 || strips.count != counts.count || strips.count > 4096 {
         return Err(ErrorCode::Uncertain);
     }
-    let icc = entry(&entries, ICC_TAG).ok_or(ErrorCode::Uncertain)?;
-    let bytes = reader.value(icc.offset, icc.count, ICC_BYTES_MAX)?;
-    if format!("{:x}", Sha256::digest(&bytes)) != icc_sha256 {
+    let offsets = array_values(&mut reader, strips)?;
+    let lengths = array_values(&mut reader, counts)?;
+    let rows_per_strip = long_value(
+        &mut reader,
+        entry(&entries, 278).ok_or(ErrorCode::Uncertain)?,
+    )?;
+    if rows_per_strip == 0 || rows_per_strip > height {
+        return Err(ErrorCode::Uncertain);
+    }
+    // The strips together account for every declared row: each one carries
+    // `rows × width × 3 × 4` uncompressed sample bytes, the last one the
+    // remaining partial row block.
+    if height.div_ceil(rows_per_strip) != strips.count {
+        return Err(ErrorCode::Uncertain);
+    }
+    let mut previous_end = head_end;
+    for (offset, length) in offsets.into_iter().zip(lengths) {
+        if length == 0 || offset < previous_end {
+            return Err(ErrorCode::Uncertain);
+        }
+        let end = offset.checked_add(length).ok_or(ErrorCode::Uncertain)?;
+        if end > metadata.len() {
+            return Err(ErrorCode::Uncertain);
+        }
+        previous_end = end;
+    }
+    if previous_end != metadata.len() {
+        // Unaccounted trailing payload is not the qualified artifact shape.
         return Err(ErrorCode::Uncertain);
     }
     let mut file = File::open(path).map_err(|_| ErrorCode::Uncertain)?;
@@ -369,6 +443,9 @@ mod tests {
 
     fn valid_tags() -> Vec<Tag> {
         let icc = vec![0u8; 588];
+        // The strip payload sits after the IFD and its external values; the
+        // single strip covers the whole 4x3 image body.
+        let strip_offset = (8 + 2 + 12 * 11 + 4 + 6 + 6 + icc.len()) as u32;
         vec![
             Tag {
                 kind: 256,
@@ -409,11 +486,18 @@ mod tests {
                 kind: 273,
                 field_type: 4,
                 count: 1,
-                value: 0,
+                value: strip_offset,
                 extra: None,
             },
             Tag {
                 kind: 277,
+                field_type: 4,
+                count: 1,
+                value: 3,
+                extra: None,
+            },
+            Tag {
+                kind: 278,
                 field_type: 4,
                 count: 1,
                 value: 3,
@@ -467,7 +551,7 @@ mod tests {
         };
         let identity = validate_for_icc(&path, 1 << 20, &synthetic_icc).unwrap();
         assert_eq!((identity.width, identity.height), (4, 3));
-        assert_eq!(identity.size, 8 + 2 + 120 + 4 + 6 + 6 + 588 + 48);
+        assert_eq!(identity.size, 8 + 2 + 132 + 4 + 6 + 6 + 588 + 48);
 
         // Any changed tag that breaks the contract is refused.
         for (index, change) in [
@@ -504,7 +588,7 @@ mod tests {
         }
         // A foreign ICC payload never satisfies the pinned bytes.
         let mut tags = valid_tags();
-        tags[9].extra.as_mut().unwrap()[0] = b'X';
+        tags[10].extra.as_mut().unwrap()[0] = b'X';
         let foreign = dir.join("foreign.tif");
         build(&foreign, &tags, &[0u8; 48]);
         assert!(validate(&foreign, 1 << 20).is_err());
@@ -529,6 +613,176 @@ mod tests {
         writer.bytes.extend_from_slice(&2u16.to_le_bytes());
         std::fs::write(dir.join("short.tif"), &writer.bytes).unwrap();
         assert!(validate(&dir.join("short.tif"), 1 << 20).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Build one 4x3 fixture with an explicit strip layout. `offsets` and
+    /// `counts` may differ in length or content to describe malformed files.
+    fn strip_body_offset(external_bytes: usize, rows_tag: bool) -> u32 {
+        (8 + 2 + 12 * (8 + 2 + usize::from(rows_tag)) + 4 + 6 + 6 + 588 + external_bytes) as u32
+    }
+
+    fn strip_case(
+        path: &Path,
+        rows_per_strip: Option<u32>,
+        offsets: Vec<u32>,
+        counts: Vec<u32>,
+        body: &[u8],
+    ) {
+        let mut tags: Vec<Tag> = valid_tags()
+            .into_iter()
+            .filter(|tag| !matches!(tag.kind, 273 | 278 | 279))
+            .collect();
+        let layout = |kind: u16, values: &[u32]| Tag {
+            kind,
+            field_type: 4,
+            count: values.len() as u32,
+            value: values[0],
+            extra: (values.len() > 1).then(|| {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect()
+            }),
+        };
+        tags.push(layout(273, &offsets));
+        if let Some(rows_per_strip) = rows_per_strip {
+            tags.push(Tag {
+                kind: 278,
+                field_type: 4,
+                count: 1,
+                value: rows_per_strip,
+                extra: None,
+            });
+        }
+        tags.push(layout(279, &counts));
+        tags.sort_by_key(|tag| tag.kind);
+        build(path, &tags, body);
+    }
+
+    #[test]
+    fn strip_ranges_and_declared_sample_coverage_are_validated() {
+        let dir = temp_dir("strips");
+        let body = [7u8; 48];
+        let synthetic_icc = format!("{:x}", Sha256::digest(vec![0u8; 588]));
+        let accepts = |path: &Path| validate_for_icc(path, 1 << 20, &synthetic_icc).is_ok();
+
+        // A well-formed single-strip layout validates.
+        let path = dir.join("single.tif");
+        strip_case(
+            &path,
+            Some(3),
+            vec![strip_body_offset(0, true)],
+            vec![48],
+            &body,
+        );
+        assert!(accepts(&path));
+
+        // Three ascending, disjoint one-row strips validate too.
+        let path = dir.join("rows.tif");
+        let base = strip_body_offset(24, true);
+        strip_case(
+            &path,
+            Some(1),
+            vec![base, base + 16, base + 32],
+            vec![16, 16, 16],
+            &body,
+        );
+        assert!(accepts(&path));
+
+        // Truncated strip data is refused.
+        let path = dir.join("truncated.tif");
+        strip_case(
+            &path,
+            Some(3),
+            vec![strip_body_offset(0, true)],
+            vec![48],
+            &body,
+        );
+        let complete = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &complete[..complete.len() - 14]).unwrap();
+        assert_eq!(validate(&path, 1 << 20).unwrap_err(), ErrorCode::Uncertain);
+
+        // A strip claiming bytes beyond the file end is refused.
+        let path = dir.join("beyond.tif");
+        strip_case(
+            &path,
+            Some(3),
+            vec![strip_body_offset(0, true)],
+            vec![100],
+            &body,
+        );
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // An out-of-file strip offset is refused.
+        let path = dir.join("outside.tif");
+        strip_case(&path, Some(3), vec![100_000], vec![48], &body);
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // Mismatched strip array counts are refused.
+        let path = dir.join("mismatch.tif");
+        strip_case(&path, Some(3), vec![746], vec![24, 24], &body);
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // Strips that do not account for every declared row are refused.
+        let path = dir.join("undercovered.tif");
+        strip_case(
+            &path,
+            Some(1),
+            vec![strip_body_offset(0, true)],
+            vec![48],
+            &body,
+        );
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // A zero-length strip is refused.
+        let path = dir.join("empty.tif");
+        strip_case(
+            &path,
+            Some(3),
+            vec![strip_body_offset(0, true)],
+            vec![0],
+            &body,
+        );
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // Overlapping strips are refused.
+        let path = dir.join("overlap.tif");
+        strip_case(&path, Some(2), vec![746, 760], vec![24, 24], &body);
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // Unaccounted trailing payload is refused.
+        let path = dir.join("trailing.tif");
+        strip_case(
+            &path,
+            Some(3),
+            vec![strip_body_offset(0, true)],
+            vec![48],
+            &body,
+        );
+        let mut trailing = std::fs::read(&path).unwrap();
+        trailing.push(0);
+        std::fs::write(&path, trailing).unwrap();
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // Strip arrays must use SHORT or LONG elements.
+        let mut tags = valid_tags();
+        tags[5].field_type = 1;
+        let path = dir.join("typed.tif");
+        build(&path, &tags, &body);
+        assert!(validate(&path, 1 << 20).is_err());
+
+        // The declared row geometry requires the rows-per-strip tag.
+        let path = dir.join("norows.tif");
+        strip_case(
+            &path,
+            None,
+            vec![strip_body_offset(0, false)],
+            vec![48],
+            &body,
+        );
+        assert!(validate(&path, 1 << 20).is_err());
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

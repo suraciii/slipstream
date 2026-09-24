@@ -239,7 +239,12 @@ fn manifest_digest_parts(
         "bundle": bundle,
         "policy": policy,
         "recipe": [recipe.exposure_milli_ev, recipe.white_balance_mode],
-        "source": {"kind": source.kind, "sha256": source.sha256, "size": source.size},
+        "source": {
+            "kind": source.kind,
+            "profile_id": source.profile_id,
+            "sha256": source.sha256,
+            "size": source.size,
+        },
         "target": protocol::PHOTO_WORKLOAD,
         "workload": protocol::PHOTO_WORKLOAD,
     }))
@@ -453,26 +458,30 @@ impl PhotoExecutor {
             Request::Output {
                 incarnation,
                 sequence,
+                export_id,
                 ..
-            } => self.output(&incarnation, sequence, descriptor),
+            } => self.output(&incarnation, &export_id, sequence, descriptor),
             Request::ValidateOutput {
                 incarnation,
                 sequence,
+                export_id,
                 size,
                 sha256,
                 accepted,
                 ..
-            } => self.validate_output(&incarnation, sequence, size, &sha256, accepted),
+            } => self.validate_output(&incarnation, &export_id, sequence, size, &sha256, accepted),
             Request::Inspect {
                 incarnation,
                 sequence,
+                export_id,
                 ..
-            } => self.inspect(&incarnation, sequence),
+            } => self.inspect(&incarnation, &export_id, sequence),
             Request::Cancel {
                 incarnation,
                 sequence,
+                export_id,
                 ..
-            } => self.cancel(&incarnation, sequence),
+            } => self.cancel(&incarnation, &export_id, sequence),
         }
     }
 
@@ -542,6 +551,7 @@ impl PhotoExecutor {
         let admission = {
             let mut data = self.lock()?;
             let available = data.available;
+            let headroom = Headroom::measure(&self.config)?;
             begin_start(
                 &mut data.registry,
                 &self.config,
@@ -550,6 +560,7 @@ impl PhotoExecutor {
                 descriptor.as_ref(),
                 &self.image_id,
                 available,
+                &headroom,
             )?
         };
         let record = match admission {
@@ -597,10 +608,12 @@ impl PhotoExecutor {
     fn output(
         &self,
         incarnation: &str,
+        export_id: &str,
         sequence: u64,
         descriptor: Option<File>,
     ) -> Result<ResultBody, ErrorCode> {
-        let (identity, result_path) = {
+        let mut descriptor = descriptor;
+        let (identity, result_path, mut descriptor) = {
             let mut data = self.lock()?;
             expire(
                 &mut data.registry,
@@ -608,38 +621,62 @@ impl PhotoExecutor {
                 self.config.receipt_retention_seconds,
             )?;
             let record = record_ref(&data.registry, incarnation, sequence)?;
-            if record.phase != Phase::OutputReady && !record.output_transferred {
+            // The attempt identity is bound to the durable export identity:
+            // a foreign export never receives, mutes, or cancels an artifact.
+            if record.export_id != export_id {
+                return Err(ErrorCode::Conflict);
+            }
+            // The durable claim admits exactly one service artifact; once it
+            // is spent, no retry or concurrent request may transfer again.
+            if record.output_transferred {
+                return Err(ErrorCode::Conflict);
+            }
+            if record.phase != Phase::OutputReady {
                 return Err(ErrorCode::InvalidRequest);
             }
+            // The descriptor is verified before anything durable changes, so
+            // an unusable descriptor never spends the attempt's one claim.
+            let descriptor = descriptor.take().ok_or(ErrorCode::InvalidRequest)?;
+            photo::validate_descriptor(
+                descriptor.as_raw_fd(),
+                photo::DescriptorRequirement {
+                    kind: photo::DescriptorKind::Output,
+                    peer_uid: self.config.peer_uid,
+                    declared_size: 0,
+                    max_bytes: self.config.output_bytes_max,
+                },
+            )
+            .map_err(|_| ErrorCode::InvalidRequest)?;
             let identity = record.output.clone().ok_or(ErrorCode::Uncertain)?;
             let path = record
                 .workspace(Path::new(&self.config.root))
                 .join("work")
                 .join(OUTPUT_NAME);
-            (identity, path)
+            // Persist the transfer claim under the journal lock before the
+            // copy: concurrent requests observe the claim and are refused,
+            // and one attempt can never publish a second service artifact.
+            // A failed copy keeps the claim, so the attempt settles without
+            // a second transfer instead of publishing partial bytes twice.
+            record_ref_mut(&mut data.registry, incarnation, sequence)?.output_transferred = true;
+            persist(Path::new(&self.config.root), &data.registry)?;
+            (identity, path, descriptor)
         };
-        let mut descriptor = descriptor.ok_or(ErrorCode::InvalidRequest)?;
-        let receipt = transfer_output(&self.config, &identity, &result_path, &mut descriptor, &{
-            let data = self.lock()?;
-            data.registry
-                .records
-                .get(&sequence)
-                .cloned()
-                .ok_or(ErrorCode::Uncertain)?
-        })?;
-        let mut data = self.lock()?;
-        let record = record_ref_mut(&mut data.registry, incarnation, sequence)?;
-        if record.output.as_ref() != Some(&identity) {
-            return Err(ErrorCode::Uncertain);
-        }
-        record.output_transferred = true;
-        persist(Path::new(&self.config.root), &data.registry)?;
+        let receipt = transfer_output(
+            &self.config,
+            &identity,
+            &result_path,
+            &mut descriptor,
+            export_id,
+            incarnation,
+            sequence,
+        )?;
         Ok(ResultBody::Output { receipt })
     }
 
     fn validate_output(
         &self,
         incarnation: &str,
+        export_id: &str,
         sequence: u64,
         size: u64,
         sha256: &str,
@@ -651,10 +688,13 @@ impl PhotoExecutor {
             now()?,
             self.config.receipt_retention_seconds,
         )?;
-        if record_ref(&data.registry, incarnation, sequence)?.terminal() {
-            return Ok(record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation));
-        }
         let record = record_ref(&data.registry, incarnation, sequence)?;
+        if record.export_id != export_id {
+            return Err(ErrorCode::Conflict);
+        }
+        if record.terminal() {
+            return Ok(record.result_body(incarnation));
+        }
         if record.validation_ack == Some(accepted) {
             return Ok(record.result_body(incarnation));
         }
@@ -677,25 +717,43 @@ impl PhotoExecutor {
         Ok(record.result_body(incarnation))
     }
 
-    fn inspect(&self, incarnation: &str, sequence: u64) -> Result<ResultBody, ErrorCode> {
+    fn inspect(
+        &self,
+        incarnation: &str,
+        export_id: &str,
+        sequence: u64,
+    ) -> Result<ResultBody, ErrorCode> {
         let mut data = self.lock()?;
         expire(
             &mut data.registry,
             now()?,
             self.config.receipt_retention_seconds,
         )?;
-        Ok(record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation))
+        let record = record_ref(&data.registry, incarnation, sequence)?;
+        if record.export_id != export_id {
+            return Err(ErrorCode::Conflict);
+        }
+        Ok(record.result_body(incarnation))
     }
 
-    fn cancel(&self, incarnation: &str, sequence: u64) -> Result<ResultBody, ErrorCode> {
+    fn cancel(
+        &self,
+        incarnation: &str,
+        export_id: &str,
+        sequence: u64,
+    ) -> Result<ResultBody, ErrorCode> {
         let mut data = self.lock()?;
         expire(
             &mut data.registry,
             now()?,
             self.config.receipt_retention_seconds,
         )?;
-        if record_ref(&data.registry, incarnation, sequence)?.terminal() {
-            return Ok(record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation));
+        let record = record_ref(&data.registry, incarnation, sequence)?;
+        if record.export_id != export_id {
+            return Err(ErrorCode::Conflict);
+        }
+        if record.terminal() {
+            return Ok(record.result_body(incarnation));
         }
         let record = {
             let record = record_ref_mut(&mut data.registry, incarnation, sequence)?;
@@ -1259,6 +1317,10 @@ impl PhotoExecutor {
     }
 
     fn admission_ready(&self, identity: Option<&ParentIdentity>) -> Result<(), ErrorCode> {
+        // The configured control reserve and shared-ancestor headroom are
+        // part of admission: an unmet or unmeasured boundary keeps the
+        // reported capability blocked, never falsely available.
+        Headroom::measure(&self.config)?.satisfied(&self.config)?;
         let identity = identity.ok_or(ErrorCode::Unavailable)?;
         if fs::metadata(self.parent_path())
             .map_err(|_| ErrorCode::Unavailable)?
@@ -1976,6 +2038,90 @@ fn write_cgroup(path: &Path, value: &str) -> Result<(), ErrorCode> {
 
 // Admission ------------------------------------------------------------
 
+/// Measured control-path storage and shared-ancestor memory headroom. Both
+/// must cover their configured reserve before an intent is persisted or a
+/// worker is released (`design/processing-photo-protocol.md` admission
+/// ordering step 3).
+#[derive(Clone, Copy, Debug)]
+struct Headroom {
+    control_free_bytes: u64,
+    ancestor_headroom_bytes: u64,
+}
+
+impl Headroom {
+    /// Measure the actual filesystem supply at the control root and the
+    /// memory headroom of the shared ancestor above the processing subtree.
+    fn measure(config: &Config) -> Result<Self, ErrorCode> {
+        Ok(Self {
+            control_free_bytes: control_free_bytes(Path::new(&config.root))?,
+            ancestor_headroom_bytes: shared_ancestor_headroom()?,
+        })
+    }
+
+    /// An unmet or unmeasurable reserve leaves the capability unavailable:
+    /// admission is refused and no start intent is persisted, so no worker
+    /// is ever released onto an unqualified boundary.
+    fn satisfied(&self, config: &Config) -> Result<(), ErrorCode> {
+        if self.control_free_bytes < config.control_reserve_bytes
+            || self.ancestor_headroom_bytes < config.shared_ancestor_headroom_bytes
+        {
+            return Err(ErrorCode::Unavailable);
+        }
+        Ok(())
+    }
+}
+
+/// Bytes currently free on the filesystem that carries the control root.
+fn control_free_bytes(root: &Path) -> Result<u64, ErrorCode> {
+    let file = File::open(root).map_err(|_| ErrorCode::Unavailable)?;
+    // SAFETY: fstatvfs receives the live descriptor and a correctly sized output struct.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatvfs(file.as_raw_fd(), &mut stat) } != 0 {
+        return Err(ErrorCode::Unavailable);
+    }
+    let blocks = stat.f_bavail;
+    let frsize = stat.f_frsize;
+    blocks.checked_mul(frsize).ok_or(ErrorCode::Unavailable)
+}
+
+/// The memory headroom of the shared ancestor above the capped processing
+/// subtree. A missing or unlimited ancestor limit defers to the host supply
+/// reported by the kernel; a finite limit leaves `max - current` bytes. An
+/// overcommitted ancestor has no measurable headroom and refuses admission.
+fn shared_ancestor_headroom() -> Result<u64, ErrorCode> {
+    let ancestor = match backend::read(&Path::new(CGROUP).join("memory.max")) {
+        Ok(limit) if limit.trim() != "max" => {
+            let limit: u64 = limit.trim().parse().map_err(|_| ErrorCode::Unavailable)?;
+            let current: u64 = backend::read(&Path::new(CGROUP).join("memory.current"))?
+                .trim()
+                .parse()
+                .map_err(|_| ErrorCode::Unavailable)?;
+            limit.checked_sub(current).ok_or(ErrorCode::Unavailable)?
+        }
+        Ok(_) => u64::MAX,
+        Err(_) => u64::MAX,
+    };
+    Ok(ancestor.min(meminfo_available_bytes()?))
+}
+
+/// The kernel's estimate of memory available for new work without swapping.
+fn meminfo_available_bytes() -> Result<u64, ErrorCode> {
+    let text = std::fs::read_to_string("/proc/meminfo").map_err(|_| ErrorCode::Unavailable)?;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("MemAvailable:") {
+            let kilobytes: u64 = value
+                .trim()
+                .strip_suffix("kB")
+                .ok_or(ErrorCode::Unavailable)?
+                .trim()
+                .parse()
+                .map_err(|_| ErrorCode::Unavailable)?;
+            return kilobytes.checked_mul(1024).ok_or(ErrorCode::Unavailable);
+        }
+    }
+    Err(ErrorCode::Unavailable)
+}
+
 /// Perform every bounded admission check and persist the executor intent.
 /// The descriptor copy runs afterwards, without the journal mutex held.
 #[allow(clippy::too_many_arguments)]
@@ -1987,6 +2133,7 @@ fn begin_start(
     descriptor: Option<&File>,
     image_id: &str,
     available: bool,
+    headroom: &Headroom,
 ) -> Result<StartAdmission, ErrorCode> {
     let Request::Start {
         export_id,
@@ -2009,8 +2156,13 @@ fn begin_start(
     expire(registry, now()?, config.receipt_retention_seconds)?;
     if let Some(record) = registry.records.get(sequence) {
         // Replaying the same identity and digest resolves to the same
-        // attempt; any conflicting identity data is a conflict.
-        if record.export_id != *export_id || record.manifest_sha256 != *manifest_sha256 {
+        // attempt; any conflicting identity data is a conflict. The
+        // recomputed digest binds the declared source facts, including the
+        // profile, so a replay can never diverge from the durable attempt.
+        if record.export_id != *export_id
+            || record.manifest_sha256 != *manifest_sha256
+            || manifest_digest(request)? != record.manifest_sha256
+        {
             return Err(ErrorCode::Conflict);
         }
         return Ok(StartAdmission::Replay(Box::new(
@@ -2084,6 +2236,9 @@ fn begin_start(
     {
         return Err(ErrorCode::ResourceBudget);
     }
+    // The configured control reserve and shared-ancestor headroom must be
+    // measured and met before the start intent is persisted or copied.
+    headroom.satisfied(config)?;
     if registry.active.is_some() {
         return Err(ErrorCode::Busy);
     }
@@ -2279,24 +2434,19 @@ fn finalize_start(
 }
 
 /// Copy the launcher-owned result into the service output descriptor with
-/// bounded chunks and return the bounded OutputReceipt.
+/// bounded chunks and return the bounded OutputReceipt. The descriptor has
+/// already been validated by the caller, and the durable transfer claim has
+/// already been persisted, so this is the one copy of the one artifact.
+#[allow(clippy::too_many_arguments)]
 fn transfer_output(
     config: &Config,
     identity: &OutputIdentity,
     result_path: &Path,
     descriptor: &mut File,
-    record: &PhotoRecord,
+    export_id: &str,
+    incarnation: &str,
+    sequence: u64,
 ) -> Result<OutputReceipt, ErrorCode> {
-    photo::validate_descriptor(
-        descriptor.as_raw_fd(),
-        photo::DescriptorRequirement {
-            kind: photo::DescriptorKind::Output,
-            peer_uid: config.peer_uid,
-            declared_size: 0,
-            max_bytes: config.output_bytes_max,
-        },
-    )
-    .map_err(|_| ErrorCode::InvalidRequest)?;
     let mut result = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -2334,9 +2484,9 @@ fn transfer_output(
         return Err(ErrorCode::Uncertain);
     }
     Ok(OutputReceipt {
-        export_id: record.export_id.clone(),
-        incarnation: record.incarnation.clone(),
-        sequence: record.sequence,
+        export_id: export_id.to_owned(),
+        incarnation: incarnation.to_owned(),
+        sequence,
         target: protocol::PHOTO_WORKLOAD.into(),
         size: identity.size,
         sha256,
@@ -2699,6 +2849,14 @@ mod tests {
         }
     }
 
+    /// Headroom comfortably above every configured test reserve.
+    fn satisfied_headroom() -> Headroom {
+        Headroom {
+            control_free_bytes: 1 << 40,
+            ancestor_headroom_bytes: 1 << 40,
+        }
+    }
+
     fn empty_registry(instance: &str) -> Registry {
         Registry {
             version: 1,
@@ -2918,6 +3076,7 @@ mod tests {
             Some(&descriptor),
             &format!("sha256:{}", "1".repeat(64)),
             true,
+            &satisfied_headroom(),
         )
         .unwrap();
         let StartAdmission::Intent(record) = admission else {
@@ -2961,6 +3120,7 @@ mod tests {
                 Some(&descriptor),
                 &format!("sha256:{}", "1".repeat(64)),
                 true,
+                &satisfied_headroom(),
             )
             .unwrap_err(),
             ErrorCode::InvalidRequest
@@ -2991,6 +3151,7 @@ mod tests {
             Some(&descriptor),
             &format!("sha256:{}", "1".repeat(64)),
             true,
+            &satisfied_headroom(),
         )
         .unwrap() else {
             panic!("expected a fresh intent");
@@ -3033,6 +3194,7 @@ mod tests {
                 None,
                 &format!("sha256:{}", "1".repeat(64)),
                 true,
+                &satisfied_headroom(),
             )
             .unwrap_err()
         };
@@ -3162,6 +3324,7 @@ mod tests {
                 Some(&descriptor),
                 &format!("sha256:{}", "1".repeat(64)),
                 true,
+                &satisfied_headroom(),
             )
             .unwrap_err(),
             ErrorCode::ResourceBudget
@@ -3177,6 +3340,7 @@ mod tests {
                 Some(&descriptor),
                 &format!("sha256:{}", "1".repeat(64)),
                 true,
+                &satisfied_headroom(),
             )
             .unwrap_err(),
             ErrorCode::ResourceBudget
@@ -3193,6 +3357,7 @@ mod tests {
                 Some(&descriptor),
                 &format!("sha256:{}", "1".repeat(64)),
                 true,
+                &satisfied_headroom(),
             )
             .unwrap_err(),
             ErrorCode::ResourceBudget
@@ -3224,32 +3389,36 @@ mod tests {
 
         // Unknown attempt identities are refused.
         assert_eq!(
-            executor.inspect(&incarnation, 9).unwrap_err(),
+            executor.inspect(&incarnation, "export-1", 9).unwrap_err(),
             ErrorCode::UnknownAttempt
         );
         assert_eq!(
-            executor.inspect(&incarnation, 0).unwrap_err(),
+            executor.inspect(&incarnation, "export-1", 0).unwrap_err(),
             ErrorCode::Expired
         );
         assert_eq!(
-            executor.output(&incarnation, 9, None).unwrap_err(),
+            executor
+                .output(&incarnation, "export-1", 9, None)
+                .unwrap_err(),
             ErrorCode::UnknownAttempt
         );
         // A planned attempt has no validated output to transfer.
         assert_eq!(
-            executor.output(&incarnation, 1, None).unwrap_err(),
+            executor
+                .output(&incarnation, "export-1", 1, None)
+                .unwrap_err(),
             ErrorCode::InvalidRequest
         );
         // Validation before any transfer is refused.
         assert_eq!(
             executor
-                .validate_output(&incarnation, 2, 10, &"4".repeat(64), true)
+                .validate_output(&incarnation, "export-1", 2, 10, &"4".repeat(64), true)
                 .unwrap_err(),
             ErrorCode::InvalidRequest
         );
         assert_eq!(
             executor
-                .validate_output(&"b".repeat(32), 2, 10, &"4".repeat(64), true)
+                .validate_output(&"b".repeat(32), "export-1", 2, 10, &"4".repeat(64), true)
                 .unwrap_err(),
             ErrorCode::StaleIncarnation
         );
@@ -3294,7 +3463,9 @@ mod tests {
             .open(&output_path)
             .unwrap();
 
-        let body = executor.output(&incarnation, 1, Some(descriptor)).unwrap();
+        let body = executor
+            .output(&incarnation, "export-1", 1, Some(descriptor))
+            .unwrap();
         let ResultBody::Output { receipt } = body else {
             panic!("expected an output receipt");
         };
@@ -3307,7 +3478,9 @@ mod tests {
         assert_eq!(fs::read(&output_path).unwrap(), payload);
         // The transfer is durably recorded for the validation acknowledgement.
         assert!(executor.record(1).unwrap().output_transferred);
-        // A second transfer of the same attempt identity resolves cleanly.
+        // A repeated transfer of the same attempt is refused with the closed
+        // conflict outcome: the durable claim admits exactly one service
+        // artifact, and the refused descriptor never gains bytes.
         let descriptor = OpenOptions::new()
             .read(true)
             .write(true)
@@ -3316,7 +3489,292 @@ mod tests {
             .custom_flags(libc::O_CLOEXEC)
             .open(root.join("service-output-2"))
             .unwrap();
-        assert!(executor.output(&incarnation, 1, Some(descriptor)).is_ok());
+        assert_eq!(
+            executor
+                .output(&incarnation, "export-1", 1, Some(descriptor))
+                .unwrap_err(),
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            fs::read(root.join("service-output-2")).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(fs::read(&output_path).unwrap(), payload);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn output_side_operations_are_bound_to_the_durable_export_identity() {
+        let root = temp_dir("export-bound");
+        let mut registry = empty_registry("0".repeat(32).as_str());
+        let mut record = record_for(1, Phase::OutputReady);
+        record.state = State::Settling;
+        let payload = b"tiff-bytes";
+        record.output = Some(OutputIdentity {
+            size: payload.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            width: 4,
+            height: 3,
+        });
+        registry.records.insert(1, record);
+        registry.active = Some(1);
+        registry.watermark = 1;
+        let executor = executor_with(&root, registry);
+        let incarnation = "a".repeat(32);
+
+        // The launcher-owned result file at its attempt path.
+        let result_path = root
+            .join("attempts")
+            .join("b".repeat(32))
+            .join("work")
+            .join("output");
+        fs::create_dir_all(&result_path).unwrap();
+        fs::write(result_path.join("development.tif"), payload).unwrap();
+
+        // Every output-side operation under a foreign export identity is
+        // refused with the closed conflict outcome and changes nothing.
+        let foreign = "export-2";
+        assert_eq!(
+            executor.inspect(&incarnation, foreign, 1).unwrap_err(),
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            executor
+                .validate_output(&incarnation, foreign, 1, 10, &"4".repeat(64), true)
+                .unwrap_err(),
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            executor.cancel(&incarnation, foreign, 1).unwrap_err(),
+            ErrorCode::Conflict
+        );
+        let refused_descriptor = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(root.join("service-output-refused"))
+            .unwrap();
+        assert_eq!(
+            executor
+                .output(&incarnation, foreign, 1, Some(refused_descriptor))
+                .unwrap_err(),
+            ErrorCode::Conflict
+        );
+        let record = executor.record(1).unwrap();
+        assert!(!record.output_transferred);
+        assert_eq!(record.validation_ack, None);
+        assert!(!record.cancellation_requested);
+        assert_eq!(record.outcome, None);
+        assert_eq!(record.state, State::Settling);
+        assert_eq!(
+            fs::read(root.join("service-output-refused")).unwrap(),
+            Vec::<u8>::new()
+        );
+
+        // The matching export identity still drives the whole flow: inspect,
+        // the one transfer, the validation acknowledgement, and cancellation.
+        let ResultBody::Receipt { receipt } =
+            executor.inspect(&incarnation, "export-1", 1).unwrap()
+        else {
+            panic!("expected a receipt");
+        };
+        assert_eq!(receipt.export_id, "export-1");
+        let descriptor = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(root.join("service-output"))
+            .unwrap();
+        assert!(
+            executor
+                .output(&incarnation, "export-1", 1, Some(descriptor))
+                .is_ok()
+        );
+        assert_eq!(fs::read(root.join("service-output")).unwrap(), payload);
+        assert!(
+            executor
+                .validate_output(
+                    &incarnation,
+                    "export-1",
+                    1,
+                    payload.len() as u64,
+                    &format!("{:x}", Sha256::digest(payload)),
+                    true
+                )
+                .is_ok()
+        );
+        assert_eq!(executor.record(1).unwrap().validation_ack, Some(true));
+        assert!(executor.cancel(&incarnation, "export-1", 1).is_ok());
+        assert!(executor.record(1).unwrap().cancellation_requested);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn admission_measures_the_configured_reserve_and_ancestor_headroom() {
+        let root = temp_dir("headroom");
+        let config = test_config(&root);
+        let mut registry = empty_registry(&config.instance);
+        let request = with_canonical_digests(start_request(&config, |_| {}));
+        let descriptor = source_file(&root, b"data");
+        let begin = |registry: &mut Registry,
+                     config: &Config,
+                     headroom: &Headroom|
+         -> Result<StartAdmission, ErrorCode> {
+            begin_start(
+                registry,
+                config,
+                &root,
+                &request,
+                Some(&descriptor),
+                &format!("sha256:{}", "1".repeat(64)),
+                true,
+                headroom,
+            )
+        };
+
+        // Control-path storage below the configured reserve refuses
+        // admission and never persists a start intent.
+        let starved = Headroom {
+            control_free_bytes: config.control_reserve_bytes - 1,
+            ancestor_headroom_bytes: u64::MAX,
+        };
+        assert_eq!(
+            begin(&mut registry, &config, &starved).unwrap_err(),
+            ErrorCode::Unavailable
+        );
+        assert!(registry.records.is_empty());
+        assert_eq!(registry.active, None);
+        // Shared-ancestor headroom below the configured allowance is the
+        // same closed refusal.
+        let starved = Headroom {
+            control_free_bytes: u64::MAX,
+            ancestor_headroom_bytes: config.shared_ancestor_headroom_bytes - 1,
+        };
+        assert_eq!(
+            begin(&mut registry, &config, &starved).unwrap_err(),
+            ErrorCode::Unavailable
+        );
+        assert!(registry.records.is_empty());
+        assert_eq!(registry.active, None);
+
+        // Measured values at or above both configured boundaries admit.
+        let StartAdmission::Intent(record) =
+            begin(&mut registry, &config, &satisfied_headroom()).unwrap()
+        else {
+            panic!("expected a fresh intent");
+        };
+        assert_eq!(record.phase, Phase::Intent);
+        assert_eq!(registry.active, Some(1));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn headroom_boundaries_are_the_exact_configured_comparisons() {
+        let config = test_config(Path::new("/tmp"));
+        let met = Headroom {
+            control_free_bytes: config.control_reserve_bytes,
+            ancestor_headroom_bytes: config.shared_ancestor_headroom_bytes,
+        };
+        assert!(met.satisfied(&config).is_ok());
+        let unmet = Headroom {
+            control_free_bytes: config.control_reserve_bytes,
+            ancestor_headroom_bytes: config.shared_ancestor_headroom_bytes - 1,
+        };
+        assert_eq!(
+            unmet.satisfied(&config).unwrap_err(),
+            ErrorCode::Unavailable
+        );
+        // The live measurements are real byte quantities the admission path
+        // can compare: the control filesystem reports free space and the
+        // kernel reports available memory.
+        assert!(control_free_bytes(Path::new("/tmp")).unwrap() > 0);
+        assert!(meminfo_available_bytes().unwrap() > 0);
+        if let Ok(headroom) = shared_ancestor_headroom() {
+            assert!(headroom <= meminfo_available_bytes().unwrap());
+        }
+    }
+
+    #[test]
+    fn replay_binds_the_declared_source_profile_identity() {
+        let root = temp_dir("replay-profile");
+        let config = test_config(&root);
+        let mut registry = empty_registry(&config.instance);
+        let request = with_canonical_digests(start_request(&config, |_| {}));
+        let descriptor = source_file(&root, b"data");
+        let StartAdmission::Intent(_) = begin_start(
+            &mut registry,
+            &config,
+            &root,
+            &request,
+            Some(&descriptor),
+            &format!("sha256:{}", "1".repeat(64)),
+            true,
+            &satisfied_headroom(),
+        )
+        .unwrap() else {
+            panic!("expected a fresh intent");
+        };
+
+        // The unchanged tuple, including its profile, replays.
+        assert!(matches!(
+            begin_start(
+                &mut registry,
+                &config,
+                &root,
+                &request,
+                Some(&descriptor),
+                &format!("sha256:{}", "1".repeat(64)),
+                true,
+                &satisfied_headroom(),
+            )
+            .unwrap(),
+            StartAdmission::Replay(_)
+        ));
+
+        // A different profile under the same attempt identity and the same
+        // declared digest is a conflict, never a replay: the durable digest
+        // binds the profile that was admitted.
+        let mut forged = request.clone();
+        if let photo::Request::Start { source, .. } = &mut forged {
+            source.profile_id = "sony-ilce-7cm2-arw".into();
+        }
+        assert_eq!(
+            begin_start(
+                &mut registry,
+                &config,
+                &root,
+                &forged,
+                Some(&descriptor),
+                &format!("sha256:{}", "1".repeat(64)),
+                true,
+                &satisfied_headroom(),
+            )
+            .unwrap_err(),
+            ErrorCode::Conflict
+        );
+
+        // An honestly recomputed digest over the changed profile conflicts
+        // as well.
+        let foreign = with_canonical_digests(forged);
+        assert_eq!(
+            begin_start(
+                &mut registry,
+                &config,
+                &root,
+                &foreign,
+                Some(&descriptor),
+                &format!("sha256:{}", "1".repeat(64)),
+                true,
+                &satisfied_headroom(),
+            )
+            .unwrap_err(),
+            ErrorCode::Conflict
+        );
+        assert_eq!(registry.records.len(), 1);
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3340,7 +3798,7 @@ mod tests {
         let incarnation = "a".repeat(32);
 
         let body = executor
-            .validate_output(&incarnation, 1, 10, &"4".repeat(64), true)
+            .validate_output(&incarnation, "export-1", 1, 10, &"4".repeat(64), true)
             .unwrap();
         let ResultBody::Receipt { receipt } = body else {
             panic!("expected a receipt");
@@ -3351,13 +3809,13 @@ mod tests {
         // Replaying the same acknowledgement resolves to the same receipt.
         assert!(
             executor
-                .validate_output(&incarnation, 1, 10, &"4".repeat(64), true)
+                .validate_output(&incarnation, "export-1", 1, 10, &"4".repeat(64), true)
                 .is_ok()
         );
         // A different acknowledgement value is a conflict.
         assert_eq!(
             executor
-                .validate_output(&incarnation, 1, 10, &"4".repeat(64), false)
+                .validate_output(&incarnation, "export-1", 1, 10, &"4".repeat(64), false)
                 .unwrap_err(),
             ErrorCode::Conflict
         );
@@ -3378,7 +3836,7 @@ mod tests {
         let other_executor = executor_with(&root, conflicting);
         assert_eq!(
             other_executor
-                .validate_output(&incarnation, 1, 10, &"5".repeat(64), true)
+                .validate_output(&incarnation, "export-1", 1, 10, &"5".repeat(64), true)
                 .unwrap_err(),
             ErrorCode::Conflict
         );
@@ -3424,7 +3882,7 @@ mod tests {
         };
         assert_eq!(receipt.outcome, settled.outcome);
         // A late Cancel request for a terminal attempt never re-settles.
-        let body = executor.cancel(&"a".repeat(32), 1).unwrap();
+        let body = executor.cancel(&"a".repeat(32), "export-1", 1).unwrap();
         let ResultBody::Receipt { receipt } = body else {
             panic!("expected a receipt");
         };

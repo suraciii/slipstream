@@ -54,11 +54,17 @@ fn deadline_timer(deadline_ms: u64) -> std::io::Result<()> {
                 tv_nsec: 0,
             },
             it_value: libc::timespec {
-                tv_sec: (deadline_ms / 1000) as _,
+                tv_sec: (deadline_ms / 1000)
+                    .try_into()
+                    .map_err(|_| io::Error::other("deadline overflow"))?,
                 tv_nsec: ((deadline_ms % 1000) * 1_000_000) as _,
             },
         };
-        if libc::timer_settime(timer, 0, &setting, std::ptr::null_mut()) != 0 {
+        // `deadline_ms` is the absolute CLOCK_REALTIME attempt deadline, the
+        // same clock domain as `now()`; TIMER_ABSTIME is what makes a worker
+        // whose launcher died terminate at that instant instead of waiting
+        // the epoch-length interval a relative interpretation would see.
+        if libc::timer_settime(timer, libc::TIMER_ABSTIME, &setting, std::ptr::null_mut()) != 0 {
             return Err(io::Error::last_os_error());
         }
     }
@@ -294,5 +300,53 @@ fn main() {
     })();
     if result.is_err() {
         std::process::exit(75);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The armed deadline is absolute: a near-future CLOCK_REALTIME instant
+    /// must terminate the worker at that wall-clock time, within a small
+    /// bounded margin. The relative misinterpretation of an absolute
+    /// Unix-millisecond value would wait roughly the age of the Unix epoch
+    /// and never reach the margin, which is exactly what this test excludes.
+    #[test]
+    fn an_armed_absolute_deadline_terminates_the_worker_within_the_bounded_margin() {
+        const CHILD: &str = "SLIPSTREAM_TEST_ABSOLUTE_PHOTO_DEADLINE";
+        if std::env::var_os(CHILD).is_some() {
+            let deadline = now().unwrap() + 400;
+            deadline_timer(deadline).unwrap();
+            loop {
+                // SAFETY: pause has no preconditions; SIGALRM terminates via _exit(76).
+                unsafe {
+                    libc::pause();
+                }
+            }
+        }
+        let started = Instant::now();
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::an_armed_absolute_deadline_terminates_the_worker_within_the_bounded_margin",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(result.status.code(), Some(76));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        // Not before the armed instant and not after the bounded margin.
+        assert!(
+            elapsed >= Duration::from_millis(350),
+            "fired early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "deadline was not armed absolutely: {elapsed:?}"
+        );
     }
 }
