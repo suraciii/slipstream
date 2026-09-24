@@ -77,6 +77,36 @@ def run_command(arguments: tuple[str, ...], timeout: float = 5.0) -> CommandResu
     return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
+def run_production_probe(launcher: Path, instance: str, policy: str, bundle: str) -> str | None:
+    """Ask the installed launcher for exact Photo readiness as the Web UID."""
+    try:
+        result = subprocess.run(
+            (
+                "/usr/bin/setpriv",
+                "--reuid=1000",
+                "--regid=1000",
+                "--clear-groups",
+                "--no-new-privs",
+                str(launcher),
+                "--check-production",
+                instance,
+                policy,
+                bundle,
+            ),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "launcher-production-timeout"
+    except OSError:
+        return "launcher-production-probe-unavailable"
+    return None if result.returncode == 0 else "launcher-production-refused"
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_args, **_kwargs):
         return None
@@ -98,6 +128,7 @@ class DeploymentSnapshot:
         web_url: str | None = None,
         web_token_file: Path | None = None,
         command=run_command,
+        production_probe=run_production_probe,
         urlopen=open_web,
     ):
         self.instance = instance
@@ -107,6 +138,7 @@ class DeploymentSnapshot:
         self.web_url = web_url
         self.web_token_file = web_token_file
         self.command = command
+        self.production_probe = production_probe
         self.urlopen = urlopen
 
     def run(self) -> dict[str, object]:
@@ -120,6 +152,7 @@ class DeploymentSnapshot:
             self._runtime_check(),
             self._cgroup_check(),
         ]
+        checks.append(self._production_check(checks))
         checks.extend(self._web_checks())
         passed = all(check.ok for check in checks)
         return {
@@ -279,6 +312,26 @@ class DeploymentSnapshot:
         if swap_value != "0":
             return Check("attempt-cgroup", False, "attempt-swap-not-zero", swap_value[:80])
         return Check("attempt-cgroup", True)
+
+    def _production_check(self, checks: list[Check]) -> Check:
+        required = {
+            "deployment-identities",
+            "host-topology",
+            "launcher-installation",
+            "launcher-unit",
+            "launcher-config",
+            "launcher-service",
+            "launcher-runtime",
+        }
+        observed = {check.name: check for check in checks}
+        if any(name not in observed or not observed[name].ok for name in required):
+            return Check("launcher-production-admission", False, "launcher-prerequisites-unavailable")
+        reason = self.production_probe(
+            self.paths.launcher, self.instance, self.policy, self.bundle
+        )
+        if reason is not None:
+            return Check("launcher-production-admission", False, reason)
+        return Check("launcher-production-admission", True)
 
     def _web_checks(self) -> list[Check]:
         if not self.web_url:

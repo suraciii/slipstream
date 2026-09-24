@@ -34,7 +34,11 @@ The report is a `read-only-deployment-snapshot` with a status of
 controllers, systemd, Docker's systemd cgroup driver, the root-owned launcher
 binary/unit/configuration, the exact runtime socket and owner claim, a running
 launcher unit, finite attempt memory with zero swap, and authenticated Library,
-Album, health, and processing-capability reads. It reports distinct failure
+Album, health, and processing-capability reads. It also runs the installed
+launcher's read-only `--check-production` probe as Web UID 1000, with a
+five-second deadline and discarded output. The probe must reconcile an
+available `photo-processing` capability for the supplied instance, policy and
+bundle. It reports distinct failure
 reasons such as `launcher-installation-missing`, `launcher-socket-missing`,
 `attempt-memory-unlimited`, and `web-capability-unavailable`.
 JSON is printed to standard output; the checker has no report-path option and
@@ -43,8 +47,10 @@ does not write to the host.
 The checker never claims production readiness by itself. A successful snapshot
 still needs the complete launch, failure, recovery, cleanup, source, Export,
 and supported-host evidence required by the deployment and processing specs.
-It does not prove exact Web/worker/policy identity binding, canonical ancestor
-ownership, retained receipt settlement, failure/recovery behavior, or the RAW,
+The probe checks protocol capability identities and exercises the socket as the
+Web UID, but the snapshot does not prove exact deployed launcher/Web/worker image identity,
+retained receipt
+settlement, failure/recovery behavior, or the RAW,
 TIFF, Film, and Export workflow. Those checks remain open in #375 and its
 independent dependencies.
 

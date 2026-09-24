@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,92 @@ def fake_command(arguments):
 
 
 class DeploymentVerifierTests(unittest.TestCase):
+    def test_production_probe_uses_web_uid_and_discards_output(self):
+        completed = subprocess.CompletedProcess([], 0)
+        with patch.object(deployment.subprocess, "run", return_value=completed) as run:
+            self.assertIsNone(
+                deployment.run_production_probe(Path("/usr/local/libexec/launcher"), INSTANCE, POLICY, BUNDLE)
+            )
+        arguments = run.call_args.args[0]
+        self.assertEqual(
+            arguments,
+            (
+                "/usr/bin/setpriv", "--reuid=1000", "--regid=1000", "--clear-groups",
+                "--no-new-privs",
+                "/usr/local/libexec/launcher", "--check-production", INSTANCE, POLICY, BUNDLE,
+            ),
+        )
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+        self.assertEqual(run.call_args.kwargs["env"], {"PATH": "/usr/bin:/bin", "LANG": "C"})
+
+    def test_production_probe_refuses_and_times_out_without_claiming_readiness(self):
+        with patch.object(
+            deployment.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)
+        ):
+            self.assertEqual(
+                deployment.run_production_probe(Path("/launcher"), INSTANCE, POLICY, BUNDLE),
+                "launcher-production-refused",
+            )
+        with patch.object(
+            deployment.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 5)
+        ):
+            self.assertEqual(
+                deployment.run_production_probe(Path("/launcher"), INSTANCE, POLICY, BUNDLE),
+                "launcher-production-timeout",
+            )
+
+    def test_production_check_requires_static_authority_before_probe(self):
+        calls = []
+
+        def probe(*arguments):
+            calls.append(arguments)
+            return None
+
+        checker = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, production_probe=probe
+        )
+        required = [
+            deployment.Check(name, True) for name in (
+                "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
+                "launcher-config", "launcher-service", "launcher-runtime",
+            )
+        ]
+        required[-1] = deployment.Check("launcher-runtime", False, "launcher-socket-missing")
+        self.assertEqual(
+            checker._production_check(required).reason, "launcher-prerequisites-unavailable"
+        )
+        self.assertEqual(calls, [])
+
+    def test_production_check_accepts_only_exact_web_uid_probe(self):
+        required = [
+            deployment.Check(name, True) for name in (
+                "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
+                "launcher-config", "launcher-service", "launcher-runtime",
+            )
+        ]
+        observed = []
+
+        def probe(*arguments):
+            observed.append(arguments)
+            return None
+
+        checker = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, production_probe=probe
+        )
+        self.assertEqual(
+            checker._production_check(required),
+            deployment.Check("launcher-production-admission", True),
+        )
+        self.assertEqual(observed, [(checker.paths.launcher, INSTANCE, POLICY, BUNDLE)])
+
+        checker.production_probe = lambda *_: "launcher-production-refused"
+        self.assertEqual(
+            checker._production_check(required).reason, "launcher-production-refused"
+        )
+
     def test_missing_launcher_is_distinct_and_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
