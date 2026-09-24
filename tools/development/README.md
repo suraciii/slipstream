@@ -48,9 +48,10 @@ are probe limits, not supported production defaults.
 
 The modes are:
 
-- `smoke`: real RAW decoding, float TIFF/ICC inspection, generated exposure
-  history checked after an engine database round trip, small-image repeated full
-  simulation, A/B/A state checks, and the active grain microstructure branch.
+- `smoke`: real RAW decoding, float TIFF/ICC inspection, zero and nonzero EV
+  history, custom raw white-balance coefficients, one-path/manual-exposure
+  history checks, database reload, small-image repeated full simulation, A/B/A
+  state checks, and the active grain microstructure branch.
 - `benchmark`: the same RAW checks plus approximately 1 MP and 2 MP full-effect
   simulations. The default is one first call and 20 warm calls per geometry
   in one reused simulator. This does not measure a fresh process per geometry.
@@ -69,8 +70,11 @@ in #329. In particular, resized TIFF does not establish full-resolution negative
 sample preservation, and a repeated in-process result does not establish
 fresh-process or cross-hardware reproducibility.
 
-The database round trip reuses the imported generated history. It is not an
-independently authored reference for nonzero exposure or camera white balance.
+The database round trip reuses the imported generated history. The custom
+white-balance case verifies one enabled darktable temperature module with fixed
+channel coefficients and a manual exposure module with camera-bias compensation
+off. It does not verify a temperature/tint-to-camera mapping or serve as an
+independently authored darktable reference; those remain open in #329.
 
 Grain and print glare retain their effects. The harness uses one Numba thread
 and resets Numba's own RNG inside a compiled function before every simulation.
