@@ -706,6 +706,13 @@ mod tests {
     const SOURCE_PROFILE_ASSET: &[u8] = include_bytes!("../assets/prophoto-linear-g10.icc");
     const SOURCE_PROFILE_ASSET_DIGEST: &str =
         "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed";
+    /// The source profile bytes the qualified darktable run embeds. Only the
+    /// description tag differs from the pinned asset, so this is the artifact
+    /// the accepted-digest list must not refuse.
+    const QUALIFIED_RUN_PROFILE_ASSET: &[u8] =
+        include_bytes!("../assets/prophoto-linear-g10-darktable.icc");
+    const QUALIFIED_RUN_PROFILE_ASSET_DIGEST: &str =
+        "7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe";
     const DESTINATION_PROFILE_ASSET_DIGEST: &str =
         "b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21";
 
@@ -806,6 +813,8 @@ mod tests {
         value + (boundary - value % boundary) % boundary
     }
 
+    const DESCRIPTION_TAG: [u8; 4] = *b"desc";
+
     /// One flat 16x16 patch per value, so every JPEG block stays uniform and
     /// the decoded patch can be compared with its exact expected byte.
     const PATCH: u32 = 16;
@@ -828,6 +837,22 @@ mod tests {
             .to_rgb8()
     }
 
+    /// The ICC tag table of one profile as `(signature, bytes)` pairs.
+    fn icc_tags(profile: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let count = u32::from_be_bytes(profile[128..132].try_into().unwrap()) as usize;
+        (0..count)
+            .map(|index| {
+                let entry = 132 + index * 12;
+                let signature: [u8; 4] = profile[entry..entry + 4].try_into().unwrap();
+                let start =
+                    u32::from_be_bytes(profile[entry + 4..entry + 8].try_into().unwrap()) as usize;
+                let length =
+                    u32::from_be_bytes(profile[entry + 8..entry + 12].try_into().unwrap()) as usize;
+                (signature, profile[start..start + length].to_vec())
+            })
+            .collect()
+    }
+
     #[test]
     fn pinned_profile_assets_keep_their_identity() {
         assert_eq!(
@@ -838,7 +863,51 @@ mod tests {
             hex_digest(DESTINATION_PROFILE_ASSET),
             DESTINATION_PROFILE_ASSET_DIGEST
         );
+        assert_eq!(
+            hex_digest(QUALIFIED_RUN_PROFILE_ASSET),
+            QUALIFIED_RUN_PROFILE_ASSET_DIGEST
+        );
         assert!(ACCEPTED_SOURCE_PROFILE_DIGESTS.contains(&SOURCE_PROFILE_ASSET_DIGEST));
+        assert!(ACCEPTED_SOURCE_PROFILE_DIGESTS.contains(&QUALIFIED_RUN_PROFILE_ASSET_DIGEST));
+    }
+
+    #[test]
+    fn qualified_run_profile_differs_from_the_pinned_asset_only_in_its_description() {
+        let pinned = icc_tags(SOURCE_PROFILE_ASSET);
+        let qualified = icc_tags(QUALIFIED_RUN_PROFILE_ASSET);
+        assert_eq!(pinned.len(), qualified.len());
+        let mut descriptions = 0;
+        for ((pinned_tag, pinned_bytes), (qualified_tag, qualified_bytes)) in
+            pinned.iter().zip(&qualified)
+        {
+            assert_eq!(pinned_tag, qualified_tag);
+            if *pinned_tag == DESCRIPTION_TAG {
+                descriptions += 1;
+                assert_ne!(pinned_bytes, qualified_bytes);
+            } else {
+                assert_eq!(
+                    pinned_bytes,
+                    qualified_bytes,
+                    "colorimetry tag {:?} differs",
+                    std::str::from_utf8(pinned_tag).unwrap()
+                );
+            }
+        }
+        assert_eq!(descriptions, 1, "exactly one description tag is expected");
+    }
+
+    #[test]
+    fn development_tiff_derivative_accepts_the_qualified_run_source_profile() {
+        let rows: Vec<[f64; 3]> = PINNED_VECTORS.iter().map(|(input, _)| *input).collect();
+        let pinned = float_fixture(&rows, SOURCE_PROFILE_ASSET)
+            .descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        let qualified = float_fixture(&rows, QUALIFIED_RUN_PROFILE_ASSET)
+            .descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512))
+            .unwrap();
+        // The source profile selects the transform and is never copied into the
+        // derivative, so both artifacts must encode the same image.
+        assert_eq!(pinned.jpeg, qualified.jpeg);
     }
 
     #[test]
