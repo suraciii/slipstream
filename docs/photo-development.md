@@ -216,10 +216,21 @@ A dropped response alone must not imply that the request failed to take effect.
 
 Edit Recipes require backup. Intermediate images and Edit Previews may be
 reconstructed while their source and processing assets remain available.
-A successful Development TIFF, its captured Export snapshot, and its request
-receipt must remain available for seven days after publication. The interface
-must disclose the expiry. An active download must hold a lease that keeps the
-artifact, snapshot, and receipt available until the response stream settles.
+Every accepted Export's status receipt and captured snapshot must remain
+available until terminal settlement and for seven days afterward. Repeating an
+accepted request with the same identity and payload must resolve to that Export
+without starting another attempt. Reusing its identity with a different
+payload must be refused. An explicit retry must use a new request identity and
+may use the captured snapshot only while it remains retained. After a receipt
+expires, repeating that request must return an explicit expired outcome and
+must not create an Export. Expiry must not make the old identity available for
+new work. A new Export after expiry requires a new request identity and
+confirmation of the current source and settings.
+
+A successful Development TIFF and its captured snapshot must remain available
+for seven days after publication. The interface must disclose the expiry. An
+active download must hold a lease that keeps the artifact and snapshot
+available until the response stream settles.
 
 The deployment must enforce a finite retained-output allowance. If the service
 cannot reserve enough space for a complete new Development TIFF within that
