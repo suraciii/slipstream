@@ -127,11 +127,16 @@ class StubDeployment:
         preview_202_first: bool = False,
         preview_202_always: bool = False,
         wrong_token: bool = False,
+        inspect_photo_id: str | None = None,
+        submit_recipe_version: str | None = None,
+        artifact_export_id: str = EXPORT_ID,
+        preview_content_type: str = "image/jpeg",
+        preview_body_override: bytes | None = None,
     ):
         self.capability_payload = {
             "state": capability_state,
             "bundleId": BUNDLE_ID,
-            "incarnation": "inc-1",
+            "incarnation": "a" * 32,
             "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
             "profiles": [
                 {"profileId": "raw", "whiteBalanceModes": ["as-shot"], "whiteBalanceRanges": None}
@@ -163,12 +168,17 @@ class StubDeployment:
         self.preview_202_always = preview_202_always
         self.preview_polls = 0
         self.wrong_token = wrong_token
+        self.inspect_photo_id = inspect_photo_id
+        self.submit_recipe_version = submit_recipe_version
+        self.artifact_export_id = artifact_export_id
+        self.preview_content_type = preview_content_type
+        self.preview_body_override = preview_body_override
         self.export_recipe_version: str | None = None
         self.artifact_expiry = iso_at_now_plus(7 * 86400)
 
     def artifact_metadata(self) -> dict:
         return {
-            "exportId": EXPORT_ID,
+            "exportId": self.artifact_export_id,
             "target": "development-tiff",
             "stage": "develop",
             "contentType": "image/tiff",
@@ -227,7 +237,7 @@ class StubDeployment:
         if self.fail_export and not active:
             return {
                 "exportId": EXPORT_ID,
-                "photoId": PHOTO_ID,
+                "photoId": self.inspect_photo_id or PHOTO_ID,
                 "state": "failed",
                 "target": "development-tiff",
                 "recipeVersion": self.export_recipe_version,
@@ -241,7 +251,7 @@ class StubDeployment:
         if active:
             return {
                 "exportId": EXPORT_ID,
-                "photoId": PHOTO_ID,
+                "photoId": self.inspect_photo_id or PHOTO_ID,
                 "state": "running",
                 "target": "development-tiff",
                 "recipeVersion": self.export_recipe_version,
@@ -254,7 +264,7 @@ class StubDeployment:
             }
         return {
             "exportId": EXPORT_ID,
-            "photoId": PHOTO_ID,
+            "photoId": self.inspect_photo_id or PHOTO_ID,
             "state": "succeeded",
             "target": "development-tiff",
             "recipeVersion": self.export_recipe_version,
@@ -289,20 +299,21 @@ class StubDeployment:
             self.preview_polls += 1
             if (self.preview_202_first and self.preview_polls == 1) or self.preview_202_always:
                 return 202, json.dumps({"state": "queued", "stage": "develop"}).encode(), []
+            preview_body = self.preview_body_override or self.preview_bytes
             metadata = {
                 "photoId": PHOTO_ID,
                 "stage": "develop",
-                "contentType": "image/jpeg",
+                "contentType": self.preview_content_type,
                 "width": 3,
                 "height": 2,
-                "byteLength": len(self.preview_bytes),
-                "sha256": hashlib.sha256(self.preview_bytes).hexdigest(),
+                "byteLength": len(preview_body),
+                "sha256": hashlib.sha256(preview_body).hexdigest(),
                 "sourceRevision": self.source_revision,
                 "recipeVersion": self.recipe["recipeVersion"] if self.recipe else "",
                 "displayTransform": "display-transform-v1",
                 "expiresAt": iso_at_now_plus(3600),
             }
-            return 200, self.preview_bytes, sorted(metadata.items())
+            return 200, preview_body, sorted(metadata.items())
         if path == f"/api/photos/{PHOTO_ID}/exports" and method == "POST":
             if "exports" in self.disabled_routes:
                 return 404, b"", []
@@ -312,7 +323,9 @@ class StubDeployment:
             current = self.recipe["recipeVersion"] if self.recipe else None
             if payload.get("expectedRecipeVersion") != current:
                 return 409, json.dumps({"code": "recipe_conflict", "message": "stub"}).encode(), []
-            self.export_recipe_version = current
+            self.export_recipe_version = (
+                self.submit_recipe_version if self.submit_recipe_version is not None else current
+            )
             return (
                 201,
                 json.dumps(
@@ -320,7 +333,7 @@ class StubDeployment:
                         "exportId": EXPORT_ID,
                         "state": "queued",
                         "target": "development-tiff",
-                        "recipeVersion": current,
+                        "recipeVersion": self.export_recipe_version,
                         "sourceRevision": self.source_revision,
                         "receiptExpiresAt": None,
                         "artifactExpiresAt": None,
@@ -447,8 +460,8 @@ class HelperTests(unittest.TestCase):
         facts, problems = acceptance.validate_capability(
             {
                 "state": "ready",
-                "bundleId": "bundle",
-                "incarnation": "inc",
+                "bundleId": "b" * 64,
+                "incarnation": "a" * 32,
                 "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
                 "profiles": [{"profileId": "raw", "whiteBalanceModes": ["as-shot"]}],
                 "stages": {"develop": "ready", "film": "unavailable"},
@@ -459,7 +472,27 @@ class HelperTests(unittest.TestCase):
         _, problems = acceptance.validate_capability({"state": "turbo"})
         self.assertIn("state-outside-closed-set", problems)
         self.assertIn("stages-must-name-develop-and-film", problems)
-        self.assertIn("bundleId-missing-or-not-string", problems)
+        self.assertIn("bundleId-not-lowercase-hex-64", problems)
+        _, problems = acceptance.validate_capability(
+            {
+                "state": "ready",
+                "bundleId": "bundle",
+                "incarnation": "inc-1",
+                "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+                "profiles": [
+                    {
+                        "profileId": "raw",
+                        "whiteBalanceModes": ["as-shot", 1],
+                        "whiteBalanceRanges": {"temperature-tint": "wide"},
+                    }
+                ],
+                "stages": {"develop": "ready", "film": "unavailable"},
+            }
+        )
+        self.assertIn("bundleId-not-lowercase-hex-64", problems)
+        self.assertIn("incarnation-not-lowercase-hex-32", problems)
+        self.assertIn("profiles-0-whiteBalanceModes-element-not-string", problems)
+        self.assertIn("profiles-0-whiteBalanceRanges-entry-invalid", problems)
 
     def test_recipe_read_validation(self):
         good = {
@@ -618,6 +651,71 @@ class HelperTests(unittest.TestCase):
         self.assertIn("artifact-fields-not-exactly-closed-set", problems)
         _, problems = acceptance.validate_artifact_object(dict(good, expiresAt="soon"))
         self.assertIn("artifact-expiresAt-unparsable", problems)
+        _, problems = acceptance.validate_artifact_object(dict(good, byteLength=10**30))
+        self.assertIn("artifact-byteLength-exceeds-download-limit", problems)
+        _, problems = acceptance.validate_artifact_object(dict(good, byteLength=0))
+        self.assertIn("artifact-byteLength-not-positive", problems)
+
+    def test_download_limit_clamps_declared_size(self):
+        limit, problems = acceptance.artifact_download_limit(100)
+        self.assertEqual(limit, 100 + acceptance.DOWNLOAD_SLACK_BYTES)
+        self.assertEqual(problems, [])
+        limit, problems = acceptance.artifact_download_limit(10**30)
+        self.assertEqual(limit, acceptance.MAX_DOWNLOAD_BYTES)
+        self.assertEqual(problems, ["declared-byteLength-exceeds-download-limit"])
+        limit, problems = acceptance.artifact_download_limit(0)
+        self.assertEqual(problems, ["declared-byteLength-not-positive"])
+        limit, problems = acceptance.artifact_download_limit("100")
+        self.assertEqual(problems, ["declared-byteLength-not-integer"])
+
+    def test_export_submission_binds_snapshot_identity(self):
+        good = {
+            "exportId": EXPORT_ID,
+            "state": "queued",
+            "target": "development-tiff",
+            "recipeVersion": "rv-2",
+            "sourceRevision": "src-1",
+            "receiptExpiresAt": None,
+            "artifactExpiresAt": None,
+        }
+        _, problems = acceptance.validate_export_submission(good, "rv-2", "src-1")
+        self.assertEqual(problems, [])
+        _, problems = acceptance.validate_export_submission(
+            dict(good, recipeVersion="rv-1", sourceRevision="src-9"), "rv-2", "src-1"
+        )
+        self.assertIn("recipeVersion-mismatch", problems)
+        self.assertIn("sourceRevision-mismatch", problems)
+        _, problems = acceptance.validate_export_submission(dict(good, exportId="../../evil"))
+        self.assertIn("exportId-outside-character-set", problems)
+
+    def test_export_inspection_binds_photo_and_snapshot_identity(self):
+        base = {
+            "exportId": EXPORT_ID,
+            "photoId": PHOTO_ID,
+            "state": "succeeded",
+            "target": "development-tiff",
+            "recipeVersion": "rv-2",
+            "sourceRevision": "src-1",
+            "bundleId": BUNDLE_ID,
+            "terminalOutcome": "succeeded",
+            "failureReason": None,
+            "receiptExpiresAt": "2026-01-01T00:00:00Z",
+            "artifact": None,
+        }
+        _, problems = acceptance.validate_export_inspection(
+            base, EXPORT_ID, photo_id=PHOTO_ID, recipe_version="rv-2", source_revision="src-1"
+        )
+        self.assertEqual(
+            [problem for problem in problems if problem != "artifact-null-after-succeeded"],
+            [],
+        )
+        foreign = dict(base, photoId="other-photo", recipeVersion="rv-1", sourceRevision="src-9")
+        _, problems = acceptance.validate_export_inspection(
+            foreign, EXPORT_ID, photo_id=PHOTO_ID, recipe_version="rv-2", source_revision="src-1"
+        )
+        self.assertIn("photoId-mismatch", problems)
+        self.assertIn("recipeVersion-mismatch", problems)
+        self.assertIn("sourceRevision-mismatch", problems)
 
     def test_export_inspection_validation(self):
         base = {
@@ -722,6 +820,18 @@ class HelperTests(unittest.TestCase):
             self.assertFalse((root / "fresh").exists())
             output = acceptance.prepare_output_dir(str(root / "fresh"), fixture)
             self.assertTrue(output.is_dir())
+            multibyte = root / "token-multibyte"
+            multibyte.write_bytes(("é" * 4096).encode("utf-8"))
+            os.chmod(multibyte, 0o600)
+            with self.assertRaises(acceptance.InvocationRefused) as caught:
+                acceptance.read_token_file(multibyte)
+            self.assertEqual(caught.exception.reason, "token-file-too-large")
+            invalid_utf8 = root / "token-binary"
+            invalid_utf8.write_bytes(b"\xff\xfe\xfa")
+            os.chmod(invalid_utf8, 0o600)
+            with self.assertRaises(acceptance.InvocationRefused) as caught:
+                acceptance.read_token_file(invalid_utf8)
+            self.assertEqual(caught.exception.reason, "token-file-invalid")
 
 
 class RefusalTests(AcceptanceTestCase):
@@ -913,6 +1023,84 @@ class DryRunTests(AcceptanceTestCase):
         self.assertEqual(len(report["sidecars"]), 1)
         self.assertEqual(report["sidecars"][0]["sha256"], hashlib.sha256(b"<x/>").hexdigest())
         self.assertIn(str(sidecar), report["sidecars"][0]["path"])
+
+    def test_download_refuses_symlinked_artifact_destination(self):
+        self.output_dir.mkdir(parents=True)
+        escape = self.output_dir / f"{EXPORT_ID}.tiff"
+        escape.symlink_to(self.root / "outside" / "stolen.tiff")
+        with RunningStub(StubDeployment()) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        download = next(step for step in report["steps"] if step["name"] == "download-artifact")
+        self.assertEqual(download["reason"], "artifact-path-symlink")
+        self.assertFalse(escape.exists())
+        self.assertNotIn(
+            str(escape), report.get("writtenFiles", [])
+        )
+
+    def test_settlement_rejects_foreign_photo_inspection(self):
+        with RunningStub(StubDeployment(inspect_photo_id="ffffffff-0000-4000-8000-00000000dead")) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        settlement = next(step for step in report["steps"] if step["name"] == "export-settlement")
+        self.assertEqual(settlement["reason"], "export-inspect-invalid")
+        self.assertEqual(settlement["detail"]["problems"], ["photoId-mismatch"])
+
+    def test_submission_rejects_stale_recipe_version(self):
+        with RunningStub(StubDeployment(submit_recipe_version="rv-stale")) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        submit = next(step for step in report["steps"] if step["name"] == "submit-export")
+        self.assertEqual(submit["reason"], "export-submit-invalid")
+        self.assertIn("recipeVersion-mismatch", submit["detail"]["problems"])
+        skipped = {step["name"] for step in report["steps"] if step["status"] == "skipped"}
+        self.assertIn("export-settlement", skipped)
+
+    def test_artifact_rejects_foreign_export_id_in_metadata(self):
+        with RunningStub(StubDeployment(artifact_export_id="another-export-2")) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        settlement = next(step for step in report["steps"] if step["name"] == "export-settlement")
+        self.assertIn("artifact-exportId-mismatch", settlement["detail"]["problems"])
+
+    def test_preview_rejects_wrong_content_type(self):
+        with RunningStub(StubDeployment(preview_content_type="text/plain")) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        preview = next(step for step in report["steps"] if step["name"] == "edit-preview")
+        self.assertEqual(preview["reason"], "preview-metadata-invalid")
+        self.assertIn("header-contentType-unsupported", preview["detail"]["problems"])
+
+    def test_preview_rejects_nonjpeg_body_with_jpeg_content_type(self):
+        with RunningStub(StubDeployment(preview_body_override=b"not a jpeg at all")) as stub:
+            code, report, _ = run_main(self.invocation(stub))
+        self.assertEqual(code, 1)
+        preview = next(step for step in report["steps"] if step["name"] == "edit-preview")
+        self.assertEqual(preview["reason"], "preview-body-invalid")
+        self.assertIn("preview-body-contentType-mismatch", preview["detail"]["problems"])
+
+    def test_unreadable_sidecar_fails_with_json_report_not_traceback(self):
+        stub = StubDeployment()
+        sidecar = self.fixture.with_name(self.fixture.name + ".xmp")
+        sidecar.write_bytes(b"<x/>")
+
+        original_handle = stub.handle
+
+        def sabotaging_handle(method, path, body, headers):
+            if path == f"/api/photos/{PHOTO_ID}/edit-preview/develop":
+                sidecar.unlink()
+                sidecar.mkdir()
+            return original_handle(method, path, body, headers)
+
+        stub.handle = sabotaging_handle
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(self.invocation(running))
+        self.assertEqual(code, 1)
+        self.assertEqual(report["status"], "failed")
+        invariance = next(step for step in report["steps"] if step["name"] == "original-invariance")
+        self.assertEqual(invariance["reason"], "invariance-snapshot-failed")
+        self.assertEqual(invariance["detail"]["unreadable"][0]["path"], str(sidecar))
+        self.assertEqual(invariance["detail"]["unreadable"][0]["error"], "IsADirectoryError")
 
 
 if __name__ == "__main__":

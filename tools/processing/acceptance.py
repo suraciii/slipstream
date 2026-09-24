@@ -61,6 +61,7 @@ DEVELOPMENT_TARGET = "development-tiff"
 DEVELOP_STAGE = "develop"
 DISPLAY_TRANSFORM_IDENTITY = "display-transform-v1"
 DEVELOPMENT_CONTENT_TYPE = "image/tiff"
+PREVIEW_CONTENT_TYPE = "image/jpeg"
 
 # The pinned Development TIFF source profiles from design/development-color.md:
 # the bundle asset and the legacy-normalized profile the qualified darktable run
@@ -123,6 +124,7 @@ _SAVE_OUTCOMES = (
 )
 _EXPORT_STATES = ("queued", "running", "succeeded", "failed", "cancelled")
 _LOWER_HEX_64 = re.compile(r"\A[0-9a-f]{64}\Z")
+_LOWER_HEX_32 = re.compile(r"\A[0-9a-f]{32}\Z")
 _REQUEST_IDENTITY = re.compile(r"\A[A-Za-z0-9._-]{1,128}\Z")
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
@@ -216,11 +218,11 @@ def validate_capability(payload: object) -> tuple[dict, list]:
     if payload.get("state") not in CAPABILITY_STATES:
         problems.append("state-outside-closed-set")
     facts["bundleId"] = payload.get("bundleId")
-    if not isinstance(payload.get("bundleId"), str) or not payload.get("bundleId"):
-        problems.append("bundleId-missing-or-not-string")
+    if not _LOWER_HEX_64.match(str(payload.get("bundleId") or "")):
+        problems.append("bundleId-not-lowercase-hex-64")
     facts["incarnation"] = payload.get("incarnation")
-    if not isinstance(payload.get("incarnation"), str) or not payload.get("incarnation"):
-        problems.append("incarnation-missing-or-not-string")
+    if not _LOWER_HEX_32.match(str(payload.get("incarnation") or "")):
+        problems.append("incarnation-not-lowercase-hex-32")
     exposure = payload.get("exposure")
     if not isinstance(exposure, dict):
         problems.append("exposure-missing-or-not-object")
@@ -247,12 +249,19 @@ def validate_capability(payload: object) -> tuple[dict, list]:
             }
             if not isinstance(entry["profileId"], str) or not entry["profileId"]:
                 problems.append(f"profiles-{index}-profileId-missing")
-            if not isinstance(entry["whiteBalanceModes"], list):
+            modes = entry["whiteBalanceModes"]
+            if not isinstance(modes, list):
                 problems.append(f"profiles-{index}-whiteBalanceModes-missing")
-            if entry["whiteBalanceRanges"] is not None and not isinstance(
-                entry["whiteBalanceRanges"], dict
-            ):
-                problems.append(f"profiles-{index}-whiteBalanceRanges-invalid")
+            elif any(not isinstance(mode, str) or not mode for mode in modes):
+                problems.append(f"profiles-{index}-whiteBalanceModes-element-not-string")
+            if entry["whiteBalanceRanges"] is not None:
+                ranges = entry["whiteBalanceRanges"]
+                if not isinstance(ranges, dict):
+                    problems.append(f"profiles-{index}-whiteBalanceRanges-invalid")
+                else:
+                    for mode, bound in ranges.items():
+                        if not isinstance(mode, str) or not isinstance(bound, dict):
+                            problems.append(f"profiles-{index}-whiteBalanceRanges-entry-invalid")
             cleaned.append(entry)
         facts["profiles"] = cleaned
     stages = payload.get("stages")
@@ -452,6 +461,27 @@ def header_object_mismatches(metadata: dict, artifact: dict) -> list:
     return problems
 
 
+def artifact_download_limit(declared: object) -> tuple[int, list]:
+    """Clamp the read limit for a download to the hard maximum.
+
+    Returns the applied byte limit and problems for an unusable declared
+    size.  A declared size above `MAX_DOWNLOAD_BYTES` is refused instead of
+    being clamped, because accepting it would mean reading an artifact the
+    deployment cannot legitimately publish.
+    """
+    problems: list = []
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        problems.append("declared-byteLength-not-integer")
+        return MAX_DOWNLOAD_BYTES, problems
+    if declared <= 0:
+        problems.append("declared-byteLength-not-positive")
+        return MAX_DOWNLOAD_BYTES, problems
+    if declared > MAX_DOWNLOAD_BYTES:
+        problems.append("declared-byteLength-exceeds-download-limit")
+        return MAX_DOWNLOAD_BYTES, problems
+    return min(declared + DOWNLOAD_SLACK_BYTES, MAX_DOWNLOAD_BYTES), problems
+
+
 def validate_artifact_object(artifact: object) -> tuple[dict, list]:
     """Validate the closed artifact metadata object of `GET /api/exports/{id}`."""
     problems: list = []
@@ -463,6 +493,12 @@ def validate_artifact_object(artifact: object) -> tuple[dict, list]:
     for name in ("width", "height", "byteLength"):
         if not isinstance(artifact.get(name), int) or isinstance(artifact.get(name), bool):
             problems.append(f"artifact-{name}-not-integer")
+    declared = artifact.get("byteLength")
+    if isinstance(declared, int) and not isinstance(declared, bool):
+        if declared <= 0:
+            problems.append("artifact-byteLength-not-positive")
+        elif declared > MAX_DOWNLOAD_BYTES:
+            problems.append("artifact-byteLength-exceeds-download-limit")
     if not _LOWER_HEX_64.match(str(artifact.get("sha256", ""))):
         problems.append("artifact-sha256-not-lowercase-hex-64")
     if parse_timestamp(artifact.get("expiresAt")) is None:
@@ -474,15 +510,20 @@ def validate_artifact_object(artifact: object) -> tuple[dict, list]:
     return facts, problems
 
 
-def validate_export_submission(payload: object) -> tuple[dict, list]:
+def validate_export_submission(
+    payload: object,
+    expected_recipe_version: str | None = None,
+    expected_source_revision: str | None = None,
+) -> tuple[dict, list]:
     """Validate the 201/200 body of `POST /api/photos/{id}/exports`."""
     problems: list = []
     facts: dict = {}
-    if not isinstance(payload, dict):
-        return facts, ["payload-not-object"]
-    if not isinstance(payload.get("exportId"), str) or not payload.get("exportId"):
+    export_id = payload.get("exportId") if isinstance(payload, dict) else None
+    if not isinstance(export_id, str) or not export_id:
         problems.append("exportId-missing")
-    facts["exportId"] = payload.get("exportId")
+    elif not valid_request_identity(export_id):
+        problems.append("exportId-outside-character-set")
+    facts["exportId"] = export_id
     facts["state"] = payload.get("state")
     if payload.get("state") not in ("queued", "running"):
         problems.append("state-not-queued-or-running")
@@ -491,6 +532,10 @@ def validate_export_submission(payload: object) -> tuple[dict, list]:
     for key in ("recipeVersion", "sourceRevision"):
         if not isinstance(payload.get(key), str) or not payload.get(key):
             problems.append(f"{key}-missing")
+    if expected_recipe_version is not None and payload.get("recipeVersion") != expected_recipe_version:
+        problems.append("recipeVersion-mismatch")
+    if expected_source_revision is not None and payload.get("sourceRevision") != expected_source_revision:
+        problems.append("sourceRevision-mismatch")
     facts["receiptExpiresAt"] = payload.get("receiptExpiresAt")
     if payload.get("receiptExpiresAt") is not None:
         problems.append("receiptExpiresAt-not-null-while-active")
@@ -500,7 +545,13 @@ def validate_export_submission(payload: object) -> tuple[dict, list]:
     return facts, problems
 
 
-def validate_export_inspection(payload: object, export_id: str) -> tuple[dict, list]:
+def validate_export_inspection(
+    payload: object,
+    export_id: str,
+    photo_id: str | None = None,
+    recipe_version: str | None = None,
+    source_revision: str | None = None,
+) -> tuple[dict, list]:
     """Validate `GET /api/exports/{id}` against the wire contract."""
     problems: list = []
     facts: dict = {}
@@ -508,6 +559,12 @@ def validate_export_inspection(payload: object, export_id: str) -> tuple[dict, l
         return facts, ["payload-not-object"]
     if payload.get("exportId") != export_id:
         problems.append("exportId-mismatch")
+    if photo_id is not None and payload.get("photoId") != photo_id:
+        problems.append("photoId-mismatch")
+    if recipe_version is not None and payload.get("recipeVersion") != recipe_version:
+        problems.append("recipeVersion-mismatch")
+    if source_revision is not None and payload.get("sourceRevision") != source_revision:
+        problems.append("sourceRevision-mismatch")
     state = payload.get("state")
     facts["state"] = state
     if state not in _EXPORT_STATES:
@@ -530,6 +587,8 @@ def validate_export_inspection(payload: object, export_id: str) -> tuple[dict, l
             problems.append("artifact-null-after-succeeded")
         else:
             artifact_facts, artifact_problems = validate_artifact_object(artifact)
+            if isinstance(artifact, dict) and artifact.get("exportId") != payload.get("exportId"):
+                problems.append("artifact-exportId-mismatch")
             facts["artifact"] = artifact_facts
             problems.extend(artifact_problems)
     else:
@@ -553,6 +612,8 @@ def validate_preview_headers(
         problems.append("header-photoId-mismatch")
     if metadata.get("stage") != DEVELOP_STAGE:
         problems.append("header-stage-not-develop")
+    if metadata.get("contentType") != PREVIEW_CONTENT_TYPE:
+        problems.append("header-contentType-unsupported")
     if metadata.get("sourceRevision") != expected_source_revision:
         problems.append("header-sourceRevision-mismatch")
     if metadata.get("recipeVersion") != expected_recipe_version:
@@ -587,6 +648,8 @@ def validate_preview_body(metadata: dict, body: bytes) -> tuple[dict, list]:
         problems.append("sha256-mismatch")
     content_type = str(metadata.get("contentType", ""))
     facts["contentType"] = content_type
+    if content_type != PREVIEW_CONTENT_TYPE:
+        problems.append("preview-contentType-unsupported")
     width = _optional_int(metadata.get("width"))
     height = _optional_int(metadata.get("height"))
     if body[:2] == b"\xff\xd8":
@@ -599,7 +662,10 @@ def validate_preview_body(metadata: dict, body: bytes) -> tuple[dict, list]:
             problems.append("dimensions-mismatch")
     else:
         facts["decode"] = "unsupported-container"
-        problems.append("preview-body-not-a-decodable-container")
+        if content_type == PREVIEW_CONTENT_TYPE:
+            problems.append("preview-body-contentType-mismatch")
+        else:
+            problems.append("preview-body-not-a-decodable-container")
     return facts, problems
 
 
@@ -841,14 +907,18 @@ def read_token_file(path: Path) -> str:
             raise InvocationRefused("token-file-not-regular")
         if metadata.st_mode & 0o022:
             raise InvocationRefused("token-file-writable-by-group-or-others")
-        with path.open("r", encoding="utf-8") as stream:
-            raw = stream.read(MAX_TOKEN_BYTES + 1)
+        with path.open("rb") as stream:
+            raw_bytes = stream.read(MAX_TOKEN_BYTES + 1)
     except InvocationRefused:
         raise
     except OSError as error:
         raise InvocationRefused("token-file-unreadable") from error
-    if len(raw) > MAX_TOKEN_BYTES:
+    if len(raw_bytes) > MAX_TOKEN_BYTES:
         raise InvocationRefused("token-file-too-large")
+    try:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InvocationRefused("token-file-invalid") from error
     token = raw.strip()
     if not token or any(character.isspace() for character in token):
         raise InvocationRefused("token-file-invalid")
@@ -1399,7 +1469,9 @@ class Runner:
             "POST", PHOTO_EXPORTS_PATH.format(id=self.photo_id), payload=body
         )
         require_success(response, payload, "export-submit", accepted=(201,))
-        facts, problems = validate_export_submission(payload)
+        facts, problems = validate_export_submission(
+            payload, self.recipe_version, self.source_revision
+        )
         if problems:
             raise AcceptanceFailure(
                 "export-submit-invalid", {"problems": problems, "facts": facts}
@@ -1415,7 +1487,13 @@ class Runner:
         while True:
             response, payload = self.client.request_json("GET", path)
             require_success(response, payload, "export-inspect")
-            facts, problems = validate_export_inspection(payload, self.export_id)
+            facts, problems = validate_export_inspection(
+                payload,
+                self.export_id,
+                photo_id=self.photo_id,
+                recipe_version=self.recipe_version,
+                source_revision=self.source_revision,
+            )
             state = facts.get("state")
             if state in ("succeeded", "failed", "cancelled"):
                 break
@@ -1453,15 +1531,16 @@ class Runner:
 
     def _step_download_artifact(self) -> dict:
         self._require_processing_ready()
+        destination = self._artifact_destination()
         path = EXPORT_ARTIFACT_PATH.format(id=self.export_id)
         declared = None
         if self.export_artifact:
             declared = self.export_artifact.get("byteLength")
-        limit = (
-            int(declared) + DOWNLOAD_SLACK_BYTES
-            if isinstance(declared, int)
-            else self.client.max_download_bytes
-        )
+        limit, limit_problems = artifact_download_limit(declared)
+        if limit_problems:
+            raise AcceptanceFailure(
+                "artifact-declared-size-invalid", {"problems": limit_problems}
+            )
         response = self.client.request("GET", path, max_bytes=limit)
         if response.status == 404:
             code = structured_code(self._safe_json(response))
@@ -1473,6 +1552,8 @@ class Runner:
                 {"status": response.status, "code": structured_code(self._safe_json(response))},
             )
         metadata, problems = collect_metadata_headers(response.headers, ARTIFACT_METADATA_FIELDS)
+        if metadata.get("exportId") != self.export_id:
+            problems.append("header-exportId-mismatch")
         if metadata.get("target") != DEVELOPMENT_TARGET:
             problems.append("header-target-not-development-tiff")
         if metadata.get("stage") != DEVELOP_STAGE:
@@ -1524,8 +1605,7 @@ class Runner:
             raise AcceptanceFailure(
                 "artifact-invalid", {"problems": problems, "facts": facts}
             )
-        destination = self.output_dir / f"{self.export_id}.tiff"
-        if destination.exists():
+        if destination.exists() or destination.is_symlink():
             raise AcceptanceFailure(
                 "artifact-path-occupied", {"path": str(destination)}
             )
@@ -1542,6 +1622,32 @@ class Runner:
         }
         return facts
 
+    def _artifact_destination(self) -> Path:
+        """Resolve a safe destination inside the output directory.
+
+        The exportId comes from the service, so the destination is constrained
+        by the ID character set, path containment, and a symlink refusal: a
+        traversal ID or a pre-created symlink (including a dangling one) must
+        never move the artifact write outside `--output-dir`.
+        """
+        if not valid_request_identity(self.export_id or ""):
+            raise AcceptanceFailure(
+                "export-id-invalid-charset", {"exportId": self.export_id}
+            )
+        destination = self.output_dir / f"{self.export_id}.tiff"
+        if destination.is_symlink():
+            raise AcceptanceFailure(
+                "artifact-path-symlink", {"path": str(destination)}
+            )
+        resolved_output = self.output_dir.resolve()
+        resolved_destination = destination.resolve()
+        if resolved_output not in resolved_destination.parents:
+            raise AcceptanceFailure(
+                "artifact-path-escapes-output-dir",
+                {"path": str(destination), "resolved": str(resolved_destination)},
+            )
+        return destination
+
     def _step_film_stage(self) -> dict:
         self._skip(
             "film-stage-not-implemented",
@@ -1556,28 +1662,42 @@ class Runner:
         )
 
     def _step_invariance_after(self) -> dict:
-        snapshots = self._current_snapshots()
+        snapshots, unreadable = self._current_snapshots()
+        if unreadable:
+            # A file we must prove unchanged cannot be read any more.  The
+            # comparison cannot run, so the step fails and the report records
+            # it instead of raising a traceback past the report.
+            raise AcceptanceFailure(
+                "invariance-snapshot-failed", {"unreadable": unreadable}
+            )
         changes = invariance_changes(self.invariance_before, snapshots)
         if changes:
             raise AcceptanceFailure("original-mutated", {"changes": changes})
         return {"checked": sorted(snapshots), "unchanged": True}
 
-    def _current_snapshots(self) -> dict:
+    def _current_snapshots(self) -> tuple[dict, list]:
         snapshots = {}
+        unreadable = []
         candidates = [self.fixture] + [
             path for path in external_xmp_sidecars(self.fixture) if path.exists()
         ]
         for path in candidates:
-            snapshots[str(path)] = snapshot_original(path)
-        return snapshots
+            try:
+                snapshots[str(path)] = snapshot_original(path)
+            except OSError as error:
+                unreadable.append({"path": str(path), "error": type(error).__name__})
+        return snapshots, unreadable
 
     def _invariance_before(self) -> None:
         if not self.fixture.is_file():
             raise InvocationRefused("fixture-not-regular-file")
         try:
-            self.invariance_before = self._current_snapshots()
+            snapshots, unreadable = self._current_snapshots()
         except OSError as error:
             raise InvocationRefused("fixture-unreadable") from error
+        if not snapshots or unreadable:
+            raise InvocationRefused("fixture-unreadable")
+        self.invariance_before = snapshots
 
     # -- orchestration -------------------------------------------------------
 
