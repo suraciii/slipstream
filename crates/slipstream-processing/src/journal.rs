@@ -1632,8 +1632,8 @@ fn random_id() -> Result<String, ErrorCode> {
 }
 
 /// The durable identity a claim records. It carries nothing else: a claim is
-/// pure instance identity, so a claim whose start never completed stays
-/// adoptable by the executor that holds it.
+/// pure instance identity, and completeness comes from the root's registry,
+/// never from the claim itself.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Claim {

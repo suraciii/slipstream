@@ -2803,9 +2803,9 @@ fn random_id() -> Result<String, ErrorCode> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-/// Restore the durable registry, or initialize a fresh one. A root whose
-/// start never completed holds a claim but no registry; adopting that claim
-/// means a fresh registry with a new incarnation, exactly as a first start.
+/// Restore the durable registry, or initialize a fresh one with a new
+/// incarnation, exactly as a first start. An existing claim whose root has
+/// no registry never reaches here: the shared claim path quarantines it.
 fn restore_registry(root: &Path, config: &Config) -> Result<Registry, ErrorCode> {
     Ok(load(root)?.unwrap_or(Registry {
         version: 1,
