@@ -134,6 +134,26 @@ The Rust workspace contains the production Library/Preview core and HTTP server 
 
 **Fixture coverage boundary.** The shared validation protocol vectors run against an empty fixture Library and pin validation, error, and contract-envelope shapes. The Browse vectors use a generated RAW/JPEG pair and Album to pin non-empty windows, ordering, Preview and Thumbnail hydration, metadata, status, membership, Browse position, and Album mutations. The cache vectors seed one Photo and one web asset and pin derivative and web-asset response headers, ETag identity, and revalidation. Every file under `compatibility/` must have an executing consumer; the compatibility inventory test enforces this rule.
 
+### Continuous integration
+
+[`verify.yml`](.github/workflows/verify.yml) runs `bun run verify` once on a
+GitHub-hosted `ubuntu-latest` runner. That single job is the required `verify`
+check, so the gate keeps one runner and reuses work instead of adding runners:
+
+- The job restores a Rust cache keyed on `Cargo.lock` and
+  `rust-toolchain.toml`: `~/.cargo/registry`, `~/.cargo/git`, and `target`.
+  A restored cache removes dependency compilation. Formatting, Clippy, every
+  test, the Web build, and the browser suite still run in full.
+- `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`. The job
+  never sets `RUST_BACKTRACE`, so nothing there reads debug information;
+  leaving it out shortens compilation and linking and keeps the cache near
+  220 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
+  backtraces, reproduce it locally without those variables.
+- The bundled browser suite runs with `fullyParallel` and every runner CPU
+  (`workers: "100%"` under `CI`). Scenarios provision their own Library,
+  server, and browser context, so they share no state and stay order
+  independent; a scenario that needs shared setup must declare it itself.
+
 ## Photo fixtures
 
 Do not commit real photographs, RAW files, generated Previews, SQLite databases, or Slipstream runtime state. Tests that require a real camera file must accept an explicit local path and skip with a clear reason when the file is unavailable. Repository fixtures must be generated, minimal, redistributable, and contain no private photography.

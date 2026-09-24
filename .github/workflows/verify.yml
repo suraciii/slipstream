@@ -12,6 +12,12 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    env:
+      # This job never sets RUST_BACKTRACE, so nothing reads debug
+      # information. Leaving it out shortens compilation and linking and
+      # keeps the Rust cache near 220 MB compressed instead of 530 MB.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -20,6 +26,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
           components: clippy,rustfmt
+      - name: Restore Rust dependencies and build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-verify-${{ runner.os }}-
       - run: sudo apt-get update && sudo apt-get install --yes libraw-dev libjpeg-dev libvips-dev liblcms2-dev pkg-config
       - run: bun install --frozen-lockfile
       - run: bun x playwright install --with-deps chromium
