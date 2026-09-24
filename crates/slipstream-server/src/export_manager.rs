@@ -55,7 +55,10 @@ impl ExportManager {
         processing: ProcessingConfig,
         allowance: u64,
     ) -> Result<Self, String> {
-        let workspace = ExportWorkspace::open(state_directory.join("exports"), &library_root)
+        let workspace_root = state_directory.join("exports");
+        std::fs::create_dir_all(&workspace_root)
+            .map_err(|error| format!("Export workspace is unavailable: {error}"))?;
+        let workspace = ExportWorkspace::open(&workspace_root, &library_root)
             .map_err(|error| format!("Export workspace is unavailable: {error}"))?;
         Ok(Self {
             library,
@@ -819,14 +822,16 @@ fn verify_received_output(
 /// TIFF directory walk: positive geometry, three 32-bit IEEE-float samples per
 /// pixel, RGB photometric interpretation, and an embedded RGB ICC profile.
 pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> {
-    let invalid = || ExportError::Validation("Output is not a valid Development TIFF");
-    let mut file = open_read_only(path).map_err(|_| invalid())?;
+    macro_rules! invalid {
+        () => {{ ExportError::Validation("Output is not a valid Development TIFF") }};
+    }
+    let mut file = open_read_only(path).map_err(|_| invalid!())?;
     let mut header = [0_u8; 8];
-    file.read_exact(&mut header).map_err(|_| invalid())?;
+    file.read_exact(&mut header).map_err(|_| invalid!())?;
     let little_endian = match &header[..4] {
         b"II\x2a\x00" => true,
         b"MM\x00\x2a" => false,
-        _ => return Err(invalid()),
+        _ => return Err(invalid!()),
     };
     let word = |bytes: [u8; 2]| {
         if little_endian {
@@ -845,11 +850,11 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
     let ifd_offset = dword([header[4], header[5], header[6], header[7]]);
     let mut entry = [0_u8; 2];
     file.seek(SeekFrom::Start(u64::from(ifd_offset)))
-        .map_err(|_| invalid())?;
-    file.read_exact(&mut entry).map_err(|_| invalid())?;
+        .map_err(|_| invalid!())?;
+    file.read_exact(&mut entry).map_err(|_| invalid!())?;
     let entry_count = word([entry[0], entry[1]]);
     if entry_count == 0 || entry_count > 512 {
-        return Err(invalid());
+        return Err(invalid!());
     }
     let mut width = 0_u32;
     let mut height = 0_u32;
@@ -857,10 +862,47 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
     let mut sample_format: Vec<u16> = Vec::new();
     let mut samples_per_pixel = 0_u16;
     let mut photometric = 0_u16;
+    let mut compression = 0_u32;
+    let mut strip_longs: Vec<u32> = Vec::new();
+    let mut strip_counts: Vec<u32> = Vec::new();
     let mut icc: Option<(u32, u32)> = None;
+    // Reads a LONG array either inline or at its external offset.
+    fn long_array(
+        file: &mut std::fs::File,
+        little_endian: bool,
+        count: u32,
+        inline_value: [u8; 4],
+        offset: u32,
+    ) -> Option<Vec<u32>> {
+        if count == 0 || count > 1_048_576 {
+            return None;
+        }
+        if count == 1 {
+            let raw = if little_endian {
+                u32::from_le_bytes(inline_value)
+            } else {
+                u32::from_be_bytes(inline_value)
+            };
+            return Some(vec![raw]);
+        }
+        let resume = file.stream_position().ok()?;
+        let mut bytes = vec![0_u8; count as usize * 4];
+        file.seek(SeekFrom::Start(u64::from(offset))).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        file.seek(SeekFrom::Start(resume)).ok()?;
+        let word = |chunk: &[u8]| {
+            let raw: [u8; 4] = chunk.try_into().ok()?;
+            Some(if little_endian {
+                u32::from_le_bytes(raw)
+            } else {
+                u32::from_be_bytes(raw)
+            })
+        };
+        bytes.chunks_exact(4).map(word).collect()
+    }
     for _ in 0..entry_count {
         let mut raw = [0_u8; 12];
-        file.read_exact(&mut raw).map_err(|_| invalid())?;
+        file.read_exact(&mut raw).map_err(|_| invalid!())?;
         let tag = word([raw[0], raw[1]]);
         let kind = word([raw[2], raw[3]]);
         let count = dword([raw[4], raw[5], raw[6], raw[7]]);
@@ -868,9 +910,11 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
             1 | 2 | 6 | 7 => 1, // BYTE | ASCII | SBYTE | UNDEFINED
             3 | 8 => 2,         // SHORT | SSHORT
             4 | 9 => 4,         // LONG | SLONG
-            _ => return Err(invalid()),
+            _ => return Err(invalid!()),
         };
-        let total = count.checked_mul(type_size).ok_or_else(invalid)?;
+        let total = count.checked_mul(type_size).ok_or(ExportError::Validation(
+            "Output is not a valid Development TIFF",
+        ))?;
         let inline = total <= 4;
         let mut value_bytes = [0_u8; 4];
         value_bytes.copy_from_slice(&raw[8..12]);
@@ -899,10 +943,12 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
                         .map(|index| shorts(value_bytes, index))
                         .collect::<Vec<_>>()
                 } else {
+                    let resume = file.stream_position().map_err(|_| invalid!())?;
                     let mut bytes = vec![0_u8; total.min(16) as usize];
                     file.seek(SeekFrom::Start(u64::from(value_offset)))
-                        .map_err(|_| invalid())?;
-                    file.read_exact(&mut bytes).map_err(|_| invalid())?;
+                        .map_err(|_| invalid!())?;
+                    file.read_exact(&mut bytes).map_err(|_| invalid!())?;
+                    file.seek(SeekFrom::Start(resume)).map_err(|_| invalid!())?;
                     (0..(bytes.len() / 2))
                         .map(|index| word([bytes[index * 2], bytes[index * 2 + 1]]))
                         .collect::<Vec<_>>()
@@ -913,36 +959,534 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
                     sample_format = values;
                 }
             }
+            259 => compression = value_offset,
             262 => photometric = shorts(value_bytes, 0),
+            273 | 279 => {
+                let Some(values) =
+                    long_array(&mut file, little_endian, count, value_bytes, value_offset)
+                else {
+                    return Err(invalid!());
+                };
+                if tag == 273 {
+                    strip_longs = values;
+                } else {
+                    strip_counts = values;
+                }
+            }
             277 => samples_per_pixel = shorts(value_bytes, 0),
             34675 => icc = Some((value_offset, count)),
             _ => {}
         }
     }
     if width == 0 || height == 0 {
-        return Err(invalid());
+        return Err(invalid!());
     }
     if samples_per_pixel != 3
         || bits_per_sample != vec![32, 32, 32]
         || sample_format != vec![3, 3, 3]
         || photometric != 2
+        || compression != 8
     {
-        return Err(invalid());
+        return Err(invalid!());
     }
     // The embedded profile must describe RGB data; the pixels are scene-linear
     // ProPhoto RGB by the engine contract.
     let Some((offset, size)) = icc else {
-        return Err(invalid());
+        return Err(invalid!());
     };
     if !(128..=1024 * 1024).contains(&size) {
-        return Err(invalid());
+        return Err(invalid!());
     }
     let mut profile = [0_u8; 24];
     file.seek(SeekFrom::Start(u64::from(offset)))
-        .map_err(|_| invalid())?;
-    file.read_exact(&mut profile).map_err(|_| invalid())?;
+        .map_err(|_| invalid!())?;
+    file.read_exact(&mut profile).map_err(|_| invalid!())?;
     if &profile[16..20] != b"RGB " {
-        return Err(invalid());
+        return Err(invalid!());
+    }
+    // The declared strips must actually inflate to the declared geometry:
+    // structural validity alone cannot prove the compressed payload carries
+    // every float32 RGB sample, so the publication precondition decodes it.
+    let strip_offsets = strip_longs.clone();
+    let strip_byte_counts = strip_counts.clone();
+    if strip_offsets.is_empty() || strip_offsets.len() != strip_byte_counts.len() {
+        return Err(invalid!());
+    }
+    let expected = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|samples| samples.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or(ExportError::Validation(
+            "Output is not a valid Development TIFF",
+        ))?;
+    let mut decoded = 0_usize;
+    for (strip_index, (&strip_offset, &strip_length)) in strip_offsets
+        .iter()
+        .zip(strip_byte_counts.iter())
+        .enumerate()
+    {
+        let _ = strip_index;
+        if strip_length == 0 {
+            return Err(invalid!());
+        }
+        let mut strip = vec![0_u8; strip_length as usize];
+        file.seek(SeekFrom::Start(u64::from(strip_offset)))
+            .map_err(|_| invalid!())?;
+        file.read_exact(&mut strip).map_err(|_| invalid!())?;
+        let inflated = inflate_zlib(&strip, expected - decoded).map_err(|_| invalid!())?;
+        decoded += inflated.len();
+        if decoded > expected {
+            return Err(invalid!());
+        }
+    }
+    if decoded != expected {
+        return Err(invalid!());
     }
     Ok(())
+}
+
+/// The zlibs of one pinned producer, inflated with a bounded decoder.
+///
+/// The decoder accepts stored, fixed-Huffman, and dynamic-Huffman blocks,
+/// refuses back-references that reach before the produced bytes, and stops
+/// as soon as the output exceeds the geometry-derived bound so a hostile
+/// stream cannot balloon memory.
+fn inflate_zlib(input: &[u8], output_bound: usize) -> Result<Vec<u8>, ()> {
+    if input.len() < 6 {
+        return Err(());
+    }
+    // zlib wrapper (RFC 1950): deflate, no preset dictionary, check bits.
+    if input[0] & 0x0f != 8
+        || input[0] >> 4 > 7
+        || (u16::from(input[0]) << 8 | u16::from(input[1])) % 31 != 0
+        || input[1] & 0x20 != 0
+    {
+        return Err(());
+    }
+    inflate_deflate(&input[2..input.len() - 4], output_bound)
+}
+
+struct DeflateBits<'a> {
+    bytes: &'a [u8],
+    position: usize,
+    bit: u32,
+}
+
+impl<'a> DeflateBits<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            position: 0,
+            bit: 0,
+        }
+    }
+
+    fn take(&mut self, count: u32) -> Result<u32, ()> {
+        let mut value = 0_u32;
+        for index in 0..count {
+            let byte = *self.bytes.get(self.position).ok_or(())?;
+            value |= (u32::from((byte >> self.bit) & 1)) << index;
+            self.bit += 1;
+            if self.bit == 8 {
+                self.bit = 0;
+                self.position += 1;
+            }
+        }
+        Ok(value)
+    }
+
+    fn align(&mut self) {
+        if self.bit != 0 {
+            self.bit = 0;
+            self.position += 1;
+        }
+    }
+}
+
+/// One canonical Huffman decoding table built from code lengths.
+struct Huffman {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl Huffman {
+    fn new(lengths: &[u8]) -> Result<Self, ()> {
+        let mut counts = [0_u16; 16];
+        for &length in lengths {
+            counts[usize::from(length)] += 1;
+        }
+        counts[0] = 0;
+        let mut offsets = [0_usize; 16];
+        for length in 1..16 {
+            offsets[length] = offsets[length - 1] + usize::from(counts[length - 1]);
+        }
+        let mut symbols = vec![0_u16; lengths.iter().filter(|&&l| l != 0).count()];
+        for (symbol, &length) in lengths.iter().enumerate() {
+            if length != 0 {
+                symbols[offsets[usize::from(length)]] = symbol as u16;
+                offsets[usize::from(length)] += 1;
+            }
+        }
+        let mut leftover = 0_i32;
+        for count in counts.iter().take(16).skip(1) {
+            leftover = (leftover << 1) - i32::from(*count);
+            if leftover > 0 {
+                return Err(());
+            }
+        }
+        Ok(Self { counts, symbols })
+    }
+
+    fn decode(&self, bits: &mut DeflateBits) -> Result<u16, ()> {
+        let mut code = 0_i32;
+        let mut first = 0_i32;
+        let mut index = 0_i32;
+        for length in 1..16 {
+            code |= i32::try_from(bits.take(1)?).map_err(|_| ())?;
+            let count = i32::from(self.counts[length]);
+            if code - count < first {
+                return self
+                    .symbols
+                    .get(usize::try_from(index + (code - first)).map_err(|_| ())?)
+                    .copied()
+                    .ok_or(());
+            }
+            index += count;
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        Err(())
+    }
+}
+
+const LENGTH_BASE: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+const LENGTH_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const DISTANCE_BASE: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DISTANCE_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+
+fn inflate_deflate(input: &[u8], output_bound: usize) -> Result<Vec<u8>, ()> {
+    let mut bits = DeflateBits::new(input);
+    let mut output: Vec<u8> = Vec::new();
+    loop {
+        let final_block = bits.take(1)? == 1;
+        match bits.take(2)? {
+            0 => {
+                bits.align();
+                let length = bits.take(16)? as usize;
+                let complement = bits.take(16)? as usize;
+                if length ^ 0xffff != complement {
+                    return Err(());
+                }
+                for _ in 0..length {
+                    let byte = *bits.bytes.get(bits.position).ok_or(())?;
+                    output.push(byte);
+                    bits.position += 1;
+                }
+            }
+            1 => {
+                let mut lengths = [0_u8; 288];
+                for (symbol, length) in lengths.iter_mut().enumerate() {
+                    *length = match symbol {
+                        0..=143 => 8,
+                        144..=255 => 9,
+                        256..=279 => 7,
+                        _ => 8,
+                    };
+                }
+                let literal = Huffman::new(&lengths)?;
+                let distance = Huffman::new(&[5_u8; 30])?;
+                inflate_block(&mut bits, &literal, &distance, &mut output, output_bound)?;
+            }
+            2 => {
+                let code_lengths = usize::try_from(bits.take(4)?).map_err(|_| ())? + 4;
+                const ORDER: [usize; 19] = [
+                    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+                ];
+                let mut lengths = [0_u8; 19];
+                for &index in ORDER.iter().take(code_lengths) {
+                    lengths[index] = bits.take(3)? as u8;
+                }
+                let code_table = Huffman::new(&lengths)?;
+                let literals = usize::try_from(bits.take(5)?).map_err(|_| ())? + 257;
+                let distances = usize::try_from(bits.take(5)?).map_err(|_| ())? + 1;
+                let mut combined = vec![0_u8; literals + distances];
+                let mut index = 0;
+                while index < literals + distances {
+                    let symbol = code_table.decode(&mut bits)?;
+                    match symbol {
+                        0..=15 => {
+                            combined[index] = symbol as u8;
+                            index += 1;
+                        }
+                        16 => {
+                            let previous =
+                                *combined.get(index.checked_sub(1).ok_or(())?).ok_or(())?;
+                            let repeat = 3 + usize::try_from(bits.take(2)?).map_err(|_| ())?;
+                            combined
+                                .get_mut(index..index + repeat)
+                                .ok_or(())?
+                                .fill(previous);
+                            index += repeat;
+                        }
+                        17 => {
+                            let repeat = 3 + usize::try_from(bits.take(3)?).map_err(|_| ())?;
+                            combined.get_mut(index..index + repeat).ok_or(())?.fill(0);
+                            index += repeat;
+                        }
+                        18 => {
+                            let repeat = 11 + usize::try_from(bits.take(7)?).map_err(|_| ())?;
+                            combined.get_mut(index..index + repeat).ok_or(())?.fill(0);
+                            index += repeat;
+                        }
+                        _ => return Err(()),
+                    }
+                }
+                if combined[256] == 0 {
+                    return Err(());
+                }
+                let literal = Huffman::new(&combined[..literals])?;
+                let distance = Huffman::new(&combined[literals..])?;
+                inflate_block(&mut bits, &literal, &distance, &mut output, output_bound)?;
+            }
+            _ => return Err(()),
+        }
+        if final_block {
+            break;
+        }
+    }
+    Ok(output)
+}
+
+fn inflate_block(
+    bits: &mut DeflateBits,
+    literal: &Huffman,
+    distance: &Huffman,
+    output: &mut Vec<u8>,
+    output_bound: usize,
+) -> Result<(), ()> {
+    loop {
+        let symbol = literal.decode(bits)?;
+        match symbol {
+            0..=255 => {
+                if output.len() >= output_bound {
+                    return Err(());
+                }
+                output.push(symbol as u8);
+            }
+            256 => return Ok(()),
+            257..=285 => {
+                let code = usize::from(symbol) - 257;
+                let length = usize::from(LENGTH_BASE[code])
+                    + usize::try_from(bits.take(u32::from(LENGTH_EXTRA[code]))?).map_err(|_| ())?;
+                let distance_symbol = distance.decode(bits)?;
+                if usize::from(distance_symbol) >= 30 {
+                    return Err(());
+                }
+                let code = usize::from(distance_symbol);
+                let back = usize::from(DISTANCE_BASE[code])
+                    + usize::try_from(bits.take(u32::from(DISTANCE_EXTRA[code]))?)
+                        .map_err(|_| ())?;
+                if back == 0 || back > output.len() || output.len() + length > output_bound {
+                    return Err(());
+                }
+                let start = output.len() - back;
+                for offset in 0..length {
+                    let byte = output[start + offset];
+                    output.push(byte);
+                }
+            }
+            _ => return Err(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod development_tiff_decode {
+    use super::*;
+
+    /// Writes a structurally valid Development TIFF whose single Deflate
+    /// strip carries `payload`, so only the decoded content can differ
+    /// between a good and a corrupt artifact.
+    fn write_development_tiff(path: &Path, payload: &[u8]) {
+        // Assemble by hand for full control over offsets.
+        let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
+        bytes.extend_from_slice(&11_u16.to_le_bytes());
+        let mut externals: Vec<u8> = Vec::new();
+        let base: usize = 8 + 2 + 11 * 12 + 4;
+        let mut at: u32 = base as u32;
+        let entry = |tag: u16,
+                     kind: u16,
+                     count: u32,
+                     value: u32,
+                     extra: Option<&[u8]>,
+                     out: &mut Vec<u8>,
+                     externals: &mut Vec<u8>,
+                     at: &mut u32| {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            match extra {
+                Some(blob) => {
+                    out.extend_from_slice(&at.to_le_bytes());
+                    externals.extend_from_slice(blob);
+                    if blob.len() % 2 == 1 {
+                        externals.push(0);
+                    }
+                    *at += u32::try_from(blob.len() + blob.len() % 2).unwrap();
+                }
+                None => out.extend_from_slice(&value.to_le_bytes()),
+            }
+        };
+        let three_shorts =
+            |a: u16, b: u16, c: u16| [a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes()].concat();
+        let icc = {
+            let mut profile = vec![0_u8; 140];
+            profile[16..20].copy_from_slice(b"RGB ");
+            profile
+        };
+        entry(256, 4, 1, 2, None, &mut bytes, &mut externals, &mut at);
+        entry(257, 4, 1, 1, None, &mut bytes, &mut externals, &mut at);
+        entry(
+            258,
+            3,
+            3,
+            0,
+            Some(&three_shorts(32, 32, 32)),
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        entry(259, 4, 1, 8, None, &mut bytes, &mut externals, &mut at);
+        entry(262, 3, 1, 2, None, &mut bytes, &mut externals, &mut at);
+        // The strip offset is known only after the external area; write the
+        // entry with a placeholder and patch it once `at` is final.
+        entry(273, 4, 1, 0, None, &mut bytes, &mut externals, &mut at);
+        entry(277, 3, 1, 3, None, &mut bytes, &mut externals, &mut at);
+        entry(
+            279,
+            4,
+            1,
+            u32::try_from(payload.len()).unwrap(),
+            None,
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        entry(284, 3, 1, 1, None, &mut bytes, &mut externals, &mut at);
+        entry(
+            339,
+            3,
+            3,
+            0,
+            Some(&three_shorts(3, 3, 3)),
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        entry(
+            34675,
+            7,
+            u32::try_from(icc.len()).unwrap(),
+            0,
+            Some(&icc),
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&externals);
+        let strip_offset = u32::try_from(bytes.len()).unwrap();
+        let patch_at: usize = 10 + 5 * 12 + 8;
+        let patch_end = patch_at + 4;
+        bytes[patch_at..patch_end].copy_from_slice(&strip_offset.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// One zlib stream made of stored deflate blocks, so the test does not
+    /// need a compressor to produce a payload that must decode cleanly.
+    fn stored_zlib(content: &[u8]) -> Vec<u8> {
+        let mut stream = vec![0x78, 0x01];
+        for chunk in content.chunks(65_535) {
+            let length = chunk.len() as u16;
+            stream.push(if chunk.len() == content.len() { 1 } else { 0 });
+            stream.extend_from_slice(&length.to_le_bytes());
+            stream.extend_from_slice(&(!length).to_le_bytes());
+            stream.extend_from_slice(chunk);
+        }
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in content {
+            a = (a + u32::from(byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        stream.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        stream
+    }
+
+    #[test]
+    fn publication_requires_a_developed_payload_that_really_inflates() {
+        let base = std::env::temp_dir().join(format!(
+            "export-decode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        fs::create_dir_all(&base).unwrap();
+
+        // A structurally valid TIFF whose strip does not inflate: refused.
+        let corrupt = [
+            0x78_u8, 0x9c, 0xde, 0xad, 0xbe, 0xef, 0xba, 0xdc, 0x00, 0x01,
+        ];
+        let corrupt_path = base.join("corrupt.tif");
+        write_development_tiff(&corrupt_path, &corrupt);
+        assert!(validate_development_tiff(&corrupt_path).is_err());
+
+        // The publication path refuses before any artifact is published.
+        let originals = base.join("originals");
+        fs::create_dir_all(&originals).unwrap();
+        fs::create_dir_all(base.join("exports")).unwrap();
+        let workspace = ExportWorkspace::open(base.join("exports"), &originals).unwrap();
+        let writer = workspace.begin_development_tiff("exp-corrupt").unwrap();
+        fs::copy(&corrupt_path, writer.temporary_path()).unwrap();
+        assert!(writer.publish(validate_development_tiff).is_err());
+        let artifacts = base.join("exports/artifacts");
+        assert_eq!(fs::read_dir(&artifacts).unwrap().count(), 0);
+
+        // A well-formed stored-block payload with the exact float32 RGB
+        // geometry decodes and publishes.
+        let pixels = vec![0_u8; 2 * 3 * 4];
+        let good_path = base.join("good.tif");
+        write_development_tiff(&good_path, &stored_zlib(&pixels));
+        assert!(validate_development_tiff(&good_path).is_ok());
+        let writer = workspace.begin_development_tiff("exp-good").unwrap();
+        fs::copy(&good_path, writer.temporary_path()).unwrap();
+        let published = writer.publish(validate_development_tiff).unwrap();
+        assert_eq!(
+            fs::read(&published.path).unwrap(),
+            fs::read(&good_path).unwrap()
+        );
+
+        // A truncated stream that decodes to fewer samples is also refused.
+        let short = stored_zlib(&pixels[..12]);
+        let short_path = base.join("short.tif");
+        write_development_tiff(&short_path, &short);
+        assert!(validate_development_tiff(&short_path).is_err());
+
+        let _ = fs::remove_dir_all(base);
+    }
 }

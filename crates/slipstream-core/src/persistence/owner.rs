@@ -4854,8 +4854,13 @@ fn submit_export(
         if recipe.source_revision != submission.expected_source_revision {
             return Ok(ExportSubmitOutcome::Unavailable);
         }
-        let payload = ExportRecipePayload::capture(&recipe.settings, submission.exposure_range)
-            .map_err(|_| PersistenceError::Storage)?;
+        // A saved recipe outside the approved range is invalid input for the
+        // Export, not a storage failure.
+        let payload =
+            match ExportRecipePayload::capture(&recipe.settings, submission.exposure_range) {
+                Ok(payload) => payload,
+                Err(_) => return Ok(ExportSubmitOutcome::InvalidSettings),
+            };
         let now = export_unix_seconds();
         if !reservable(transaction, now, submission.retained_output_bytes_max)? {
             return Ok(ExportSubmitOutcome::RetainedOutputFull);

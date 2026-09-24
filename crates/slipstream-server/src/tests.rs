@@ -10476,4 +10476,812 @@ async fn edit_recipe_validates_settings_before_the_write() {
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
+// ---------------------------------------------------------------------------
+// Export routes
+// ---------------------------------------------------------------------------
+
+mod export_routes {
+    use super::*;
+    use crate::http::create_router_with_processing;
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+
+    const EXPORT_INSTANCE: &str = "0123456789abcdef0123456789abcdef";
+
+    fn tiff_bytes(tags: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+        let data_start = 8 + 2 + tags.len() * 12 + 4;
+        let mut bytes = b"II*\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        let mut data = Vec::new();
+        for (tag, field_type, value) in tags {
+            bytes.extend_from_slice(&tag.to_le_bytes());
+            bytes.extend_from_slice(&field_type.to_le_bytes());
+            let count = if *field_type == 3 || *field_type == 5 {
+                1
+            } else {
+                value.len() as u32
+            };
+            bytes.extend_from_slice(&count.to_le_bytes());
+            if value.len() <= 4 {
+                let mut inline = [0_u8; 4];
+                inline[..value.len()].copy_from_slice(value);
+                bytes.extend_from_slice(&inline);
+            } else {
+                bytes.extend_from_slice(&((data_start + data.len()) as u32).to_le_bytes());
+                data.extend_from_slice(value);
+            }
+        }
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&data);
+        bytes
+    }
+
+    /// Writes one RAW fixture whose TIFF header carries the camera identity so
+    /// the capture inspection classifies it against the approved profile.
+    fn raw_fixture_with_camera(path: &std::path::Path, make: &[u8], model: &[u8]) {
+        let bytes = tiff_bytes(&[(0x010f, 2, make.to_vec()), (0x0110, 2, model.to_vec())]);
+        fs::write(path, bytes).unwrap();
+    }
+
+    fn export_processing() -> crate::config::ProcessingConfig {
+        crate::config::ProcessingConfig {
+            instance: EXPORT_INSTANCE.to_owned(),
+            policy_sha256: "b".repeat(64),
+            bundle_sha256: "c".repeat(64),
+        }
+    }
+
+    /// Builds the shared Export fixture: a RAW Photo carrying an approved
+    /// camera identity, a JPEG-only Photo, and a configured processing
+    /// deployment with the given retained-output allowance.
+    fn export_fixture(allowance: Option<u64>) -> (PathBuf, Config) {
+        let (base, mut config) = prepare_populated_fixture();
+        raw_fixture_with_camera(
+            &config.library_root.join("pair.ARW"),
+            b"SONY\0",
+            b"ILCE-7RM5\0\0\0",
+        );
+        config.processing = Some(export_processing());
+        config.export_retained_output_bytes = allowance;
+        (base, config)
+    }
+
+    async fn export_application(_base: &Path, config: &Config) -> (Arc<Application>, Router) {
+        let application = Application::open(config).await.unwrap();
+        wait_for_scan_settled(&application).await;
+        let router = create_router_with_processing(
+            Arc::clone(&application),
+            open_web_root(config.web_root()),
+            config.processing.clone(),
+        );
+        application.access.seed_test_token();
+        (application, router)
+    }
+
+    fn photo_id_for(config: &Config, relative_path: &str) -> String {
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .query_row(
+                "SELECT p.id FROM photos p JOIN original_files o ON p.original_id = o.id
+                 WHERE o.relative_path = ?1",
+                [relative_path],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    async fn submit_export_request(
+        router: &Router,
+        photo_id: &str,
+        request_id: &str,
+        recipe_revision: &str,
+        source_revision: &str,
+    ) -> Response<Body> {
+        let body = serde_json::json!({
+            "requestId": request_id,
+            "expectedRecipeRevision": recipe_revision,
+            "expectedSourceRevision": source_revision,
+        });
+        send(
+            router,
+            authenticated_request()
+                .method("POST")
+                .uri(format!(
+                    "https://camera.local/api/photos/{photo_id}/exports"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn get_export(router: &Router, export_id: &str) -> serde_json::Value {
+        response_json(
+            send(
+                router,
+                authenticated_request()
+                    .uri(format!("https://camera.local/api/exports/{export_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await
+    }
+
+    async fn current_source_revision(application: &Application, photo_id: &str) -> String {
+        application
+            .library
+            .edit_recipe(photo_id)
+            .await
+            .unwrap()
+            .expect("the Photo must exist")
+            .current_source_revision
+    }
+
+    async fn save_recipe(
+        application: &Application,
+        photo_id: &str,
+        request_id: &str,
+        expected_recipe_revision: Option<String>,
+        exposure_ev: f64,
+    ) -> slipstream_core::EditRecipe {
+        let expected_source_revision = current_source_revision(application, photo_id).await;
+        let outcome = application
+            .library
+            .save_edit_recipe(slipstream_core::SaveEditRecipe {
+                photo_id: photo_id.to_owned(),
+                request_id: request_id.to_owned(),
+                expected_recipe_revision,
+                expected_source_revision,
+                settings: slipstream_core::EditRecipeSettings {
+                    exposure_ev,
+                    white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
+                },
+            })
+            .await
+            .unwrap();
+        match outcome {
+            slipstream_core::EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            slipstream_core::EditRecipeWriteOutcome::Unchanged(recipe) => recipe,
+            other => panic!("the recipe save must succeed, got {other:?}"),
+        }
+    }
+
+    async fn wait_for_failed_state(router: &Router, export_id: &str) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let record = get_export(router, export_id).await;
+            if record["state"] == "failed" {
+                return record;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the attempt must fail without a launcher: {record}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn post_export_action(router: &Router, action: &str, export_id: &str) -> Response<Body> {
+        send(
+            router,
+            authenticated_request()
+                .method("POST")
+                .uri(format!(
+                    "https://camera.local/api/exports/{export_id}/{action}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn export_submit_accepts_replays_and_keeps_identity_after_later_writes() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let first = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &first.revision,
+            &source_revision,
+        )
+        .await;
+        if created.status() != StatusCode::OK {
+            let body = axum::body::to_bytes(created.into_body(), 65536)
+                .await
+                .unwrap();
+            panic!("submit failed: {}", String::from_utf8_lossy(&body));
+        }
+        let created = axum::http::Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .unwrap();
+        let _ = created;
+        let record = response_json(
+            submit_export_request(
+                &router,
+                &photo_id,
+                "request-1",
+                &first.revision,
+                &source_revision,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(record["state"], "queued");
+        assert_eq!(record["target"], "development-tiff");
+        assert_eq!(record["snapshot"]["recipeRevision"], first.revision);
+        assert_eq!(record["snapshot"]["exposureMilliEv"], 500);
+        assert_eq!(record["snapshot"]["whiteBalanceMode"], "as-shot");
+        assert_eq!(record["snapshot"]["sourceRevision"], source_revision);
+
+        let replayed = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &first.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(response_json(replayed).await["id"], record["id"]);
+
+        // A later recipe write must not be overwritten by replaying the older
+        // request identity: the Export keeps its original snapshot.
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(first.revision.clone()),
+            0.75,
+        )
+        .await;
+        assert_ne!(second.revision, first.revision);
+        let stale_replay = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &first.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(stale_replay.status(), StatusCode::OK);
+        let stale_record = response_json(stale_replay).await;
+        assert_eq!(stale_record["id"], record["id"]);
+        assert_eq!(stale_record["snapshot"]["recipeRevision"], first.revision);
+        assert_eq!(stale_record["snapshot"]["exposureMilliEv"], 500);
+
+        // A new request identity against the current recipe starts new work.
+        let fresh = submit_export_request(
+            &router,
+            &photo_id,
+            "request-2",
+            &second.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(fresh.status(), StatusCode::OK);
+        let fresh_record = response_json(fresh).await;
+        assert_ne!(fresh_record["id"], record["id"]);
+        assert_eq!(fresh_record["snapshot"]["recipeRevision"], second.revision);
+
+        let listed = response_json(
+            send(
+                &router,
+                authenticated_request()
+                    .uri(format!(
+                        "https://camera.local/api/photos/{photo_id}/exports"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        let ids: Vec<&str> = listed["exports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_submit_reports_every_owner_refusal_code() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let jpeg_id = photo_id_for(&config, "pair.JPG");
+
+        let unknown =
+            submit_export_request(&router, "missing-photo", "request-unknown", "rev", "source")
+                .await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(unknown).await["error"]["code"],
+            "unknown_photo"
+        );
+
+        // JPEG-only Photos cannot take the development-tiff workload.
+        let jpeg = submit_export_request(&router, &jpeg_id, "request-jpeg", "rev", "source").await;
+        assert_eq!(jpeg.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(jpeg).await["error"]["code"],
+            "unsupported_photo"
+        );
+
+        // A RAW Photo without a saved recipe cannot start an Export.
+        let missing =
+            submit_export_request(&router, &photo_id, "request-norecipe", "rev", "source").await;
+        assert_eq!(missing.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(missing).await["error"]["code"],
+            "missing_recipe"
+        );
+
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+
+        // A stale recipe revision is a conflict.
+        let stale_recipe = submit_export_request(
+            &router,
+            &photo_id,
+            "request-stale-recipe",
+            "no-such-revision",
+            &source_revision,
+        )
+        .await;
+        assert_eq!(stale_recipe.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale_recipe).await["error"]["code"],
+            "recipe_conflict"
+        );
+
+        // A stale source revision is a conflict.
+        let stale_source = submit_export_request(
+            &router,
+            &photo_id,
+            "request-stale-source",
+            &recipe.revision,
+            "stale-source-revision",
+        )
+        .await;
+        assert_eq!(stale_source.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale_source).await["error"]["code"],
+            "source_changed"
+        );
+
+        // Settings outside the approved range are invalid input.
+        let outside = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(recipe.revision.clone()),
+            2.0,
+        )
+        .await;
+        let invalid = submit_export_request(
+            &router,
+            &photo_id,
+            "request-invalid",
+            &outside.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await["error"]["code"],
+            "invalid_settings"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_submit_reports_retained_output_capacity_before_acceptance() {
+        let (base, config) = export_fixture(Some(slipstream_core::MAXIMUM_EXPORT_BYTES));
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+
+        let first = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // The in-flight Export reserves the worst-case artifact size, so the
+        // allowance cannot admit a second one before acceptance.
+        let second = submit_export_request(
+            &router,
+            &photo_id,
+            "request-2",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(second).await["error"]["code"],
+            "retained_output_full"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_routes_report_processing_unavailable_without_configuration() {
+        // Neither processing nor an allowance is configured.
+        let (base, config) = prepare_populated_fixture();
+        let (application, router) = export_application(&base, &config).await;
+        let body = serde_json::json!({
+            "requestId": "r",
+            "expectedRecipeRevision": "rev",
+            "expectedSourceRevision": "src"
+        });
+        let submitted = send(
+            &router,
+            authenticated_request()
+                .method("POST")
+                .uri("https://camera.local/api/photos/whatever/exports")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(submitted.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(submitted).await["error"]["code"],
+            "processing_unavailable"
+        );
+        let read = send(
+            &router,
+            authenticated_request()
+                .uri("https://camera.local/api/exports/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response_json(read).await["error"]["code"], "unknown_export");
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+
+        // Processing configured without an allowance refuses the same way.
+        let (base, mut config) = prepare_populated_fixture();
+        raw_fixture_with_camera(
+            &config.library_root.join("pair.ARW"),
+            b"SONY\0",
+            b"ILCE-7RM5\0\0\0",
+        );
+        config.processing = Some(export_processing());
+        let (application, router) = export_application(&base, &config).await;
+        let submitted = send(
+            &router,
+            authenticated_request()
+                .method("POST")
+                .uri("https://camera.local/api/photos/whatever/exports")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(submitted.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(submitted).await["error"]["code"],
+            "processing_unavailable"
+        );
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_unknown_identity_is_reported_on_every_route() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (_application, router) = export_application(&base, &config).await;
+
+        // A missing record maps to unknown_export on every route.
+        let response = send(
+            &router,
+            authenticated_request()
+                .uri("https://camera.local/api/exports/no-such-export")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "unknown_export"
+        );
+
+        for action in ["cancel", "retry"] {
+            let response = post_export_action(&router, action, "no-such-export").await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "unknown_export",
+                "{action}"
+            );
+        }
+
+        let artifact = send(
+            &router,
+            authenticated_request()
+                .uri("https://camera.local/api/exports/no-such-export/artifact")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(artifact.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response_json(artifact).await["error"]["code"],
+            "unknown_export"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_cancel_settles_once_and_retry_rearms_within_retention() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let record = response_json(created).await;
+        let export_id = record["id"].as_str().unwrap().to_owned();
+
+        // Cancellation settles exactly once while the attempt is still queued.
+        let cancelled = post_export_action(&router, "cancel", &export_id).await;
+        assert_eq!(cancelled.status(), StatusCode::OK);
+        let cancelled_record = response_json(cancelled).await;
+        assert_eq!(cancelled_record["state"], "cancelled");
+
+        // A repeated cancellation returns the unchanged terminal record.
+        let repeated = post_export_action(&router, "cancel", &export_id).await;
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(response_json(repeated).await, cancelled_record);
+
+        // Replaying the original submission returns the terminal snapshot.
+        let replayed = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(response_json(replayed).await["state"], "cancelled");
+
+        // Retry re-arms the retained snapshot with a cleared attempt and the
+        // untouched snapshot.
+        let retried = post_export_action(&router, "retry", &export_id).await;
+        assert_eq!(retried.status(), StatusCode::OK);
+        let retried_record = response_json(retried).await;
+        assert_eq!(retried_record["id"], record["id"]);
+        assert_eq!(retried_record["state"], "queued");
+        assert_eq!(retried_record["snapshot"], record["snapshot"]);
+        assert!(retried_record["attempt"].is_null());
+
+        // Without a launcher the re-armed attempt fails and stays retriable.
+        let failed = wait_for_failed_state(&router, &export_id).await;
+        assert!(failed["outcome"].as_str().is_some());
+        let retry_failed = post_export_action(&router, "retry", &export_id).await;
+        assert_eq!(retry_failed.status(), StatusCode::OK);
+        assert_eq!(response_json(retry_failed).await["state"], "queued");
+
+        // A retry of a queued Export is refused as a conflict.
+        let conflict = post_export_action(&router, "retry", &export_id).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(conflict).await["error"]["code"],
+            "export_conflict"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_expiry_reports_expired_identities_and_reclaims_records() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let record = response_json(created).await;
+        let export_id = record["id"].as_str().unwrap().to_owned();
+        let cancelled = post_export_action(&router, "cancel", &export_id).await;
+        assert_eq!(cancelled.status(), StatusCode::OK);
+
+        // Force the retention window to pass and run the sweep.
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute("UPDATE exports SET retain_until = 1", [])
+            .unwrap();
+        drop(connection);
+        manager.sweep_expiry().await;
+
+        // The record is gone and the identity refuses new work as expired.
+        let read = send(
+            &router,
+            authenticated_request()
+                .uri(format!("https://camera.local/api/exports/{export_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::NOT_FOUND);
+        let replayed = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::GONE);
+        assert_eq!(
+            response_json(replayed).await["error"]["code"],
+            "export_expired"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn export_artifact_requires_published_facts_and_streams_with_a_lease() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let record = response_json(created).await;
+        let export_id = record["id"].as_str().unwrap().to_owned();
+        let cancelled = post_export_action(&router, "cancel", &export_id).await;
+        assert_eq!(cancelled.status(), StatusCode::OK);
+
+        // A terminal Export without a published artifact refuses downloads.
+        let missing = send(
+            &router,
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/exports/{export_id}/artifact"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(missing).await["error"]["code"],
+            "output_unavailable"
+        );
+
+        // Publish a file into the workspace and record its facts.
+        let artifact_bytes = b"development-tiff-bytes".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&artifact_bytes));
+        let path = manager.artifact_path(&export_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &artifact_bytes).unwrap();
+        let now = 1_800_000_000_u64;
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute(
+                "UPDATE exports SET state='succeeded', outcome=NULL, artifact_size=?1,
+                   artifact_sha256=?2, artifact_expires_at=?3, settled_at=?4, retain_until=?5
+                 WHERE id=?6",
+                rusqlite::params![
+                    artifact_bytes.len() as i64,
+                    digest,
+                    (now + 604_800) as i64,
+                    now as i64,
+                    (now + 604_800) as i64,
+                    export_id
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let download = send(
+            &router,
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/exports/{export_id}/artifact"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(download.headers()["slipstream-export-id"], export_id);
+        assert_eq!(
+            download.headers()["slipstream-export-target"],
+            "development-tiff"
+        );
+        assert_eq!(download.headers()["slipstream-artifact-sha256"], digest);
+        let body = axum::body::to_bytes(download.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &artifact_bytes[..]);
+
+        // The lease is released once the response stream settles.
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let leases = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap();
+            if leases == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the download lease must be released after the stream settles"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(connection);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
 }
