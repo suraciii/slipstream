@@ -11,6 +11,7 @@ pub mod capture;
 pub mod confinement;
 pub mod derivative;
 pub mod domain;
+pub mod export;
 pub mod identity;
 pub mod library;
 mod native;
@@ -55,6 +56,10 @@ pub use domain::{
     PhotoStateMutation, PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed,
     PreviewSeedResult, PreviewSource, PreviewState, RebindEditRecipe, RelativeOriginalPath,
     SaveEditRecipe, ScanResult, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+};
+pub use export::{
+    ArtifactWriter, ExportError, ExportTarget, ExportWorkspace, MAXIMUM_EXPORT_BYTES,
+    PublishedArtifact, StagedOriginal, StagedOriginalFacts,
 };
 pub use identity::{InvalidModificationTime, original_id, source_revision, standalone_photo_id};
 pub use library::{
