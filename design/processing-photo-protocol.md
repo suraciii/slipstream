@@ -72,7 +72,12 @@ reconcile/inspect/cancel: export_id, incarnation, sequence when applicable
 ```
 
 `op` is one of the listed values, `mode` is exactly `photo-processing`, and
-`version` is `1`; unknown fields are refused. Responses use the same mode and
+`version` is `1`; unknown fields are refused. A declared `source.size` and a
+reported `validate-output` `size` are positive and no greater than the bounded
+application limits; a packet outside that range is malformed and is refused
+with the rest of envelope validation, before the descriptor count and the
+capability are checked. The configured source and output maxima may be smaller,
+and admission enforces those separately. Responses use the same mode and
 version plus exactly one bounded `result` or `error` object. An output result
 is the bounded `OutputReceipt` (attempt identity, target, size and SHA-256),
 never file bytes or a path. The validation acknowledgement is durable before

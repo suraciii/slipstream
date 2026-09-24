@@ -33,6 +33,8 @@ pub const FRAME_BYTES: usize = REQUEST_BYTES;
 const CONTROL_BYTES: usize = 128;
 // These match the current 4 GiB streaming-fingerprint and Export artifact
 // limits. The launcher crate stays independent of the Library implementation.
+// They also bound the sizes a production request may declare, so a packet can
+// never describe more bytes than the bounded application seams accept.
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -354,6 +356,7 @@ impl Request {
                     || source.kind != "raw"
                     || !identifier(&source.profile_id, 64)
                     || source.size == 0
+                    || source.size > MAX_SOURCE_BYTES
                     || !hex(&source.sha256, 64)
                     || recipe.white_balance_mode != "as-shot"
                     || !hex(recipe_digest, 64)
@@ -391,6 +394,7 @@ impl Request {
                     || *sequence == 0
                     || target != PHOTO_WORKLOAD
                     || *size == 0
+                    || *size > MAX_OUTPUT_BYTES
                     || !hex(sha256, 64)
                 {
                     return Err(ErrorCode::InvalidRequest);
@@ -1395,6 +1399,78 @@ mod tests {
             })
         ));
         fs::remove_file(socket).unwrap();
+    }
+
+    /// A packet may not declare more bytes than the bounded application seams
+    /// accept. The application limit stays representable; a smaller configured
+    /// deployment maximum is enforced during admission, not by this envelope
+    /// check.
+    #[test]
+    fn declared_source_and_output_sizes_stay_within_the_application_limit() {
+        let mut start = start_request();
+        match &mut start {
+            Request::Start { source, .. } => source.size = MAX_SOURCE_BYTES,
+            other => panic!("unexpected request: {other:?}"),
+        }
+        let bytes = start.bytes().unwrap();
+        assert_eq!(Request::parse(&bytes).unwrap(), start);
+
+        let mut oversized = start.clone();
+        match &mut oversized {
+            Request::Start { source, .. } => source.size = MAX_SOURCE_BYTES + 1,
+            other => panic!("unexpected request: {other:?}"),
+        }
+        assert_eq!(oversized.bytes(), Err(ErrorCode::InvalidRequest));
+        assert_eq!(
+            Request::parse(&serde_json::to_vec(&oversized).unwrap()),
+            Err(ErrorCode::InvalidRequest)
+        );
+
+        // The listener accepts the in-limit packet and refuses the oversized one
+        // of the same shape, dropping the source descriptor attached to it.
+        let (sender, receiver) = socket_pair();
+        let (source_path, source) = file("declared-source", b"raw bytes", libc::O_RDONLY, 0o444);
+        assert!(send_packet(sender.as_raw_fd(), &bytes, &[source.as_raw_fd()]).is_ok());
+        let (received, descriptor) = receive_request(receiver.as_raw_fd()).unwrap();
+        assert_eq!(received, start);
+        assert!(descriptor.is_some());
+        drop(descriptor);
+
+        let (sender, receiver) = socket_pair();
+        assert!(
+            send_packet(
+                sender.as_raw_fd(),
+                &serde_json::to_vec(&oversized).unwrap(),
+                &[source.as_raw_fd()]
+            )
+            .is_ok()
+        );
+        assert!(receive_request(receiver.as_raw_fd()).is_err());
+        assert!(source.metadata().is_ok());
+        fs::remove_file(source_path).unwrap();
+
+        let mut validation = Request::ValidateOutput {
+            mode: PHOTO_MODE.into(),
+            version: PHOTO_PROTOCOL_VERSION,
+            instance: "0".repeat(32),
+            export_id: "export-1".into(),
+            incarnation: "d".repeat(32),
+            sequence: 1,
+            target: PHOTO_WORKLOAD.into(),
+            size: MAX_OUTPUT_BYTES,
+            sha256: "4".repeat(64),
+            accepted: true,
+        };
+        assert!(Request::parse(&validation.bytes().unwrap()).is_ok());
+        match &mut validation {
+            Request::ValidateOutput { size, .. } => *size = MAX_OUTPUT_BYTES + 1,
+            other => panic!("unexpected request: {other:?}"),
+        }
+        assert_eq!(validation.bytes(), Err(ErrorCode::InvalidRequest));
+        assert_eq!(
+            Request::parse(&serde_json::to_vec(&validation).unwrap()),
+            Err(ErrorCode::InvalidRequest)
+        );
     }
 
     #[test]
