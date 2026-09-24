@@ -105,7 +105,7 @@ fields:
 
 `RecipeSnapshot` is closed for this first workload. The execution payload is
 `exposure_milli_ev`, a signed 64-bit integer in thousandths of an EV, and
-`white_balance={mode:as-shot}`. The approved bundle supplies the finite EV
+`white_balance_mode=as-shot`. The approved bundle supplies the finite EV
 range; values outside that range, non-finite stored values, custom temperature
 or tint, and unknown recipe fields are refused. The service may retain a
 recipe that is readable but not representable by this execution payload; that
@@ -113,7 +113,7 @@ Photo remains browseable and processing-unavailable until an explicitly
 qualified mapping exists.
 
 The service computes `recipe_digest` from the canonical ordered tuple
-`{exposure_milli_ev, white_balance.mode}` and includes it in the durable Export
+`{exposure_milli_ev, white_balance_mode}` and includes it in the durable Export
 snapshot and launcher manifest. The launcher receives the two semantic values
 and the digest, validates them against the configured bundle, and never
 receives a darktable history or engine-private settings blob.
@@ -174,7 +174,7 @@ its camera make, camera model and RAW container against that list and reports
 an unlisted class as unsupported; the launcher revalidates the received
 `profile_id` against its own configured bundle before it admits any plan.
 Other bounds of this workload stay closed at a finite exposure range of 0 to
-+1 EV in 1000th-EV steps with `white_balance={mode:as-shot}`.
++1 EV in 1000th-EV steps with `white_balance_mode=as-shot`.
 
 ### Authority split
 

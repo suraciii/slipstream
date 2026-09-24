@@ -414,9 +414,9 @@ observed; identity is never regenerated for a retry.
 
 `recipe_conflict`, `source_changed`, and `requires_rebind` present current
 server facts and require an explicit Photographer action before a further write;
-they never silently adopt the newer revision or the newer source. An unknown
+they never silently adopt the newer revision or the newer source. An `unknown`
 outcome keeps the pending draft and offers retry under the same identity.
-`unsupported_photo`, `invalid_settings`, `unavailable`, and transport failures
+`unsupported`, `invalid_settings`, `unavailable`, and transport failures
 keep the last committed revisions in the controls and never claim the draft was
 saved. Session undo, redo, and reset are browser-local over drafted settings;
 none is a save until the next settled write.
@@ -435,9 +435,11 @@ surface. Preview failure never changes Originals or the committed recipe.
 
 Export submit, inspect, cancel, and retry are owned by the Photo scope with
 settlement-family key `(photoId, export-command)`. Submission captures the
-revisions the Photographer observed and renders its returned snapshot. A submit
-that loses its response presents an unknown outcome and resolves by inspecting
-that Photo's current Exports, never by resubmitting with a fresh identity.
+revisions the Photographer observed and renders its returned snapshot, and is
+admitted only against a confirmed save; an `unknown` save outcome is reconciled
+first. A submit that loses its response presents an `unknown` outcome and
+resolves by inspecting that Photo's current Exports, never by resubmitting with
+a fresh identity.
 Cancellation settles once against the returned state, and a result that raced it
 is presented as the actual terminal outcome. Inspection polling stops with the
 Photo scope, and a later poll never refreshes controls for a superseded

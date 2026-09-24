@@ -108,8 +108,9 @@ Photo facts returned by `GET /api/photos/{id}` and the bounded Photo summaries
 in Browse windows and Photo queries carry the saved-edit fact. Artifact
 downloads and Edit Preview renditions reuse the existing private derivative
 transfer rules. Structured error codes are authoritative for these routes; no
-client parses messages. States, outcomes, snapshot identity, receipt expiry and
-disclosure rules are owned by
+client parses messages. States, outcomes, snapshot identity, receipt expiry,
+disclosure rules, and the closed wire contract with every request field,
+response field, HTTP status mapping, and outcome/error code are owned by
 [Photo Development Architecture](photo-development.md#service-surface).
 
 Every CLI request identifies contract version 1 through
@@ -126,8 +127,9 @@ return structured error codes and domain references. For reused routes whose
 legacy response cannot distinguish necessary cases, add structured fields for
 CLI requests rather than parse English messages or silently change Web shapes.
 
-The exact request/response fixtures for these routes must be added with their
-implementation and executed before any CLI release. No route addition may
+The request/response fixtures for these routes must be derived from the wire
+contract in [Photo Development Architecture](photo-development.md#service-surface),
+added with their implementation, and executed before any CLI release. No route addition may
 bypass the existing method, header-size, body-size, or shutdown admission rules.
 No existing route or wire value is retired by this design.
 
