@@ -124,6 +124,10 @@ Reading matching settings alone must not authorize an unrelated overwrite.
 CLI commands retain explicit mutation and uncertainty semantics; autosave is
 browser orchestration of the same service operation.
 
+Until a public save protocol defines a bounded request-identity age and an
+explicit expired outcome, this receipt boundary remains internal. It must not
+silently delete receipts and then accept an old identity as new work.
+
 Undo/redo must submit a new guarded recipe write. A whole pointer drag is one
 history entry. External changes invalidate assumptions behind local history;
 the browser must reconcile before using that history to write over newer state.
