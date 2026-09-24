@@ -14,6 +14,8 @@ use std::fmt;
 /// Total metadata bytes one Capture Time inspection may read or allocate.
 pub const MAXIMUM_CAPTURE_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAXIMUM_TAG_VALUE_BYTES: usize = 64 * 1024;
+/// Camera identity strings are short; a longer value is not a camera name.
+const MAXIMUM_TEXT_TAG_BYTES: usize = 128;
 const MAXIMUM_TIFF_DIRECTORY_ENTRIES: usize = 1024;
 const MAXIMUM_JPEG_MARKERS: usize = 4096;
 
@@ -67,6 +69,10 @@ pub struct CaptureReviewMetadata {
     pub iso: Option<u32>,
     pub shutter_speed: Option<String>,
     pub focal_length: Option<String>,
+    /// Camera make and model as recorded by the camera. They identify the
+    /// source class of a RAW Original and are not user-editable facts.
+    pub make: Option<String>,
+    pub model: Option<String>,
 }
 
 impl CaptureFact {
@@ -437,6 +443,8 @@ enum TagValue {
 
 #[derive(Clone, Debug)]
 struct ExifFields {
+    make: TagValue,
+    model: TagValue,
     original: TagValue,
     digitized: TagValue,
     subsec_original: TagValue,
@@ -453,6 +461,8 @@ struct ExifFields {
 impl Default for ExifFields {
     fn default() -> Self {
         Self {
+            make: TagValue::Absent,
+            model: TagValue::Absent,
             original: TagValue::Absent,
             digitized: TagValue::Absent,
             subsec_original: TagValue::Absent,
@@ -734,6 +744,8 @@ fn collect_capture_tags(
 ) -> Result<(), MetadataError> {
     for entry in entries {
         let (target, expected_types): (Option<&mut TagValue>, &[u16]) = match entry.tag {
+            0x010f => (Some(&mut fields.make), &[2]),
+            0x0110 => (Some(&mut fields.model), &[2]),
             0x9003 => (Some(&mut fields.original), &[2]),
             0x9004 => (Some(&mut fields.digitized), &[2]),
             0x9291 => (Some(&mut fields.subsec_original), &[2]),
@@ -845,7 +857,35 @@ fn review_metadata(fields: &ExifFields) -> CaptureReviewMetadata {
         focal_length: parse_rational(&fields.focal_length, order).map(
             |(numerator, denominator)| format!("{} mm", format_decimal(numerator, denominator)),
         ),
+        make: parse_text(&fields.make),
+        model: parse_text(&fields.model),
     }
+}
+
+/// One bounded ASCII tag value: camera strings are NUL-terminated and may carry
+/// padding. A value that is not printable ASCII is reported as absent rather
+/// than guessed.
+fn parse_text(value: &TagValue) -> Option<String> {
+    let TagValue::Valid(value) = value else {
+        return None;
+    };
+    let end = value
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(value.len());
+    let text = value.get(..end)?;
+    if text.is_empty() || text.len() > MAXIMUM_TEXT_TAG_BYTES {
+        return None;
+    }
+    if !text
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        return None;
+    }
+    let text = String::from_utf8_lossy(text);
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 fn parse_integer(value: &TagValue, order: ByteOrder) -> Option<u32> {
@@ -1298,6 +1338,8 @@ mod tests {
             (0x8827, 3, 400_u16.to_le_bytes().to_vec()),
             (0x829a, 5, rational(1, 125)),
             (0x920a, 5, rational(50, 1)),
+            (0x010f, 2, b"SONY\0".to_vec()),
+            (0x0110, 2, b"ILCE-7RM5\0\0\0".to_vec()),
         ]));
         let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
         assert_eq!(
@@ -1308,6 +1350,24 @@ mod tests {
         assert_eq!(metadata.iso, Some(400));
         assert_eq!(metadata.shutter_speed.as_deref(), Some("1/125 s"));
         assert_eq!(metadata.focal_length.as_deref(), Some("50 mm"));
+        assert_eq!(metadata.make.as_deref(), Some("SONY"));
+        assert_eq!(metadata.model.as_deref(), Some("ILCE-7RM5"));
+    }
+
+    #[test]
+    fn camera_identity_rejects_non_text_and_oversized_values() {
+        let bytes = jpeg(&tiff_typed(&[
+            (0x010f, 2, vec![0x01, 0x02, 0x00]),
+            (0x0110, 3, 7_u16.to_le_bytes().to_vec()),
+        ]));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(metadata.make, None);
+        assert_eq!(metadata.model, None);
+
+        let oversized = format!("{}\0", "N".repeat(MAXIMUM_TEXT_TAG_BYTES + 1));
+        let bytes = jpeg(&tiff_typed(&[(0x010f, 2, oversized.into_bytes())]));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(metadata.make, None);
     }
 
     #[test]

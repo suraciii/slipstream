@@ -5,6 +5,7 @@ mod environment;
 mod faults;
 mod journal;
 pub mod photo;
+pub mod photo_profile;
 pub mod protocol;
 mod slice;
 mod transport;
