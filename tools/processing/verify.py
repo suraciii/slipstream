@@ -812,7 +812,6 @@ class Qualification:
             launcher_sha256=self.launcher_sha256,verifier_sha256=self.verifier_sha256,
             worker_image=self.arguments.worker_image,web_image=self.arguments.web_image,
             host=command('uname','-r'),docker=json.loads(command('docker','info','--format','{{json .}}'))['CgroupDriver']),indent=2))
-        print(json.dumps(dict(status='passed',attempts=len(self.results),evidence=str(self.output))))
 
     def cleanup(self):
         self.stop()
@@ -832,7 +831,7 @@ class Qualification:
                 work=self.root/'attempts'/record['launch_id']/'work'
                 if os.path.ismount(work):command('umount',str(work))
                 command('systemctl','stop',runtime['attempt_unit'],check=False)
-                command('systemctl','revert',runtime['attempt_unit'],check=False)
+                wait_attempt_absent(self.parent,runtime['attempt_unit'])
         if self.web:command('docker','rm','--force',self.web)
         self.web_token = None
         command('systemctl','stop',self.parent,check=False);command('systemctl','revert',self.parent,check=False)
@@ -859,6 +858,7 @@ def main():
     verifier=Qualification(arguments)
     try:verifier.verify()
     finally:verifier.cleanup()
+    print(json.dumps(dict(status='passed',attempts=len(verifier.results),evidence=str(verifier.output))))
 
 
 if __name__=='__main__':main()

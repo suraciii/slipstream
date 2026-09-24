@@ -1,10 +1,14 @@
 """Bounded read-only cleanup observations; actual manager effects remain opt-in."""
-from pathlib import Path
+import contextlib
 import errno
+import io
+import json
+from pathlib import Path
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
-from unittest.mock import Mock
+import uuid
+from unittest.mock import Mock, patch
 
 import verify
 
@@ -64,6 +68,100 @@ class SliceObservations(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'expired'):
                 verify.attempt_absent('missing-parent.slice', 'attempt.slice', 15)
             command.assert_not_called()
+
+
+class CleanupContract(unittest.TestCase):
+    def test_cleanup_stops_attempt_without_revert_and_proves_absence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / 'root'
+            output = base / 'output'
+            (root / 'attempts' / 'launch' / 'work').mkdir(parents=True)
+            (root / 'launcher.log').write_text('')
+            output.mkdir()
+            instance = uuid.uuid4().hex
+            parent = 'slipstreamprocessing' + instance + '.slice'
+            unit = parent.removesuffix('.slice') + '-' + uuid.uuid4().hex + '.slice'
+            registry = dict(records={'1': dict(launch_id='launch', receipt=dict(runtime=dict(
+                container_id=None, attempt_unit=unit)))})
+            (root / 'registry.json').write_text(json.dumps(registry))
+
+            case = verify.Qualification.__new__(verify.Qualification)
+            case.root = root
+            case.output = output
+            case.parent = parent
+            case.instance = instance
+            case.web = 'owned-web-container'
+            case.web_token = 'synthetic-token'
+            case.stop = Mock()
+            calls = []
+
+            def fake_command(*arguments, **kwargs):
+                calls.append(arguments)
+                if arguments[:3] == ('systemctl', '--system', 'list-units'):
+                    return ''
+                if arguments[:3] == ('systemctl', '--system', 'show'):
+                    return '/run/systemd/transient'
+                return ''
+
+            with patch.object(verify, 'command', side_effect=fake_command), \
+                    patch.object(verify.os.path, 'ismount', return_value=False):
+                case.cleanup()
+
+            case.stop.assert_called_once()
+            self.assertIn(('systemctl', 'stop', unit), calls)
+            self.assertNotIn(('systemctl', 'revert', unit), calls)
+            absence_call = ('systemctl', '--system', 'list-units', '--all', '--plain',
+                            '--no-legend', '--no-pager', unit)
+            self.assertIn(absence_call, calls)
+            self.assertIn(('docker', 'rm', '--force', 'owned-web-container'), calls)
+            self.assertIn(('systemctl', 'revert', parent), calls)
+            self.assertIsNone(case.web_token)
+            self.assertFalse(root.exists())
+            self.assertTrue((output / 'final-registry.json').exists())
+
+    def test_main_prints_pass_only_after_cleanup_succeeds(self):
+        for fail_cleanup in [False, True]:
+            with self.subTest(fail_cleanup=fail_cleanup):
+                events = []
+                cleanup_output = []
+                stdout = io.StringIO()
+
+                class FakeQualification:
+                    def __init__(self, arguments):
+                        self.results = [dict()]
+                        self.output = Path(arguments.output)
+
+                    def verify(self):
+                        events.append('verify')
+
+                    def cleanup(self):
+                        events.append('cleanup')
+                        cleanup_output.append(stdout.getvalue())
+                        if fail_cleanup:
+                            raise verify.subprocess.TimeoutExpired(['systemctl', 'revert'], 15)
+
+                argv = ['verify.py', '--launcher', '/unused', '--worker-image',
+                        'sha256:' + '0' * 64, '--web-image', 'sha256:' + '1' * 64,
+                        '--output', '/evidence']
+                with patch.object(verify, 'Qualification', FakeQualification), \
+                        patch.object(verify.os, 'geteuid', return_value=0), \
+                        patch.object(sys, 'argv', argv), \
+                        contextlib.redirect_stdout(stdout):
+                    if fail_cleanup:
+                        with self.assertRaises(verify.subprocess.TimeoutExpired):
+                            verify.main()
+                    else:
+                        verify.main()
+
+                self.assertEqual(events, ['verify', 'cleanup'])
+                self.assertEqual(cleanup_output, [''])
+                if fail_cleanup:
+                    self.assertEqual(stdout.getvalue(), '')
+                else:
+                    result = json.loads(stdout.getvalue())
+                    self.assertEqual(result['status'], 'passed')
+                    self.assertEqual(result['attempts'], 1)
 
 
 if __name__ == '__main__':
