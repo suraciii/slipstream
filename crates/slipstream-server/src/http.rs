@@ -176,6 +176,14 @@ pub(crate) fn create_router_with_processing(
         .route("/api/photo-queries", post(create_photo_query))
         .route("/api/photo-queries/{cursor}", get(get_photo_query_page))
         .route("/api/photos/{id}", get(get_photo))
+        .route(
+            "/api/photos/{id}/edit-recipe",
+            get(crate::edit_recipe::get_edit_recipe).post(crate::edit_recipe::post_edit_recipe),
+        )
+        .route(
+            "/api/photos/{id}/edit-recipe/rebind",
+            get(method_not_allowed).post(crate::edit_recipe::post_edit_recipe_rebind),
+        )
         .route("/api/file-locations", get(get_file_locations))
         .route("/api/browse", post(open_browse))
         .route("/api/browse/{token}/position", get(get_browse_position))
@@ -319,12 +327,12 @@ pub(crate) async fn status(
     json_response(StatusCode::OK, &state.application.scan_status())
 }
 
-const CLI_CONTRACT_HEADER: &str = "slipstream-cli-contract";
+pub(crate) const CLI_CONTRACT_HEADER: &str = "slipstream-cli-contract";
 const DEFAULT_LIST_PAGE: usize = 50;
 
 type CliBoundaryResult<T> = Result<T, Box<Response<Body>>>;
 
-fn require_cli_contract(request: &Request<Body>) -> CliBoundaryResult<()> {
+pub(crate) fn require_cli_contract(request: &Request<Body>) -> CliBoundaryResult<()> {
     let mut values = request.headers().get_all(CLI_CONTRACT_HEADER).iter();
     if values.next().and_then(|value| value.to_str().ok()) == Some("1") && values.next().is_none() {
         return Ok(());
@@ -345,7 +353,7 @@ fn require_cli_contract(request: &Request<Body>) -> CliBoundaryResult<()> {
     )))
 }
 
-fn cli_error(
+pub(crate) fn cli_error(
     status: StatusCode,
     code: &'static str,
     message: &'static str,
@@ -364,7 +372,7 @@ fn cli_error(
     )
 }
 
-fn invalid_cli(argument: &'static str, reason: &'static str) -> Response<Body> {
+pub(crate) fn invalid_cli(argument: &'static str, reason: &'static str) -> Response<Body> {
     cli_error(
         StatusCode::BAD_REQUEST,
         "invalid_input",
@@ -373,7 +381,7 @@ fn invalid_cli(argument: &'static str, reason: &'static str) -> Response<Body> {
     )
 }
 
-fn require_published(application: &Application) -> CliBoundaryResult<()> {
+pub(crate) fn require_published(application: &Application) -> CliBoundaryResult<()> {
     if application.shared.published.load(Ordering::Relaxed) {
         return Ok(());
     }
@@ -1114,6 +1122,8 @@ pub(crate) async fn get_photo(
                 shutter_speed: metadata.shutter_speed,
                 focal_length: metadata.focal_length,
                 iso: metadata.iso,
+                make: metadata.make,
+                model: metadata.model,
             },
         },
     )
@@ -2757,7 +2767,7 @@ pub(crate) async fn read_json_body(request: Request<Body>) -> Result<Value, Resp
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Invalid JSON body"))
 }
 
-async fn read_cli_json_body<T: serde::de::DeserializeOwned>(
+pub(crate) async fn read_cli_json_body<T: serde::de::DeserializeOwned>(
     request: Request<Body>,
 ) -> Result<T, Response<Body>> {
     let declared_length = match request.headers().get(header::CONTENT_LENGTH) {
