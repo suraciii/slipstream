@@ -160,10 +160,9 @@ receipt expiry, the old identity returns an explicit expired outcome and cannot
 be submitted as new work. A new Export requires a new identity and a newly
 confirmed source/settings snapshot.
 
-Before Export endpoints are implemented, the public protocol must define an
-enforceable bounded request-identity and age rule that lets the service reject
-expired accepted identities. An expired identity must never be interpreted as
-new work.
+The public protocol must define an enforceable bounded request-identity and age
+rule that lets the service reject an expired accepted identity. An expired
+identity must never be interpreted as new work.
 
 ## Preview Scheduling
 
