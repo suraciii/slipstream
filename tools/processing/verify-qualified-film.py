@@ -408,7 +408,6 @@ class QualifiedFilmQualification(FILM.FilmQualification):
                         expected_error=self.arguments.expect_error,
                         expected_qualification_failure=self.arguments.expect_qualification_failure)
         (self.output / 'identity.json').write_text(json.dumps(identity, indent=2))
-        print(json.dumps(dict(status='passed', attempts=len(self.results), refusals=len(self.refusals))))
 
 
 def main():
@@ -470,6 +469,8 @@ def main():
         verifier.verify()
     finally:
         verifier.cleanup()
+    print(json.dumps(dict(status='passed', attempts=len(verifier.results),
+                          refusals=len(verifier.refusals))))
 
 
 if __name__ == '__main__':
