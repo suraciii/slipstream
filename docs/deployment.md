@@ -76,11 +76,13 @@ instance `bundle` value and as `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`, and pin
 the image by its `sha256:` identifier, not by tag.
 
 A refused start must not consume the instance. The launcher claims the
-instance identity before it verifies the image and host, and a start that is
-refused after claiming leaves a released claim with an uninitialized instance
-root. A later start with a corrected configuration must adopt that claim,
-initialize the instance root, and start normally. Deleting the claim file is
-never part of recovery.
+instance identity before it verifies the image and host, and it makes the
+instance journal durable before any check that can refuse the start. A start
+that is refused after claiming removes the claim it created, so a later start
+with a corrected configuration starts normally. A claim whose instance root
+has no journal is never adopted: the launcher refuses the start and preserves
+the existing ownership evidence. Deleting claim files is never part of
+recovery.
 
 After an approved production configuration and its exact policy/bundle
 identities are installed, load the unit and start the instance:

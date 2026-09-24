@@ -174,7 +174,7 @@ impl Executor {
                 Ok::<_, ErrorCode>((c, documents, launcher))
             })
             .transpose()?;
-        let instance_claim = claim_instance(&config)?;
+        let (instance_claim, _fresh) = claim_instance(&config)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -1642,12 +1642,18 @@ struct Claim {
 }
 
 /// Create or adopt the instance claim file at `path` and take its exclusive
-/// flock. The identity semantics are shared by every processing executor:
-/// version 1, an exact root match, one claim per instance, and a busy refusal
-/// while another owner holds the flock. Executor state such as a completed
-/// registry never gates adoption, because the flock proves no other owner
-/// exists.
-pub(crate) fn hold_claim(path: &Path, namespace: &Path, root: &str) -> Result<File, ErrorCode> {
+/// flock. Returns the retained descriptor and whether this process created
+/// the claim. The identity semantics are shared by every processing
+/// executor: version 1, an exact root match, one claim per instance, and a
+/// busy refusal while another owner holds the flock. An existing claim whose
+/// root has no registry stays quarantined: the flock proves exclusivity, not
+/// completeness, so a lost or never-written registry is never adopted and the
+/// previous ownership evidence survives.
+pub(crate) fn hold_claim(
+    path: &Path,
+    namespace: &Path,
+    root: &str,
+) -> Result<(File, bool), ErrorCode> {
     let (mut file, fresh) = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -1708,14 +1714,20 @@ pub(crate) fn hold_claim(path: &Path, namespace: &Path, root: &str) -> Result<Fi
             return Err(ErrorCode::Uncertain);
         }
         let claim: Claim = serde_json::from_slice(&bytes).map_err(|_| ErrorCode::Uncertain)?;
-        if claim.version != 1 || claim.root != root {
+        if claim.version != 1
+            || claim.root != root
+            || !Path::new(root)
+                .join("registry.json")
+                .try_exists()
+                .map_err(|_| ErrorCode::Uncertain)?
+        {
             return Err(ErrorCode::Uncertain);
         }
     }
-    Ok(file)
+    Ok((file, fresh))
 }
 
-pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
+pub(crate) fn claim_instance(config: &Config) -> Result<(File, bool), ErrorCode> {
     let namespace = Path::new("/var/lib/slipstream-processing/instances");
     for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
         if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {
@@ -1945,7 +1957,7 @@ pub(crate) mod tests {
     }
 
     /// Claims hold an exclusive descriptor, so assertions compare outcomes.
-    fn claim_error(claim: Result<File, ErrorCode>) -> ErrorCode {
+    fn claim_error(claim: Result<(File, bool), ErrorCode>) -> ErrorCode {
         claim.err().unwrap()
     }
 
@@ -1970,18 +1982,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_uncompleted_claim_is_adopted_without_a_registry() {
-        let dir = claim_dir("adopt");
+    fn a_claim_without_an_initialized_root_stays_quarantined_until_the_registry_exists() {
+        let dir = claim_dir("quarantine");
         let path = dir.join("instance.claim");
+        let root = dir.display().to_string();
         // A first start that was refused after claiming leaves exactly this
         // state: a released claim file and no registry.json.
-        drop(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap());
+        let (file, fresh) = hold_claim(&path, &dir, &root).unwrap();
+        assert!(fresh);
+        drop(file);
         assert!(!dir.join("registry.json").try_exists().unwrap());
-        let adopted = hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap();
+        // The claim alone proves exclusivity, not completeness, so the
+        // registry-less state is never adopted.
+        assert_eq!(
+            claim_error(hold_claim(&path, &dir, &root)),
+            ErrorCode::Uncertain
+        );
+        // Once the root is initialized, the claim is adoptable again.
+        fs::File::create(dir.join("registry.json")).unwrap();
+        let (adopted, fresh) = hold_claim(&path, &dir, &root).unwrap();
+        assert!(!fresh);
         // Adoption keeps the recorded identity; it never rewrites the claim.
         let claim: Claim = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(claim.version, 1);
-        assert_eq!(claim.root, "/var/lib/slipstream-processing/a");
+        assert_eq!(claim.root, root);
         drop(adopted);
         fs::remove_dir_all(dir).unwrap();
     }
