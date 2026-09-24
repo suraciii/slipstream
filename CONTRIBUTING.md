@@ -142,12 +142,13 @@ check, so the gate keeps one runner and reuses work instead of adding runners:
 
 - The job restores a Rust cache keyed on `Cargo.lock` and
   `rust-toolchain.toml`: `~/.cargo/registry`, `~/.cargo/git`, and `target`.
-  A restored cache removes dependency compilation. Formatting, Clippy, every
-  test, the Web build, and the browser suite still run in full.
+  A restored cache removes dependency compilation, which is worth about 50s of
+  the Rust stage on the runner. Formatting, Clippy, every test, the Web build,
+  and the browser suite still run in full.
 - `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`. The job
   never sets `RUST_BACKTRACE`, so nothing there reads debug information;
   leaving it out shortens compilation and linking and keeps the cache near
-  220 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
+  280 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
   backtraces, reproduce it locally without those variables.
 - The bundled browser suite is a smoke gate over the real stack and runs with
   `fullyParallel` on the runner's four CPUs. The behavior and race scenarios
