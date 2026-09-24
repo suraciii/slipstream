@@ -822,10 +822,12 @@ fn verify_received_output(
 /// TIFF directory walk: positive geometry, three 32-bit IEEE-float samples per
 /// pixel, RGB photometric interpretation, and an embedded RGB ICC profile.
 pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> {
+    use std::os::fd::AsRawFd;
     macro_rules! invalid {
         () => {{ ExportError::Validation("Output is not a valid Development TIFF") }};
     }
     let mut file = open_read_only(path).map_err(|_| invalid!())?;
+    use slipstream_core::derivative::DerivativeTarget;
     let mut header = [0_u8; 8];
     file.read_exact(&mut header).map_err(|_| invalid!())?;
     let little_endian = match &header[..4] {
@@ -1005,35 +1007,37 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<(), ExportError> 
         return Err(invalid!());
     }
     // The declared strips must exist, agree on their lengths, and declare the
-    // pinned Deflate payload. Structural validity alone is not publication:
-    // publication additionally requires the payload to decode through the
-    // same Development TIFF reader the preview path uses, with a bounded
-    // target. That reader (`slipstream_core::derivative::process_development_tiff`,
-    // backed by the native `slipstream_vips_linear_from_fd`) exists only on
-    // the main-side preview work this branch rebases onto; the call is wired
-    // here in that rebase step.
+    // pinned Deflate payload.
     if strip_longs.is_empty() || strip_longs.len() != strip_counts.len() {
         return Err(invalid!());
     }
     if strip_counts.contains(&0) {
         return Err(invalid!());
     }
+    // Publication additionally requires that the payload really decodes:
+    // structural validity cannot prove the compressed strips inflate to the
+    // declared geometry, so the artifact is read through the same bounded
+    // Development TIFF reader the preview path uses before anything is
+    // published.
+    let derivative = slipstream_core::derivative::process_development_tiff(
+        file.as_raw_fd(),
+        DerivativeTarget::Thumbnail512,
+    )
+    .map_err(|_| invalid!())?;
+    drop(derivative);
     Ok(())
 }
 
 #[cfg(test)]
-mod development_tiff_structural {
+mod development_tiff_decode {
     use super::*;
 
-    /// Writes a Development TIFF directory with the pinned geometry, sample,
-    /// compression, and profile tags so the structural gate can be exercised
-    /// independently of the strip payload decode.
-    fn write_development_tiff(path: &Path, strip_count: u32, strip_length: u32) {
-        let icc = {
-            let mut profile = vec![0_u8; 140];
-            profile[16..20].copy_from_slice(b"RGB ");
-            profile
-        };
+    /// Writes a structurally valid Development TIFF whose single Deflate
+    /// strip carries `payload`, so only the decoded content can differ
+    /// between a good and a corrupt artifact. The embedded profile is the
+    /// pinned accepted source profile asset.
+    fn write_development_tiff(path: &Path, payload: &[u8]) {
+        let icc: &[u8] = include_bytes!("../../slipstream-core/assets/prophoto-linear-g10.icc");
         let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
         bytes.extend_from_slice(&11_u16.to_le_bytes());
         let mut externals: Vec<u8> = Vec::new();
@@ -1079,22 +1083,13 @@ mod development_tiff_structural {
         entry(259, 4, 1, 8, None, &mut bytes, &mut externals, &mut at);
         entry(262, 3, 1, 2, None, &mut bytes, &mut externals, &mut at);
         let strip_patch = bytes.len() + 8;
-        entry(
-            273,
-            4,
-            strip_count,
-            0,
-            None,
-            &mut bytes,
-            &mut externals,
-            &mut at,
-        );
+        entry(273, 4, 1, 0, None, &mut bytes, &mut externals, &mut at);
         entry(277, 3, 1, 3, None, &mut bytes, &mut externals, &mut at);
         entry(
             279,
             4,
-            strip_count,
-            strip_length,
+            1,
+            u32::try_from(payload.len()).unwrap(),
             None,
             &mut bytes,
             &mut externals,
@@ -1116,7 +1111,7 @@ mod development_tiff_structural {
             7,
             u32::try_from(icc.len()).unwrap(),
             0,
-            Some(&icc),
+            Some(icc),
             &mut bytes,
             &mut externals,
             &mut at,
@@ -1124,15 +1119,37 @@ mod development_tiff_structural {
         bytes.extend_from_slice(&[0, 0, 0, 0]);
         bytes.extend_from_slice(&externals);
         let strip_offset: u32 = bytes.len() as u32;
-        bytes[strip_patch..strip_patch + 4].copy_from_slice(&strip_offset.to_le_bytes());
-        bytes.extend_from_slice(&vec![0_u8; strip_length as usize]);
+        let patch_end = strip_patch + 4;
+        bytes[strip_patch..patch_end].copy_from_slice(&strip_offset.to_le_bytes());
+        bytes.extend_from_slice(payload);
         fs::write(path, bytes).unwrap();
     }
 
+    /// One zlib stream made of stored deflate blocks, so the test does not
+    /// need a compressor to produce a payload that must decode cleanly.
+    fn stored_zlib(content: &[u8]) -> Vec<u8> {
+        let mut stream = vec![0x78, 0x01];
+        for chunk in content.chunks(65_535) {
+            let length = chunk.len() as u16;
+            stream.push(if chunk.len() == content.len() { 1 } else { 0 });
+            stream.extend_from_slice(&length.to_le_bytes());
+            stream.extend_from_slice(&(!length).to_le_bytes());
+            stream.extend_from_slice(chunk);
+        }
+        let mut a: u32 = 1;
+        let mut b: u32 = 0;
+        for &byte in content {
+            a = (a + u32::from(byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        stream.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        stream
+    }
+
     #[test]
-    fn structural_gate_accepts_the_pinned_directory_and_refuses_broken_strips() {
+    fn publication_requires_a_developed_payload_that_really_inflates() {
         let base = std::env::temp_dir().join(format!(
-            "export-structural-{}-{}",
+            "export-decode-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1141,14 +1158,47 @@ mod development_tiff_structural {
         ));
         fs::create_dir_all(&base).unwrap();
 
-        let good = base.join("good.tif");
-        write_development_tiff(&good, 1, 16);
-        assert!(validate_development_tiff(&good).is_ok());
+        // A structurally valid TIFF whose strip does not inflate: refused by
+        // the real Development TIFF reader.
+        // A stream whose stored-block header claims more bytes than follow.
+        let mut corrupt = vec![0x78_u8, 0x01, 1];
+        corrupt.extend_from_slice(&24_u16.to_le_bytes());
+        corrupt.extend_from_slice(&(!24_u16).to_le_bytes());
+        corrupt.extend_from_slice(&[0_u8; 6]);
+        let corrupt_path = base.join("corrupt.tif");
+        write_development_tiff(&corrupt_path, &corrupt);
+        assert!(validate_development_tiff(&corrupt_path).is_err());
 
-        // A zero-length declared strip is not a payload.
-        let empty_strip = base.join("empty-strip.tif");
-        write_development_tiff(&empty_strip, 1, 0);
-        assert!(validate_development_tiff(&empty_strip).is_err());
+        // The publication path refuses before any artifact is published.
+        let originals = base.join("originals");
+        fs::create_dir_all(&originals).unwrap();
+        fs::create_dir_all(base.join("exports")).unwrap();
+        let workspace = ExportWorkspace::open(base.join("exports"), &originals).unwrap();
+        let writer = workspace.begin_development_tiff("exp-corrupt").unwrap();
+        fs::copy(&corrupt_path, writer.temporary_path()).unwrap();
+        assert!(writer.publish(validate_development_tiff).is_err());
+        let artifacts = base.join("exports/artifacts");
+        assert_eq!(fs::read_dir(&artifacts).unwrap().count(), 0);
+
+        // A well-formed stored-block payload with the exact float32 RGB
+        // geometry decodes through the reader and publishes.
+        let pixels = vec![0_u8; 2 * 3 * 4];
+        let good_path = base.join("good.tif");
+        write_development_tiff(&good_path, &stored_zlib(&pixels));
+        assert!(validate_development_tiff(&good_path).is_ok());
+        let writer = workspace.begin_development_tiff("exp-good").unwrap();
+        fs::copy(&good_path, writer.temporary_path()).unwrap();
+        let published = writer.publish(validate_development_tiff).unwrap();
+        assert_eq!(
+            fs::read(&published.path).unwrap(),
+            fs::read(&good_path).unwrap()
+        );
+
+        // A truncated stream that decodes to fewer samples is also refused.
+        let short = stored_zlib(&pixels[..12]);
+        let short_path = base.join("short.tif");
+        write_development_tiff(&short_path, &short);
+        assert!(validate_development_tiff(&short_path).is_err());
 
         let _ = fs::remove_dir_all(base);
     }

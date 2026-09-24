@@ -113,7 +113,8 @@ extern "C" int32_t slipstream_vips_linear_from_fd(
   if (written <= 0 || static_cast<size_t>(written) >= sizeof(path))
     return SLIPSTREAM_VIPS_INTERNAL_ERROR;
   VipsImage *input = vips_image_new_from_file(
-      path, "access", VIPS_ACCESS_SEQUENTIAL, nullptr);
+      path, "access", VIPS_ACCESS_SEQUENTIAL, "fail_on", VIPS_FAIL_ON_WARNING,
+      nullptr);
   if (input == nullptr) return LinearStatus();
   VipsImage *resized = nullptr;
 
