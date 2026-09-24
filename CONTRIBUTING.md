@@ -149,10 +149,16 @@ check, so the gate keeps one runner and reuses work instead of adding runners:
   leaving it out shortens compilation and linking and keeps the cache near
   220 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
   backtraces, reproduce it locally without those variables.
-- The bundled browser suite runs with `fullyParallel` and every runner CPU
-  (`workers: "100%"` under `CI`). Scenarios provision their own Library,
-  server, and browser context, so they share no state and stay order
-  independent; a scenario that needs shared setup must declare it itself.
+- The bundled browser suite keeps the default worker layout, so its scenarios
+  still run one file at a time. Running it with `fullyParallel` and all four
+  runner CPUs is 2.2× faster (6.5m to 3.0m on the runner), but the window,
+  scroll, and rendered-thumbnail scenarios then fail intermittently: at four
+  workers, run [36050307251](https://github.com/suraciii/slipstream/actions/runs/36050307251)
+  failed `out-of-order window settlements render every loaded Photo position`,
+  and three local runs on four CPUs failed two to seven scenarios each. Every
+  failure was a time or rendered-state assertion (`expect` default 5s,
+  `page.clock` targets) that holds under the serial layout. Enable full
+  parallelism only after those scenarios tolerate concurrent load.
 
 ## Photo fixtures
 
