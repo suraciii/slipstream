@@ -205,6 +205,9 @@ class DeploymentVerifierTests(unittest.TestCase):
             (cgroup / "cgroup.controllers").write_text("cpu io memory pids\n")
             (attempt / "memory.max").write_text(str(4 * 1024**3) + "\n")
             (attempt / "memory.swap.max").write_text("0\n")
+            (attempt / "cpu.max").write_text("400000 100000\n")
+            (attempt / "pids.max").write_text("256\n")
+            (attempt / "io.stat").write_text("")
             checker = deployment.DeploymentSnapshot(
                 instance=INSTANCE,
                 policy=POLICY,
@@ -213,6 +216,35 @@ class DeploymentVerifierTests(unittest.TestCase):
                 command=fake_command,
             )
             self.assertEqual(checker._cgroup_check(), deployment.Check("attempt-cgroup", True))
+
+    def test_attempt_cgroup_rejects_unbounded_cpu_or_tasks_and_missing_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cgroup = root / "cgroup"
+            attempt = cgroup / "slipstreamprocessing" / "attempt"
+            attempt.mkdir(parents=True)
+            (cgroup / "cgroup.controllers").write_text("cpu io memory pids\n")
+            (attempt / "memory.max").write_text(str(4 * 1024**3) + "\n")
+            (attempt / "memory.swap.max").write_text("0\n")
+            (attempt / "cpu.max").write_text("max 100000\n")
+            (attempt / "pids.max").write_text("256\n")
+            (attempt / "io.stat").write_text("")
+            checker = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                paths=deployment.Paths(cgroup_root=cgroup, attempt_cgroup=attempt),
+                command=fake_command,
+            )
+            self.assertEqual(checker._cgroup_check().reason, "attempt-cpu-unlimited")
+
+            (attempt / "cpu.max").write_text("400000 100000\n")
+            (attempt / "pids.max").write_text("max\n")
+            self.assertEqual(checker._cgroup_check().reason, "attempt-pids-unlimited")
+
+            (attempt / "pids.max").write_text("256\n")
+            (attempt / "io.stat").unlink()
+            self.assertEqual(checker._cgroup_check().reason, "attempt-io-accounting-unavailable")
 
     def test_web_capability_requires_all_available_states(self):
         with tempfile.TemporaryDirectory() as directory:
