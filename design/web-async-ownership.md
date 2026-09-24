@@ -395,6 +395,66 @@ retryable after any other answered non-success, and keeps the whole
 description retryable after a transport failure. A batch Undo never
 navigates: the change it restores never advanced away from a Photo.
 
+### Edit Recipe reads and guarded saves
+
+An Edit Recipe read is owned by the Photo scope with key
+`(requestGeneration, photoId, recipe)`. It starts when a Photo's Develop surface
+opens; the Photo scope aborts it on Photo or source change, and a stale read
+writes neither controls nor committed state.
+
+A save is an admitted write with settlement-family key
+`(photoId, recipe-write)`: the newest save for that Photo owns the Develop
+notice and its connectivity presentation, while a superseded save stays locally
+silent and its committed revision remains observable through the recipe read.
+The client coalesces edits during one gesture and sends one save per settled
+gesture through a single per-Photo queue; a settled gesture waits behind an
+in-flight save instead of running concurrently. Each queued write carries the
+stable request identity captured for it and the revisions the Photographer
+observed; identity is never regenerated for a retry.
+
+`recipe_conflict`, `source_changed`, and `requires_rebind` present current
+server facts and require an explicit Photographer action before a further write;
+they never silently adopt the newer revision or the newer source. An `unknown`
+outcome keeps the pending draft and offers retry under the same identity.
+`unsupported`, `invalid_settings`, `unavailable`, and transport failures
+keep the last committed revisions in the controls and never claim the draft was
+saved. Session undo, redo, and reset are browser-local over drafted settings;
+none is a save until the next settled write.
+
+### Edit Preview requests
+
+An Edit Preview request is owned by the Photo scope with key
+`(requestGeneration, photoId, stage, identity)`. Requests with the same full
+identity coalesce. A changed identity supersedes the older request locally
+without claiming to cancel admitted server work, and displays the queued state
+until a result for the current identity exists. A superseded result never
+publishes, and a refusal names the unavailable stage and reason on the Develop
+surface. Preview failure never changes Originals or the committed recipe.
+
+### Export submission and lifecycle
+
+Export submit, inspect, cancel, and retry are owned by the Photo scope with
+settlement-family key `(photoId, export-command)`. Submission captures the
+revisions the Photographer observed and renders its returned snapshot, and is
+admitted only against a confirmed save; an `unknown` save outcome is reconciled
+first. A submit that loses its response presents an `unknown` outcome and
+resolves by inspecting that Photo's current Exports, never by resubmitting with
+a fresh identity.
+Cancellation settles once against the returned state, and a result that raced it
+is presented as the actual terminal outcome. Inspection polling stops with the
+Photo scope, and a later poll never refreshes controls for a superseded
+identity.
+
+### Artifact downloads
+
+An artifact download is a browser-managed byte transfer owned by the Photo
+scope and follows the Browser image transfer rules: before its scope halts or
+the element is replaced, the client removes the pending transfer and its
+handlers, and a completion writes only while the download record and the Photo
+identity remain current. The Develop surface discloses the artifact's expiry
+from Export metadata. A download requested after expiry presents
+`artifact_expired` and never implies that settings or the artifact changed.
+
 ### Saved Album position
 
 Saved-position writes are admitted writes serialized by the progress queue
@@ -437,6 +497,13 @@ a superseded presentation workflow.
   request. If still current, it renders facts and starts current Preview. It
   sends saved position only while still current immediately before send; once
   sent, that write always settles.
+- Opening a Photo's Develop surface starts the Photo-owned Edit Recipe read and
+  starts no processing. Each settled gesture sends one guarded save through the
+  per-Photo queue; a preview refresh starts only for the committed revision and
+  only while the Photo scope and that revision remain current.
+- Submitting an Export is the admitted submission followed, while the Photo
+  scope and the captured identity remain current, by inspection polling until a
+  terminal state. Cancelling replaces inspection for that Export only.
 - Reopening an expired source is source-owned. It may await independent root
   binding, then starts Browse open, a high-priority source window, optional
   Photo-owned Preview, and conditional saved position. Each child starts only
