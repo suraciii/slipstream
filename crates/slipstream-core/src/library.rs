@@ -2107,7 +2107,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             connection

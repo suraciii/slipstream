@@ -252,23 +252,37 @@ class DeploymentVerifierTests(unittest.TestCase):
             (attempt / "io.stat").write_bytes(b"\xff")
             self.assertEqual(checker._cgroup_check().reason, "attempt-io-accounting-unavailable")
 
-    def test_web_capability_requires_all_available_states(self):
+    def test_web_capability_requires_the_ready_condition_with_profiles(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
             token_file.write_text("synthetic-token\n")
             token_file.chmod(0o600)
 
+            def ready_capability():
+                return {
+                    "state": "ready",
+                    "bundleId": "b" * 64,
+                    "incarnation": "a" * 32,
+                    "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
+                    "profiles": [
+                        {
+                            "profileId": "sony-ilce-7rm5-arw",
+                            "whiteBalanceModes": ["as-shot"],
+                            "whiteBalanceRanges": None,
+                        }
+                    ],
+                    "stages": {"develop": "ready", "film": "unavailable"},
+                }
+
             def urlopen(request, timeout):
                 path = request.full_url.split("/", 3)[-1]
                 if path == "healthz":
-                    value = {"status": "ok"}
-                elif path == "api/status":
-                    value = {"state": "published"}
-                elif path == "api/overview":
-                    value = {"albums": []}
-                else:
-                    value = {"state": "unavailable", "reason": "source-unavailable"}
-                return FakeResponse(value)
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                return FakeResponse(ready_capability())
 
             checker = deployment.DeploymentSnapshot(
                 instance=INSTANCE,
@@ -279,8 +293,60 @@ class DeploymentVerifierTests(unittest.TestCase):
                 urlopen=urlopen,
             )
             checks = checker._web_checks()
+            self.assertTrue(all(check.ok for check in checks), checks)
+
+            # A deployment that cannot prove readiness fails closed with the
+            # observed condition as the detail.
+            def urlopen_blocked(request, timeout):
+                path = request.full_url.split("/", 3)[-1]
+                if path == "healthz":
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                capability = ready_capability()
+                capability["state"] = "resource-unavailable"
+                capability["stages"]["develop"] = "unavailable"
+                return FakeResponse(capability)
+
+            blocked = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="https://photos.example.com",
+                web_token_file=token_file,
+                urlopen=urlopen_blocked,
+            )
+            checks = blocked._web_checks()
             self.assertEqual(checks[0].reason, "web-capability-unavailable")
-            self.assertEqual(checks[0].detail, "source-unavailable")
+            self.assertEqual(checks[0].detail, "resource-unavailable")
+
+            # The profile list stays empty only for `source-unsupported`, so
+            # a `ready` answer without profiles is a failed check.
+            def urlopen_no_profiles(request, timeout):
+                path = request.full_url.split("/", 3)[-1]
+                if path == "healthz":
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                capability = ready_capability()
+                capability["profiles"] = []
+                return FakeResponse(capability)
+
+            empty = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="https://photos.example.com",
+                web_token_file=token_file,
+                urlopen=urlopen_no_profiles,
+            )
+            checks = empty._web_checks()
+            self.assertEqual(checks[0].reason, "web-capability-unavailable")
+            self.assertEqual(checks[0].detail, "profiles")
 
     def test_web_rejects_plain_http_before_sending_bearer(self):
         with tempfile.TemporaryDirectory() as directory:

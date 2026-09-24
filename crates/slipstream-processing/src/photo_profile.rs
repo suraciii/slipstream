@@ -39,6 +39,11 @@ pub const APPROVED_PROFILES: &[ApprovedProfile] = &[
 pub const APPROVED_EXPOSURE_MILLI_EV_MIN: i64 = 0;
 pub const APPROVED_EXPOSURE_MILLI_EV_MAX: i64 = 1000;
 
+/// The white-balance mode the qualified workload admits. It is not
+/// adjustable, so the capability report publishes no executable range beside
+/// it and the capability report's `whiteBalanceRanges` stays `null`.
+pub const APPROVED_WHITE_BALANCE_MODE: &str = "as-shot";
+
 pub fn approved_profile(profile_id: &str) -> Option<&'static ApprovedProfile> {
     APPROVED_PROFILES
         .iter()

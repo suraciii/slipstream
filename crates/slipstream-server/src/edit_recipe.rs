@@ -17,19 +17,13 @@ use slipstream_core::{
 };
 use slipstream_processing::photo_profile::{
     self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN,
+    APPROVED_WHITE_BALANCE_MODE,
 };
 
-use crate::{
-    ProcessingConfig,
-    http::{
-        CLI_CONTRACT_HEADER, HttpState, cli_error, invalid_cli, read_cli_json_body, read_json_body,
-        require_cli_contract, require_published, valid_id,
-    },
+use crate::http::{
+    CLI_CONTRACT_HEADER, HttpState, cli_error, invalid_cli, read_cli_json_body, read_json_body,
+    require_cli_contract, require_published, valid_id,
 };
-
-/// The approved white-balance mode of the first workload. The core state
-/// layer only stores this mode, so every other wire value is invalid input.
-const APPROVED_WHITE_BALANCE: &str = "as-shot";
 
 /// Mirrors the core request-identity bound; the persistence owner enforces
 /// the same limit again before admitting a write.
@@ -37,35 +31,30 @@ const MAXIMUM_REQUEST_ID_BYTES: usize = 128;
 
 // ---------------------------------------------------------------- support state
 
-/// The support state of one Photo's source class against the approved
-/// profiles. States are the closed stage values of the contract: `ready`,
-/// `unavailable`, or `unsupported`.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SupportWire {
-    state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile_id: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
+/// The source support of one Photo, as the merged Photo Development Surface
+/// contract defines it. `state` is closed to `supported`, `unavailable`, or
+/// `unsupported`; `reason` carries one of the closed `supportReason` values
+/// and is non-null only with `unavailable`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SupportClassification {
+    pub(crate) state: &'static str,
+    pub(crate) reason: Option<&'static str>,
 }
 
-/// Whether the develop execution can process this Photo right now. A stored
-/// recipe outside the approved range stays readable, but reports processing
-/// as unavailable instead of being rewritten.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ProcessingWire {
-    state: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
-}
+/// The reason recorded when the Original is absent from its remembered
+/// Location, so no current source fact can be read.
+const ORIGINAL_MISSING: &str = "original-missing";
+
+/// The reason recorded when the Original cannot yield the facts that name
+/// its source class: unreadable bytes, an unreadable camera identity, or an
+/// unrecognized RAW container.
+const ORIGINAL_UNREADABLE: &str = "original-unreadable";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExposureRangeWire {
-    pub(crate) min_ev: f64,
-    pub(crate) max_ev: f64,
+    pub(crate) minimum_ev: f64,
+    pub(crate) maximum_ev: f64,
     pub(crate) step_ev: f64,
 }
 
@@ -73,7 +62,7 @@ pub(crate) struct ExposureRangeWire {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ControlsWire {
     exposure: ExposureRangeWire,
-    white_balance: [&'static str; 1],
+    white_balance_modes: [&'static str; 1],
 }
 
 /// The approved control ranges. They are deployment constants of the
@@ -81,15 +70,15 @@ pub(crate) struct ControlsWire {
 pub(crate) fn approved_controls() -> ControlsWire {
     ControlsWire {
         exposure: approved_exposure_range(),
-        white_balance: [APPROVED_WHITE_BALANCE],
+        white_balance_modes: [APPROVED_WHITE_BALANCE_MODE],
     }
 }
 
 /// The approved finite exposure range of the qualified workload in EV.
 pub(crate) fn approved_exposure_range() -> ExposureRangeWire {
     ExposureRangeWire {
-        min_ev: APPROVED_EXPOSURE_MILLI_EV_MIN as f64 / 1000.0,
-        max_ev: APPROVED_EXPOSURE_MILLI_EV_MAX as f64 / 1000.0,
+        minimum_ev: APPROVED_EXPOSURE_MILLI_EV_MIN as f64 / 1000.0,
+        maximum_ev: APPROVED_EXPOSURE_MILLI_EV_MAX as f64 / 1000.0,
         step_ev: 0.001,
     }
 }
@@ -101,60 +90,71 @@ struct SourceFacts<'a> {
     filename: &'a str,
     make: Option<&'a str>,
     model: Option<&'a str>,
-    processing: Option<&'a ProcessingConfig>,
 }
 
-fn derive_support(facts: SourceFacts<'_>, source_available: bool) -> SupportWire {
-    // A JPEG source is known-unapproved by its kind. For a RAW source the
-    // class identity needs the filename container and the observed camera
-    // make and model. The metadata read deliberately returns defaults when
-    // inspection is saturated, the source changed mid-read, or it cannot be
-    // opened, so a missing identity means the class is unavailable to
-    // observe rather than unlisted.
-    let Some(container) = (facts.kind == OriginalKind::Raw)
-        .then(|| photo_profile::container_of_filename(facts.filename))
-        .flatten()
-    else {
-        return SupportWire {
+/// Classifies one Photo's source class against the approved profiles.
+///
+/// The state is a fact about the class, independent of the deployment's
+/// processing enablement: the capability report owns that boundary. A
+/// missing or unreadable Original reports `unavailable` and never
+/// `supported` or `unsupported`, because no current source fact can be
+/// read. A JPEG source is a known class without an approved profile, so it
+/// reports `unsupported`. For a RAW source the class identity needs the
+/// filename container and the observed camera make and model; the bounded
+/// metadata read deliberately returns defaults when inspection is saturated,
+/// the source changed mid-read, or it cannot be opened, so an unobservable
+/// identity means the class is unavailable to observe rather than unlisted.
+fn derive_support(
+    facts: SourceFacts<'_>,
+    source_available: bool,
+    original_available: bool,
+) -> SupportClassification {
+    if !source_available {
+        // An Original absent from its remembered Location is missing; one
+        // that is present but whose published source facts cannot be read
+        // is unreadable.
+        return SupportClassification {
             state: "unavailable",
-            profile_id: None,
-            reason: Some("source-class-unobservable"),
+            reason: Some(if original_available {
+                ORIGINAL_UNREADABLE
+            } else {
+                ORIGINAL_MISSING
+            }),
+        };
+    }
+    if facts.kind != OriginalKind::Raw {
+        return SupportClassification {
+            state: "unsupported",
+            reason: None,
+        };
+    }
+    let Some(container) = photo_profile::container_of_filename(facts.filename) else {
+        return SupportClassification {
+            state: "unavailable",
+            reason: Some(ORIGINAL_UNREADABLE),
         };
     };
     let (Some(make), Some(model)) = (facts.make, facts.model) else {
-        return SupportWire {
+        return SupportClassification {
             state: "unavailable",
-            profile_id: None,
-            reason: Some("camera-identity-unavailable"),
+            reason: Some(ORIGINAL_UNREADABLE),
         };
     };
     match photo_profile::classify(make, model, &container) {
         // The identity is observed, so a failed match is a known-unapproved
         // class.
-        None => SupportWire {
+        None => SupportClassification {
             state: "unsupported",
-            profile_id: None,
             reason: None,
         },
-        Some(profile) if facts.processing.is_none() => SupportWire {
-            state: "unavailable",
-            profile_id: Some(profile.profile_id),
-            reason: Some("operator-disabled"),
-        },
-        Some(profile) if !source_available => SupportWire {
-            state: "unavailable",
-            profile_id: Some(profile.profile_id),
-            reason: Some("source-unavailable"),
-        },
-        Some(profile) => SupportWire {
-            state: "ready",
-            profile_id: Some(profile.profile_id),
+        Some(_) => SupportClassification {
+            state: "supported",
             reason: None,
         },
     }
 }
 
-// True when the enabled execution payload can represent the stored value:
+/// True when the enabled execution payload can represent the stored value:
 /// a finite multiple of one thousandth of an EV inside the approved range.
 fn representable(settings: &EditRecipeSettings) -> bool {
     let milli = settings.exposure_ev * 1000.0;
@@ -165,75 +165,103 @@ fn representable(settings: &EditRecipeSettings) -> bool {
         && rounded <= APPROVED_EXPOSURE_MILLI_EV_MAX as f64
 }
 
-fn processing_state(support: &SupportWire, recipe: Option<&EditRecipe>) -> ProcessingWire {
-    match support.state {
-        "ready" => match recipe {
-            Some(recipe) if !representable(&recipe.settings) => ProcessingWire {
-                state: "unavailable",
-                reason: Some("recipe-not-representable"),
-            },
-            _ => ProcessingWire {
-                state: "ready",
-                reason: None,
-            },
-        },
-        "unsupported" => ProcessingWire {
+/// Whether the develop execution can process this Photo right now. A stored
+/// recipe outside the approved range, or whose white-balance mode the
+/// capability does not admit, stays readable but reports processing as
+/// unavailable instead of being rewritten; a deployment without the
+/// processing capability or with unreadable source facts reports the same.
+fn processing_available(
+    support: SupportClassification,
+    processing_configured: bool,
+    source_available: bool,
+    recipe: Option<&EditRecipe>,
+) -> bool {
+    let admitted = recipe.is_none_or(|recipe| {
+        matches!(recipe.settings.white_balance, WhiteBalanceIntent::AsShot)
+            && representable(&recipe.settings)
+    });
+    support.state == "supported" && processing_configured && source_available && admitted
+}
+
+/// A deployment whose launcher exposes no photo-processing capability has no
+/// approved source class at all, so a class the compiled list approves still
+/// reads as `unsupported`. This keeps every per-Photo report consistent with
+/// the capability report's empty profile list in that state.
+fn apply_capability_condition(
+    support: SupportClassification,
+    condition: &str,
+) -> SupportClassification {
+    if condition == "source-unsupported" && support.state == "supported" {
+        SupportClassification {
             state: "unsupported",
             reason: None,
-        },
-        _ => ProcessingWire {
-            state: "unavailable",
-            reason: support.reason,
-        },
+        }
+    } else {
+        support
+    }
+}
+
+/// The closed capability condition of this deployment: the operator choice
+/// when disabled, otherwise the condition the launcher answer maps onto.
+async fn capability_condition(state: &HttpState) -> &'static str {
+    match &state.processing {
+        Some(config) => crate::processing_capability::capability_condition(config).await,
+        None => "disabled",
     }
 }
 
 // ---------------------------------------------------------------- wire shapes
 
+/// One stored recipe as the read model renders it. A stored value the
+/// execution payload cannot represent stays readable here, including a
+/// temperature-tint intent no capability admits.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EditRecipeWire {
-    revision: String,
-    source_revision: String,
-    settings: SettingsWire,
+pub(crate) struct RecipeWire {
+    recipe_version: String,
+    exposure_ev: f64,
+    white_balance: serde_json::Value,
 }
 
-impl From<EditRecipe> for EditRecipeWire {
+impl From<EditRecipe> for RecipeWire {
     fn from(recipe: EditRecipe) -> Self {
         Self {
-            revision: recipe.revision,
-            source_revision: recipe.source_revision,
-            settings: SettingsWire {
-                exposure_ev: recipe.settings.exposure_ev,
-                white_balance: white_balance_name(recipe.settings.white_balance),
-            },
+            recipe_version: recipe.revision,
+            exposure_ev: recipe.settings.exposure_ev,
+            white_balance: white_balance_wire(recipe.settings.white_balance),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SettingsWire {
-    exposure_ev: f64,
-    white_balance: &'static str,
-}
-
-fn white_balance_name(intent: WhiteBalanceIntent) -> &'static str {
+/// The stored white-balance intent in the shared field shape: exactly the
+/// mode plus the fields that mode requires.
+fn white_balance_wire(intent: WhiteBalanceIntent) -> serde_json::Value {
     match intent {
-        WhiteBalanceIntent::AsShot => APPROVED_WHITE_BALANCE,
+        WhiteBalanceIntent::AsShot => serde_json::json!({ "mode": APPROVED_WHITE_BALANCE_MODE }),
+        WhiteBalanceIntent::TemperatureTint {
+            temperature_kelvin,
+            tint_milli,
+        } => serde_json::json!({
+            "mode": "temperature-tint",
+            "temperatureKelvin": temperature_kelvin,
+            "tintMilli": tint_milli,
+        }),
     }
 }
 
 /// One recipe read: the current recipe or its absence, the observed source
-/// revision, the source support state, and the approved control ranges.
+/// revision, the source support state with its closed reason, the
+/// processing availability, and the approved control ranges. `sourceRevision`
+/// is null exactly when `sourceSupport` is `unavailable`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EditRecipeResponse {
     photo_id: String,
-    recipe: Option<EditRecipeWire>,
-    source_revision: String,
-    support: SupportWire,
-    processing: ProcessingWire,
+    source_revision: Option<String>,
+    recipe: Option<RecipeWire>,
+    source_support: &'static str,
+    support_reason: Option<&'static str>,
+    processing_available: bool,
     controls: ControlsWire,
 }
 
@@ -243,11 +271,8 @@ pub(crate) struct EditRecipeResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EditRecipeWriteResponse {
     outcome: &'static str,
-    recipe: EditRecipeWire,
+    recipe_version: String,
     source_revision: String,
-    support: SupportWire,
-    processing: ProcessingWire,
-    controls: ControlsWire,
 }
 
 // ---------------------------------------------------------------- request bodies
@@ -265,7 +290,7 @@ struct SaveEditRecipeBody {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SettingsBody {
     exposure_ev: f64,
-    white_balance: String,
+    white_balance: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -322,7 +347,7 @@ fn body_shape_error() -> Response<Body> {
 
 fn settings_error(argument: &'static str, reason: &'static str) -> Response<Body> {
     cli_error(
-        StatusCode::BAD_REQUEST,
+        StatusCode::UNPROCESSABLE_ENTITY,
         "invalid_settings",
         "Correct the settings against the approved ranges and shape.",
         serde_json::json!({"argument": argument, "reason": reason}),
@@ -339,54 +364,53 @@ fn unknown_photo(photo_id: &str) -> Response<Body> {
 }
 
 /// Persistence and read failures are service-availability failures of these
-/// routes, so they carry the closed `processing_unavailable` code with the
-/// operation named in the details.
+/// routes: the service lacks the facts or resources the operation needs, so
+/// they carry the closed `resource_unavailable` code with the operation
+/// named in the details.
 fn storage_error(operation: &'static str) -> Response<Body> {
     cli_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "processing_unavailable",
+        "resource_unavailable",
         "The service cannot read or write the current facts; inspect server health before trying again.",
         serde_json::json!({"operation": operation}),
     )
 }
 
-fn unsupported_photo(photo_id: &str, support: &SupportWire) -> Response<Body> {
+fn unsupported_photo(photo_id: &str) -> Response<Body> {
     cli_error(
-        StatusCode::CONFLICT,
+        StatusCode::UNPROCESSABLE_ENTITY,
         "unsupported_photo",
         "This Photo's source class has no approved profile.",
-        serde_json::json!({"photoId": photo_id, "support": support}),
+        serde_json::json!({"photoId": photo_id}),
+    )
+}
+
+/// The source facts that guard a write cannot be read, so no guarded write
+/// is possible until a later read observes them again.
+fn unavailable_source(photo_id: &str, reason: Option<&'static str>) -> Response<Body> {
+    cli_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "resource_unavailable",
+        "Current source facts cannot be read, so no guarded write is possible.",
+        serde_json::json!({"photoId": photo_id, "supportReason": reason}),
     )
 }
 
 /// Current facts for one conflict-family outcome, so the client can recover
 /// without a second read.
-fn conflict_details(
-    photo_id: &str,
-    read: &EditRecipeRead,
-    support: &SupportWire,
-) -> serde_json::Value {
+fn conflict_details(read: &EditRecipeRead) -> serde_json::Value {
     serde_json::json!({
-        "photoId": photo_id,
-        "recipeRevision": read.recipe.as_ref().map(|recipe| recipe.revision.clone()),
-        "sourceRevision": read.current_source_revision,
-        "support": support,
+        "currentSourceRevision": read.current_source_revision,
+        "currentRecipeVersion": read.recipe.as_ref().map(|recipe| recipe.revision.clone()),
     })
 }
 
 fn conflict_response(
     code: &'static str,
     message: &'static str,
-    photo_id: &str,
     read: EditRecipeRead,
-    support: SupportWire,
 ) -> Response<Body> {
-    cli_error(
-        StatusCode::CONFLICT,
-        code,
-        message,
-        conflict_details(photo_id, &read, &support),
-    )
+    cli_error(StatusCode::CONFLICT, code, message, conflict_details(&read))
 }
 
 // ---------------------------------------------------------------- shared reads
@@ -416,17 +440,12 @@ async fn load_facts(
     Ok((photo, metadata, read))
 }
 
-fn source_facts<'a>(
-    photo: &'a PhotoRead,
-    metadata: &'a CaptureReviewMetadata,
-    state: &'a HttpState,
-) -> SourceFacts<'a> {
+fn source_facts<'a>(photo: &'a PhotoRead, metadata: &'a CaptureReviewMetadata) -> SourceFacts<'a> {
     SourceFacts {
         kind: photo.original_kind,
         filename: &photo.filename,
         make: metadata.make.as_deref(),
         model: metadata.model.as_deref(),
-        processing: state.processing.as_ref(),
     }
 }
 
@@ -455,18 +474,27 @@ pub(crate) async fn get_edit_recipe(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    let support = derive_support(
-        source_facts(&photo, &metadata, &state),
-        read.source_available,
+    let facts = source_facts(&photo, &metadata);
+    let support = apply_capability_condition(
+        derive_support(facts, read.source_available, photo.original_available),
+        capability_condition(&state).await,
     );
-    let processing = processing_state(&support, read.recipe.as_ref());
-    ok_response(&EditRecipeResponse {
-        photo_id,
-        recipe: read.recipe.map(EditRecipeWire::from),
-        source_revision: read.current_source_revision,
+    let processing_available = processing_available(
         support,
-        processing,
+        state.processing.is_some(),
+        read.source_available,
+        read.recipe.as_ref(),
+    );
+    let recipe = read.recipe.map(RecipeWire::from);
+    ok_response(&EditRecipeResponse {
+        source_revision: (support.state != "unavailable")
+            .then(|| read.current_source_revision.clone()),
+        recipe,
+        source_support: support.state,
+        support_reason: support.reason,
+        processing_available,
         controls: approved_controls(),
+        photo_id,
     })
 }
 
@@ -500,10 +528,17 @@ pub(crate) async fn post_edit_recipe(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    let facts = source_facts(&photo, &metadata, &state);
-    let support = derive_support(facts, read.source_available);
-    if support.state == "unsupported" {
-        return unsupported_photo(&photo_id, &support);
+    let facts = source_facts(&photo, &metadata);
+    let support = apply_capability_condition(
+        derive_support(facts, read.source_available, photo.original_available),
+        capability_condition(&state).await,
+    );
+    match support.state {
+        // A known-unapproved class refuses every guarded write.
+        "unsupported" => return unsupported_photo(&photo_id),
+        // The source facts that guard the write cannot be read.
+        "unavailable" => return unavailable_source(&photo_id, support.reason),
+        _ => {}
     }
     let mutation = SaveEditRecipe {
         photo_id: photo_id.clone(),
@@ -516,7 +551,7 @@ pub(crate) async fn post_edit_recipe(
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-save"),
     };
-    map_write_outcome(&state, &photo_id, facts, read, outcome).await
+    map_write_outcome(&state, &photo_id, read, outcome).await
 }
 
 /// `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
@@ -557,10 +592,17 @@ pub(crate) async fn post_edit_recipe_rebind(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    let facts = source_facts(&photo, &metadata, &state);
-    let support = derive_support(facts, read.source_available);
-    if support.state == "unsupported" {
-        return unsupported_photo(&photo_id, &support);
+    let facts = source_facts(&photo, &metadata);
+    let support = apply_capability_condition(
+        derive_support(facts, read.source_available, photo.original_available),
+        capability_condition(&state).await,
+    );
+    match support.state {
+        // A known-unapproved class refuses every guarded write.
+        "unsupported" => return unsupported_photo(&photo_id),
+        // The source facts that guard the write cannot be read.
+        "unavailable" => return unavailable_source(&photo_id, support.reason),
+        _ => {}
     }
     let mutation = RebindEditRecipe {
         photo_id: photo_id.clone(),
@@ -571,15 +613,20 @@ pub(crate) async fn post_edit_recipe_rebind(
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-rebind"),
     };
-    map_write_outcome(&state, &photo_id, facts, read, outcome).await
+    map_write_outcome(&state, &photo_id, read, outcome).await
 }
 
 // ---------------------------------------------------------------- validation
 
 fn validated_settings(body: &SaveEditRecipeBody) -> Option<EditRecipeSettings> {
+    // The shared field shape closes the request identity to 1..=128
+    // characters of ASCII letters, digits, `.`, `_`, or `-`.
     if body.request_id.is_empty()
         || body.request_id.len() > MAXIMUM_REQUEST_ID_BYTES
-        || body.request_id.chars().any(char::is_control)
+        || !body
+            .request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         return None;
     }
@@ -600,35 +647,61 @@ fn validated_settings(body: &SaveEditRecipeBody) -> Option<EditRecipeSettings> {
     if !(APPROVED_EXPOSURE_MILLI_EV_MIN..=APPROVED_EXPOSURE_MILLI_EV_MAX).contains(&milli) {
         return None;
     }
-    if body.settings.white_balance != APPROVED_WHITE_BALANCE {
-        return None;
-    }
+    let white_balance = parse_white_balance_payload(&body.settings.white_balance)?;
     Some(EditRecipeSettings {
         exposure_ev: body.settings.exposure_ev,
-        white_balance: WhiteBalanceIntent::AsShot,
+        white_balance,
     })
+}
+
+/// Parses one shared-field-shape `whiteBalance` value: exactly `mode` plus
+/// the fields that mode requires. The payload bounds are closed and
+/// published independent of admission, so a temperature-tint intent inside
+/// the bounds is wire-valid even though only as-shot is admitted for
+/// execution.
+fn parse_white_balance_payload(value: &serde_json::Value) -> Option<WhiteBalanceIntent> {
+    let object = value.as_object()?;
+    let mode = object.get("mode")?.as_str()?;
+    match mode {
+        APPROVED_WHITE_BALANCE_MODE if object.len() == 1 => Some(WhiteBalanceIntent::AsShot),
+        "temperature-tint" if object.len() == 3 => {
+            let temperature_kelvin = integer_field(object, "temperatureKelvin")?;
+            let tint_milli = integer_field(object, "tintMilli")?;
+            let intent = WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin,
+                tint_milli,
+            };
+            intent.within_payload_bounds().then_some(intent)
+        }
+        _ => None,
+    }
+}
+
+fn integer_field(object: &serde_json::Map<String, serde_json::Value>, name: &str) -> Option<i32> {
+    object
+        .get(name)
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
 }
 
 fn invalid_settings_response() -> Response<Body> {
     settings_error(
         "settings",
-        "The save must carry a nonempty request identity, both expected revisions, and an exposure on the approved thousandth-of-an-EV grid with as-shot white balance.",
+        "The save must carry a nonempty request identity, both expected revisions, and an exposure on the approved thousandth-of-an-EV grid with a white-balance value inside the published payload bounds.",
     )
 }
 
 // ---------------------------------------------------------------- outcome mapping
 
 /// Maps one core write outcome onto the closed outcome and error-code sets.
-/// Conflict-family responses carry the current recipe revision, source
-/// revision, and support state.
+/// Conflict-family responses carry the current source revision and the
+/// current recipe version.
 async fn map_write_outcome(
     state: &HttpState,
     photo_id: &str,
-    facts: SourceFacts<'_>,
     read: EditRecipeRead,
     outcome: EditRecipeWriteOutcome,
 ) -> Response<Body> {
-    let source_available = read.source_available;
     let pre_write_revision = read.recipe.map(|recipe| recipe.revision);
     match outcome {
         EditRecipeWriteOutcome::Saved(recipe) => {
@@ -650,31 +723,23 @@ async fn map_write_outcome(
             let replayed =
                 !installed || pre_write_revision.as_deref() == Some(recipe.revision.as_str());
             let outcome_name = if replayed { "unchanged" } else { "saved" };
-            write_response(outcome_name, recipe, facts, source_available)
+            write_response(outcome_name, recipe)
         }
-        EditRecipeWriteOutcome::Unchanged(recipe) => {
-            write_response("unchanged", recipe, facts, source_available)
-        }
+        EditRecipeWriteOutcome::Unchanged(recipe) => write_response("unchanged", recipe),
         EditRecipeWriteOutcome::Conflict(current) => conflict_response(
             "recipe_conflict",
             "The expected recipe revision is no longer current; decide again from the carried facts.",
-            photo_id,
             current,
-            derive_support(facts, source_available),
         ),
         EditRecipeWriteOutcome::SourceChanged(current) => conflict_response(
             "source_changed",
             "The source revision changed; the saved intent is preserved for an explicit rebind.",
-            photo_id,
             current,
-            derive_support(facts, source_available),
         ),
         EditRecipeWriteOutcome::RequiresRebind(current) => conflict_response(
             "requires_rebind",
             "The stored binding is stale; only an explicit rebind may adopt the new source.",
-            photo_id,
             current,
-            derive_support(facts, source_available),
         ),
         EditRecipeWriteOutcome::RequestConflict => cli_error(
             StatusCode::CONFLICT,
@@ -689,34 +754,17 @@ async fn map_write_outcome(
             "A write requiring an existing recipe found none.",
             serde_json::json!({"photoId": photo_id}),
         ),
-        EditRecipeWriteOutcome::UnsupportedPhoto => {
-            unsupported_photo(photo_id, &derive_support(facts, source_available))
-        }
-        EditRecipeWriteOutcome::Unavailable => cli_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "processing_unavailable",
-            "Current source facts cannot be read, so no guarded write is possible.",
-            serde_json::json!({"photoId": photo_id}),
-        ),
+        EditRecipeWriteOutcome::UnsupportedPhoto => unsupported_photo(photo_id),
+        EditRecipeWriteOutcome::Unavailable => unavailable_source(photo_id, None),
         EditRecipeWriteOutcome::InvalidSettings => invalid_settings_response(),
     }
 }
 
-fn write_response(
-    outcome: &'static str,
-    recipe: EditRecipe,
-    facts: SourceFacts<'_>,
-    source_available: bool,
-) -> Response<Body> {
-    let support = derive_support(facts, source_available);
-    let processing = processing_state(&support, Some(&recipe));
+fn write_response(outcome: &'static str, recipe: EditRecipe) -> Response<Body> {
     ok_response(&EditRecipeWriteResponse {
         outcome,
-        source_revision: recipe.source_revision.clone(),
-        recipe: EditRecipeWire::from(recipe),
-        support,
-        processing,
-        controls: approved_controls(),
+        recipe_version: recipe.revision,
+        source_revision: recipe.source_revision,
     })
 }
 
@@ -728,4 +776,127 @@ fn ok_response<T: Serialize>(value: &T) -> Response<Body> {
         .header(axum::http::header::CONTENT_LENGTH, body.len())
         .body(Body::from(body))
         .expect("valid JSON response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_unsupported_condition_downgrades_only_supported_classes() {
+        let supported = SupportClassification {
+            state: "supported",
+            reason: None,
+        };
+        let downgraded = apply_capability_condition(supported, "source-unsupported");
+        assert_eq!(downgraded.state, "unsupported");
+        assert!(downgraded.reason.is_none());
+
+        // Other conditions keep the class fact; an already-unavailable or
+        // unsupported class never becomes supported.
+        for condition in [
+            "disabled",
+            "launcher-unavailable",
+            "ready",
+            "bundle-unavailable",
+            "resource-unavailable",
+        ] {
+            assert_eq!(
+                apply_capability_condition(supported, condition).state,
+                "supported"
+            );
+        }
+        let unavailable = SupportClassification {
+            state: "unavailable",
+            reason: Some(ORIGINAL_MISSING),
+        };
+        assert_eq!(
+            apply_capability_condition(unavailable, "source-unsupported").state,
+            "unavailable"
+        );
+        let unsupported = SupportClassification {
+            state: "unsupported",
+            reason: None,
+        };
+        assert_eq!(
+            apply_capability_condition(unsupported, "source-unsupported").state,
+            "unsupported"
+        );
+    }
+
+    #[test]
+    fn temperature_tint_payload_bounds_close_the_shape() {
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({"mode": "as-shot"})),
+            Some(WhiteBalanceIntent::AsShot)
+        );
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({
+                "mode": "temperature-tint", "temperatureKelvin": 6500, "tintMilli": -10
+            })),
+            Some(WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin: 6500,
+                tint_milli: -10,
+            })
+        );
+        // Out of bounds, wrong arity, wrong types, and unknown modes refuse.
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({
+                "mode": "temperature-tint", "temperatureKelvin": 999, "tintMilli": 0
+            })),
+            None
+        );
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({
+                "mode": "temperature-tint", "temperatureKelvin": 6500
+            })),
+            None
+        );
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({
+                "mode": "temperature-tint", "temperatureKelvin": 6.5, "tintMilli": 0
+            })),
+            None
+        );
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!({"mode": "custom"})),
+            None
+        );
+        assert_eq!(
+            parse_white_balance_payload(&serde_json::json!("as-shot")),
+            None
+        );
+    }
+
+    #[test]
+    fn stored_temperature_tint_reads_but_blocks_processing() {
+        let recipe = EditRecipe {
+            photo_id: "photo".to_owned(),
+            revision: "rev-1".to_owned(),
+            source_revision: "source-1".to_owned(),
+            settings: EditRecipeSettings {
+                exposure_ev: 0.25,
+                white_balance: WhiteBalanceIntent::TemperatureTint {
+                    temperature_kelvin: 6500,
+                    tint_milli: 12,
+                },
+            },
+        };
+        let wire = RecipeWire::from(recipe.clone());
+        assert_eq!(
+            wire.white_balance,
+            serde_json::json!({
+                "mode": "temperature-tint", "temperatureKelvin": 6500, "tintMilli": 12
+            })
+        );
+        let support = SupportClassification {
+            state: "supported",
+            reason: None,
+        };
+        assert!(!processing_available(support, true, true, Some(&recipe)));
+        // The same exposure as as-shot stays processable.
+        let mut as_shot = recipe.clone();
+        as_shot.settings.white_balance = WhiteBalanceIntent::AsShot;
+        assert!(processing_available(support, true, true, Some(&as_shot)));
+    }
 }

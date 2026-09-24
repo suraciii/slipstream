@@ -64,6 +64,10 @@ struct EditRecipeReceipt {
     source_revision: String,
     exposure_ev: f64,
     white_balance_mode: String,
+    #[serde(default)]
+    temperature_kelvin: Option<i32>,
+    #[serde(default)]
+    tint_milli: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -1716,7 +1720,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 7)
+    preflight_schema_for_max_version(connection, canonical_root, 8)
 }
 
 fn preflight_schema_for_max_version(
@@ -1747,6 +1751,8 @@ fn preflight_schema_for_max_version(
         6 => validate_canonical_schema(connection, SchemaVersion::V6)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         7 => validate_canonical_schema(connection, SchemaVersion::V7)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        8 => validate_canonical_schema(connection, SchemaVersion::V8)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -1784,7 +1790,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 7 {
+    if version > 8 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -1831,13 +1837,18 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         7 => validate_canonical_schema(&transaction, SchemaVersion::V7)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        8 => validate_canonical_schema(&transaction, SchemaVersion::V8)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
         migrate_v5(&transaction)?;
     }
-    if version != 7 {
+    if version < 7 {
         migrate_v6(&transaction)?;
+    }
+    if version < 8 {
+        migrate_v7(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -1856,7 +1867,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -2237,6 +2248,36 @@ fn migrate_v6(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)?;
     validate_canonical_schema(transaction, SchemaVersion::V7)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
+fn migrate_v7(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V7)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // The closed white-balance payload bounds are published independent of
+    // admission, so a recipe can retain a temperature-tint editing intent
+    // that no capability admits for execution. The rebuild widens the mode
+    // column and adds the two nullable intent values; existing as-shot rows
+    // keep null values.
+    transaction
+        .execute_batch(
+            "ALTER TABLE edit_recipes RENAME TO edit_recipes_v7;
+             CREATE TABLE edit_recipes(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               revision TEXT NOT NULL CHECK(length(revision) > 0),
+               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+               exposure_ev REAL NOT NULL CHECK(exposure_ev BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308),
+               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode IN ('as-shot','temperature-tint')),
+               temperature_kelvin INTEGER CHECK(temperature_kelvin IS NULL OR temperature_kelvin BETWEEN 1000 AND 40000),
+               tint_milli INTEGER CHECK(tint_milli IS NULL OR tint_milli BETWEEN -150000 AND 150000)
+             );
+             INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+               SELECT photo_id,revision,source_revision,exposure_ev,white_balance_mode FROM edit_recipes_v7;
+             DROP TABLE edit_recipes_v7;
+             PRAGMA user_version = 8;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
@@ -2823,8 +2864,13 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&readonly, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // A library written by the previous release is still canonical at V7;
+    // the writable pass below brings it to the current schema.
+    if validate_canonical_schema(&readonly, SchemaVersion::V8).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V7).is_err()
+    {
+        return Err(PersistenceError::UnsupportedSchema);
+    }
     let stored_root = required_root_binding(&readonly)?;
     drop(readonly);
 
@@ -2874,8 +2920,10 @@ pub(crate) fn expand_library_binding(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&connection, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // Bring a previous-release schema up to the current one with the same
+    // migration chain startup uses, so the expansion writes against the
+    // canonical current tables.
+    startup_schema(&state, &database_name, &mut connection, &stored_root)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
     }
@@ -2887,7 +2935,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -2937,7 +2985,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3725,7 +3773,8 @@ fn read_edit_recipe(
     let row = connection
         .query_row(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
-                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode
+                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
+                    e.temperature_kelvin,e.tint_milli
              FROM photos p JOIN original_files o ON o.id=p.original_id
              LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
             [photo_id],
@@ -3739,6 +3788,8 @@ fn read_edit_recipe(
                 let recipe_source_revision: Option<String> = row.get(6)?;
                 let exposure_ev: Option<f64> = row.get(7)?;
                 let white_balance_mode: Option<String> = row.get(8)?;
+                let temperature_kelvin: Option<i32> = row.get(9)?;
+                let tint_milli: Option<i32> = row.get(10)?;
                 let recipe = match (
                     recipe_revision,
                     recipe_source_revision,
@@ -3753,7 +3804,11 @@ fn read_edit_recipe(
                             source_revision,
                             settings: EditRecipeSettings {
                                 exposure_ev,
-                                white_balance: parse_white_balance_intent(&mode)?,
+                                white_balance: parse_white_balance_intent(
+                                    &mode,
+                                    temperature_kelvin,
+                                    tint_milli,
+                                )?,
                             },
                         })
                     }
@@ -3783,12 +3838,27 @@ fn validate_edit_recipe_request_id(request_id: &str) -> bool {
 }
 
 fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, PersistenceError> {
+    // The as-shot formula is unchanged so receipts written by earlier
+    // versions keep replaying; a value-carrying intent serializes its
+    // values because two different payloads under one request identity
+    // must never collide.
+    let white_balance = match mutation.settings.white_balance {
+        WhiteBalanceIntent::AsShot => serde_json::json!("as-shot"),
+        WhiteBalanceIntent::TemperatureTint {
+            temperature_kelvin,
+            tint_milli,
+        } => serde_json::json!({
+            "mode": "temperature-tint",
+            "temperature_kelvin": temperature_kelvin,
+            "tint_milli": tint_milli,
+        }),
+    };
     let payload = serde_json::json!({
         "photo_id": mutation.photo_id,
         "expected_recipe_revision": mutation.expected_recipe_revision,
         "expected_source_revision": mutation.expected_source_revision,
         "exposure_ev": mutation.settings.exposure_ev,
-        "white_balance": white_balance_intent_name(mutation.settings.white_balance),
+        "white_balance": white_balance,
     });
     let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -3832,8 +3902,12 @@ fn write_edit_recipe_receipt(
 }
 
 fn receipt_recipe(receipt: EditRecipeReceipt) -> Result<EditRecipe, PersistenceError> {
-    let white_balance = parse_white_balance_intent(&receipt.white_balance_mode)
-        .map_err(|_| PersistenceError::Storage)?;
+    let white_balance = parse_white_balance_intent(
+        &receipt.white_balance_mode,
+        receipt.temperature_kelvin,
+        receipt.tint_milli,
+    )
+    .map_err(|_| PersistenceError::Storage)?;
     Ok(EditRecipe {
         photo_id: receipt.photo_id,
         revision: receipt.revision,
@@ -3852,6 +3926,7 @@ fn save_edit_recipe(
     mutation: SaveEditRecipe,
 ) -> Result<EditRecipeWriteOutcome, PersistenceError> {
     if !mutation.settings.exposure_ev.is_finite()
+        || !mutation.settings.white_balance.within_payload_bounds()
         || mutation.expected_source_revision.is_empty()
         || !validate_edit_recipe_request_id(&mutation.request_id)
     {
@@ -3903,6 +3978,8 @@ fn save_edit_recipe(
         if let Some(recipe) = &current.recipe
             && recipe.settings == mutation.settings
         {
+            let (temperature_kelvin, tint_milli) =
+                white_balance_intent_values(recipe.settings.white_balance);
             write_edit_recipe_receipt(
                 transaction,
                 &mutation.request_id,
@@ -3915,25 +3992,32 @@ fn save_edit_recipe(
                     exposure_ev: recipe.settings.exposure_ev,
                     white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
                         .to_owned(),
+                    temperature_kelvin,
+                    tint_milli,
                 },
             )?;
             return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
         }
 
         let revision = random_uuid_v4()?;
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(mutation.settings.white_balance);
         transaction
             .execute(
-                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
-                 VALUES(?,?,?,?,?)
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli)
+                 VALUES(?,?,?,?,?,?,?)
                  ON CONFLICT(photo_id) DO UPDATE SET revision=excluded.revision,
                     source_revision=excluded.source_revision,exposure_ev=excluded.exposure_ev,
-                    white_balance_mode=excluded.white_balance_mode",
+                    white_balance_mode=excluded.white_balance_mode,
+                    temperature_kelvin=excluded.temperature_kelvin,tint_milli=excluded.tint_milli",
                 params![
                     mutation.photo_id,
                     revision,
                     mutation.expected_source_revision,
                     mutation.settings.exposure_ev,
                     white_balance_intent_name(mutation.settings.white_balance),
+                    temperature_kelvin,
+                    tint_milli,
                 ],
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -3943,6 +4027,8 @@ fn save_edit_recipe(
             source_revision: mutation.expected_source_revision,
             settings: mutation.settings,
         };
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(recipe.settings.white_balance);
         write_edit_recipe_receipt(
             transaction,
             &mutation.request_id,
@@ -3955,6 +4041,8 @@ fn save_edit_recipe(
                 exposure_ev: recipe.settings.exposure_ev,
                 white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
                     .to_owned(),
+                temperature_kelvin,
+                tint_milli,
             },
         )?;
         Ok(EditRecipeWriteOutcome::Saved(recipe))
@@ -4042,15 +4130,38 @@ fn photo_processing_source(
 }
 
 fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
+    intent.mode_name()
+}
+
+fn white_balance_intent_values(intent: WhiteBalanceIntent) -> (Option<i32>, Option<i32>) {
     match intent {
-        WhiteBalanceIntent::AsShot => "as-shot",
+        WhiteBalanceIntent::AsShot => (None, None),
+        WhiteBalanceIntent::TemperatureTint {
+            temperature_kelvin,
+            tint_milli,
+        } => (Some(temperature_kelvin), Some(tint_milli)),
     }
 }
 
-fn parse_white_balance_intent(value: &str) -> rusqlite::Result<WhiteBalanceIntent> {
-    match value {
-        "as-shot" => Ok(WhiteBalanceIntent::AsShot),
-        _ => Err(rusqlite::Error::InvalidQuery),
+fn parse_white_balance_intent(
+    mode: &str,
+    temperature_kelvin: Option<i32>,
+    tint_milli: Option<i32>,
+) -> rusqlite::Result<WhiteBalanceIntent> {
+    let intent = match (mode, temperature_kelvin, tint_milli) {
+        ("as-shot", None, None) => WhiteBalanceIntent::AsShot,
+        ("temperature-tint", Some(temperature_kelvin), Some(tint_milli)) => {
+            WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin,
+                tint_milli,
+            }
+        }
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    if intent.within_payload_bounds() {
+        Ok(intent)
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
     }
 }
 
@@ -6002,7 +6113,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
     }
 
     #[tokio::test]
@@ -6083,12 +6194,12 @@ mod tests {
         persistence.shutdown().unwrap();
 
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             connection
@@ -6634,9 +6745,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -6645,7 +6756,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v8_database_is_rejected_without_changes() {
+    fn newer_v9_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -6653,7 +6764,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 8)
+            .pragma_update(None, "user_version", 9)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -6737,7 +6848,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -6908,7 +7019,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 

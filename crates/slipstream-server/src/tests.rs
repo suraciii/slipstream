@@ -7286,13 +7286,22 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         processing,
         serde_json::json!({
             "state": "disabled",
-            "launcher": "disabled",
-            "source": "disabled",
-            "bundle": "disabled",
-            "reason": "operator-disabled",
-            "stages": {"develop": "unavailable", "film": "unavailable"},
-            "profileIds": ["sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"],
-            "exposure": {"minEv": 0.0, "maxEv": 1.0, "stepEv": 0.001}
+            "bundleId": null,
+            "incarnation": null,
+            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
+            "profiles": [
+                {
+                    "profileId": "sony-ilce-7rm5-arw",
+                    "whiteBalanceModes": ["as-shot"],
+                    "whiteBalanceRanges": null
+                },
+                {
+                    "profileId": "sony-ilce-7cm2-arw",
+                    "whiteBalanceModes": ["as-shot"],
+                    "whiteBalanceRanges": null
+                }
+            ],
+            "stages": {"develop": "unavailable", "film": "unavailable"}
         })
     );
     let configured_router = crate::http::create_router_with_processing(
@@ -7318,14 +7327,23 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
     assert_eq!(
         opted_in,
         serde_json::json!({
-            "state": "unavailable",
-            "launcher": "unavailable",
-            "source": "unavailable",
-            "bundle": "unavailable",
-            "reason": "launcher-unavailable",
-            "stages": {"develop": "unavailable", "film": "unavailable"},
-            "profileIds": ["sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"],
-            "exposure": {"minEv": 0.0, "maxEv": 1.0, "stepEv": 0.001}
+            "state": "launcher-unavailable",
+            "bundleId": null,
+            "incarnation": null,
+            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
+            "profiles": [
+                {
+                    "profileId": "sony-ilce-7rm5-arw",
+                    "whiteBalanceModes": ["as-shot"],
+                    "whiteBalanceRanges": null
+                },
+                {
+                    "profileId": "sony-ilce-7cm2-arw",
+                    "whiteBalanceModes": ["as-shot"],
+                    "whiteBalanceRanges": null
+                }
+            ],
+            "stages": {"develop": "unavailable", "film": "unavailable"}
         })
     );
     let health = send(
@@ -9770,7 +9788,7 @@ fn save_body(
         "requestId": request_id,
         "expectedRecipeRevision": expected_recipe_revision,
         "expectedSourceRevision": expected_source_revision,
-        "settings": {"exposureEv": exposure_ev, "whiteBalance": "as-shot"}
+        "settings": {"exposureEv": exposure_ev, "whiteBalance": {"mode": "as-shot"}}
     })
 }
 
@@ -9778,8 +9796,9 @@ fn error_code(body: &serde_json::Value) -> &str {
     body["error"]["code"].as_str().unwrap_or("")
 }
 
-/// The ready support state requires the approved camera identity, an ARW
-/// container, and the configured processing deployment.
+/// The supported source support requires the approved camera identity and an
+/// ARW container; it is a fact about the class, so it survives a deployment
+/// without the processing capability while processing becomes unavailable.
 #[tokio::test]
 async fn edit_recipe_read_reports_recipe_absence_support_and_controls() {
     let (base, config) = prepare_fixture();
@@ -9798,35 +9817,24 @@ async fn edit_recipe_read_reports_recipe_absence_support_and_controls() {
     assert_eq!(read["photoId"], photo_id);
     assert!(read["recipe"].is_null());
     assert!(!read["sourceRevision"].as_str().unwrap().is_empty());
-    assert_eq!(
-        read["support"],
-        serde_json::json!({"state": "ready", "profileId": "sony-ilce-7rm5-arw"})
-    );
-    assert_eq!(read["processing"], serde_json::json!({"state": "ready"}));
+    assert_eq!(read["sourceSupport"], "supported");
+    assert!(read["supportReason"].is_null());
+    assert_eq!(read["processingAvailable"], true);
     assert_eq!(
         read["controls"],
         serde_json::json!({
-            "exposure": {"minEv": 0.0, "maxEv": 1.0, "stepEv": 0.001},
-            "whiteBalance": ["as-shot"]
+            "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
+            "whiteBalanceModes": ["as-shot"]
         })
     );
 
-    // Without the configured deployment the same class reports the disabled
-    // pipeline instead of readiness.
+    // Without the configured deployment the class stays supported; only the
+    // processing availability of the Photo changes.
     let plain = authorized_router(Arc::clone(&application), config.web_root());
     let (_, disabled) = get_edit_recipe(&plain, &photo_id).await;
-    assert_eq!(
-        disabled["support"],
-        serde_json::json!({
-            "state": "unavailable",
-            "profileId": "sony-ilce-7rm5-arw",
-            "reason": "operator-disabled"
-        })
-    );
-    assert_eq!(
-        disabled["processing"],
-        serde_json::json!({"state": "unavailable", "reason": "operator-disabled"})
-    );
+    assert_eq!(disabled["sourceSupport"], "supported");
+    assert!(disabled["supportReason"].is_null());
+    assert_eq!(disabled["processingAvailable"], false);
 
     // An invalid Photo reference fails with the closed unknown_photo code.
     let response = get_cli_json(
@@ -9884,7 +9892,8 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     let detail = cli_photo_read(&router, &photo_id).await;
     assert_eq!(detail["hasSavedEdits"], false);
 
-    // The first save creates a revision.
+    // The first save creates a revision. A success body carries exactly the
+    // outcome, the committed recipe version, and the bound source revision.
     let (status, saved) = save_recipe(
         &router,
         &photo_id,
@@ -9893,14 +9902,8 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["outcome"], "saved");
-    assert_eq!(
-        saved["recipe"]["settings"],
-        serde_json::json!({"exposureEv": 0.25, "whiteBalance": "as-shot"})
-    );
-    assert_eq!(saved["recipe"]["sourceRevision"], source_revision);
+    let revision = saved["recipeVersion"].as_str().unwrap().to_owned();
     assert_eq!(saved["sourceRevision"], source_revision);
-    assert_eq!(saved["support"]["state"], "ready");
-    let revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
 
     // Photo facts now report the saved edit through detail, Browse, and the
     // bounded Photo query.
@@ -9955,7 +9958,7 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["outcome"], "unchanged");
-    assert_eq!(replay["recipe"]["revision"], revision);
+    assert_eq!(replay["recipeVersion"], revision);
 
     // The same identity with a different payload is refused.
     let (status, request_conflict) = save_recipe(
@@ -9977,7 +9980,7 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(second["outcome"], "saved");
-    let second_revision = second["recipe"]["revision"].as_str().unwrap().to_owned();
+    let second_revision = second["recipeVersion"].as_str().unwrap().to_owned();
     assert_ne!(second_revision, revision);
     let (status, stale_replay) = save_recipe(
         &router,
@@ -9987,9 +9990,10 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stale_replay["outcome"], "unchanged");
-    assert_eq!(stale_replay["recipe"]["revision"], revision);
+    assert_eq!(stale_replay["recipeVersion"], revision);
 
-    // A stale recipe revision conflicts and carries current facts.
+    // A stale recipe revision conflicts and carries the current facts under
+    // the contract's field names.
     let (status, recipe_conflict) = save_recipe(
         &router,
         &photo_id,
@@ -10004,16 +10008,12 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&recipe_conflict), "recipe_conflict");
     assert_eq!(
-        recipe_conflict["error"]["details"]["recipeRevision"],
+        recipe_conflict["error"]["details"]["currentRecipeVersion"],
         second_revision
     );
     assert_eq!(
-        recipe_conflict["error"]["details"]["sourceRevision"],
+        recipe_conflict["error"]["details"]["currentSourceRevision"],
         source_revision
-    );
-    assert_eq!(
-        recipe_conflict["error"]["details"]["support"]["state"],
-        "ready"
     );
 
     // A changed source fails a stale save and preserves the saved intent.
@@ -10051,18 +10051,19 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&source_changed), "source_changed");
-    // The carried facts name the currently committed recipe revision.
+    // The carried facts name the currently committed recipe version and the
+    // newly published source revision.
     assert_eq!(
-        source_changed["error"]["details"]["recipeRevision"],
+        source_changed["error"]["details"]["currentRecipeVersion"],
         second_revision
     );
     assert_eq!(
-        source_changed["error"]["details"]["sourceRevision"],
+        source_changed["error"]["details"]["currentSourceRevision"],
         new_source
     );
 
     // The explicit rebind adopts the newly observed source revision with a
-    // new recipe revision.
+    // new recipe version, and a read renders the committed intent.
     let (status, rebound) = rebind_recipe(
         &router,
         &photo_id,
@@ -10074,18 +10075,27 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rebound["outcome"], "saved");
-    let rebound_revision = rebound["recipe"]["revision"].as_str().unwrap().to_owned();
+    let rebound_revision = rebound["recipeVersion"].as_str().unwrap().to_owned();
     assert_ne!(rebound_revision, second_revision);
-    assert_eq!(rebound["recipe"]["sourceRevision"], new_source);
-    // The rebind carries the committed settings of the rebound recipe.
-    assert_eq!(rebound["recipe"]["settings"]["exposureEv"], 0.75);
+    assert_eq!(rebound["sourceRevision"], new_source);
+    // The rebound recipe keeps its committed settings and renders the stored
+    // white-balance mode in the shared field shape.
+    let (_, rebound_read) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(rebound_read["recipe"]["recipeVersion"], rebound_revision);
+    assert_eq!(rebound_read["recipe"]["exposureEv"], 0.75);
+    assert_eq!(
+        rebound_read["recipe"]["whiteBalance"],
+        serde_json::json!({"mode": "as-shot"})
+    );
+    assert_eq!(rebound_read["sourceRevision"], new_source);
+    assert_eq!(rebound_read["sourceSupport"], "supported");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
 
 /// A Photo whose source class has no approved profile is refused before any
-/// guarded write and reads as unsupported.
+/// guarded write and reads as unsupported, with a present source revision.
 #[tokio::test]
 async fn edit_recipe_refuses_unsupported_source_classes() {
     let (base, config) = prepare_fixture();
@@ -10102,13 +10112,20 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
     let unapproved_id = by_location["other.ARW"].clone();
     let jpeg_id = by_location["plain.jpg"].clone();
 
+    // The observed identity without a matching profile is unsupported.
     let (status, read) = get_edit_recipe(&router, &unapproved_id).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(read["support"], serde_json::json!({"state": "unsupported"}));
-    assert_eq!(
-        read["processing"],
-        serde_json::json!({"state": "unsupported"})
-    );
+    assert_eq!(read["sourceSupport"], "unsupported");
+    assert!(read["supportReason"].is_null());
+    assert!(!read["sourceRevision"].as_str().unwrap().is_empty());
+    assert_eq!(read["processingAvailable"], false);
+
+    // A JPEG is a known class without an approved profile, so it reads as
+    // unsupported too.
+    let (status, jpeg_read) = get_edit_recipe(&router, &jpeg_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jpeg_read["sourceSupport"], "unsupported");
+    assert!(jpeg_read["supportReason"].is_null());
 
     for photo_id in [unapproved_id, jpeg_id] {
         let (status, refused) = save_recipe(
@@ -10117,7 +10134,7 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
             save_body("refused", None, "00000000-0000-4000-8000-000000000000", 0.1),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error_code(&refused), "unsupported_photo");
         let (status, rebound) = rebind_recipe(
             &router,
@@ -10128,7 +10145,7 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error_code(&rebound), "unsupported_photo");
     }
 
@@ -10137,7 +10154,9 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
 }
 
 /// A RAW Photo whose camera identity cannot be observed reads as
-/// unavailable, not unsupported, and its writes are not blocked.
+/// unavailable with the closed unreadable-Original reason, reports a null
+/// source revision, and refuses every guarded write with the closed
+/// resource refusal.
 #[tokio::test]
 async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
     let (base, config) = prepare_fixture();
@@ -10152,32 +10171,92 @@ async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
         .unwrap();
 
     let (_, read) = get_edit_recipe(&router, &photo_id).await;
-    assert_eq!(
-        read["support"],
-        serde_json::json!({"state": "unavailable", "reason": "camera-identity-unavailable"})
-    );
-    assert_eq!(
-        read["processing"],
-        serde_json::json!({"state": "unavailable", "reason": "camera-identity-unavailable"})
-    );
-    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+    assert_eq!(read["sourceSupport"], "unavailable");
+    assert_eq!(read["supportReason"], "original-unreadable");
+    // The null source revision marks exactly the unavailable state.
+    assert!(read["sourceRevision"].is_null());
+    assert_eq!(read["processingAvailable"], false);
 
-    // The write is admitted: the class is unobservable, not refused.
-    let (status, saved) = save_recipe(
+    // The identity is unobservable, so no guarded write is possible.
+    let (status, refused) = save_recipe(
         &router,
         &photo_id,
-        save_body("opaque-save", None, &source_revision, 0.4),
+        save_body(
+            "opaque-save",
+            None,
+            "00000000-0000-4000-8000-000000000000",
+            0.4,
+        ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(saved["outcome"], "saved");
-    assert_eq!(saved["recipe"]["settings"]["exposureEv"], 0.4);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&refused), "resource_unavailable");
+    let (status, rebind_refused) = rebind_recipe(
+        &router,
+        &photo_id,
+        serde_json::json!({
+            "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
+            "expectedSourceRevision": "00000000-0000-4000-8000-000000000000",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&rebind_refused), "resource_unavailable");
 
     // The metadata response reports the absent camera identity as absent
     // values, not as a failure.
     let detail = cli_photo_read(&router, &photo_id).await;
     assert!(detail["metadata"]["make"].is_null());
     assert!(detail["metadata"]["model"].is_null());
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// An Original missing from its remembered Location reports unavailable with
+/// the closed missing-Original reason and the same null source revision.
+#[tokio::test]
+async fn edit_recipe_reports_missing_original_as_unavailable() {
+    let (base, config) = prepare_fixture();
+    let raw_path = config.library_root.join("vanishing.ARW");
+    approved_raw_fixture(&raw_path);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = configured_router(&application, config.web_root());
+    let by_location = photo_ids_by_location(
+        &application,
+        &browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+    )
+    .await;
+    let photo_id = by_location["vanishing.ARW"].clone();
+
+    let (_, before) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(before["sourceSupport"], "supported");
+
+    fs::remove_file(&raw_path).unwrap();
+    let scanned = post_json(&router, "/api/scan", serde_json::json!({}), None).await;
+    assert_eq!(scanned.status(), StatusCode::OK);
+    wait_for_scan_settled(&application).await;
+
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(read["sourceSupport"], "unavailable");
+    assert_eq!(read["supportReason"], "original-missing");
+    assert!(read["sourceRevision"].is_null());
+    assert_eq!(read["processingAvailable"], false);
+
+    let (status, refused) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "missing-save",
+            None,
+            "00000000-0000-4000-8000-000000000000",
+            0.2,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&refused), "resource_unavailable");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -10205,30 +10284,78 @@ async fn edit_recipe_validates_settings_before_the_write() {
         save_body("bad-range", None, &source_revision, 1.5),
         save_body("off-grid", None, &source_revision, 0.0005),
         save_body("", None, &source_revision, 0.1),
+        // The request identity admits only letters, digits, `.`, `_`, `-`.
+        save_body("space id", None, &source_revision, 0.1),
+        save_body("slash/id", None, &source_revision, 0.1),
         serde_json::json!({
             "requestId": "custom-wb",
             "expectedSourceRevision": source_revision,
-            "settings": {"exposureEv": 0.1, "whiteBalance": "custom"}
+            "settings": {"exposureEv": 0.1, "whiteBalance": {"mode": "custom"}}
+        }),
+        serde_json::json!({
+            "requestId": "out-of-bounds",
+            "expectedSourceRevision": source_revision,
+            "settings": {"exposureEv": 0.1, "whiteBalance": {"mode": "temperature-tint", "temperatureKelvin": 500, "tintMilli": 0}}
         }),
         serde_json::json!({
             "requestId": "unknown-field",
             "expectedSourceRevision": source_revision,
-            "settings": {"exposureEv": 0.1, "whiteBalance": "as-shot", "tint": 3},
+            "settings": {"exposureEv": 0.1, "whiteBalance": {"mode": "as-shot", "tint": 3}},
         }),
     ] {
         let (status, refused) = save_recipe(&router, &photo_id, body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error_code(&refused), "invalid_settings");
     }
 
-    // An empty rebind revision and an unknown rebind field are invalid input.
+    // A temperature-tint intent inside the published payload bounds is
+    // wire-valid editing intent: it commits like any save, reads back with
+    // its values, and reports processing as unavailable because the
+    // capability does not admit the mode.
+    let (status, saved) = save_recipe(
+        &router,
+        &photo_id,
+        serde_json::json!({
+            "requestId": "tint-intent",
+            "expectedSourceRevision": source_revision,
+            "settings": {"exposureEv": 0.3, "whiteBalance": {"mode": "temperature-tint", "temperatureKelvin": 6500, "tintMilli": -12}}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["outcome"], "saved");
+    let tint_revision = saved["recipeVersion"].as_str().unwrap().to_owned();
+    // The identical intent replays as unchanged: different values under the
+    // same request identity would conflict.
+    let (status, replay) = save_recipe(
+        &router,
+        &photo_id,
+        serde_json::json!({
+            "requestId": "tint-intent",
+            "expectedSourceRevision": source_revision,
+            "settings": {"exposureEv": 0.3, "whiteBalance": {"mode": "temperature-tint", "temperatureKelvin": 6500, "tintMilli": -12}}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["outcome"], "unchanged");
+    assert_eq!(replay["recipeVersion"], tint_revision);
+    let (_, tint_read) = get_edit_recipe(&router, &photo_id).await;
+    assert_eq!(
+        tint_read["recipe"]["whiteBalance"],
+        serde_json::json!({"mode": "temperature-tint", "temperatureKelvin": 6500, "tintMilli": -12})
+    );
+    assert_eq!(tint_read["recipe"]["exposureEv"], 0.3);
+    assert_eq!(tint_read["processingAvailable"], false);
+
+    // An empty rebind revision and an unknown rebind field are invalid settings.
     let (status, refused) = rebind_recipe(
         &router,
         &photo_id,
         serde_json::json!({"expectedRecipeRevision": "", "expectedSourceRevision": source_revision}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error_code(&refused), "invalid_settings");
     let (status, refused) = rebind_recipe(
         &router,
@@ -10240,7 +10367,7 @@ async fn edit_recipe_validates_settings_before_the_write() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(error_code(&refused), "invalid_settings");
 
     // The same Web route works without the CLI contract header.
@@ -10258,7 +10385,7 @@ async fn edit_recipe_validates_settings_before_the_write() {
     let web_saved = post_json(
         &router,
         &format!("/api/photos/{photo_id}/edit-recipe"),
-        save_body("web-save", None, &source_revision, 0.1),
+        save_body("web-save", Some(&tint_revision), &source_revision, 0.1),
         None,
     )
     .await;
@@ -10294,7 +10421,7 @@ async fn edit_recipe_validates_settings_before_the_write() {
             .unwrap(),
     )
     .await;
-    assert_eq!(web_malformed.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(web_malformed.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let refused = response_json(web_malformed).await;
     assert_eq!(error_code(&refused), "invalid_settings");
 

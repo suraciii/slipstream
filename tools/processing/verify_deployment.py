@@ -417,16 +417,52 @@ class DeploymentSnapshot:
         if not isinstance(overview.get("albums"), list):
             return [Check("web-capability", False, "web-album-response-invalid")]
         capability = values["/api/processing/capability"]
-        expected = {"state": "available", "launcher": "available", "source": "available", "bundle": "available"}
         if not isinstance(capability, dict):
             return [Check("web-capability", False, "web-capability-response-invalid")]
-        for key, value in expected.items():
-            if capability.get(key) != value:
-                reason = capability.get("reason")
-                detail = reason if isinstance(reason, str) else f"{key}={capability.get(key)!r}"
-                return [Check("web-capability", False, "web-capability-unavailable", detail)]
-        if capability.get("reason") is not None:
-            return [Check("web-capability", False, "web-capability-reason-present")]
+        # The merged Photo Development service surface closes the capability
+        # contract: a qualified deployment reports `ready` with a proven
+        # develop stage, the approved per-class profiles, and the launcher
+        # identities it observed.
+        if capability.get("state") != "ready":
+            return [
+                Check("web-capability", False, "web-capability-unavailable", str(capability.get("state")))
+            ]
+        stages = capability.get("stages")
+        if not isinstance(stages, dict) or stages.get("develop") != "ready":
+            return [Check("web-capability", False, "web-capability-unavailable", "develop-stage")]
+        if stages.get("film") != "unavailable":
+            return [Check("web-capability", False, "web-capability-response-invalid", "film-stage")]
+        bundle_id = capability.get("bundleId")
+        incarnation = capability.get("incarnation")
+        if (
+            not isinstance(bundle_id, str)
+            or not _lower_hex(bundle_id, 64)
+            or not isinstance(incarnation, str)
+            or not _lower_hex(incarnation, 32)
+        ):
+            return [Check("web-capability", False, "web-capability-response-invalid", "identities")]
+        if capability.get("exposure") != {
+            "minimumEv": 0.0,
+            "maximumEv": 1.0,
+            "stepEv": 0.001,
+        }:
+            return [Check("web-capability", False, "web-capability-response-invalid", "exposure")]
+        profiles = capability.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            # The profile list stays empty only for `source-unsupported`,
+            # which cannot be `ready`.
+            return [Check("web-capability", False, "web-capability-unavailable", "profiles")]
+        for profile in profiles:
+            if (
+                not isinstance(profile, dict)
+                or not isinstance(profile.get("profileId"), str)
+                or not 1 <= len(profile["profileId"]) <= 64
+                or profile.get("whiteBalanceModes") != ["as-shot"]
+                or profile.get("whiteBalanceRanges") is not None
+            ):
+                return [
+                    Check("web-capability", False, "web-capability-response-invalid", "profiles")
+                ]
         return [
             Check("web-health", True),
             Check("web-library", True),
