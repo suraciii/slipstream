@@ -158,6 +158,7 @@ fn fixture_with(photo_names: &[&str]) -> (PathBuf, Config) {
         port: 0,
         web_root: Some(web),
         processing: None,
+        export_retained_output_bytes: None,
     };
     (base, config)
 }
