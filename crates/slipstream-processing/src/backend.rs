@@ -1416,40 +1416,86 @@ fn count_terminal_source(raw: &str, total: &mut usize) -> Result<()> {
     Ok(())
 }
 
-fn optional_terminal_io_source(path: &Path, total: &mut usize) -> Option<String> {
-    let remaining = crate::protocol::TERMINAL_SNAPSHOT_BYTES.checked_sub(*total)?;
-    let mut bytes = Vec::new();
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)
-        .ok()?
-        .take(remaining as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > remaining {
-        return None;
-    }
-    let raw = String::from_utf8(bytes).ok()?;
-    let mut candidate_total = *total;
-    count_terminal_io_source(&raw, &mut candidate_total).ok()?;
-    *total = candidate_total;
-    Some(raw)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalIoOmission {
+    Open(Option<i32>),
+    Read(Option<i32>),
+    TooLarge,
+    InvalidText,
+    AggregateLimit,
 }
 
-fn count_terminal_io_source(raw: &str, total: &mut usize) -> Result<()> {
-    if raw.len() > crate::protocol::TERMINAL_SNAPSHOT_BYTES
-        || !raw.is_ascii()
+impl TerminalIoOmission {
+    fn diagnostic(self) -> String {
+        match self {
+            Self::Open(Some(errno)) => format!("phase=open errno={errno}"),
+            Self::Open(None) => "phase=open errno=unknown".into(),
+            Self::Read(Some(errno)) => format!("phase=read errno={errno}"),
+            Self::Read(None) => "phase=read errno=unknown".into(),
+            Self::TooLarge => "phase=read reason=byte-limit".into(),
+            Self::InvalidText => "phase=validate reason=invalid-text".into(),
+            Self::AggregateLimit => "phase=validate reason=aggregate-limit".into(),
+        }
+    }
+}
+
+enum TerminalIoCapture {
+    Captured(String),
+    Omitted(TerminalIoOmission),
+}
+
+fn terminal_io_total(raw: &str, total: usize) -> std::result::Result<usize, TerminalIoOmission> {
+    if raw.len() > crate::protocol::TERMINAL_SNAPSHOT_BYTES {
+        return Err(TerminalIoOmission::TooLarge);
+    }
+    if !raw.is_ascii()
         || !raw
             .bytes()
             .all(|byte| byte == b'\n' || (b' '..=b'~').contains(&byte))
     {
-        return Err(ErrorCode::Uncertain);
+        return Err(TerminalIoOmission::InvalidText);
     }
-    *total = total
+    total
         .checked_add(raw.len())
         .filter(|length| *length <= crate::protocol::TERMINAL_SNAPSHOT_BYTES)
-        .ok_or(ErrorCode::Uncertain)?;
+        .ok_or(TerminalIoOmission::AggregateLimit)
+}
+
+fn optional_terminal_io_source(path: &Path, total: &mut usize) -> TerminalIoCapture {
+    let Some(remaining) = crate::protocol::TERMINAL_SNAPSHOT_BYTES.checked_sub(*total) else {
+        return TerminalIoCapture::Omitted(TerminalIoOmission::AggregateLimit);
+    };
+    let mut bytes = Vec::new();
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return TerminalIoCapture::Omitted(TerminalIoOmission::Open(error.raw_os_error()));
+        }
+    };
+    if let Err(error) = file.take(remaining as u64 + 1).read_to_end(&mut bytes) {
+        return TerminalIoCapture::Omitted(TerminalIoOmission::Read(error.raw_os_error()));
+    }
+    if bytes.len() > remaining {
+        return TerminalIoCapture::Omitted(TerminalIoOmission::TooLarge);
+    }
+    let raw = match String::from_utf8(bytes) {
+        Ok(raw) => raw,
+        Err(_) => return TerminalIoCapture::Omitted(TerminalIoOmission::InvalidText),
+    };
+    let candidate_total = match terminal_io_total(&raw, *total) {
+        Ok(total) => total,
+        Err(reason) => return TerminalIoCapture::Omitted(reason),
+    };
+    *total = candidate_total;
+    TerminalIoCapture::Captured(raw)
+}
+
+fn count_terminal_io_source(raw: &str, total: &mut usize) -> Result<()> {
+    *total = terminal_io_total(raw, *total).map_err(|_| ErrorCode::Uncertain)?;
     Ok(())
 }
 
@@ -1475,7 +1521,16 @@ fn terminal_snapshot(
     snapshot.memory_events_raw = raw_terminal_source(&path.join("memory.events"), &mut total)?;
     snapshot.memory_events_local_raw =
         raw_terminal_source(&path.join("memory.events.local"), &mut total)?;
-    snapshot.io_stat_raw = optional_terminal_io_source(&path.join("io.stat"), &mut total);
+    snapshot.io_stat_raw = match optional_terminal_io_source(&path.join("io.stat"), &mut total) {
+        TerminalIoCapture::Captured(raw) => Some(raw),
+        TerminalIoCapture::Omitted(reason) => {
+            eprintln!(
+                "processing terminal io.stat omitted {}",
+                reason.diagnostic()
+            );
+            None
+        }
+    };
 
     let (peak, events) = parse_terminal_values(&snapshot, expected_memory_limit)?;
     Ok((snapshot, peak, events))
@@ -1911,6 +1966,56 @@ mod tests {
         assert_eq!(
             snapshot.io_stat_raw.as_deref(),
             Some("8:0 rbytes=1 cost.usage=9\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_io_omissions_report_bounded_phase_errno_or_limit_without_paths() {
+        let (root, _) = snapshot_fixture();
+        let path = root.join("io.stat");
+        let mut total = 0;
+        fs::remove_file(&path).unwrap();
+        let missing = optional_terminal_io_source(&path, &mut total);
+        assert!(matches!(
+            &missing,
+            TerminalIoCapture::Omitted(TerminalIoOmission::Open(Some(libc::ENOENT)))
+        ));
+        let TerminalIoCapture::Omitted(reason) = missing else {
+            unreachable!("missing io.stat must be diagnosed");
+        };
+        assert_eq!(reason.diagnostic(), "phase=open errno=2");
+
+        fs::create_dir(&path).unwrap();
+        let unreadable = optional_terminal_io_source(&path, &mut total);
+        assert!(matches!(
+            &unreadable,
+            TerminalIoCapture::Omitted(TerminalIoOmission::Read(Some(libc::EISDIR)))
+        ));
+        let TerminalIoCapture::Omitted(reason) = unreadable else {
+            unreachable!("reading an io.stat directory must be diagnosed");
+        };
+        assert_eq!(reason.diagnostic(), "phase=read errno=21");
+
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, b"ab").unwrap();
+        total = TERMINAL_SNAPSHOT_BYTES - 1;
+        let oversized = optional_terminal_io_source(&path, &mut total);
+        let TerminalIoCapture::Omitted(reason) = oversized else {
+            unreachable!("over-limit io.stat must remain omitted");
+        };
+        assert_eq!(reason, TerminalIoOmission::TooLarge);
+        assert_eq!(reason.diagnostic(), "phase=read reason=byte-limit");
+
+        let diagnostics = [
+            "phase=open errno=2",
+            "phase=read errno=21",
+            "phase=read reason=byte-limit",
+        ];
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.contains(&root.to_string_lossy().to_string()))
         );
         fs::remove_dir_all(root).unwrap();
     }
