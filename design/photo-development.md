@@ -494,7 +494,10 @@ this subsection is their closed wire contract. Every body is one UTF-8 JSON
 object. Every non-success response body carries exactly one `code` from
 [Error codes](#error-codes) and a human-readable `message` that clients must
 not parse. Unknown request fields, wrong types, and values outside the closed
-sets are refused with 422 and `invalid_settings` before any state change.
+sets are refused with 422 and `invalid_settings` before any state change. A
+`whiteBalance` value inside the payload bounds below is wire-valid even when
+its mode is not admitted for execution; only values outside those bounds,
+unknown modes, and wrong types are `invalid_settings`.
 
 Shared field shapes:
 
@@ -507,18 +510,26 @@ Shared field shapes:
 - `exposureEv`: finite number within the capability report's approved range and
   step for the source class.
 - `whiteBalance`: exactly `mode` plus the fields that mode requires. `as-shot`
-  requires no other field; `temperature-tint` requires `temperatureKelvin` and
-  `tint` within the ranges the capability report publishes for the admitted
-  mode. [Development Color Pipeline](development-color.md#raw-development) owns
-  the qualification that admits a mode.
+  requires no other field. `temperature-tint` requires `temperatureKelvin`, an
+  integer from 1,000 through 40,000 in Kelvin, and `tintMilli`, a signed
+  integer from -150,000 through 150,000 in thousandths of the green–magenta
+  tint unit whose zero, scale, and direction the qualified mapping pins.
+  These payload bounds are closed and published independent of admission, so a
+  conforming client can always construct a valid request.
+  [Development Color Pipeline](development-color.md#raw-development) owns the
+  qualification that admits a mode for execution.
 - `stage`: the closed value `develop`.
 - `target`: the closed value `development-tiff`.
 
 `GET /api/processing/capability` returns 200 with `state`, `bundleId`,
 `incarnation`, `exposure` (`minimumEv`, `maximumEv`, `stepEv`), `profiles`
-(one object per approved source class, each with `profileId` and
-`whiteBalanceModes`), and `stages` (the keys `develop` and `film`, each
-`ready`, `unavailable`, or `unsupported`). `state` is closed to the conditions
+(one object per approved source class, each with `profileId`,
+`whiteBalanceModes`, and `whiteBalanceRanges`), and `stages` (the keys
+`develop` and `film`, each `ready`, `unavailable`, or `unsupported`).
+`whiteBalanceRanges` is `null` when the source class admits no adjustable
+mode, and otherwise reports, for each admitted adjustable mode within the
+payload bounds, the narrower minimum and maximum that the qualification
+admits for execution against the observed bundle. `state` is closed to the conditions
 [Production Photo Processing
 Protocol](processing-photo-protocol.md#errors-and-capability) requires the
 service to distinguish: `disabled`, `launcher-unavailable`,
@@ -540,7 +551,11 @@ retained artifacts stay usable in every state. It has no error body.
 `unavailable`, or `unsupported`), `supportReason` (`null`, `original-missing`,
 or `original-unreadable`, non-null only with `unavailable`),
 `processingAvailable` (boolean), and `controls` (`exposure` with `minimumEv`,
-`maximumEv`, `stepEv`, and `whiteBalanceModes`). `sourceRevision` is `null`
+`maximumEv`, `stepEv`, and `whiteBalanceModes`). A stored `whiteBalance` whose
+mode is absent from `controls.whiteBalanceModes` is not currently admitted:
+the client renders it read-only as retained intent, and the service reports
+the Photo processing-unavailable with `processing_unavailable` until the
+capability report admits the mode again. `sourceRevision` is `null`
 exactly when `sourceSupport` is `unavailable`, so a missing or unreadable
 Original reports one state and never `supported` or `unsupported` with
 processing unavailable. A client that observes `unavailable` must not save,
@@ -603,11 +618,13 @@ outside the closed sets, including a target outside the closed target set; 503
 `target`, `recipeVersion`, `sourceRevision`, `bundleId`, `terminalOutcome`
 (`succeeded`, `failed`, `cancelled`, or `null`), `failureReason` (nullable
 string), `receiptExpiresAt` with the submit response meaning, and `artifact`
-(`null` when no validated artifact is retained, or an object with `stage`,
-`contentType`, `width`, `height`, `profileIdentity`, `byteLength`, `sha256`,
-and `expiresAt`). The artifact object repeats the download metadata exactly, so
-a client validates a download against the inspect response. The only error is
-404 `unknown_export`.
+(`null` when no validated artifact is retained, otherwise an object with
+exactly the download metadata: `exportId`, `target`, `stage`, `contentType`,
+`width`, `height`, `profileIdentity`, `byteLength`, `sha256`, and
+`expiresAt`). The artifact object equals the download's response-header
+metadata field for field, so a client validates a download by comparing every
+artifact object field with the headers it received. The only error is 404
+`unknown_export`.
 
 `POST /api/exports/{id}/cancel` carries no request fields and returns 200 with
 `exportId`, `state`, and `terminalOutcome` of the settled Export. Errors are
