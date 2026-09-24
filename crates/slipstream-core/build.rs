@@ -3,13 +3,16 @@ fn main() {
     println!("cargo:rerun-if-changed=native/raw_preview.h");
     println!("cargo:rerun-if-changed=native/vips_preview.cc");
     println!("cargo:rerun-if-changed=native/vips_preview.h");
+    println!("cargo:rerun-if-changed=native/vips_display.cc");
+    println!("cargo:rerun-if-changed=native/vips_display.h");
 
     let mut build = cc::Build::new();
     build
         .cpp(true)
         .std("c++17")
         .file("native/raw_preview.cc")
-        .file("native/vips_preview.cc");
+        .file("native/vips_preview.cc")
+        .file("native/vips_display.cc");
     for package in ["libraw", "libjpeg", "vips"] {
         let library = pkg_config::Config::new()
             .probe(package)
