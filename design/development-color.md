@@ -140,6 +140,68 @@ algorithm version. An implicit library default must not choose the rendering
 intent or adaptation. Display capability is unavailable until the complete
 transform identity is qualified and included in the bundle.
 
+The destination profile asset is `sRGB-elle-V2-srgbtrc.icc` with SHA-256
+`b44e86e44d44993a3a9a880626f9832e9c37e2234caba501548f9114bada6d21`. The
+transform identity is version `display-transform-v1`: a Bradford D50-to-D65
+adaptation using the ICC PCS white points, the rendering intent `relative
+colorimetric` (intent-insensitive because both profiles are matrix/TRC), and
+the fixed matrix below derived from the two pinned profiles' colorants. A
+library may supply profile parsing and file encoding, but it must not choose
+the intent, adaptation, or output scaling. The committed identity is this
+matrix:
+
+```
+[ 2.034390615588929, -0.727658826450461, -0.306731789138469],
+[-0.228838423556639,  1.231758946896254, -0.002920523339614],
+[-0.008543280951811, -0.153257113180394,  1.161800394132204],
+```
+
+A display derivative resamples in linear space, applies the matrix, clips each
+linear sRGB channel, applies the sRGB transfer function, and quantizes to 8-bit
+once. Samples are column vectors, `linear_sRGB = M * linear_ProPhoto`, with
+matrix row one producing red, row two green, and row three blue. `M` already
+carries the single Bradford D50-to-D65 adaptation and the source-to-destination
+primaries conversion; no further adaptation or conversion is applied before or
+after it. The chain is fixed, with the matrix product, clip, transfer function,
+and quantization evaluated in double precision from the resampled linear sample:
+
+1. `linear[i] = M[i][0] * ProPhoto[0] + M[i][1] * ProPhoto[1] + M[i][2] * ProPhoto[2]`
+2. `clipped[i] = min(max(linear[i], 0.0), 1.0)`
+3. `display[i] = 12.92 * clipped[i]` when `clipped[i] <= 0.0031308`, otherwise
+   `1.055 * clipped[i] ** (1.0 / 2.4) - 0.055`
+4. `byte[i] = round(display[i] * 255.0)`, rounding halves away from zero
+
+These vectors are the contract for that arithmetic: for each linear ProPhoto
+sample the conversion must produce exactly these sRGB bytes before JPEG
+encoding, and every `display-transform-v1` implementation must reproduce all
+ten, including the channel-isolating and over-range cases.
+
+```
+[ 0.0,  0.0,  0.0] -> [  0,   0,   0]
+[ 0.18, 0.18, 0.18] -> [118, 118, 118]
+[ 1.0,  1.0,  1.0] -> [255, 255, 255]
+[ 1.0,  0.0,  0.0] -> [255,   0,   0]
+[ 0.0,  1.0,  0.0] -> [  0, 255,   0]
+[ 0.0,  0.0,  1.0] -> [  0,   0, 255]
+[ 2.0,  0.5,  0.125] -> [255, 111,  64]
+[-0.25, 0.5,  0.5] -> [  0, 214, 189]
+[ 0.5,  0.5,  2.0] -> [ 56, 187, 255]
+[ 0.9,  0.2,  0.05] -> [255,  57,  38]
+```
+
+The transform contract is that pre-encoding byte frame. Derivative bytes also
+depend on the implementation that produced the samples and the file: the
+resampling kernel and its sample-center and edge handling, and the encoder
+configuration and version, including subsampling, optimization, metadata, and
+quality. Caches and validators must therefore key on the recorded display
+conversion identity, and derivative bytes are comparable only within one
+recorded version of that implementation: a different resampler or encoder is a
+different display conversion, not a re-certification of the same one. The
+qualified implementation resamples in linear light with a Lanczos3 kernel,
+never upscales a target beyond the source geometry, and encodes 8-bit JPEG at
+quality 85 with the destination profile embedded; the processing bundle must
+record its implementation and version alongside the profile bytes.
+
 Film display must use the Film Result's defined output encoding and a matching
 ICC profile. Comparison must keep the stage, geometry, bundle, and display
 conversion fixed while changing only the compared development settings.

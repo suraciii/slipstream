@@ -230,10 +230,10 @@ must not create an Export. Expiry must not make the old identity available for
 new work. A new Export after expiry requires a new request identity and
 confirmation of the current source and settings.
 
-A successful Development TIFF and its captured snapshot must remain available
-for seven days after publication. The interface must disclose the expiry. An
-active download must hold a lease that keeps the artifact and snapshot
-available until the response stream settles.
+A successful Development TIFF, its captured Export snapshot, and its request
+receipt must remain available for seven days after publication. The interface
+must disclose the expiry. An active download must hold a lease that keeps the
+artifact, snapshot, and receipt available until the response stream settles.
 
 The deployment must enforce a finite retained-output allowance. If the service
 cannot reserve enough space for a complete new Development TIFF within that
