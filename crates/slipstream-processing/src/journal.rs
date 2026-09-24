@@ -1631,28 +1631,30 @@ fn random_id() -> Result<String, ErrorCode> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
-    let namespace = Path::new("/var/lib/slipstream-processing/instances");
-    for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
-        if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(path)
-                .map_err(|_| ErrorCode::Uncertain)?;
-            File::open(path.parent().ok_or(ErrorCode::Uncertain)?)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| ErrorCode::Uncertain)?;
-        }
-        secure_directory(path, 0)?;
-    }
-    let path = namespace.join(format!("{}.claim", config.instance));
+/// The durable identity a claim records. It carries nothing else: a claim is
+/// pure instance identity, so a claim whose start never completed stays
+/// adoptable by the executor that holds it.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Claim {
+    version: u8,
+    root: String,
+}
+
+/// Create or adopt the instance claim file at `path` and take its exclusive
+/// flock. The identity semantics are shared by every processing executor:
+/// version 1, an exact root match, one claim per instance, and a busy refusal
+/// while another owner holds the flock. Executor state such as a completed
+/// registry never gates adoption, because the flock proves no other owner
+/// exists.
+pub(crate) fn hold_claim(path: &Path, namespace: &Path, root: &str) -> Result<File, ErrorCode> {
     let (mut file, fresh) = match OpenOptions::new()
         .read(true)
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&path)
+        .open(path)
     {
         Ok(file) => (file, true),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
@@ -1660,15 +1662,17 @@ pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
                 .read(true)
                 .write(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-                .open(&path)
+                .open(path)
                 .map_err(|_| ErrorCode::Uncertain)?,
             false,
         ),
         Err(_) => return Err(ErrorCode::Uncertain),
     };
     let metadata = file.metadata().map_err(|_| ErrorCode::Uncertain)?;
+    // The production launcher runs as root, so this is the root-owned check;
+    // focused tests exercise the same path as the invoking user.
     if !metadata.is_file()
-        || metadata.uid() != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.nlink() != 1
         || metadata.mode() & 0o077 != 0
         || metadata.len() > REQUEST_BYTES as u64
@@ -1679,16 +1683,10 @@ pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(ErrorCode::Busy);
     }
-    #[derive(Serialize, Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Claim {
-        version: u8,
-        root: String,
-    }
     if fresh {
         let bytes = serde_json::to_vec(&Claim {
             version: 1,
-            root: config.root.clone(),
+            root: root.to_owned(),
         })
         .map_err(|_| ErrorCode::Uncertain)?;
         if bytes.len() > REQUEST_BYTES {
@@ -1710,17 +1708,32 @@ pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
             return Err(ErrorCode::Uncertain);
         }
         let claim: Claim = serde_json::from_slice(&bytes).map_err(|_| ErrorCode::Uncertain)?;
-        if claim.version != 1
-            || claim.root != config.root
-            || !Path::new(&config.root)
-                .join("registry.json")
-                .try_exists()
-                .map_err(|_| ErrorCode::Uncertain)?
-        {
+        if claim.version != 1 || claim.root != root {
             return Err(ErrorCode::Uncertain);
         }
     }
     Ok(file)
+}
+
+pub(crate) fn claim_instance(config: &Config) -> Result<File, ErrorCode> {
+    let namespace = Path::new("/var/lib/slipstream-processing/instances");
+    for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
+        if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(path)
+                .map_err(|_| ErrorCode::Uncertain)?;
+            File::open(path.parent().ok_or(ErrorCode::Uncertain)?)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| ErrorCode::Uncertain)?;
+        }
+        secure_directory(path, 0)?;
+    }
+    hold_claim(
+        &namespace.join(format!("{}.claim", config.instance)),
+        namespace,
+        &config.root,
+    )
 }
 
 fn prepare_private_directory(path: &Path) -> Result<(), ErrorCode> {
@@ -1914,6 +1927,127 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A scratch claim namespace outside the fixed host path, so the claim
+    /// semantics run under any CI UID.
+    fn claim_dir(tag: &str) -> std::path::PathBuf {
+        let dir: std::path::PathBuf = std::env::temp_dir().join(format!(
+            "slipstream-claim-{tag}-{}-{}",
+            std::process::id(),
+            random_id().unwrap()
+        ));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&dir)
+            .unwrap();
+        dir
+    }
+
+    /// Claims hold an exclusive descriptor, so assertions compare outcomes.
+    fn claim_error(claim: Result<File, ErrorCode>) -> ErrorCode {
+        claim.err().unwrap()
+    }
+
+    fn foreign_claim_bytes(root: &str) -> Vec<u8> {
+        serde_json::to_vec(&Claim {
+            version: 2,
+            root: root.to_owned(),
+        })
+        .unwrap()
+    }
+
+    fn write_claim_file(path: &Path, bytes: &[u8], mode: u32) {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_uncompleted_claim_is_adopted_without_a_registry() {
+        let dir = claim_dir("adopt");
+        let path = dir.join("instance.claim");
+        // A first start that was refused after claiming leaves exactly this
+        // state: a released claim file and no registry.json.
+        drop(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap());
+        assert!(!dir.join("registry.json").try_exists().unwrap());
+        let adopted = hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap();
+        // Adoption keeps the recorded identity; it never rewrites the claim.
+        let claim: Claim = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(claim.version, 1);
+        assert_eq!(claim.root, "/var/lib/slipstream-processing/a");
+        drop(adopted);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_held_claim_stays_busy() {
+        let dir = claim_dir("busy");
+        let path = dir.join("instance.claim");
+        let held = hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap();
+        assert_eq!(
+            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
+            ErrorCode::Busy
+        );
+        drop(held);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn foreign_root_and_foreign_version_claims_stay_refused() {
+        let dir = claim_dir("foreign");
+        let path = dir.join("instance.claim");
+        // A claim written for a different root is never adoptable.
+        drop(hold_claim(&path, &dir, "/var/lib/slipstream-processing/other").unwrap());
+        assert_eq!(
+            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
+            ErrorCode::Uncertain
+        );
+        fs::remove_file(&path).unwrap();
+        write_claim_file(
+            &path,
+            &foreign_claim_bytes("/var/lib/slipstream-processing/a"),
+            0o600,
+        );
+        assert_eq!(
+            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
+            ErrorCode::Uncertain
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nonconforming_claim_files_stay_refused() {
+        let dir = claim_dir("nonconforming");
+        let bytes = serde_json::to_vec(&Claim {
+            version: 1,
+            root: "/var/lib/slipstream-processing/a".to_owned(),
+        })
+        .unwrap();
+        // A group-readable claim file fails the private-mode check.
+        let path = dir.join("loose.claim");
+        write_claim_file(&path, &bytes, 0o644);
+        assert_eq!(
+            claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
+            ErrorCode::Uncertain
+        );
+        // A symlinked claim path fails the no-follow check.
+        let target = dir.join("target.claim");
+        write_claim_file(&target, &bytes, 0o600);
+        let link = dir.join("link.claim");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(
+            claim_error(hold_claim(&link, &dir, "/var/lib/slipstream-processing/a")),
+            ErrorCode::Uncertain
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn events(kills: u64) -> Events {
         Events {

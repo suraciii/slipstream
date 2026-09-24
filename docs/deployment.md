@@ -55,7 +55,33 @@ install the exact candidate's launcher binary at
 `/etc/slipstream-processing/INSTANCE/config.json`, with its socket at
 `/run/slipstream-processing/INSTANCE/launcher.sock` and its persistent root at
 `/var/lib/slipstream-processing/INSTANCE`. Replace `INSTANCE` with the same 32
-lowercase hexadecimal identifier in the service name and configuration. The
+lowercase hexadecimal identifier in the service name and configuration.
+
+Build the worker image in two passes so the image records its own bundle
+identity. The first build produces the engine payload and the derived bundle
+digest in `/opt/slipstream-photo/bundle`. The second build pins that digest as
+the `slipstream.processing.photo.bundle` label:
+
+```sh
+docker build --tag slipstream:processing-photo --file tools/processing/photo/Dockerfile .
+PHOTO_BUNDLE=$(docker run --rm --entrypoint cat slipstream:processing-photo /opt/slipstream-photo/bundle)
+docker build --tag slipstream:processing-photo \
+  --build-arg PHOTO_BUNDLE="$PHOTO_BUNDLE" \
+  --file tools/processing/photo/Dockerfile .
+```
+
+The launcher must refuse to start when the pinned image lacks the label or the
+label differs from the configured bundle. Configure the printed digest as the
+instance `bundle` value and as `SLIPSTREAM_PROCESSING_BUNDLE_SHA256`, and pin
+the image by its `sha256:` identifier, not by tag.
+
+A refused start must not consume the instance. The launcher claims the
+instance identity before it verifies the image and host, and a start that is
+refused after claiming leaves a released claim with an uninitialized instance
+root. A later start with a corrected configuration must adopt that claim,
+initialize the instance root, and start normally. Deleting the claim file is
+never part of recovery.
+
 After an approved production configuration and its exact policy/bundle
 identities are installed, load the unit and start the instance:
 

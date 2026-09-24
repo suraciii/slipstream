@@ -349,7 +349,10 @@ impl PhotoExecutor {
             0,
         )?;
         // The instance claim is shared with the other processing executors; it
-        // binds one root per instance identity across the whole host.
+        // binds one root per instance identity across the whole host. Holding
+        // an existing claim proves this process is the only possible owner, so
+        // a claim whose start never completed is adopted below with a fresh
+        // registry, exactly as a first start.
         let authority = protocol::Config {
             version: 1,
             mode: "qualification".into(),
@@ -389,16 +392,7 @@ impl PhotoExecutor {
         // The pinned worker image is a deployment prerequisite: an unavailable
         // or foreign image leaves the whole capability unavailable.
         let image_id = inspect_image(&config)?;
-        let registry = load(root)?.unwrap_or(Registry {
-            version: 1,
-            instance: config.instance.clone(),
-            incarnation: random_id()?,
-            watermark: 0,
-            parent_pending: false,
-            parent_identity: None,
-            active: None,
-            records: BTreeMap::new(),
-        });
+        let registry = restore_registry(root, &config)?;
         validate_registry(&registry, &config)?;
         for entry in fs::read_dir(root.join("attempts")).map_err(|_| ErrorCode::Unavailable)? {
             let entry = entry.map_err(|_| ErrorCode::Unavailable)?;
@@ -2796,6 +2790,22 @@ fn random_id() -> Result<String, ErrorCode> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Restore the durable registry, or initialize a fresh one. A root whose
+/// start never completed holds a claim but no registry; adopting that claim
+/// means a fresh registry with a new incarnation, exactly as a first start.
+fn restore_registry(root: &Path, config: &Config) -> Result<Registry, ErrorCode> {
+    Ok(load(root)?.unwrap_or(Registry {
+        version: 1,
+        instance: config.instance.clone(),
+        incarnation: random_id()?,
+        watermark: 0,
+        parent_pending: false,
+        parent_identity: None,
+        active: None,
+        records: BTreeMap::new(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3959,6 +3969,27 @@ mod tests {
             validate_registry(&fabricated, &config).unwrap_err(),
             ErrorCode::Uncertain
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_uncompleted_claim_is_adopted_with_a_fresh_registry() {
+        let root = temp_dir("adopt-claim");
+        let config = test_config(&root);
+        // A first start that was refused after claiming leaves a released
+        // claim and no registry.json. The photo open path must adopt it.
+        drop(journal::hold_claim(&root.join("instance.claim"), &root, &config.root).unwrap());
+        assert!(!root.join("registry.json").try_exists().unwrap());
+        let registry = restore_registry(&root, &config).unwrap();
+        validate_registry(&registry, &config).unwrap();
+        assert_eq!(registry.version, 1);
+        assert_eq!(registry.instance, config.instance);
+        assert!(registry.records.is_empty());
+        assert!(!registry.parent_pending);
+        assert_eq!(registry.active, None);
+        // Each adoption of an uncompleted root is a new incarnation.
+        let again = restore_registry(&root, &config).unwrap();
+        assert_ne!(again.incarnation, registry.incarnation);
         fs::remove_dir_all(&root).unwrap();
     }
 
