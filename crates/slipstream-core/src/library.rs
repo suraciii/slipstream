@@ -1,11 +1,12 @@
 use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
-    AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult, LibraryRoot,
-    NativeWorkBudget, NativeWorkPermit, OriginalCapability, PhotoAlbumMembership, PhotoQuery,
-    PhotoQueryError, PhotoQueryProjection, PhotoRead, PhotoStateBatchMutation,
-    PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult, PreviewSeed,
-    PreviewSeedResult, RecoverySurvey, RequestedRelocation, ScanLimits, ScanResult, ScanSnapshot,
+    AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
+    EditRecipeRead, EditRecipeWriteOutcome, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
+    OriginalCapability, PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection,
+    PhotoRead, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
+    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
+    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         AlbumWriteError, DatabaseName, MutationError, Persistence, PersistenceError,
@@ -598,6 +599,54 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.photo_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads the current saved recipe and the Library source revision in one
+    /// serialized persistence-owner operation.
+    pub async fn edit_recipe(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<EditRecipeRead>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.edit_recipe_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Saves one semantic recipe only when both the caller's recipe revision
+    /// and observed Library source revision still match current persistence.
+    pub async fn save_edit_recipe(
+        &self,
+        mutation: SaveEditRecipe,
+    ) -> Result<EditRecipeWriteOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.save_edit_recipe_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Rebinds existing settings to the current observed source revision only
+    /// after the caller confirms both the recipe and source revisions.
+    pub async fn rebind_edit_recipe(
+        &self,
+        mutation: RebindEditRecipe,
+    ) -> Result<EditRecipeWriteOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.rebind_edit_recipe_receiver(mutation)
         }?;
         receive
             .await
@@ -1933,7 +1982,7 @@ mod tests {
         let database = state.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v7.sql"))
             .unwrap();
         connection
             .execute(
@@ -2058,7 +2107,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            6
+            7
         );
         assert_eq!(
             connection
@@ -2306,7 +2355,7 @@ mod tests {
         let database = config.state_directory.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v6.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v7.sql"))
             .unwrap();
         connection
             .execute(
@@ -2890,16 +2939,35 @@ mod tests {
     #[tokio::test]
     async fn scan_recovery_follows_a_unique_exact_candidate() {
         let (base, initial_config) = fixture();
-        fs::write(base.0.join("originals/a.JPG"), b"jpeg-bytes-a").unwrap();
+        let raw_bytes = b"raw-bytes-a";
+        fs::write(base.0.join("originals/a.ARW"), raw_bytes).unwrap();
         let library = Library::open(initial_config).unwrap();
         let first = library.scan().await.unwrap();
         let photo_id = first.photos[0].id.clone();
+        let current = library.edit_recipe(&photo_id).await.unwrap().unwrap();
+        let original_source_revision = current.current_source_revision;
+        let saved = library
+            .save_edit_recipe(crate::SaveEditRecipe {
+                photo_id: photo_id.clone(),
+                expected_recipe_revision: None,
+                expected_source_revision: original_source_revision,
+                settings: crate::EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: crate::WhiteBalanceIntent::AsShot,
+                },
+            })
+            .await
+            .unwrap();
+        let saved = match saved {
+            crate::EditRecipeWriteOutcome::Saved(recipe) => recipe,
+            outcome => panic!("first recipe save should succeed, got {outcome:?}"),
+        };
         library.shutdown().unwrap();
-        seed_fingerprint(&base, "a.JPG", b"jpeg-bytes-a");
+        seed_fingerprint(&base, "a.ARW", raw_bytes);
         fs::create_dir(base.0.join("originals/moved")).unwrap();
         fs::rename(
-            base.0.join("originals/a.JPG"),
-            base.0.join("originals/moved/a.JPG"),
+            base.0.join("originals/a.ARW"),
+            base.0.join("originals/moved/a.ARW"),
         )
         .unwrap();
         let library = Library::open(config(&base)).unwrap();
@@ -2907,12 +2975,44 @@ mod tests {
         assert_eq!(second.photos.len(), 1);
         assert_eq!(second.photos[0].id, photo_id);
         assert!(second.photos[0].available);
+        assert!(second.photos[0].has_saved_edits);
+        assert!(
+            library
+                .photo(&photo_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .has_saved_edits
+        );
         assert!(
             second
                 .originals
                 .iter()
-                .any(|original| original.relative_path.as_str() == "moved/a.JPG")
+                .any(|original| original.relative_path.as_str() == "moved/a.ARW")
         );
+        let recovered = library.edit_recipe(&photo_id).await.unwrap().unwrap();
+        let recovered_recipe = recovered.recipe.unwrap();
+        assert_eq!(recovered_recipe.revision, saved.revision);
+        assert_eq!(recovered_recipe.settings, saved.settings);
+        assert_ne!(
+            recovered.current_source_revision,
+            recovered_recipe.source_revision
+        );
+        assert!(matches!(
+            library
+                .save_edit_recipe(crate::SaveEditRecipe {
+                    photo_id: photo_id.clone(),
+                    expected_recipe_revision: Some(saved.revision),
+                    expected_source_revision: recovered.current_source_revision,
+                    settings: crate::EditRecipeSettings {
+                        exposure_ev: 1.0,
+                        white_balance: crate::WhiteBalanceIntent::AsShot,
+                    },
+                })
+                .await
+                .unwrap(),
+            crate::EditRecipeWriteOutcome::RequiresRebind(_)
+        ));
         library.shutdown().unwrap();
         drop(base);
     }

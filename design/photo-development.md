@@ -12,9 +12,13 @@ remain authoritative for their boundaries.
 
 ## Model and Ownership
 
-The Photo owns one current Edit Recipe. Its revision is an opaque concurrency
-token, independent of Rating and Selection State revisions. Reset settings may
-match the initial baseline without deleting the recorded editing intent.
+The Photo owns zero or one current Edit Recipe. No saved recipe means the
+processing baseline and as-shot white balance. Saving settings creates editing
+intent even when they match that baseline; resetting a saved recipe does not
+delete it. Its opaque revision is independent of Rating and Selection State
+revisions. Custom white-balance intent remains semantic temperature and tint;
+its accepted ranges and engine mapping must be qualified before that mode is
+exposed.
 
 A Development Result is the scene-linear derivative after darktable. A Film
 Result is the fixed recipe's simulated output. An Edit Preview identifies a
@@ -81,13 +85,22 @@ be validated before the service accepts them.
 ## Recipe Writes and Autosave
 
 A save command must include semantic settings, an expected Edit Recipe revision,
-the expected source-content binding, and a stable request identity. Validation
-must compare both the recipe and source preconditions. A changed source binding
-must refuse an old draft even when the recipe revision itself has not changed. Validation and compare-and-set persistence must
-be atomic. The result must identify the committed revision or an explicit
-conflict, refusal, or unknown outcome. Identical retries with the same request
-identity must resolve to the recorded operation; a different payload under that
-identity must be rejected.
+the expected Library source revision, and a stable request identity. Validation
+must compare both the recipe and source preconditions. A changed published
+source revision must refuse an old draft even when the recipe revision itself
+has not changed. Validation and compare-and-set persistence must be atomic. The
+result must identify the committed revision or an explicit conflict, refusal,
+or unknown outcome. Identical retries with the same request identity must
+resolve to the recorded operation; a different payload under that identity
+must be rejected.
+
+The Library source revision is an opaque token from the current Library
+observation. It guards state writes against a changed published source; it is
+not proof of exact byte identity. Processing admission must resolve the Photo
+through the confined descriptor boundary, copy and hash the input, and verify
+source stability before use. A processing operation must refuse an input whose
+current Library source revision no longer matches the recipe binding. Source
+byte verification remains required even when the saved revision matches.
 
 Each browser Photo owner must serialize writes. It may retain one in-flight
 save and coalesce later editing actions into the latest pending recipe. An
@@ -240,14 +253,18 @@ required. Re-rendering with unqualified replacement assets is forbidden.
 ## Library and Client Integration
 
 Location Recovery with equal content preserves editing intent after validation.
-A content change invalidates derived results and requires explicit rebinding of
-saved intent. That separate guarded operation must identify both the previously
-observed recipe revision and the newly confirmed content binding. It must return
-a new recipe revision; ordinary autosave and rendering must not perform rebinding
-as a side effect. Rebinding remains subject to concurrent-source and edit checks. Photo read models must expose edited state and processing
-availability without eagerly rendering every Photo. Saved editing intent and
-retained Export references must prevent automatic retirement as an unreferenced
-record in Retire and Bind.
+A changed published source revision invalidates use of the bound recipe until an
+explicit rebind. That operation must identify both the previously observed
+recipe revision and the newly observed source revision. It must return a new
+recipe revision; ordinary saves and processing must not rebind as a side effect.
+Rebinding remains subject to concurrent-source and edit checks. Exact input
+bytes are independently verified when processing stages the Original.
+
+Photo read models must expose whether a saved recipe exists and processing
+availability without eagerly rendering every Photo. The saved-edit fact is
+true even when saved settings match the baseline or the Original is unavailable.
+Saved editing intent and retained Export references must prevent automatic
+retirement as an unreferenced record in Retire and Bind.
 
 The service must offer bounded operations to discover support, read/change an
 Edit Recipe, request a stage preview, submit/list/inspect/cancel Exports, and

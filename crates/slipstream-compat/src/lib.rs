@@ -449,6 +449,8 @@ mod tests {
             "sqlite/schema-v5.sql",
             "sqlite/schema-v6.json",
             "sqlite/schema-v6.sql",
+            "sqlite/schema-v7.json",
+            "sqlite/schema-v7.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -526,7 +528,7 @@ mod tests {
                 "{file} lost its executing consumer {source}"
             );
         }
-        for version in 1..=5 {
+        for version in 1..=7 {
             let schema = fs::read_to_string(
                 repository.join("crates/slipstream-core/src/persistence/schema.rs"),
             )
@@ -971,7 +973,7 @@ mod tests {
 
     #[test]
     fn canonical_schema_snapshots_execute_with_bundled_sqlite() {
-        for version in ["v4", "v5", "v6"] {
+        for version in ["v4", "v5", "v6", "v7"] {
             let connection = Connection::open_in_memory().unwrap();
             connection
                 .execute_batch(

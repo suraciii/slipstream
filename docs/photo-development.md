@@ -57,8 +57,11 @@ Entering Edit must restore the current Edit Recipe. It must not reset settings
 merely because the Photographer changes views or leaves an Album.
 
 The Grid must retain its camera-produced thumbnails and indicate Photos with
-saved edits. Selection State, Rating, Album membership, and browsing position
-must remain independent of Edit Recipe changes.
+saved edits. Its bounded Photo summaries must report whether a saved Edit
+Recipe exists. This fact remains true when the recipe matches the processing
+baseline or its Original File is unavailable; it does not imply that processing
+is currently available. Selection State, Rating, Album membership, and
+browsing position must remain independent of Edit Recipe changes.
 
 Desktop controls must sit beside the image. On a narrow screen, the image and
 controls must remain reachable without horizontal page scrolling. Labels,

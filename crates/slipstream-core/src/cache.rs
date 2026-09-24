@@ -2258,6 +2258,7 @@ mod tests {
             sort_path: "one.ARW".to_owned(),
             selection_state: crate::SelectionState::Undecided,
             rating: 0,
+            has_saved_edits: false,
         };
 
         let manifest_path = scheduler.cache().manifest_path(&raw_identity).unwrap();
