@@ -96,6 +96,39 @@ pub struct StagedOriginal {
     facts: OriginalFacts,
 }
 
+struct AttemptDirectory {
+    path: PathBuf,
+    retained: bool,
+}
+
+impl AttemptDirectory {
+    fn create(path: PathBuf) -> Result<Self, ExportError> {
+        fs::create_dir(&path)?;
+        let guard = Self {
+            path,
+            retained: false,
+        };
+        if let Err(error) = set_private_directory(&guard.path) {
+            drop(guard);
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
+    fn retain(mut self) -> PathBuf {
+        self.retained = true;
+        self.path.clone()
+    }
+}
+
+impl Drop for AttemptDirectory {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StagedOriginalFacts {
     pub path: PathBuf,
@@ -171,44 +204,27 @@ impl ExportWorkspace {
         original: &OriginalCapability,
     ) -> Result<StagedOriginal, ExportError> {
         let token = unique_token();
-        let attempt_directory = self.inner.staging.join(&token);
-        fs::create_dir(&attempt_directory)?;
-        set_private_directory(&attempt_directory)?;
+        let attempt_directory = AttemptDirectory::create(self.inner.staging.join(&token))?;
 
         let extension = Path::new(original.path().as_str())
             .extension()
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
             .ok_or(ExportError::InvalidArtifact)?;
-        let path = attempt_directory.join(format!("input.{extension}"));
+        let path = attempt_directory.path.join(format!("input.{extension}"));
         let mut output = OpenOptions::new()
             .create_new(true)
             .write(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .mode(0o600)
             .open(&path)?;
-        let copied = match original.copy_revision_checked(&mut output) {
-            Ok(copied) => copied,
-            Err(error) => {
-                let _ = fs::remove_file(&path);
-                let _ = fs::remove_dir(&attempt_directory);
-                return Err(error.into());
-            }
-        };
-        if let Err(error) = output.sync_all() {
-            let _ = fs::remove_file(&path);
-            let _ = fs::remove_dir(&attempt_directory);
-            return Err(error.into());
-        }
-        if let Err(error) = seal_read_only(&output) {
-            let _ = fs::remove_file(&path);
-            let _ = fs::remove_dir(&attempt_directory);
-            return Err(error);
-        }
+        let copied = original.copy_revision_checked(&mut output)?;
+        output.sync_all()?;
+        seal_read_only(&output)?;
         drop(output);
         Ok(StagedOriginal {
             path,
-            attempt_directory,
+            attempt_directory: attempt_directory.retain(),
             digest: copied.digest,
             facts: copied.facts,
         })
@@ -498,6 +514,32 @@ mod tests {
                 .is_some()
         );
         assert_eq!(fs::read(source).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_extensionless_original_without_leaking_staging_directory() {
+        let (root, library, workspace) = fixture();
+        let source = root.join("library/no-extension");
+        fs::write(&source, b"raw bytes").unwrap();
+        let capability = library
+            .original(RelativeOriginalPath::parse("no-extension").unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            workspace.stage_original(&capability),
+            Err(ExportError::InvalidArtifact)
+        ));
+        assert!(
+            workspace
+                .root()
+                .join("staging")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(fs::read(source).unwrap(), b"raw bytes");
         let _ = fs::remove_dir_all(root);
     }
 
