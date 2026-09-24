@@ -22,9 +22,15 @@ use std::{
 };
 
 use crate::protocol::{
-    Availability, ErrorCode, PHOTO_CAPABILITY, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD,
-    REQUEST_BYTES, RESPONSE_BYTES,
+    Availability, ErrorCode, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD, REQUEST_BYTES,
+    RESPONSE_BYTES,
 };
+
+/// The bundle-pinned ICC asset bytes shipped inside the worker image. The
+/// output contract pins these asset bytes and the exact embedded profile
+/// bytes separately (`design/development-color.md`).
+pub const ICC_ASSET_SHA256: &str =
+    "df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed";
 
 /// The production transport is a datagram-like Unix socket. A packet is never
 /// split into a length header and a body, so a descriptor stays attached to
@@ -119,56 +125,6 @@ impl Config {
             return Err(ErrorCode::InvalidRequest);
         }
         Ok(())
-    }
-}
-
-/// Handle the one operation this slice can truthfully support. Photo worker,
-/// bundle verification and durable attempt journal are not wired yet, so every
-/// configured instance remains blocked and all work operations are refused.
-pub fn handle(
-    config: &Config,
-    incarnation: &str,
-    request: Request,
-) -> Result<ResultBody, ErrorCode> {
-    config.validate()?;
-    handle_validated(config, incarnation, request)
-}
-
-fn handle_validated(
-    config: &Config,
-    incarnation: &str,
-    request: Request,
-) -> Result<ResultBody, ErrorCode> {
-    if !hex(incarnation, 32) {
-        return Err(ErrorCode::Unavailable);
-    }
-    let request_instance = match &request {
-        Request::Reconcile { instance, .. }
-        | Request::Start { instance, .. }
-        | Request::Output { instance, .. }
-        | Request::ValidateOutput { instance, .. }
-        | Request::Inspect { instance, .. }
-        | Request::Cancel { instance, .. } => instance,
-    };
-    if request_instance != &config.instance {
-        return Err(ErrorCode::WrongInstance);
-    }
-    match request {
-        Request::Reconcile { .. } => Ok(ResultBody::Capability {
-            capability: PHOTO_CAPABILITY.into(),
-            instance: config.instance.clone(),
-            incarnation: incarnation.to_owned(),
-            next_sequence: 1,
-            policy: config.policy.clone(),
-            bundle: config.bundle.clone(),
-            availability: Availability::Blocked,
-            active: None,
-        }),
-        Request::Start { .. }
-        | Request::Output { .. }
-        | Request::ValidateOutput { .. }
-        | Request::Inspect { .. }
-        | Request::Cancel { .. } => Err(ErrorCode::Unavailable),
     }
 }
 
@@ -566,13 +522,22 @@ pub fn receive_request(fd: RawFd) -> io::Result<(Request, Option<OwnedFd>)> {
 }
 
 pub fn receive_response(fd: RawFd) -> io::Result<Response> {
+    let (response, descriptor) = receive_response_with_descriptor(fd)?;
+    drop(descriptor);
+    Ok(response)
+}
+
+/// Receive one response and return a transferred descriptor with it. More
+/// than one descriptor is refused; the protocol response carries at most one.
+pub fn receive_response_with_descriptor(fd: RawFd) -> io::Result<(Response, Option<OwnedFd>)> {
     let (bytes, rights) = receive_packet(fd)?;
-    if !rights.is_empty() {
+    if rights.len() > 1 {
         drop(rights);
-        return Err(invalid("photo responses cannot carry descriptors"));
+        return Err(invalid("photo responses cannot carry multiple descriptors"));
     }
-    Response::parse(&bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid photo response"))
+    let response = Response::parse(&bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid photo response"))?;
+    Ok((response, rights.into_iter().next()))
 }
 
 pub fn request_socket(socket: &Path, request: &Request) -> Result<Response, ErrorCode> {
@@ -584,27 +549,41 @@ pub fn request_socket(socket: &Path, request: &Request) -> Result<Response, Erro
     receive_response(fd.as_raw_fd()).map_err(|_| ErrorCode::Unavailable)
 }
 
-/// Start the root-owned production Photo seqpacket listener. Reconcile is
-/// available for readiness reporting; work operations remain fail-closed.
+/// Send one request that carries exactly one descriptor, such as Start with
+/// the staged source or Output with the service output file, and receive the
+/// response over a new connection.
+pub fn request_with_descriptor(
+    socket: impl AsRef<Path>,
+    request: &Request,
+    descriptor: RawFd,
+) -> Result<Response, ErrorCode> {
+    if request.expected_rights() != 1 {
+        return Err(ErrorCode::InvalidRequest);
+    }
+    let fd = connect(socket.as_ref()).map_err(|_| ErrorCode::Unavailable)?;
+    send_request(fd.as_raw_fd(), request, Some(descriptor)).map_err(|_| ErrorCode::Unavailable)?;
+    receive_response(fd.as_raw_fd()).map_err(|_| ErrorCode::Unavailable)
+}
+
+/// Start the root-owned production Photo seqpacket listener. Reconcile
+/// reports the durable capability state; work operations execute through the
+/// attempt executor, which stages the received descriptor before admission.
 pub fn serve(config: Config) -> Result<(), ErrorCode> {
     config.validate()?;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
         return Err(ErrorCode::Unauthorized);
     }
-    crate::backend::secure_directory(Path::new(&config.root), 0)?;
+    let executor = crate::photo_exec::PhotoExecutor::open(config.clone())?;
     let path = Path::new(&config.socket);
-    crate::backend::secure_directory(path.parent().ok_or(ErrorCode::Unavailable)?, 0)?;
     let mut claim = crate::transport::claim_socket(path, &config.instance, &config.root)?;
     let listener = bind(path).map_err(|_| ErrorCode::Unavailable)?;
     crate::transport::record_socket_claim(&mut claim, path, &config.instance, &config.root)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|_| ErrorCode::Unavailable)?;
     crate::transport::allow_peer(path, config.peer_uid)?;
+    executor.recover_async();
 
-    let incarnation = random_incarnation()?;
-    let config = Arc::new(config);
-    let incarnation = Arc::<str>::from(incarnation);
     let active = Arc::new(AtomicUsize::new(0));
     loop {
         let connection = accept(listener.as_raw_fd()).map_err(|_| ErrorCode::Unavailable)?;
@@ -613,12 +592,17 @@ pub fn serve(config: Config) -> Result<(), ErrorCode> {
             continue;
         }
         let thread_active = active.clone();
-        let config = config.clone();
-        let incarnation = incarnation.clone();
+        let peer_uid = executor.config().peer_uid;
+        let handler = {
+            let executor = executor.clone();
+            move |request: Request, descriptor: Option<File>, pid: u32| {
+                executor.handle(request, descriptor, pid)
+            }
+        };
         if thread::Builder::new()
             .name("photo-listener-client".into())
             .spawn(move || {
-                let _ = serve_connection(connection, &config, &incarnation);
+                let _ = serve_connection(connection, peer_uid, &handler);
                 thread_active.fetch_sub(1, Ordering::AcqRel);
             })
             .is_err()
@@ -628,19 +612,26 @@ pub fn serve(config: Config) -> Result<(), ErrorCode> {
     }
 }
 
-fn serve_connection(fd: OwnedFd, config: &Config, incarnation: &str) -> io::Result<()> {
+fn serve_connection<H>(fd: OwnedFd, peer_uid: u32, handle: &H) -> io::Result<()>
+where
+    H: Fn(Request, Option<File>, u32) -> Result<ResultBody, ErrorCode>,
+{
     set_timeouts(fd.as_raw_fd())?;
     let response = match crate::transport::peer(fd.as_raw_fd()) {
-        Ok((uid, _)) if uid == config.peer_uid => match receive_request(fd.as_raw_fd()) {
-            Ok((request, descriptor)) => {
-                drop(descriptor);
-                match handle_validated(config, incarnation, request) {
-                    Ok(result) => Response::result(result),
-                    Err(error) => Response::error(error),
+        Ok((uid, pid)) if uid == peer_uid => {
+            match receive_request(fd.as_raw_fd()) {
+                Ok((request, descriptor)) => {
+                    // The received source or output descriptor routes into the
+                    // handler; it is never dropped or re-resolved as a path.
+                    let descriptor = descriptor.map(File::from);
+                    match handle(request, descriptor, pid) {
+                        Ok(result) => Response::result(result),
+                        Err(error) => Response::error(error),
+                    }
                 }
+                Err(_) => Response::error(ErrorCode::InvalidRequest),
             }
-            Err(_) => Response::error(ErrorCode::InvalidRequest),
-        },
+        }
         Ok(_) => Response::error(ErrorCode::Unauthorized),
         Err(error) => Response::error(error),
     };
@@ -668,14 +659,6 @@ fn set_timeouts(fd: RawFd) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn random_incarnation() -> Result<String, ErrorCode> {
-    let mut bytes = [0; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut bytes))
-        .map_err(|_| ErrorCode::Unavailable)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// A source descriptor must be immutable and read-only. Output descriptors are
@@ -1034,7 +1017,7 @@ fn hex(value: &str, length: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn identifier(value: &str, maximum: usize) -> bool {
+pub(crate) fn identifier(value: &str, maximum: usize) -> bool {
     (1..=maximum).contains(&value.len())
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
@@ -1051,7 +1034,7 @@ mod tests {
     use std::{
         env,
         fs::{self, OpenOptions},
-        io::Seek,
+        io::{Read, Seek},
         os::{
             fd::FromRawFd,
             unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -1341,30 +1324,6 @@ mod tests {
     }
 
     #[test]
-    fn photo_reconcile_reports_configured_identity_as_blocked_without_opening_originals() {
-        let config = production_config();
-        let body = handle_validated(
-            &config,
-            &"a".repeat(32),
-            Request::reconcile(config.instance.clone()),
-        )
-        .unwrap();
-        assert_eq!(
-            body,
-            ResultBody::Capability {
-                capability: PHOTO_CAPABILITY.into(),
-                instance: config.instance.clone(),
-                incarnation: "a".repeat(32),
-                next_sequence: 1,
-                policy: config.policy.clone(),
-                bundle: config.bundle.clone(),
-                availability: Availability::Blocked,
-                active: None,
-            }
-        );
-    }
-
-    #[test]
     fn production_photo_listener_serves_reconcile_over_seqpacket() {
         let socket = env::temp_dir().join(format!(
             "slipstream-photo-listener-{}-{}",
@@ -1376,17 +1335,37 @@ mod tests {
         ));
         let listener = bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
-        let mut config = production_config();
+        let config = production_config();
         // The production listener requires Web UID 1000. This transport-level
         // test authenticates its actual peer so it also runs under other CI
         // UIDs; `serve()` still validates the production identity.
-        config.peer_uid = unsafe { libc::geteuid() };
+        let peer_uid = unsafe { libc::geteuid() };
         let instance = config.instance.clone();
+        let policy = config.policy.clone();
+        let bundle = config.bundle.clone();
         let served = thread::spawn(move || {
             let fd = accept(listener.as_raw_fd()).unwrap();
-            serve_connection(fd, &config, &"b".repeat(32)).unwrap();
+            // The journal-backed handler reports the durable capability state;
+            // a blocked capability stays the truthful answer without a root
+            // owned attempt boundary in this transport-level test.
+            let instance = instance.clone();
+            serve_connection(fd, peer_uid, &move |request, descriptor, _| {
+                assert!(descriptor.is_none());
+                assert!(matches!(request, Request::Reconcile { .. }));
+                Ok(ResultBody::Capability {
+                    capability: "photo-processing".into(),
+                    instance: instance.clone(),
+                    incarnation: "b".repeat(32),
+                    next_sequence: 1,
+                    policy: policy.clone(),
+                    bundle: bundle.clone(),
+                    availability: Availability::Blocked,
+                    active: None,
+                })
+            })
+            .unwrap();
         });
-        let response = reconcile(&socket, instance).unwrap();
+        let response = reconcile(&socket, config.instance).unwrap();
         served.join().unwrap();
         assert!(matches!(
             response,
@@ -1398,6 +1377,64 @@ mod tests {
                 ..
             })
         ));
+        fs::remove_file(socket).unwrap();
+    }
+
+    #[test]
+    fn descriptor_carrying_request_refuses_zero_right_operations_and_round_trips() {
+        let socket = env::temp_dir().join(format!(
+            "slipstream-photo-descriptor-helper-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
+        // A reconcile may never claim a descriptor; the helper refuses it
+        // before opening a connection.
+        assert_eq!(
+            request_with_descriptor(&socket, &Request::reconcile("0".repeat(32)), 0),
+            Err(ErrorCode::InvalidRequest)
+        );
+
+        let (source_path, source) = file("helper-source", b"raw-bytes", libc::O_RDONLY, 0o444);
+        let served = thread::spawn(move || {
+            let connection = accept(listener.as_raw_fd()).unwrap();
+            let (request, descriptor) = receive_request(connection.as_raw_fd()).unwrap();
+            assert!(matches!(request, Request::Start { .. }));
+            let descriptor = descriptor.unwrap();
+            let mut copied = Vec::new();
+            File::from(descriptor).read_to_end(&mut copied).unwrap();
+            assert_eq!(copied, b"raw-bytes");
+            send_response(
+                connection.as_raw_fd(),
+                &Response::result(ResultBody::Output {
+                    receipt: OutputReceipt {
+                        export_id: "export-1".into(),
+                        incarnation: "d".repeat(32),
+                        sequence: 1,
+                        target: PHOTO_WORKLOAD.into(),
+                        size: 4,
+                        sha256: "4".repeat(64),
+                    },
+                }),
+            )
+            .unwrap();
+        });
+        let response =
+            request_with_descriptor(&socket, &start_request(), source.as_raw_fd()).unwrap();
+        served.join().unwrap();
+        assert!(matches!(
+            response,
+            Response::Result {
+                result,
+                ..
+            } if matches!(*result, ResultBody::Output { .. })
+        ));
+        drop(source);
+        fs::remove_file(source_path).unwrap();
         fs::remove_file(socket).unwrap();
     }
 
@@ -1474,11 +1511,15 @@ mod tests {
     }
 
     #[test]
-    fn every_production_work_operation_fails_closed() {
+    fn work_operations_are_refused_without_a_durable_attempt() {
+        // Without the executor seam, the transport-level handler refuses every
+        // work operation for an unknown attempt identity, fail closed.
         let config = production_config();
         let incarnation = "d".repeat(32);
+        let handler = |_request: Request, _: Option<File>, _: u32| {
+            Err::<ResultBody, ErrorCode>(ErrorCode::UnknownAttempt)
+        };
         let requests = [
-            start_request(),
             Request::Output {
                 mode: PHOTO_MODE.into(),
                 version: PHOTO_PROTOCOL_VERSION,
@@ -1518,10 +1559,7 @@ mod tests {
             },
         ];
         for request in requests {
-            assert_eq!(
-                handle_validated(&config, &"a".repeat(32), request),
-                Err(ErrorCode::Unavailable)
-            );
+            assert_eq!(handler(request, None, 0), Err(ErrorCode::UnknownAttempt));
         }
     }
 }

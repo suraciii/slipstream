@@ -24,17 +24,17 @@ pub(crate) type Result<T> = std::result::Result<T, ErrorCode>;
 const CGROUP: &str = "/sys/fs/cgroup";
 const WORKER: &str = "/usr/local/bin/slipstream-processing-worker";
 
-fn create_workspace_directory(path: &Path) -> Result<()> {
+pub(crate) fn create_workspace_directory(path: &Path) -> Result<()> {
     fs::create_dir(path).map_err(|_| ErrorCode::Uncertain)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| ErrorCode::Unavailable)
 }
 
-fn create_control_directory(path: &Path) -> Result<()> {
+pub(crate) fn create_control_directory(path: &Path) -> Result<()> {
     fs::create_dir(path).map_err(|_| ErrorCode::Unavailable)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|_| ErrorCode::Unavailable)
 }
 
-fn create_native_gate(path: &Path) -> Result<File> {
+pub(crate) fn create_native_gate(path: &Path) -> Result<File> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| ErrorCode::Unavailable)?;
     // SAFETY: the path is a new child of the private, owned control directory.
@@ -68,7 +68,7 @@ pub(crate) struct Live {
     pub oom: bool,
 }
 
-fn observed_exit(state: &serde_json::Value) -> Result<Option<u8>> {
+pub(crate) fn observed_exit(state: &serde_json::Value) -> Result<Option<u8>> {
     let status = state["Status"].as_str().ok_or(ErrorCode::Uncertain)?;
     let started = state["StartedAt"].as_str().ok_or(ErrorCode::Uncertain)?;
     if !matches!(status, "exited" | "dead") || started.starts_with("0001-01-01T") {
@@ -107,7 +107,7 @@ fn storage_matches(stat: &libc::statfs, limits: &Limits) -> bool {
         && stat.f_files == limits.storage_inodes
 }
 
-fn delegate_workload_controllers(scope: &Path, leaf: &Path) -> Result<()> {
+pub(crate) fn delegate_workload_controllers(scope: &Path, leaf: &Path) -> Result<()> {
     write(
         &scope.join("cgroup.subtree_control"),
         "+memory +cpu +pids +io",
@@ -1265,7 +1265,7 @@ impl Backend {
     }
 }
 
-fn verify_slice_phase(
+pub(crate) fn verify_slice_phase(
     pending: Option<ManagerPhase>,
     stop_confirmed: bool,
     active: impl FnOnce() -> Result<()>,
@@ -1277,7 +1277,7 @@ fn verify_slice_phase(
     if stop_confirmed { stopped() } else { active() }
 }
 
-fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
+pub(crate) fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
     match File::open(path.join("memory.max")) {
         Ok(file) => {
             let mut value = String::new();
@@ -1294,7 +1294,7 @@ fn require_unlimited_ancestor(path: &Path, allow_absent: bool) -> Result<()> {
     }
 }
 
-fn process_cgroup(pid: u32) -> Result<PathBuf> {
+pub(crate) fn process_cgroup(pid: u32) -> Result<PathBuf> {
     let text = read(&PathBuf::from(format!("/proc/{pid}/cgroup")))?;
     let path = text.strip_prefix("0::/").ok_or(ErrorCode::Unavailable)?;
     if path.contains('\n') || path.split('/').any(|component| component == "..") {
@@ -1372,13 +1372,13 @@ fn events_from_raw(hierarchical: &str, local: &str) -> Result<Events> {
     })
 }
 
-fn events(path: &Path) -> Result<Events> {
+pub(crate) fn events(path: &Path) -> Result<Events> {
     let all = read(&path.join("memory.events"))?;
     let local = read(&path.join("memory.events.local"))?;
     events_from_raw(&all, &local)
 }
 
-fn cgroup_unpopulated(path: &Path) -> Result<bool> {
+pub(crate) fn cgroup_unpopulated(path: &Path) -> Result<bool> {
     let events = read(&path.join("cgroup.events")).map_err(|_| ErrorCode::Uncertain)?;
     Ok(counter_map(&events)?.get("populated") == Some(&0))
 }
@@ -1625,7 +1625,7 @@ fn attempt_memory_limit(record: &Record) -> Result<u64> {
     Ok(accepted_limit)
 }
 
-fn mount_identity(path: &Path) -> Result<Option<u64>> {
+pub(crate) fn mount_identity(path: &Path) -> Result<Option<u64>> {
     let text = read(Path::new("/proc/self/mountinfo"))?;
     for line in text.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
@@ -1649,11 +1649,11 @@ fn mount_identity(path: &Path) -> Result<Option<u64>> {
     Ok(None)
 }
 
-fn strings(values: &[&str]) -> Vec<String> {
+pub(crate) fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
-fn command(program: &str, args: &[String]) -> Result<String> {
+pub(crate) fn command(program: &str, args: &[String]) -> Result<String> {
     command_until(program, args, Instant::now() + Duration::from_secs(5))
 }
 
