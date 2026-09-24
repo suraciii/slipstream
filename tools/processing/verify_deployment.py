@@ -28,6 +28,7 @@ DEFAULT_RUNTIME_ROOT = Path("/run/slipstream-processing")
 DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
 MAX_WEB_BYTES = 1024 * 1024
 MAX_WEB_TOKEN_BYTES = 4096
+MAX_CGROUP_IO_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,9 @@ class DeploymentSnapshot:
             return Check("attempt-cgroup", False, "attempt-cgroup-missing")
         memory = resolved_attempt / "memory.max"
         swap = resolved_attempt / "memory.swap.max"
+        cpu = resolved_attempt / "cpu.max"
+        pids = resolved_attempt / "pids.max"
+        io_stat = resolved_attempt / "io.stat"
         try:
             memory_value = memory.read_text().strip()
             swap_value = swap.read_text().strip()
@@ -311,6 +315,36 @@ class DeploymentSnapshot:
             return Check("attempt-cgroup", False, "attempt-memory-invalid")
         if swap_value != "0":
             return Check("attempt-cgroup", False, "attempt-swap-not-zero", swap_value[:80])
+        try:
+            cpu_value = cpu.read_text().strip()
+            pids_value = pids.read_text().strip()
+        except OSError:
+            return Check("attempt-cgroup", False, "attempt-cgroup-limits-unreadable")
+        # Reading the controller's accounting file proves that the attempt
+        # subtree has I/O accounting enabled. The contents are interpreted by
+        # the retained terminal receipt, not this static snapshot.
+        try:
+            with io_stat.open(encoding="ascii") as stream:
+                if len(stream.read(MAX_CGROUP_IO_BYTES + 1)) > MAX_CGROUP_IO_BYTES:
+                    return Check("attempt-cgroup", False, "attempt-io-accounting-unavailable")
+        except (OSError, UnicodeDecodeError):
+            return Check("attempt-cgroup", False, "attempt-io-accounting-unavailable")
+        cpu_parts = cpu_value.split()
+        if len(cpu_parts) != 2 or any(part == "max" for part in cpu_parts):
+            return Check("attempt-cgroup", False, "attempt-cpu-unlimited")
+        try:
+            cpu_quota, cpu_period = (int(part) for part in cpu_parts)
+        except ValueError:
+            return Check("attempt-cgroup", False, "attempt-cpu-invalid")
+        if cpu_quota <= 0 or cpu_period <= 0:
+            return Check("attempt-cgroup", False, "attempt-cpu-invalid")
+        if pids_value == "max":
+            return Check("attempt-cgroup", False, "attempt-pids-unlimited")
+        try:
+            if int(pids_value) <= 0:
+                return Check("attempt-cgroup", False, "attempt-pids-invalid")
+        except ValueError:
+            return Check("attempt-cgroup", False, "attempt-pids-invalid")
         return Check("attempt-cgroup", True)
 
     def _production_check(self, checks: list[Check]) -> Check:
