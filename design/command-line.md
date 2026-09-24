@@ -75,6 +75,43 @@ Album creation, Folder windows, scan status/check, capture metadata, Preview
 requests, and derivative download reuse their existing routes. Preserve retired
 routes as retired; do not revive the unbounded `GET /api/albums` representation.
 
+### Photo Development Surface
+
+These routes expose the first development pipeline through the same shared
+operations as Web. They obey the existing method, header-size, body-size, and
+shutdown admission rules:
+
+- `GET /api/photos/{id}/edit-recipe`: the current recipe or the absence of one,
+  the observed source revision, the source/profile support state, and the
+  approved control ranges for that source;
+- `POST /api/photos/{id}/edit-recipe`: one guarded save carrying a stable
+  request identity and both expected revisions;
+- `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
+  intent to a newly observed source revision;
+- `GET /api/photos/{id}/edit-preview/{stage}`: the current Edit Preview
+  rendition for one stage, or an admission or refusal result;
+- `POST /api/photos/{id}/exports`: capture an immutable Export snapshot and
+  admit its work;
+- `GET /api/photos/{id}/exports`: bounded list of that Photo's retained Exports
+  with their current state;
+- `GET /api/exports/{id}`: one Export's state, captured identity, terminal
+  outcome, and artifact metadata;
+- `POST /api/exports/{id}/cancel`: exactly-once cancellation against the actual
+  completion state;
+- `POST /api/exports/{id}/retry`: a new attempt identity against the retained
+  snapshot;
+- `GET /api/exports/{id}/artifact`: the validated artifact of one Export,
+  leased for the response stream.
+
+`stage` is the closed value `develop` until the Film capability is enabled. The
+Photo facts returned by `GET /api/photos/{id}` and the bounded Photo summaries
+in Browse windows and Photo queries carry the saved-edit fact. Artifact
+downloads and Edit Preview renditions reuse the existing private derivative
+transfer rules. Structured error codes are authoritative for these routes; no
+client parses messages. States, outcomes, snapshot identity, receipt expiry and
+disclosure rules are owned by
+[Photo Development Architecture](photo-development.md#service-surface).
+
 Every CLI request identifies contract version 1 through
 `Slipstream-CLI-Contract: 1`. A server that advertises version 1 must validate
 that header on CLI requests, including reused mutation routes, before domain
