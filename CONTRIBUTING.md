@@ -128,11 +128,42 @@ If the host platform is newer than the Playwright browser installer supports, po
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/absolute/path/to/chrome bun run test:browser
 ```
 
-`test:browser` runs all browser scenarios against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
+`test:browser` runs the browser smoke suite against the Rust `slipstream-server` binary. It builds the Web assets, starts the binary on a private loopback TCP port behind a local HTTPS proxy, and gives it independent temporary state and cache directories. Fixtures provision a generated Access Token and establish real sessions; the checked-in test certificate and key under `tools/test-tls/` are for synthetic fixtures only. The combined CLI-to-Web scenario runs the compiled `slipstream` client the same way. Use `SLIPSTREAM_SERVER_BINARY`, `SLIPSTREAM_CLI_BINARY`, or `SLIPSTREAM_WEB_ROOT` only when testing separately built Rust binaries or a Web directory. `test:rust` checks formatting, denies Clippy warnings, and runs Rust tests serially because the native Preview stack has one process-global libvips lifecycle. `test:fast` adds Bun/TypeScript linting and type checking plus the Rust-only browser suite. `verify` also checks repository formatting and builds Rust plus the Web application. GitHub Actions invokes the same `verify` command.
 
 The Rust workspace contains the production Library/Preview core and HTTP server in `crates/slipstream-server`. The production-language contract is in [`design/rust-server.md`](design/rust-server.md). Shared JSON and SQL vectors live in [`compatibility/`](compatibility/); Rust compatibility tests consume them.
 
 **Fixture coverage boundary.** The shared validation protocol vectors run against an empty fixture Library and pin validation, error, and contract-envelope shapes. The Browse vectors use a generated RAW/JPEG pair and Album to pin non-empty windows, ordering, Preview and Thumbnail hydration, metadata, status, membership, Browse position, and Album mutations. The cache vectors seed one Photo and one web asset and pin derivative and web-asset response headers, ETag identity, and revalidation. Every file under `compatibility/` must have an executing consumer; the compatibility inventory test enforces this rule.
+
+### Continuous integration
+
+[`verify.yml`](.github/workflows/verify.yml) runs `bun run verify` once on a
+GitHub-hosted `ubuntu-latest` runner. That single job is the required `verify`
+check, so the gate keeps one runner and reuses work instead of adding runners:
+
+- The job restores a Rust cache keyed on `Cargo.lock` and
+  `rust-toolchain.toml`: `~/.cargo/registry`, `~/.cargo/git`, and `target`.
+  A restored cache removes dependency compilation, which is worth about 50s of
+  the Rust stage on the runner. Formatting, Clippy, every test, the Web build,
+  and the browser suite still run in full.
+- `CARGO_PROFILE_DEV_DEBUG` and `CARGO_PROFILE_TEST_DEBUG` are `0`. The job
+  never sets `RUST_BACKTRACE`, so nothing there reads debug information;
+  leaving it out shortens compilation and linking and keeps the cache near
+  280 MB compressed instead of 530 MB. To debug a CI-only Rust failure with
+  backtraces, reproduce it locally without those variables.
+- The bundled browser suite is a smoke gate over the real stack and runs with
+  `fullyParallel` on the runner's four CPUs. The behavior and race scenarios
+  that could not tolerate concurrent load were removed by the smoke-suite
+  change (issue [#399](https://github.com/suraciii/slipstream/issues/399)).
+  The owners' logic rules are covered by the page-model unit tests; the
+  domains that lost executing coverage entirely are tracked in
+  issue [#410](https://github.com/suraciii/slipstream/issues/410). Keep the
+  suite at smoke depth so full parallelism stays valid.
+
+### Browser suite policy
+
+The browser suite is a smoke gate, not a behavior suite. It proves that the real stack works end to end: the access boundary, startup scan and Grid rendering, Photo View, decisions persisted through the real write path, Album management, responsive surfaces, the CLI-to-Web flow, and the opt-in real-camera scenario. Keep it small enough to run on every change; a new browser scenario needs a reason that only a real browser against the real server can prove.
+
+Logic regression belongs to the page-model unit tests (`bun run --cwd apps/web test:unit`), which characterize each owner's policy: async ownership and recovery claims, Browse Snapshot windows and retention, Photo and batch writes with Undo, Album writes, saved positions, navigation codecs, and the access session. When a rule is expressible against a model owner, add a unit test instead of a browser scenario. Presentational rules that still live inside the page UI — pointer and gesture state, Grid geometry, focus movement, filmstrip presentation — lost their browser scenarios with the smoke-suite reduction and have no executing coverage until they are extracted into testable modules; issue [#410](https://github.com/suraciii/slipstream/issues/410) owns that work. Removing the last coverage of a rule that lives inside the page UI requires a unit replacement, a dedicated slower suite, or an issue that owns the gap.
 
 ## Photo fixtures
 

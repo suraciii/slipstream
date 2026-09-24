@@ -222,6 +222,42 @@ describe("ApplicationOwner", () => {
     owner.dispose();
   });
 
+  test("an unpublished Overview body cannot replace a published generation", async () => {
+    let overviewRequests = 0;
+    const { owner, events } = harness((input) => {
+      if (input === "/api/overview") {
+        overviewRequests += 1;
+        return Promise.resolve(
+          response(
+            overviewRequests === 1
+              ? overview("publication-1", "Published")
+              : {
+                  published: false,
+                  photoCount: 0,
+                  scan: { state: "initializing" },
+                  albums: [],
+                },
+          ),
+        );
+      }
+      return Promise.resolve(response(scan("idle", "publication-1")));
+    });
+
+    await owner.loadOverview();
+    expect(owner.overview?.photoCount).toBe(1);
+    const committed = overviewEvents(events).length;
+
+    // `published: false` carries no publication generation, so the body cannot
+    // fence the status-validated publication and stays uncommitted.
+    expect(await owner.refreshOverview()).toBe(false);
+    expect(owner.overview?.photoCount).toBe(1);
+    expect(owner.overview?.albums.map((entry) => entry.name)).toEqual([
+      "Published",
+    ]);
+    expect(overviewEvents(events)).toHaveLength(committed);
+    owner.dispose();
+  });
+
   test("keeps a first foreground publication mismatch recoverable", async () => {
     const { owner, events } = harness((input) =>
       input === "/api/overview"

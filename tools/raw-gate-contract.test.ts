@@ -116,7 +116,7 @@ test("discovery parses exactly four native/service and one browser scenario", ()
     .map((name) => `${name}: test`)
     .join("\n");
   const browserOutput = browser!.expectedTests
-    .map((name) => `browser-review.browser-test.ts:1:1 \u203a ${name}`)
+    .map((name) => `browser-smoke.browser-test.ts:1:1 \u203a ${name}`)
     .join("\n");
 
   expect(

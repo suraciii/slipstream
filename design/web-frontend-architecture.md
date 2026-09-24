@@ -444,14 +444,35 @@ Verification must prove:
   once, suppresses late presentation, and starts at most one release for a
   known Browse token;
 - every operation named by Web Async Ownership retains its scope, key,
-  cancellation or settlement policy, ordering, Recovery, and failure behavior;
-- existing browser scenarios continue to cover startup, File Locations, Grid,
-  Photo Review, Album management, reconnect and race behavior, teardown, and a
-  large Library;
+  cancellation or settlement policy, ordering, Recovery, and failure behavior
+  as a characterized rule of its model owner, proven by the page-model unit
+  tests rather than by a browser scenario;
+- the browser smoke suite proves the assembled real stack end to end against
+  the Rust server and the built Web assets: the access boundary, startup scan
+  and Grid rendering, Photo View, decisions persisted through the real write
+  path, Album management, a responsive surface, the CLI-to-Web flow, and the
+  opt-in real-camera scenario. The suite stays smoke-sized and runs fully
+  parallel; it is not the home of behavior or race regression, and
+  [`CONTRIBUTING.md`](../CONTRIBUTING.md#browser-suite-policy) owns that rule;
+- presentational and browser-real rules keep required coverage wherever they
+  live. A behavior domain leaves the browser suite only when it keeps
+  required coverage with an explicit owner and destination: a page-model unit
+  assertion, a dedicated slower suite, or the open Issue that owns the work
+  until one of those exists. Until
+  issue [#410](https://github.com/suraciii/slipstream/issues/410) closes, the
+  Zoom, Dock, and Rating Wheel interaction rules, pointer and gesture state,
+  Grid geometry and focus movement, filmstrip presentation, viewport and
+  200%-text space budgets, browser history/bfcache/pagehide semantics,
+  40,000-Photo in-browser boundedness, and the rendered-DOM halves of the
+  recovery and windowing families have no executing coverage; they remain
+  required coverage, and #410 owns restoring each of them;
 - mobile Photo View checks prove Quick Action Dock and Photo tools focus,
   safe-area, and ownership behavior, and Rating Wheel checks prove the
   450-millisecond hold, 12 CSS-pixel handoff, release-only mutation, explicit
-  fallback, cancellation, and stale-settlement rules;
+  fallback, cancellation, and stale-settlement rules — as unit tests of the
+  extracted interaction module once it exists, and through issue
+  [#410](https://github.com/suraciii/slipstream/issues/410)'s dedicated
+  slower suite until then;
 - the complete repository verification gate passes with nonzero test discovery;
   and
 - an independent read-only review checks FSD placement, dependency direction,
