@@ -111,6 +111,9 @@ Comparison must keep the chosen stage and display conversion constant while
 comparing the current settings with the as-shot/baseline development settings.
 Camera reference must remain a separately labeled view. If either comparison
 image is pending, the workspace must say so rather than compare unrelated images.
+The Development view uses the fixed conversion and clipping behavior in the
+[Development Color Pipeline](../design/development-color.md#display-and-comparison).
+That display rendition must not feed the Development TIFF or Film stage.
 
 An Edit Preview must identify its actual dimensions. Reduced-resolution film
 simulation is suitable for overall color and tone; it must not be presented as
@@ -213,9 +216,33 @@ A dropped response alone must not imply that the request failed to take effect.
 
 Edit Recipes require backup. Intermediate images and Edit Previews may be
 reconstructed while their source and processing assets remain available.
-Exports must have a bounded, disclosed retention period. After expiration,
-regeneration must identify missing source or engine requirements rather than
-silently change the result. Engine upgrades must not silently change saved looks.
+Every accepted Export's status receipt and captured snapshot must remain
+available until terminal settlement and for seven days afterward. Repeating an
+accepted request with the same identity and payload must resolve to that Export
+without starting another attempt. Reusing its identity with a different
+payload must be refused. An explicit retry must use a new request identity and
+may use the captured snapshot only while it remains retained. After a receipt
+expires, repeating that request must return an explicit expired outcome and
+must not create an Export. Expiry must not make the old identity available for
+new work. A new Export after expiry requires a new request identity and
+confirmation of the current source and settings.
+
+A successful Development TIFF and its captured snapshot must remain available
+for seven days after publication. The interface must disclose the expiry. An
+active download must hold a lease that keeps the artifact and snapshot
+available until the response stream settles.
+
+The deployment must enforce a finite retained-output allowance. If the service
+cannot reserve enough space for a complete new Development TIFF within that
+allowance, it must refuse the Export before accepting the work. It must not
+evict a Development TIFF before its disclosed expiry or while a download lease
+is active. A storage refusal must leave saved settings and completed Exports
+available and explain that retained-output capacity is insufficient.
+
+Other Export targets must also have a bounded, disclosed retention period.
+After expiration, regeneration must identify missing source or engine
+requirements rather than silently change the result. Engine upgrades must not
+silently change saved looks.
 
 ## Examples
 

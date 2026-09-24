@@ -19,6 +19,19 @@ An Edit Recipe contains semantic exposure and white-balance intent plus the
 fixed Film Recipe reference. Engine module parameters are private derived data.
 The domain model must not contain darktable history blobs or Python objects.
 
+The initial Development TIFF uses the `LargeRGB-elle-V2-g10.icc` profile asset
+with SHA-256
+`df7b2c677645f1ca5364b52e62f8db04ca61f80163792942f3e409a84a6b12ed`. The
+profile's primaries, D50 white point, and linear transfer curves are part of
+that identity; a profile name alone is insufficient.
+
+The pinned darktable run embedded an ICC profile with SHA-256
+`7bef28a81c974482756f09c7d34c55d53549ba450f26185b2c16f6228af96dfe`. Its bytes
+differ from the profile asset above only in legacy description-tag
+normalization. The processing bundle must identify the asset bytes and the
+exact embedded profile bytes separately; matching a name or appearance is
+not enough.
+
 ## RAW Development
 
 The adapter must define one documented baseline for raw black/white levels,
@@ -37,6 +50,17 @@ profile, and color calibration. It must not apply the same correction twice.
 Temperature and tint mapping, range, and direction must be validated against
 reference engine output for supported cameras. Missing required camera
 information must fail the affected capability rather than invent a baseline.
+
+RAW qualification is scoped to an explicit source class, capture mode, white-
+balance mode, and processing bundle. A recognized file extension or camera-
+family label alone does not grant development support. Full-resolution Export
+support requires a full-resolution qualification; reduced-size evidence does
+not establish it. Custom temperature/tint processing requires an independent
+reference for its mapping, range, and direction under that source class and
+bundle. The service must reject an unqualified source, mode, or WB mapping
+before processing admission. It must not silently substitute as-shot WB or
+another mapping. The adjustable-WB product target remains defined by the
+[Product Spec](../docs/photo-development.md#development-controls).
 
 Module ordering, parameter versions, and encoding must be explicit in the
 adapter. Unsupported module versions must fail. The adapter must generate a
@@ -98,8 +122,23 @@ before that processing configuration is qualified.
 ## Display and Comparison
 
 Development display must operate on a copy of the Development Result through
-a fixed, versioned conversion to sRGB. Any required view mapping must remain in
-that display branch. It must never enter the Development TIFF or Film input.
+a fixed, versioned conversion from linear ProPhoto RGB to sRGB. Convert to
+linear sRGB using the pinned profile primaries, white points, and chromatic
+adaptation. Clip each linear sRGB channel independently to the interval from
+zero to one, then apply the sRGB transfer function. This clipping is the
+defined display behavior for negative, over-range, and out-of-gamut values; it
+may change their hue or brightness in the view. It must not alter the
+Development Result. This display branch must never enter the Development TIFF
+or Film input.
+
+The destination must use standard sRGB colorimetry defined by IEC 61966-2-1
+with a D65 white point. This identifies the target colorimetry, not the profile
+bytes or D50-to-D65 adaptation. The processing bundle must pin the exact source
+and destination ICC profile bytes, the color-management implementation and
+version, rendering intent, adaptation method and state, and conversion
+algorithm version. An implicit library default must not choose the rendering
+intent or adaptation. Display capability is unavailable until the complete
+transform identity is qualified and included in the bundle.
 
 Film display must use the Film Result's defined output encoding and a matching
 ICC profile. Comparison must keep the stage, geometry, bundle, and display
@@ -134,6 +173,37 @@ keeps engine representation out of Web, CLI, and persistence contracts.
 Exposing engine internals would make clients responsible for module ordering,
 color defaults, compatibility, and unsafe input. The current workflow needs only
 exposure, white balance, and a fixed Film Recipe.
+
+### Selected: Fixed Display-Only sRGB Conversion
+
+The editor needs a deterministic view for a scene-linear ProPhoto image.
+Clipping after conversion to linear sRGB defines predictable handling of
+display-boundary values without changing the TIFF handoff or Film input.
+
+### Rejected: Perceptual Gamut Mapping in the Development Handoff
+
+A perceptual mapper would introduce another look into the scene-referred
+pipeline. The Development view is for inspection; its bounded conversion must
+remain isolated from saved image data and downstream processing.
+
+### Rejected: Reuse the Display Rendition as TIFF or Film Input
+
+The sRGB conversion clips scene-linear values and adds a display transfer
+function. Reusing it would discard information and violate the Development TIFF
+and Film input contracts.
+
+### Selected: Bundle-Pinned ICC Transform
+
+The profile bytes, color-management implementation, rendering intent, and
+white-point adaptation are all part of output identity. Pinning them in the
+processing bundle makes the display transform reproducible across hosts and
+upgrades.
+
+### Rejected: Implicit Color-Management Defaults
+
+Default profiles, rendering intents, or adaptation settings can vary with
+installed libraries and host configuration. A color-space label alone cannot
+make the view repeatable.
 
 ## Verification
 
