@@ -166,6 +166,16 @@ or policy outside that fixed authority has no admitted plan.
 letters, digits, `.`, `_`, or `-`). The bundle lists the supported camera or
 container classes; `kind=raw` without a matching profile is unsupported.
 
+The first qualified list has two entries: `sony-ilce-7rm5-arw` for the Sony
+ILCE-7RM5 with an ARW container and `sony-ilce-7cm2-arw` for the Sony
+ILCE-7CM2 with an ARW container. Qualification evidence and its coverage
+limits are recorded in Issue #329. The service classifies a RAW Original by
+its camera make, camera model and RAW container against that list and reports
+an unlisted class as unsupported; the launcher revalidates the received
+`profile_id` against its own configured bundle before it admits any plan.
+Other bounds of this workload stay closed at a finite exposure range of 0 to
++1 EV in 1000th-EV steps with `white_balance={mode:as-shot}`.
+
 ### Authority split
 
 The service is the sole authority for Photo and product state. It resolves the
