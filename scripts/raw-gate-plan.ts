@@ -28,6 +28,12 @@ export const rawGatePlan: readonly RawGateStep[] = [
       "--",
       "--ignored",
       "--test-threads=1",
+      // The display derivative keeps an opt-in test of its own, but it needs a
+      // Development TIFF (`SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE`) rather than the
+      // camera RAW sample this gate provides, so it is neither run nor counted
+      // here.
+      "--skip",
+      "development_tiff_derivative_handles_a_real_artifact",
     ],
     expectedTests: nativeAndServiceTests,
   },
