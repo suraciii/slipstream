@@ -2,7 +2,7 @@ use crate::{ProcessingConfig, http::HttpState};
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 use slipstream_processing::{
-    protocol::{Availability, Request, Response, ResultBody},
+    protocol::{Availability, PHOTO_CAPABILITY, Request, Response, ResultBody},
     request as launcher_request,
 };
 
@@ -101,7 +101,7 @@ fn map_reconcile_response(
     else {
         return ProcessingCapabilityResponse::unavailable("unsupported-capability");
     };
-    if capability != "photo-processing" {
+    if capability != PHOTO_CAPABILITY {
         return ProcessingCapabilityResponse::unavailable("unsupported-capability");
     }
     if instance != config.instance || !lower_hex(&incarnation, 32) || next_sequence == 0 {

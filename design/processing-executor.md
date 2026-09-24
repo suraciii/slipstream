@@ -9,6 +9,9 @@ terminal evidence after its container runtime removes the worker cgroup.
 workspace model. [Photo Development Architecture](photo-development.md) owns
 source access, Export lifecycle, and publication. This specification owns the
 private execution boundary. The
+[Production Photo Processing Protocol](processing-photo-protocol.md) defines
+the typed Photo admission and descriptor handoff for the first production
+workload; it does not change this executor's fixture-only qualification mode.
 [qualification protocol](processing-executor-protocol.md) defines its initial
 closed fixture interface and operator configuration; it does not enable RAW
 or Film workloads. [Film Resource Measurement](processing-film-measurement.md)

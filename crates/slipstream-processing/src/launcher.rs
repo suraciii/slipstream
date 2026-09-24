@@ -1,6 +1,6 @@
 use slipstream_processing::{
     Executor,
-    protocol::{Availability, Config, Request, Response, ResultBody},
+    protocol::{Availability, Config, PHOTO_CAPABILITY, Request, Response, ResultBody},
     request, serve,
 };
 use std::{
@@ -124,7 +124,7 @@ fn ready_response(
                 bundle,
                 availability: Availability::Available,
                 ..
-            } if capability == "photo-processing"
+            } if capability == PHOTO_CAPABILITY
                 && response_instance == instance
                 && hex(&incarnation, 32)
                 && next_sequence > 0
