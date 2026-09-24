@@ -140,6 +140,19 @@ value used for fitting. The receipt peak and its six hierarchical
 and local OOM fields (`oom`, `oom_kill`, `oom_group_kill`) must equal the parsed
 snapshot values, and all six OOM fields must be zero.
 
+The same snapshot may retain the exact raw `io.stat` text from that exact
+verified attempt cgroup, inside the existing post-exit, unpopulated and
+identity-checked read. It shares the per-file cap and uses only the aggregate
+space left by the required memory values. Capture it only when the complete
+file is readable, bounded, and printable ASCII plus LF; otherwise leave
+`io_stat_raw` absent. Do not normalize or interpret kernel counter names while
+capturing, and do not substitute parent or workload-leaf counters. An absent or
+invalid I/O diagnostic does not invalidate memory evidence or delay settlement.
+The snapshot identity binds any retained I/O text to the same attempt; it does
+not create a separate I/O identity or imply that the counters are complete. The
+receipt field and bounds are defined in the [Processing Executor Qualification
+Protocol](processing-executor-protocol.md#responses-and-receipts).
+
 From engine release through terminal capture, `memory.max` is frozen at the
 captured attempt limit and `memory.swap.max` at zero; both are checked in every
 retained observer sample and the terminal snapshot. `memory.swap.current` must
@@ -192,7 +205,9 @@ campaign row:
   output, incomplete observer evidence, uncertain cleanup or failed headroom
   makes the row ineligible for E/R fitting.
 - `io_diagnostic_eligible` requires complete terminal I/O evidence for the exact
-  attempt and its declared scope. Missing per-attempt terminal counters make the
+  attempt and its declared scope. It requires `io_stat_raw` from that attempt's
+  terminal snapshot and successful independent parsing of the complete counters.
+  Missing, malformed or oversized per-attempt terminal counters make the
   diagnostic unavailable. Parent I/O counters cannot stand in for attempt
   counters unless contemporaneous evidence proves exclusive membership of the
   attempt in that parent for the entire observation interval.

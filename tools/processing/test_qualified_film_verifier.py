@@ -239,7 +239,8 @@ class QualifiedVerifierTests(unittest.TestCase):
             incarnation=intent['incarnation'], sequence=intent['sequence'],
             memory_peak_raw='100\n', memory_max_raw=f'{8 * 1024**3}\n',
             memory_swap_current_raw='0\n', memory_swap_max_raw='0\n',
-            memory_events_raw=raw_events, memory_events_local_raw=raw_events)
+            memory_events_raw=raw_events, memory_events_local_raw=raw_events,
+            io_stat_raw=None)
         receipt = dict(intent, plan=plan, outcome='completed',
                        runtime=dict(launch_id=launch_id, container_id=container_id,
                                     attempt_unit=attempt_unit),
@@ -249,6 +250,11 @@ class QualifiedVerifierTests(unittest.TestCase):
                        qualification_failure=None)
         with patch.object(verifier.FILM.FilmQualification, 'terminal', return_value=receipt):
             self.assertEqual(probe.terminal(intent), receipt)
+        with_io = copy.deepcopy(receipt)
+        with_io['evidence']['terminal_snapshot']['io_stat_raw'] = (
+            '8:0 rbytes=1 wbytes=2 rios=3 wios=4 cost.usage=9\n')
+        with patch.object(verifier.FILM.FilmQualification, 'terminal', return_value=with_io):
+            self.assertEqual(probe.terminal(intent), with_io)
         for key, value in [('empirical_ceiling_bytes', 2 * 1024**3),
                            ('safety_reserve_bytes', 2 * 1024**3), ('source_cache_bytes', 0),
                            ('evidence_sha256', '0' * 64), ('width', 20),
@@ -283,6 +289,12 @@ class QualifiedVerifierTests(unittest.TestCase):
                 memory_events_local_raw=raw_events.replace('oom_kill 0', 'oom_kill 1'))),
             ('aggregate bound', lambda row: row['evidence']['terminal_snapshot'].update(
                 memory_events_raw='x' * 4096)),
+            ('non-ascii io text', lambda row: row['evidence']['terminal_snapshot'].update(
+                io_stat_raw='8:0 é=1\n')),
+            ('io control byte', lambda row: row['evidence']['terminal_snapshot'].update(
+                io_stat_raw='8:0\tbad=1\n')),
+            ('io aggregate bound', lambda row: row['evidence']['terminal_snapshot'].update(
+                io_stat_raw='x' * 4096)),
         )
         for label, mutate in tampered:
             changed = copy.deepcopy(receipt)

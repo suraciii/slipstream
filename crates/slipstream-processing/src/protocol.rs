@@ -386,6 +386,8 @@ pub struct TerminalSnapshot {
     pub memory_swap_max_raw: String,
     pub memory_events_raw: String,
     pub memory_events_local_raw: String,
+    #[serde(default)]
+    pub io_stat_raw: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

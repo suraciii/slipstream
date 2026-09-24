@@ -1416,6 +1416,43 @@ fn count_terminal_source(raw: &str, total: &mut usize) -> Result<()> {
     Ok(())
 }
 
+fn optional_terminal_io_source(path: &Path, total: &mut usize) -> Option<String> {
+    let remaining = crate::protocol::TERMINAL_SNAPSHOT_BYTES.checked_sub(*total)?;
+    let mut bytes = Vec::new();
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?
+        .take(remaining as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > remaining {
+        return None;
+    }
+    let raw = String::from_utf8(bytes).ok()?;
+    let mut candidate_total = *total;
+    count_terminal_io_source(&raw, &mut candidate_total).ok()?;
+    *total = candidate_total;
+    Some(raw)
+}
+
+fn count_terminal_io_source(raw: &str, total: &mut usize) -> Result<()> {
+    if raw.len() > crate::protocol::TERMINAL_SNAPSHOT_BYTES
+        || !raw.is_ascii()
+        || !raw
+            .bytes()
+            .all(|byte| byte == b'\n' || (b' '..=b'~').contains(&byte))
+    {
+        return Err(ErrorCode::Uncertain);
+    }
+    *total = total
+        .checked_add(raw.len())
+        .filter(|length| *length <= crate::protocol::TERMINAL_SNAPSHOT_BYTES)
+        .ok_or(ErrorCode::Uncertain)?;
+    Ok(())
+}
+
 fn raw_terminal_u64(raw: &str) -> Result<u64> {
     let digits = raw.strip_suffix('\n').ok_or(ErrorCode::Uncertain)?;
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -1438,6 +1475,7 @@ fn terminal_snapshot(
     snapshot.memory_events_raw = raw_terminal_source(&path.join("memory.events"), &mut total)?;
     snapshot.memory_events_local_raw =
         raw_terminal_source(&path.join("memory.events.local"), &mut total)?;
+    snapshot.io_stat_raw = optional_terminal_io_source(&path.join("io.stat"), &mut total);
 
     let (peak, events) = parse_terminal_values(&snapshot, expected_memory_limit)?;
     Ok((snapshot, peak, events))
@@ -1457,6 +1495,9 @@ fn parse_terminal_values(
         &snapshot.memory_events_local_raw,
     ] {
         count_terminal_source(raw, &mut total)?;
+    }
+    if let Some(raw) = &snapshot.io_stat_raw {
+        count_terminal_io_source(raw, &mut total)?;
     }
     let peak = raw_terminal_u64(&snapshot.memory_peak_raw)?;
     if raw_terminal_u64(&snapshot.memory_max_raw)? != expected_memory_limit
@@ -1501,6 +1542,7 @@ fn expected_terminal_identity(record: &Record, path: &Path) -> Result<TerminalSn
         memory_swap_max_raw: String::new(),
         memory_events_raw: String::new(),
         memory_events_local_raw: String::new(),
+        io_stat_raw: None,
     })
 }
 
@@ -1684,6 +1726,10 @@ mod tests {
                 "memory.events.local",
                 "low 0\nhigh 0\nmax 0\noom 4\noom_kill 5\noom_group_kill 6\n",
             ),
+            (
+                "io.stat",
+                "8:0 rbytes=1 wbytes=2 rios=3 wios=4 cost.usage=9\n",
+            ),
         ] {
             fs::write(root.join(name), contents).unwrap();
         }
@@ -1702,6 +1748,7 @@ mod tests {
             memory_swap_max_raw: String::new(),
             memory_events_raw: String::new(),
             memory_events_local_raw: String::new(),
+            io_stat_raw: None,
         };
         (root, snapshot)
     }
@@ -1731,6 +1778,10 @@ mod tests {
         assert_eq!(
             snapshot.memory_events_raw,
             "low 0\nhigh 0\nmax 0\noom 1\noom_kill 2\noom_group_kill 3\n"
+        );
+        assert_eq!(
+            snapshot.io_stat_raw.as_deref(),
+            Some("8:0 rbytes=1 wbytes=2 rios=3 wios=4 cost.usage=9\n")
         );
         assert_eq!(peak, 12345);
         assert_eq!(
@@ -1800,6 +1851,77 @@ mod tests {
             Err(ErrorCode::Uncertain)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn optional_terminal_io_is_bounded_and_never_invalidates_memory_evidence() {
+        for io_stat in [None, Some(vec![0xff])] {
+            let (root, identity) = snapshot_fixture();
+            match io_stat {
+                Some(contents) => fs::write(root.join("io.stat"), contents).unwrap(),
+                None => fs::remove_file(root.join("io.stat")).unwrap(),
+            }
+            let (snapshot, peak, _) =
+                terminal_snapshot(&root, identity, 65536).expect("memory snapshot stays valid");
+            assert_eq!(peak, 12345);
+            assert_eq!(snapshot.io_stat_raw, None);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        let (root, identity) = snapshot_fixture();
+        let fixed_bytes: usize = [
+            "memory.peak",
+            "memory.max",
+            "memory.swap.current",
+            "memory.swap.max",
+            "memory.events",
+            "memory.events.local",
+        ]
+        .iter()
+        .map(|name| fs::read(root.join(name)).unwrap().len())
+        .sum();
+        let remaining = TERMINAL_SNAPSHOT_BYTES - fixed_bytes;
+        fs::write(root.join("io.stat"), format!("{}\n", "x".repeat(remaining))).unwrap();
+        let (snapshot, _, _) = terminal_snapshot(&root, identity.clone(), 65536).unwrap();
+        assert_eq!(snapshot.io_stat_raw, None);
+        fs::write(
+            root.join("io.stat"),
+            format!("{}\n", "x".repeat(remaining - 1)),
+        )
+        .unwrap();
+        let (snapshot, _, _) = terminal_snapshot(&root, identity.clone(), 65536).unwrap();
+        assert_eq!(
+            snapshot.io_stat_raw.as_ref().map(String::len),
+            Some(remaining)
+        );
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, identity) = snapshot_fixture();
+        fs::remove_file(root.join("io.stat")).unwrap();
+        fs::write(root.join("io-stat-target"), "8:0 rbytes=1\n").unwrap();
+        std::os::unix::fs::symlink(root.join("io-stat-target"), root.join("io.stat")).unwrap();
+        let (snapshot, peak, _) = terminal_snapshot(&root, identity, 65536).unwrap();
+        assert_eq!(peak, 12345);
+        assert_eq!(snapshot.io_stat_raw, None);
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, identity) = snapshot_fixture();
+        fs::write(root.join("io.stat"), "8:0 rbytes=1 cost.usage=9\n").unwrap();
+        let (snapshot, _, _) = terminal_snapshot(&root, identity, 65536).unwrap();
+        assert_eq!(
+            snapshot.io_stat_raw.as_deref(),
+            Some("8:0 rbytes=1 cost.usage=9\n")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_terminal_snapshot_receipts_default_missing_io_diagnostic() {
+        let (_, snapshot) = snapshot_fixture();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value.as_object_mut().unwrap().remove("io_stat_raw");
+        let restored: TerminalSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.io_stat_raw, None);
     }
 
     #[test]
@@ -1910,6 +2032,7 @@ mod tests {
                 memory_swap_max_raw: "0\n".into(),
                 memory_events_raw: "oom 0\noom_kill 0\noom_group_kill 0\n".into(),
                 memory_events_local_raw: "oom 0\noom_kill 0\noom_group_kill 0\n".into(),
+                io_stat_raw: Some("8:0 rbytes=1 wbytes=2 rios=3 wios=4 cost.usage=9\n".into()),
             }),
         });
         assert_eq!(backend.validate_terminal_evidence(&record), Ok(()));
