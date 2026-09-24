@@ -387,9 +387,22 @@ mod tests {
     fn an_unrecognized_configuration_selects_no_authority() {
         assert_eq!(selected_authority(b"{}"), None);
         assert_eq!(selected_authority(b""), None);
-        // A fixture-mode or Film-mode envelope with the production workload
-        // value is still that authority's configuration, never Photo's.
-        let bytes = qualification_configuration();
+    }
+
+    #[test]
+    fn a_fixture_envelope_carrying_the_production_workload_value_is_never_photo() {
+        // Embedding the production workload value in a fixture envelope's
+        // paths does not make it a production Photo configuration: only a
+        // photo-processing mode selects the Photo authority, so the bytes
+        // still open the fixture executor.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&qualification_configuration()).unwrap();
+        value["root"] = "/var/lib/slipstream-processing/qualification/development-tiff".into();
+        value["socket"] =
+            "/run/slipstream-processing/qualification/development-tiff/launcher.sock".into();
+        let bytes = serde_json::to_vec(&value).unwrap();
+
+        assert!(photo::Config::parse(&bytes).is_err());
         assert_eq!(selected_authority(&bytes), Some(Authority::Qualification));
     }
 }
