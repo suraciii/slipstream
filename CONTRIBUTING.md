@@ -153,15 +153,17 @@ check, so the gate keeps one runner and reuses work instead of adding runners:
 - The bundled browser suite is a smoke gate over the real stack and runs with
   `fullyParallel` on the runner's four CPUs. The behavior and race scenarios
   that could not tolerate concurrent load were removed by the smoke-suite
-  change (issue [#399](https://github.com/suraciii/slipstream/issues/399));
-  their rules remain covered by the page-model unit tests. Keep the suite at
-  smoke depth so full parallelism stays valid.
+  change (issue [#399](https://github.com/suraciii/slipstream/issues/399)).
+  The owners' logic rules are covered by the page-model unit tests; the
+  domains that lost executing coverage entirely are tracked in
+  issue [#410](https://github.com/suraciii/slipstream/issues/410). Keep the
+  suite at smoke depth so full parallelism stays valid.
 
 ### Browser suite policy
 
 The browser suite is a smoke gate, not a behavior suite. It proves that the real stack works end to end: the access boundary, startup scan and Grid rendering, Photo View, decisions persisted through the real write path, Album management, responsive surfaces, the CLI-to-Web flow, and the opt-in real-camera scenario. Keep it small enough to run on every change; a new browser scenario needs a reason that only a real browser against the real server can prove.
 
-Logic regression belongs to the page-model unit tests (`bun run --cwd apps/web test:unit`), which characterize each owner's policy: async ownership and recovery claims, Browse Snapshot windows and retention, Photo and batch writes with Undo, Album writes, saved positions, navigation codecs, and the access session. When a rule is expressible against a model owner, add a unit test instead of a browser scenario. Presentational rules that still live inside the page UI — pointer and gesture state, Grid geometry, focus movement, filmstrip presentation — keep browser smoke coverage until they are extracted into testable modules.
+Logic regression belongs to the page-model unit tests (`bun run --cwd apps/web test:unit`), which characterize each owner's policy: async ownership and recovery claims, Browse Snapshot windows and retention, Photo and batch writes with Undo, Album writes, saved positions, navigation codecs, and the access session. When a rule is expressible against a model owner, add a unit test instead of a browser scenario. Presentational rules that still live inside the page UI — pointer and gesture state, Grid geometry, focus movement, filmstrip presentation — lost their browser scenarios with the smoke-suite reduction and have no executing coverage until they are extracted into testable modules; issue [#410](https://github.com/suraciii/slipstream/issues/410) owns that work. Removing the last coverage of a rule that lives inside the page UI requires a unit replacement, a dedicated slower suite, or an issue that owns the gap.
 
 ## Photo fixtures
 

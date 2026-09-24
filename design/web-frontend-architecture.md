@@ -454,12 +454,25 @@ Verification must prove:
   opt-in real-camera scenario. The suite stays smoke-sized and runs fully
   parallel; it is not the home of behavior or race regression, and
   [`CONTRIBUTING.md`](../CONTRIBUTING.md#browser-suite-policy) owns that rule;
-- presentational rules that remain inside the page UI — pointer and gesture
-  state, Grid geometry and focus movement, filmstrip presentation, and the
-  Zoom, Dock, and Rating Wheel interaction rules — keep smoke coverage only.
-  Extracting each of them into a testable module with its own unit tests is
-  tracked follow-up work, and this document's mobile-interaction requirements
-  are the acceptance criteria for that extraction;
+- presentational and browser-real rules keep required coverage wherever they
+  live. A behavior domain leaves the browser suite only when it keeps
+  required coverage with an explicit owner and destination: a page-model unit
+  assertion, a dedicated slower suite, or the open Issue that owns the work
+  until one of those exists. Until
+  issue [#410](https://github.com/suraciii/slipstream/issues/410) closes, the
+  Zoom, Dock, and Rating Wheel interaction rules, pointer and gesture state,
+  Grid geometry and focus movement, filmstrip presentation, viewport and
+  200%-text space budgets, browser history/bfcache/pagehide semantics,
+  40,000-Photo in-browser boundedness, and the rendered-DOM halves of the
+  recovery and windowing families have no executing coverage; they remain
+  required coverage, and #410 owns restoring each of them;
+- mobile Photo View checks prove Quick Action Dock and Photo tools focus,
+  safe-area, and ownership behavior, and Rating Wheel checks prove the
+  450-millisecond hold, 12 CSS-pixel handoff, release-only mutation, explicit
+  fallback, cancellation, and stale-settlement rules — as unit tests of the
+  extracted interaction module once it exists, and through issue
+  [#410](https://github.com/suraciii/slipstream/issues/410)'s dedicated
+  slower suite until then;
 - the complete repository verification gate passes with nonzero test discovery;
   and
 - an independent read-only review checks FSD placement, dependency direction,
