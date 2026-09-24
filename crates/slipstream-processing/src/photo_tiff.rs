@@ -44,7 +44,8 @@ impl Reader {
     fn open(path: &Path) -> Result<Self, ErrorCode> {
         let mut file = File::open(path).map_err(|_| ErrorCode::Uncertain)?;
         let mut head = [0u8; 8];
-        file.read_exact(&mut head).map_err(|_| ErrorCode::Uncertain)?;
+        file.read_exact(&mut head)
+            .map_err(|_| ErrorCode::Uncertain)?;
         let little = match &head[..4] {
             b"II\x2a\x00" => true,
             b"MM\x00\x2a" => false,
@@ -194,41 +195,61 @@ fn validate_for_icc(
     let mut reader = Reader::open(path)?;
     let entries = first_ifd(&mut reader)?;
     // Multi-page TIFFs are not the qualified single-image output.
-    let next_ifd = u64::from(reader.u32(4)?) + 2 + 12 * u64::try_from(entries.len()).map_err(|_| ErrorCode::Uncertain)?;
+    let next_ifd = u64::from(reader.u32(4)?)
+        + 2
+        + 12 * u64::try_from(entries.len()).map_err(|_| ErrorCode::Uncertain)?;
     if reader.u32(next_ifd)? != 0 {
         return Err(ErrorCode::Uncertain);
     }
-    let width = long_value(&mut reader, entry(&entries, 256).ok_or(ErrorCode::Uncertain)?)?;
-    let height = long_value(&mut reader, entry(&entries, 257).ok_or(ErrorCode::Uncertain)?)?;
+    let width = long_value(
+        &mut reader,
+        entry(&entries, 256).ok_or(ErrorCode::Uncertain)?,
+    )?;
+    let height = long_value(
+        &mut reader,
+        entry(&entries, 257).ok_or(ErrorCode::Uncertain)?,
+    )?;
     if width == 0 || height == 0 {
         return Err(ErrorCode::Uncertain);
     }
     // IEEE float32 RGB samples, Deflate compression, RGB photometric.
-    let bits = short_values(&mut reader, entry(&entries, 258).ok_or(ErrorCode::Uncertain)?)?;
+    let bits = short_values(
+        &mut reader,
+        entry(&entries, 258).ok_or(ErrorCode::Uncertain)?,
+    )?;
     if bits != [32, 32, 32] {
         return Err(ErrorCode::Uncertain);
     }
-    if long_value(&mut reader, entry(&entries, 259).ok_or(ErrorCode::Uncertain)?)? != 8 {
+    if long_value(
+        &mut reader,
+        entry(&entries, 259).ok_or(ErrorCode::Uncertain)?,
+    )? != 8
+    {
         return Err(ErrorCode::Uncertain);
     }
-    if long_value(&mut reader, entry(&entries, 262).ok_or(ErrorCode::Uncertain)?)? != 2 {
+    if long_value(
+        &mut reader,
+        entry(&entries, 262).ok_or(ErrorCode::Uncertain)?,
+    )? != 2
+    {
         return Err(ErrorCode::Uncertain);
     }
-    if let Some(samples) = entry(&entries, 277) {
-        if long_value(&mut reader, samples)? != 3 {
-            return Err(ErrorCode::Uncertain);
-        }
+    if let Some(samples) = entry(&entries, 277)
+        && long_value(&mut reader, samples)? != 3
+    {
+        return Err(ErrorCode::Uncertain);
     }
     // Applied orientation with no hidden rotation.
-    if let Some(orientation) = entry(&entries, 274) {
-        if short_values(&mut reader, orientation)?.len() != 1
-            || short_values(&mut reader, orientation)?[0] != 1
-        {
-            return Err(ErrorCode::Uncertain);
-        }
+    if let Some(orientation) = entry(&entries, 274)
+        && (short_values(&mut reader, orientation)?.len() != 1
+            || short_values(&mut reader, orientation)?[0] != 1)
+    {
+        return Err(ErrorCode::Uncertain);
     }
-    let sample_format =
-        short_values(&mut reader, entry(&entries, 339).ok_or(ErrorCode::Uncertain)?)?;
+    let sample_format = short_values(
+        &mut reader,
+        entry(&entries, 339).ok_or(ErrorCode::Uncertain)?,
+    )?;
     if sample_format != [3, 3, 3] {
         return Err(ErrorCode::Uncertain);
     }
@@ -282,12 +303,11 @@ mod tests {
         }
 
         fn u32(&mut self, value: u32) {
-            self.bytes
-                .extend_from_slice(&if self.little {
-                    value.to_le_bytes()
-                } else {
-                    value.to_be_bytes()
-                });
+            self.bytes.extend_from_slice(&if self.little {
+                value.to_le_bytes()
+            } else {
+                value.to_be_bytes()
+            });
         }
 
         fn patch_u32(&mut self, offset: usize, value: u32) {
@@ -336,7 +356,9 @@ mod tests {
                 None => entries_bytes.extend_from_slice(&tag.value.to_le_bytes()),
             }
         }
-        writer.bytes.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        writer
+            .bytes
+            .extend_from_slice(&(tags.len() as u16).to_le_bytes());
         writer.bytes.extend_from_slice(&entries_bytes);
         writer.u32(0); // no next IFD
         writer.patch_u32(4, 8);
@@ -348,16 +370,76 @@ mod tests {
     fn valid_tags() -> Vec<Tag> {
         let icc = vec![0u8; 588];
         vec![
-            Tag { kind: 256, field_type: 4, count: 1, value: 4, extra: None },
-            Tag { kind: 257, field_type: 4, count: 1, value: 3, extra: None },
-            Tag { kind: 258, field_type: 3, count: 3, value: 0, extra: Some(vec![32, 0, 32, 0, 32, 0]) },
-            Tag { kind: 259, field_type: 4, count: 1, value: 8, extra: None },
-            Tag { kind: 262, field_type: 4, count: 1, value: 2, extra: None },
-            Tag { kind: 273, field_type: 4, count: 1, value: 0, extra: None },
-            Tag { kind: 277, field_type: 4, count: 1, value: 3, extra: None },
-            Tag { kind: 279, field_type: 4, count: 1, value: 48, extra: None },
-            Tag { kind: 339, field_type: 3, count: 3, value: 0, extra: Some(vec![3, 0, 3, 0, 3, 0]) },
-            Tag { kind: ICC_TAG, field_type: 1, count: icc.len() as u32, value: 0, extra: Some(icc) },
+            Tag {
+                kind: 256,
+                field_type: 4,
+                count: 1,
+                value: 4,
+                extra: None,
+            },
+            Tag {
+                kind: 257,
+                field_type: 4,
+                count: 1,
+                value: 3,
+                extra: None,
+            },
+            Tag {
+                kind: 258,
+                field_type: 3,
+                count: 3,
+                value: 0,
+                extra: Some(vec![32, 0, 32, 0, 32, 0]),
+            },
+            Tag {
+                kind: 259,
+                field_type: 4,
+                count: 1,
+                value: 8,
+                extra: None,
+            },
+            Tag {
+                kind: 262,
+                field_type: 4,
+                count: 1,
+                value: 2,
+                extra: None,
+            },
+            Tag {
+                kind: 273,
+                field_type: 4,
+                count: 1,
+                value: 0,
+                extra: None,
+            },
+            Tag {
+                kind: 277,
+                field_type: 4,
+                count: 1,
+                value: 3,
+                extra: None,
+            },
+            Tag {
+                kind: 279,
+                field_type: 4,
+                count: 1,
+                value: 48,
+                extra: None,
+            },
+            Tag {
+                kind: 339,
+                field_type: 3,
+                count: 3,
+                value: 0,
+                extra: Some(vec![3, 0, 3, 0, 3, 0]),
+            },
+            Tag {
+                kind: ICC_TAG,
+                field_type: 1,
+                count: icc.len() as u32,
+                value: 0,
+                extra: Some(icc),
+            },
         ]
     }
 
@@ -389,15 +471,33 @@ mod tests {
 
         // Any changed tag that breaks the contract is refused.
         for (index, change) in [
-            Tag { kind: 259, field_type: 4, count: 1, value: 1, extra: None }, // no deflate
-            Tag { kind: 262, field_type: 4, count: 1, value: 1, extra: None }, // not RGB
-            Tag { kind: 256, field_type: 4, count: 1, value: 0, extra: None }, // empty width
+            Tag {
+                kind: 259,
+                field_type: 4,
+                count: 1,
+                value: 1,
+                extra: None,
+            }, // no deflate
+            Tag {
+                kind: 262,
+                field_type: 4,
+                count: 1,
+                value: 1,
+                extra: None,
+            }, // not RGB
+            Tag {
+                kind: 256,
+                field_type: 4,
+                count: 1,
+                value: 0,
+                extra: None,
+            }, // empty width
         ]
         .into_iter()
         .enumerate()
         {
             let mut tags = valid_tags();
-            tags[index + 0] = change;
+            tags[index] = change;
             let broken = dir.join(format!("broken-{index}.tif"));
             build(&broken, &tags, &[0u8; 48]);
             assert!(validate(&broken, 1 << 20).is_err(), "case {index}");
@@ -432,4 +532,3 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
-

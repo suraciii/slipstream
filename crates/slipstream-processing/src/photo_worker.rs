@@ -3,7 +3,10 @@
 //! terminal outcome. It must never run as a host process.
 
 use sha2::{Digest, Sha256};
-use slipstream_processing::{photo::ICC_ASSET_SHA256, protocol::{Outcome, now}};
+use slipstream_processing::{
+    photo::ICC_ASSET_SHA256,
+    protocol::{Outcome, now},
+};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -171,8 +174,7 @@ fn prepare_work() -> io::Result<()> {
         return Err(bad("pinned ICC asset identity mismatch"));
     }
     fs::copy(ICC_ASSET, "/work/config/color/out/linear-prophoto.icc")?;
-    let mut permissions = fs::metadata("/work/config/color/out/linear-prophoto.icc")?
-        .permissions();
+    let mut permissions = fs::metadata("/work/config/color/out/linear-prophoto.icc")?.permissions();
     permissions.set_mode(0o444);
     fs::set_permissions("/work/config/color/out/linear-prophoto.icc", permissions)?;
     Ok(())
@@ -233,7 +235,10 @@ fn run(launch: &str, deadline: u64) -> io::Result<()> {
         .arg("--icc-asset")
         .arg(ICC_ASSET)
         .env_clear()
-        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
         .env("TMPDIR", "/work/tmp")
         .env("XDG_CONFIG_HOME", "/work/xdg")
         .env("XDG_CACHE_HOME", "/work/cache")

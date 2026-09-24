@@ -9,7 +9,7 @@
 use crate::{
     backend,
     journal::{self, ManagerPhase, ParentIdentity},
-    photo::{self, Config, OutputReceipt, PhotoReceipt, Request, Recipe, ResultBody, Source},
+    photo::{self, Config, OutputReceipt, PhotoReceipt, Recipe, Request, ResultBody, Source},
     protocol::{
         self, Availability, Cleanup, ErrorCode, Evidence, Limits, Outcome, State, digest, hex, now,
     },
@@ -323,9 +323,9 @@ struct Live {
 #[derive(Debug)]
 enum StartAdmission {
     /// A durable receipt for this attempt identity already exists.
-    Replay(ResultBody),
+    Replay(Box<ResultBody>),
     /// A fresh executor intent was persisted for the copied descriptor.
-    Intent(PhotoRecord),
+    Intent(Box<PhotoRecord>),
 }
 
 impl PhotoExecutor {
@@ -526,10 +526,7 @@ impl PhotoExecutor {
                 now()?,
                 self.config.receipt_retention_seconds,
             )?;
-            (
-                data.available,
-                data.registry.parent_identity.clone(),
-            )
+            (data.available, data.registry.parent_identity.clone())
         };
         let ready = available && self.admission_ready(identity.as_ref()).is_ok();
         self.capability(ready)
@@ -556,7 +553,7 @@ impl PhotoExecutor {
             )?
         };
         let record = match admission {
-            StartAdmission::Replay(body) => return Ok(body),
+            StartAdmission::Replay(body) => return Ok(*body),
             StartAdmission::Intent(record) => record,
         };
         // Phase B: the descriptor copy runs without the journal mutex, so
@@ -655,9 +652,7 @@ impl PhotoExecutor {
             self.config.receipt_retention_seconds,
         )?;
         if record_ref(&data.registry, incarnation, sequence)?.terminal() {
-            return Ok(
-                record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation),
-            );
+            return Ok(record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation));
         }
         let record = record_ref(&data.registry, incarnation, sequence)?;
         if record.validation_ack == Some(accepted) {
@@ -700,9 +695,7 @@ impl PhotoExecutor {
             self.config.receipt_retention_seconds,
         )?;
         if record_ref(&data.registry, incarnation, sequence)?.terminal() {
-            return Ok(
-                record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation),
-            );
+            return Ok(record_ref(&data.registry, incarnation, sequence)?.result_body(incarnation));
         }
         let record = {
             let record = record_ref_mut(&mut data.registry, incarnation, sequence)?;
@@ -810,10 +803,7 @@ impl PhotoExecutor {
 
     fn finish(self: &Arc<Self>, sequence: u64) -> Result<(), ErrorCode> {
         let record = self.record(sequence)?;
-        if self
-            .live(&record)
-            .is_ok_and(|live| live.running)
-        {
+        if self.live(&record).is_ok_and(|live| live.running) {
             self.stop(&record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
@@ -903,13 +893,11 @@ impl PhotoExecutor {
                         .get_mut(&sequence)
                         .ok_or(ErrorCode::Uncertain)?;
                     if record.outcome.is_none() {
-                        record.outcome = Some(
-                            if accepted {
-                                "completed".into()
-                            } else {
-                                "refused-output-validation".into()
-                            },
-                        );
+                        record.outcome = Some(if accepted {
+                            "completed".into()
+                        } else {
+                            "refused-output-validation".into()
+                        });
                     }
                     record.state = State::Settling;
                     persist(Path::new(&self.config.root), &data.registry)?;
@@ -952,10 +940,7 @@ impl PhotoExecutor {
     /// evidence, remove the attempt boundary, and settle the receipt durably.
     fn settle_tail(&self, sequence: u64) -> Result<ResultBody, ErrorCode> {
         let mut record = self.record(sequence)?;
-        if self
-            .live(&record)
-            .is_ok_and(|live| live.running)
-        {
+        if self.live(&record).is_ok_and(|live| live.running) {
             self.stop(&record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
@@ -1048,9 +1033,7 @@ impl PhotoExecutor {
                 && record
                     .output
                     .as_ref()
-                    .is_some_and(|identity| {
-                        self.output_present(&record, identity)
-                    })
+                    .is_some_and(|identity| self.output_present(&record, identity))
             {
                 waiters.push(record.sequence);
                 continue;
@@ -1097,13 +1080,12 @@ impl PhotoExecutor {
             .workspace(Path::new(&self.config.root))
             .join("work")
             .join(OUTPUT_NAME);
-        crate::photo_tiff::validate(&path, self.config.output_bytes_max)
-            .is_ok_and(|found| {
-                found.size == identity.size
-                    && found.sha256 == identity.sha256
-                    && found.width == identity.width
-                    && found.height == identity.height
-            })
+        crate::photo_tiff::validate(&path, self.config.output_bytes_max).is_ok_and(|found| {
+            found.size == identity.size
+                && found.sha256 == identity.sha256
+                && found.width == identity.width
+                && found.height == identity.height
+        })
     }
 }
 
@@ -1123,9 +1105,10 @@ fn docker(config: &Config, args: &[String]) -> Result<String, ErrorCode> {
 /// Resolve and verify the pinned worker image. The image entrypoint and the
 /// configured bundle label bind the execution identity to the configuration.
 fn inspect_image(config: &Config) -> Result<String, ErrorCode> {
-    let info: Value = serde_json::from_str(
-        &docker(config, &backend::strings(&["info", "--format", "{{json .}}"]))?,
-    )
+    let info: Value = serde_json::from_str(&docker(
+        config,
+        &backend::strings(&["info", "--format", "{{json .}}"]),
+    )?)
     .map_err(|_| ErrorCode::Unavailable)?;
     if info["CgroupDriver"] != "systemd"
         || info["CgroupVersion"] != "2"
@@ -1197,10 +1180,7 @@ impl PhotoExecutor {
             }
             for ancestor in parent.ancestors() {
                 if path.starts_with(ancestor) {
-                    backend::require_unlimited_ancestor(
-                        ancestor,
-                        ancestor == Path::new(CGROUP),
-                    )?;
+                    backend::require_unlimited_ancestor(ancestor, ancestor == Path::new(CGROUP))?;
                 }
                 if ancestor == Path::new(CGROUP) {
                     break;
@@ -1240,7 +1220,10 @@ impl PhotoExecutor {
         Ok(())
     }
 
-    fn prepare_parent(&self, previous: Option<&ParentIdentity>) -> Result<ParentIdentity, ErrorCode> {
+    fn prepare_parent(
+        &self,
+        previous: Option<&ParentIdentity>,
+    ) -> Result<ParentIdentity, ErrorCode> {
         self.check_caller(std::process::id())?;
         self.verify_parent(previous)?;
         let unit = parent_unit(&self.config.instance);
@@ -1267,8 +1250,7 @@ impl PhotoExecutor {
                 .map_err(|_| ErrorCode::Uncertain)?
                 .ino(),
         };
-        if !hex(&identity.invocation, 32)
-            || previous.is_some_and(|previous| previous != &identity)
+        if !hex(&identity.invocation, 32) || previous.is_some_and(|previous| previous != &identity)
         {
             return Err(ErrorCode::Uncertain);
         }
@@ -1295,17 +1277,17 @@ impl PhotoExecutor {
 
     fn limits_match(&self, path: &Path) -> Result<bool, ErrorCode> {
         let limits = self.limits();
-        Ok(backend::read(&path.join("memory.max"))? == limits.memory_bytes.to_string()
-            && backend::read(&path.join("memory.swap.max"))? == "0"
-            && backend::read(&path.join("cpu.max"))?
-                == format!("{} {}", limits.cpu_quota_us, limits.cpu_period_us)
-            && backend::read(&path.join("pids.max"))? == limits.tasks.to_string())
+        Ok(
+            backend::read(&path.join("memory.max"))? == limits.memory_bytes.to_string()
+                && backend::read(&path.join("memory.swap.max"))? == "0"
+                && backend::read(&path.join("cpu.max"))?
+                    == format!("{} {}", limits.cpu_quota_us, limits.cpu_period_us)
+                && backend::read(&path.join("pids.max"))? == limits.tasks.to_string(),
+        )
     }
 
     fn scan_unowned(&self, records: &[PhotoRecord]) -> Result<(), ErrorCode> {
-        let unit = |record: &PhotoRecord| {
-            attempt_unit(&self.config.instance, &record.launch_id)
-        };
+        let unit = |record: &PhotoRecord| attempt_unit(&self.config.instance, &record.launch_id);
         if self.parent_path().exists() {
             for entry in fs::read_dir(self.parent_path()).map_err(|_| ErrorCode::Uncertain)? {
                 let entry = entry.map_err(|_| ErrorCode::Uncertain)?;
@@ -1332,31 +1314,32 @@ impl PhotoExecutor {
             &format!("slipstreamprocessing{}-*.slice", self.config.instance),
         ]))?;
         for line in names.lines() {
-            let name = line
-                .split_whitespace()
-                .next()
-                .ok_or(ErrorCode::Uncertain)?;
-            if !records.iter().any(|record| {
-                record.state != State::Settled && unit(record) == name
-            }) {
+            let name = line.split_whitespace().next().ok_or(ErrorCode::Uncertain)?;
+            if !records
+                .iter()
+                .any(|record| record.state != State::Settled && unit(record) == name)
+            {
                 return Err(ErrorCode::Uncertain);
             }
         }
-        let ids = docker(&self.config, &backend::strings(&[
-            "ps",
-            "--all",
-            "--no-trunc",
-            "--quiet",
-            "--filter",
-            &format!(
-                "label=slipstream.processing.instance={}",
-                self.config.instance
-            ),
-        ]))?;
+        let ids = docker(
+            &self.config,
+            &backend::strings(&[
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--quiet",
+                "--filter",
+                &format!(
+                    "label=slipstream.processing.instance={}",
+                    self.config.instance
+                ),
+            ]),
+        )?;
         for id in ids.lines() {
-            if !records.iter().any(|record| record.container_id.as_deref() == Some(id)
-                && record.state != State::Settled)
-            {
+            if !records.iter().any(|record| {
+                record.container_id.as_deref() == Some(id) && record.state != State::Settled
+            }) {
                 return Err(ErrorCode::Uncertain);
             }
         }
@@ -1373,14 +1356,17 @@ impl PhotoExecutor {
         if record.manager_pending == Some(ManagerPhase::CreateReturned)
             && record.container_id.is_none()
         {
-            let ids = docker(&self.config, &backend::strings(&[
-                "ps",
-                "--all",
-                "--no-trunc",
-                "--quiet",
-                "--filter",
-                &format!("label=slipstream.processing.launch={}", record.launch_id),
-            ]))?;
+            let ids = docker(
+                &self.config,
+                &backend::strings(&[
+                    "ps",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    &format!("label=slipstream.processing.launch={}", record.launch_id),
+                ]),
+            )?;
             let ids: Vec<_> = ids.lines().collect();
             match ids.as_slice() {
                 [id] => {
@@ -1394,14 +1380,14 @@ impl PhotoExecutor {
                 _ => return Err(ErrorCode::Uncertain),
             }
         }
-        let path = self.parent_path().join(attempt_unit(
-            &self.config.instance,
-            &record.launch_id,
-        ));
+        let path = self
+            .parent_path()
+            .join(attempt_unit(&self.config.instance, &record.launch_id));
         if path.exists() {
             self.verify_unit(record)?;
         }
-        let mount = backend::mount_identity(&record.workspace(Path::new(&self.config.root)).join("work"))?;
+        let mount =
+            backend::mount_identity(&record.workspace(Path::new(&self.config.root)).join("work"))?;
         if mount.is_some() && mount != record.mount_id {
             return Err(ErrorCode::Uncertain);
         }
@@ -1454,11 +1440,9 @@ impl PhotoExecutor {
         if value["Id"] != id
             || value["Image"] != self.image_id
             || value["Name"] != format!("/{}", self.container_name(record))
-            || value["Config"]["Labels"]["slipstream.processing.instance"]
-                != self.config.instance
+            || value["Config"]["Labels"]["slipstream.processing.instance"] != self.config.instance
             || value["Config"]["Labels"]["slipstream.processing.launch"] != record.launch_id
-            || value["Config"]["Labels"]["slipstream.processing.incarnation"]
-                != record.incarnation
+            || value["Config"]["Labels"]["slipstream.processing.incarnation"] != record.incarnation
             || value["HostConfig"]["CgroupParent"]
                 != attempt_unit(&self.config.instance, &record.launch_id)
             || value["Config"]["User"] != "1000:1000"
@@ -1562,14 +1546,14 @@ impl PhotoExecutor {
                 "-o",
                 &format!(
                     "size={},nr_inodes={},noswap,nodev,nosuid,noexec,uid=1000,gid=1000,mode=0700",
-                    self.limits().storage_bytes, self.limits().storage_inodes,
+                    self.limits().storage_bytes,
+                    self.limits().storage_inodes,
                 ),
                 &format!("slipstream-{}", record.launch_id),
                 work.to_str().ok_or(ErrorCode::Unavailable)?,
             ]),
         )?;
-        record.mount_id =
-            Some(backend::mount_identity(&work)?.ok_or(ErrorCode::Uncertain)?);
+        record.mount_id = Some(backend::mount_identity(&work)?.ok_or(ErrorCode::Uncertain)?);
         record.manager_pending = None;
         self.update(record)?;
         let gate = backend::create_native_gate(&control.join("gate"))?;
@@ -1581,17 +1565,11 @@ impl PhotoExecutor {
             "--name",
             &self.container_name(record),
             "--label",
-            &format!(
-                "slipstream.processing.instance={}",
-                self.config.instance
-            ),
+            &format!("slipstream.processing.instance={}", self.config.instance),
             "--label",
             &format!("slipstream.processing.launch={}", record.launch_id),
             "--label",
-            &format!(
-                "slipstream.processing.incarnation={}",
-                record.incarnation
-            ),
+            &format!("slipstream.processing.incarnation={}", record.incarnation),
             "--cgroup-parent",
             &name,
             "--cgroupns",
@@ -1647,7 +1625,10 @@ impl PhotoExecutor {
         self.update(record)?;
         docker(
             &self.config,
-            &backend::strings(&["start", record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?]),
+            &backend::strings(&[
+                "start",
+                record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?,
+            ]),
         )?;
         record.manager_pending = None;
         self.update(record)?;
@@ -1655,7 +1636,10 @@ impl PhotoExecutor {
         self.update(record)?;
         docker(
             &self.config,
-            &backend::strings(&["pause", record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?]),
+            &backend::strings(&[
+                "pause",
+                record.container_id.as_deref().ok_or(ErrorCode::Uncertain)?,
+            ]),
         )?;
         record.manager_pending = None;
         self.update(record)?;
@@ -1681,16 +1665,22 @@ impl PhotoExecutor {
         {
             return Err(ErrorCode::Unavailable);
         }
-        if !backend::read(&scope.parent().ok_or(ErrorCode::Uncertain)?.join("cgroup.events"))?
-            .lines()
-            .any(|line| line == "frozen 1")
+        if !backend::read(
+            &scope
+                .parent()
+                .ok_or(ErrorCode::Uncertain)?
+                .join("cgroup.events"),
+        )?
+        .lines()
+        .any(|line| line == "frozen 1")
             || self.owned_container(record)?["State"]["Paused"] != true
         {
             return Err(ErrorCode::Uncertain);
         }
         // pidfd and the opened proc directory detect disappearance without
         // retargeting readback to a reused PID.
-        let process = File::open(format!("/proc/{}", live.pid)).map_err(|_| ErrorCode::Uncertain)?;
+        let process =
+            File::open(format!("/proc/{}", live.pid)).map_err(|_| ErrorCode::Uncertain)?;
         // SAFETY: pidfd_open accepts this checked positive PID and flags zero.
         let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, live.pid, 0) };
         if descriptor < 0 {
@@ -1762,7 +1752,10 @@ impl PhotoExecutor {
         };
         if self.live(record)?.running {
             self.verify_unit(record)?;
-            docker(&self.config, &backend::strings(&["kill", "--signal", "KILL", &id]))?;
+            docker(
+                &self.config,
+                &backend::strings(&["kill", "--signal", "KILL", &id]),
+            )?;
         }
         Ok(())
     }
@@ -1787,7 +1780,9 @@ impl PhotoExecutor {
         Ok(Evidence {
             peak_bytes,
             exit_code: live.as_ref().and_then(|live| live.exit_code),
-            docker_oom_killed: live.as_ref().and_then(|live| live.exit_code.map(|_| live.oom)),
+            docker_oom_killed: live
+                .as_ref()
+                .and_then(|live| live.exit_code.map(|_| live.oom)),
             attempt_before: record
                 .evidence
                 .as_ref()
@@ -1856,14 +1851,17 @@ impl PhotoExecutor {
             return Err(ErrorCode::Uncertain);
         }
         if let Some(id) = record.container_id.clone() {
-            let ids = docker(&self.config, &backend::strings(&[
-                "ps",
-                "--all",
-                "--no-trunc",
-                "--quiet",
-                "--filter",
-                &format!("id={id}"),
-            ]))?;
+            let ids = docker(
+                &self.config,
+                &backend::strings(&[
+                    "ps",
+                    "--all",
+                    "--no-trunc",
+                    "--quiet",
+                    "--filter",
+                    &format!("id={id}"),
+                ]),
+            )?;
             if !ids.is_empty() {
                 if self.live(record)?.running {
                     return Err(ErrorCode::Uncertain);
@@ -1900,10 +1898,9 @@ impl PhotoExecutor {
             record.manager_pending = None;
             self.update(record)?;
         }
-        let path = self.parent_path().join(attempt_unit(
-            &self.config.instance,
-            &record.launch_id,
-        ));
+        let path = self
+            .parent_path()
+            .join(attempt_unit(&self.config.instance, &record.launch_id));
         if let Some(invocation) = &record.unit_invocation {
             if !record.stop_confirmed {
                 return Err(ErrorCode::Uncertain);
@@ -2016,12 +2013,19 @@ fn begin_start(
         if record.export_id != *export_id || record.manifest_sha256 != *manifest_sha256 {
             return Err(ErrorCode::Conflict);
         }
-        return Ok(StartAdmission::Replay(record.result_body(incarnation)));
+        return Ok(StartAdmission::Replay(Box::new(
+            record.result_body(incarnation),
+        )));
     }
     if *sequence <= registry.watermark {
         return Err(ErrorCode::Expired);
     }
-    if *sequence != registry.watermark.checked_add(1).ok_or(ErrorCode::Capacity)? {
+    if *sequence
+        != registry
+            .watermark
+            .checked_add(1)
+            .ok_or(ErrorCode::Capacity)?
+    {
         return Err(ErrorCode::UnknownAttempt);
     }
     if !available {
@@ -2124,7 +2128,7 @@ fn begin_start(
     registry.watermark = *sequence;
     registry.records.insert(*sequence, record.clone());
     persist(root, registry)?;
-    Ok(StartAdmission::Intent(record))
+    Ok(StartAdmission::Intent(Box::new(record)))
 }
 
 /// Copy the validated descriptor into the launcher-owned private snapshot,
@@ -2158,9 +2162,7 @@ fn seal_source(
     )
     .map_err(map_seal_error)?;
     // Sync the private snapshot and seal it read-only before continuing.
-    destination
-        .sync_all()
-        .map_err(|_| ErrorCode::Unavailable)?;
+    destination.sync_all().map_err(|_| ErrorCode::Unavailable)?;
     fs::set_permissions(&destination_path, fs::Permissions::from_mode(0o444))
         .map_err(|_| ErrorCode::Unavailable)?;
     File::open(&source_dir)
@@ -2314,7 +2316,9 @@ fn transfer_output(
     while remaining != 0 {
         let take = usize::try_from(remaining.min(buffer.len() as u64))
             .map_err(|_| ErrorCode::Uncertain)?;
-        let read = result.read(&mut buffer[..take]).map_err(|_| ErrorCode::Uncertain)?;
+        let read = result
+            .read(&mut buffer[..take])
+            .map_err(|_| ErrorCode::Uncertain)?;
         if read == 0 {
             return Err(ErrorCode::Uncertain);
         }
@@ -2349,11 +2353,14 @@ fn record_ref<'a>(
     if incarnation != registry.incarnation {
         return Err(ErrorCode::StaleIncarnation);
     }
-    registry.records.get(&sequence).ok_or(if sequence <= registry.watermark {
-        ErrorCode::Expired
-    } else {
-        ErrorCode::UnknownAttempt
-    })
+    registry
+        .records
+        .get(&sequence)
+        .ok_or(if sequence <= registry.watermark {
+            ErrorCode::Expired
+        } else {
+            ErrorCode::UnknownAttempt
+        })
 }
 
 fn record_ref_mut<'a>(
@@ -2364,11 +2371,14 @@ fn record_ref_mut<'a>(
     if incarnation != registry.incarnation {
         return Err(ErrorCode::StaleIncarnation);
     }
-    registry.records.get_mut(&sequence).ok_or(if sequence <= registry.watermark {
-        ErrorCode::Expired
-    } else {
-        ErrorCode::UnknownAttempt
-    })
+    registry
+        .records
+        .get_mut(&sequence)
+        .ok_or(if sequence <= registry.watermark {
+            ErrorCode::Expired
+        } else {
+            ErrorCode::UnknownAttempt
+        })
 }
 
 fn request_instance(request: &Request) -> &str {
@@ -2387,10 +2397,7 @@ fn capability_body(registry: &Registry, config: &Config, ready: bool) -> ResultB
         capability: protocol::PHOTO_CAPABILITY.into(),
         instance: config.instance.clone(),
         incarnation: registry.incarnation.clone(),
-        next_sequence: registry
-            .watermark
-            .checked_add(1)
-            .unwrap_or(u64::MAX),
+        next_sequence: registry.watermark.saturating_add(1),
         policy: config.policy.clone(),
         bundle: config.bundle.clone(),
         availability: if ready {
@@ -2450,9 +2457,17 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
             || !matches!(
                 record.outcome.as_deref(),
                 None | Some(
-                    "completed" | "allocation-failed" | "oom" | "storage-full" | "cancelled"
-                        | "deadline" | "engine-failed" | "interrupted" | "unknown"
-                        | "refused-source-mismatch" | "refused-output-validation"
+                    "completed"
+                        | "allocation-failed"
+                        | "oom"
+                        | "storage-full"
+                        | "cancelled"
+                        | "deadline"
+                        | "engine-failed"
+                        | "interrupted"
+                        | "unknown"
+                        | "refused-source-mismatch"
+                        | "refused-output-validation"
                 )
             )
             || record
@@ -2466,7 +2481,8 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 && (record.settled_at_unix_ms.is_none()
                     || record.outcome.is_none()
                     || record.cleanup != Cleanup::Complete))
-            || record.outcome.is_some() != (record.state == State::Settling || record.state == State::Settled)
+            || record.outcome.is_some()
+                != (record.state == State::Settling || record.state == State::Settled)
             || record.source.kind != "raw"
             || !photo::identifier(&record.source.profile_id, 64)
             || !APPROVED_PROFILES.contains(&record.source.profile_id.as_str())
@@ -2536,10 +2552,8 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 }
             }
         }
-        if record.state != State::Settled {
-            if active.replace(*sequence).is_some() {
-                return Err(ErrorCode::Uncertain);
-            }
+        if record.state != State::Settled && active.replace(*sequence).is_some() {
+            return Err(ErrorCode::Uncertain);
         }
     }
     if active != registry.active {
@@ -2558,8 +2572,7 @@ fn prepare_private_directory(path: &Path) -> Result<(), ErrorCode> {
     // The production launcher runs as root, so this is the root-owned check;
     // focused tests exercise the same path as the invoking user.
     backend::secure_directory(path, unsafe { libc::geteuid() })?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|_| ErrorCode::Unavailable)
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| ErrorCode::Unavailable)
 }
 
 fn owned_by_self(metadata: &fs::Metadata) -> bool {
@@ -2638,10 +2651,7 @@ mod tests {
     use super::*;
     use crate::protocol::{PHOTO_MODE, PHOTO_PROTOCOL_VERSION};
     use std::{
-        os::unix::{
-            fs::OpenOptionsExt,
-            io::AsRawFd,
-        },
+        os::unix::fs::OpenOptionsExt,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -2654,7 +2664,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        fs::DirBuilder::new().mode(0o700).recursive(true).create(&path).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&path)
+            .unwrap();
         path
     }
 
@@ -2769,8 +2783,7 @@ mod tests {
             };
             *recipe_digest = recipe_digest_of(recipe_field).unwrap();
             *manifest_sha256 =
-                manifest_digest_of(source_field, recipe_field, policy_field, bundle_field)
-                    .unwrap();
+                manifest_digest_of(source_field, recipe_field, policy_field, bundle_field).unwrap();
         }
         overrides(&mut request);
         // Recompute nothing: overridden digests intentionally mismatch.
@@ -2827,12 +2840,10 @@ mod tests {
             recipe_digest: recipe_digest_of(&recipe).unwrap(),
             source,
             recipe,
-            plan: (phase != Phase::Intent).then(|| {
-                Plan {
-                    workload: crate::protocol::PHOTO_WORKLOAD.into(),
-                    steps: vec!["develop".into()],
-                    output: crate::protocol::PHOTO_WORKLOAD.into(),
-                }
+            plan: (phase != Phase::Intent).then(|| Plan {
+                workload: crate::protocol::PHOTO_WORKLOAD.into(),
+                steps: vec!["develop".into()],
+                output: crate::protocol::PHOTO_WORKLOAD.into(),
             }),
             phase,
             launch_id: "b".repeat(32),
@@ -2912,6 +2923,7 @@ mod tests {
         let StartAdmission::Intent(record) = admission else {
             panic!("expected a fresh intent");
         };
+        let record = *record;
         assert_eq!(record.phase, Phase::Intent);
         assert_eq!(registry.active, Some(1));
         assert_eq!(registry.watermark, 1);
@@ -2920,8 +2932,8 @@ mod tests {
         let sealed = seal_source(&config, &root, &record, &mut descriptor);
         let copied = sealed.unwrap();
         assert_ne!(copied.sha256, record.source.sha256);
-        let error = finalize_start(&mut registry, &config, &root, &request, Ok(copied))
-            .unwrap_err();
+        let error =
+            finalize_start(&mut registry, &config, &root, &request, Ok(copied)).unwrap_err();
         assert_eq!(error, ErrorCode::InvalidRequest);
         let settled = &registry.records[&1];
         assert_eq!(settled.state, State::Settled);
@@ -2980,8 +2992,7 @@ mod tests {
             &format!("sha256:{}", "1".repeat(64)),
             true,
         )
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("expected a fresh intent");
         };
         let mut descriptor = descriptor;
@@ -2992,8 +3003,7 @@ mod tests {
         let metadata = fs::metadata(&sealed_path).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o444);
         assert_eq!(fs::read(&sealed_path).unwrap(), payload);
-        let body = finalize_start(&mut registry, &config, &root, &request, Ok(copied))
-            .unwrap();
+        let body = finalize_start(&mut registry, &config, &root, &request, Ok(copied)).unwrap();
         let ResultBody::Receipt { receipt } = body else {
             panic!("expected a receipt");
         };
@@ -3038,8 +3048,7 @@ mod tests {
             } = request
             {
                 *recipe_digest = recipe_digest_of(recipe).unwrap();
-                *manifest_sha256 =
-                    manifest_digest_of(source, recipe, policy, bundle).unwrap();
+                *manifest_sha256 = manifest_digest_of(source, recipe, policy, bundle).unwrap();
             }
             request
         };
@@ -3077,11 +3086,17 @@ mod tests {
         });
         assert_eq!(refuse(&mut registry, forged), ErrorCode::InvalidRequest);
         let forged_manifest = start_request(&config, |request| {
-            if let photo::Request::Start { manifest_sha256, .. } = request {
+            if let photo::Request::Start {
+                manifest_sha256, ..
+            } = request
+            {
                 *manifest_sha256 = "f".repeat(64);
             }
         });
-        assert_eq!(refuse(&mut registry, forged_manifest), ErrorCode::InvalidRequest);
+        assert_eq!(
+            refuse(&mut registry, forged_manifest),
+            ErrorCode::InvalidRequest
+        );
 
         // A different policy or bundle identity is incompatible.
         let foreign_policy = canonical(start_request(&config, |request| {
@@ -3089,13 +3104,19 @@ mod tests {
                 *policy = "9".repeat(64);
             }
         }));
-        assert_eq!(refuse(&mut registry, foreign_policy), ErrorCode::IncompatiblePolicy);
+        assert_eq!(
+            refuse(&mut registry, foreign_policy),
+            ErrorCode::IncompatiblePolicy
+        );
         let foreign_bundle = canonical(start_request(&config, |request| {
             if let photo::Request::Start { bundle, .. } = request {
                 *bundle = "8".repeat(64);
             }
         }));
-        assert_eq!(refuse(&mut registry, foreign_bundle), ErrorCode::IncompatibleBundle);
+        assert_eq!(
+            refuse(&mut registry, foreign_bundle),
+            ErrorCode::IncompatibleBundle
+        );
 
         // Sequence discipline and a missing descriptor.
         assert_eq!(
@@ -3264,7 +3285,7 @@ mod tests {
 
         // The service output descriptor: writable, empty, zero offset.
         let output_path = root.join("service-output");
-        let mut descriptor = OpenOptions::new()
+        let descriptor = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
@@ -3273,9 +3294,7 @@ mod tests {
             .open(&output_path)
             .unwrap();
 
-        let body = executor
-            .output(&incarnation, 1, Some(descriptor))
-            .unwrap();
+        let body = executor.output(&incarnation, 1, Some(descriptor)).unwrap();
         let ResultBody::Output { receipt } = body else {
             panic!("expected an output receipt");
         };
@@ -3297,11 +3316,7 @@ mod tests {
             .custom_flags(libc::O_CLOEXEC)
             .open(root.join("service-output-2"))
             .unwrap();
-        assert!(
-            executor
-                .output(&incarnation, 1, Some(descriptor))
-                .is_ok()
-        );
+        assert!(executor.output(&incarnation, 1, Some(descriptor)).is_ok());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3334,9 +3349,11 @@ mod tests {
         assert_eq!(executor.record(1).unwrap().validation_ack, Some(true));
 
         // Replaying the same acknowledgement resolves to the same receipt.
-        assert!(executor
-            .validate_output(&incarnation, 1, 10, &"4".repeat(64), true)
-            .is_ok());
+        assert!(
+            executor
+                .validate_output(&incarnation, 1, 10, &"4".repeat(64), true)
+                .is_ok()
+        );
         // A different acknowledgement value is a conflict.
         assert_eq!(
             executor
@@ -3452,7 +3469,7 @@ mod tests {
         let capability = capability_body(&loaded, &config, true);
         let ResultBody::Capability {
             next_sequence,
-            active,
+            active: _,
             availability,
             ..
         } = capability
@@ -3462,8 +3479,7 @@ mod tests {
         assert_eq!(next_sequence, 3);
         assert_eq!(availability, Availability::Available);
         let ResultBody::Capability {
-            active: receipt,
-            ..
+            active: receipt, ..
         } = capability_body(&loaded, &config, true)
         else {
             panic!("expected a capability");
@@ -3480,11 +3496,7 @@ mod tests {
             ErrorCode::Uncertain
         );
         let mut fabricated = load(&root).unwrap().unwrap();
-        fabricated
-            .records
-            .get_mut(&1)
-            .unwrap()
-            .cleanup = Cleanup::Pending;
+        fabricated.records.get_mut(&1).unwrap().cleanup = Cleanup::Pending;
         assert_eq!(
             validate_registry(&fabricated, &config).unwrap_err(),
             ErrorCode::Uncertain
@@ -3515,12 +3527,7 @@ mod tests {
         expire(&mut registry, 2000, 86_400).unwrap();
         assert_eq!(registry.records.len(), 2);
         // After retention the complete receipt expires, the uncertain one stays.
-        expire(
-            &mut registry,
-            1000 + 86_400 * 1000,
-            86_400,
-        )
-        .unwrap();
+        expire(&mut registry, 1000 + 86_400 * 1000, 86_400).unwrap();
         assert!(registry.records.contains_key(&2));
         assert!(!registry.records.contains_key(&1));
         assert_eq!(registry.active, Some(2));
