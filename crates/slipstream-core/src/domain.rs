@@ -273,6 +273,10 @@ pub struct EditRecipeRead {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SaveEditRecipe {
     pub photo_id: String,
+    /// Stable caller-owned identity used to resolve a retry after a lost
+    /// response. It is not the recipe revision and must not be regenerated
+    /// while retrying one save.
+    pub request_id: String,
     pub expected_recipe_revision: Option<String>,
     pub expected_source_revision: String,
     pub settings: EditRecipeSettings,
@@ -292,6 +296,8 @@ pub enum EditRecipeWriteOutcome {
     Conflict(EditRecipeRead),
     SourceChanged(EditRecipeRead),
     RequiresRebind(EditRecipeRead),
+    /// The request identity was already used with a different payload.
+    RequestConflict,
     MissingPhoto,
     MissingRecipe,
     UnsupportedPhoto,

@@ -2949,6 +2949,7 @@ mod tests {
         let saved = library
             .save_edit_recipe(crate::SaveEditRecipe {
                 photo_id: photo_id.clone(),
+                request_id: "library-first-save".to_owned(),
                 expected_recipe_revision: None,
                 expected_source_revision: original_source_revision,
                 settings: crate::EditRecipeSettings {
@@ -3002,6 +3003,7 @@ mod tests {
             library
                 .save_edit_recipe(crate::SaveEditRecipe {
                     photo_id: photo_id.clone(),
+                    request_id: "library-stale-save".to_owned(),
                     expected_recipe_revision: Some(saved.revision),
                     expected_source_revision: recovered.current_source_revision,
                     settings: crate::EditRecipeSettings {
