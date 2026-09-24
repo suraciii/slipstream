@@ -2,8 +2,8 @@ use crate::{ProcessingConfig, http::HttpState};
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 use slipstream_processing::{
-    protocol::{Availability, Request, Response, ResultBody},
-    request as launcher_request,
+    photo::{self, Response, ResultBody},
+    protocol::{Availability, PHOTO_CAPABILITY},
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,11 +66,8 @@ pub(crate) async fn get_processing_capability(
     };
 
     let socket = config.socket_path();
-    let reconcile = Request::Reconcile {
-        version: 1,
-        instance: config.instance.clone(),
-    };
-    let response = tokio::task::spawn_blocking(move || launcher_request(socket, &reconcile))
+    let instance = config.instance.clone();
+    let response = tokio::task::spawn_blocking(move || photo::reconcile(socket, instance))
         .await
         .ok()
         .and_then(Result::ok);
@@ -84,9 +81,17 @@ fn map_reconcile_response(
     config: &ProcessingConfig,
     response: Response,
 ) -> ProcessingCapabilityResponse {
-    let Response::Result { version: 1, result } = response else {
+    let Response::Result {
+        mode,
+        version: 1,
+        result,
+    } = response
+    else {
         return ProcessingCapabilityResponse::unavailable("launcher-unavailable");
     };
+    if mode != PHOTO_CAPABILITY {
+        return ProcessingCapabilityResponse::unavailable("unsupported-capability");
+    }
 
     let ResultBody::Capability {
         capability,
@@ -101,7 +106,7 @@ fn map_reconcile_response(
     else {
         return ProcessingCapabilityResponse::unavailable("unsupported-capability");
     };
-    if capability != "photo-processing" {
+    if capability != PHOTO_CAPABILITY {
         return ProcessingCapabilityResponse::unavailable("unsupported-capability");
     }
     if instance != config.instance || !lower_hex(&incarnation, 32) || next_sequence == 0 {
@@ -156,19 +161,16 @@ mod tests {
         policy: &str,
         bundle: &str,
     ) -> Response {
-        Response::Result {
-            version: 1,
-            result: Box::new(ResultBody::Capability {
-                capability: capability.to_owned(),
-                instance: INSTANCE.to_owned(),
-                incarnation: "a".repeat(32),
-                next_sequence: 1,
-                policy: policy.repeat(64),
-                bundle: bundle.repeat(64),
-                availability,
-                active: None,
-            }),
-        }
+        Response::result(ResultBody::Capability {
+            capability: capability.to_owned(),
+            instance: INSTANCE.to_owned(),
+            incarnation: "a".repeat(32),
+            next_sequence: 1,
+            policy: policy.repeat(64),
+            bundle: bundle.repeat(64),
+            availability,
+            active: None,
+        })
     }
 
     #[test]

@@ -1,7 +1,8 @@
 use slipstream_processing::{
     Executor,
-    protocol::{Availability, Config, Request, Response, ResultBody},
-    request, serve,
+    photo::{self, Response, ResultBody},
+    protocol::{Availability, Config, PHOTO_CAPABILITY},
+    serve,
 };
 use std::{
     fs::OpenOptions,
@@ -59,6 +60,9 @@ fn main() {
         }
         let mut bytes = Vec::new();
         file.take(16385).read_to_end(&mut bytes).map_err(|_| ())?;
+        if let Ok(config) = photo::Config::parse(&bytes) {
+            return photo::serve(config).map_err(|_| ());
+        }
         let executor = match Config::parse(&bytes) {
             Ok(config) => Executor::open(config),
             Err(_) => match slipstream_processing::film::Config::parse(&bytes) {
@@ -71,9 +75,7 @@ fn main() {
         serve(executor).map_err(|_| ())
     })();
     if result.is_err() {
-        eprintln!(
-            "Processing qualification launcher unavailable; no image processing capability was enabled"
-        );
+        eprintln!("Processing launcher unavailable; no image processing capability was enabled");
         std::process::exit(1);
     }
 }
@@ -95,14 +97,8 @@ fn check_production(
     }
 
     let socket = format!("/run/slipstream-processing/{instance}/launcher.sock");
-    let response = request(
-        &socket,
-        &Request::Reconcile {
-            version: 1,
-            instance: instance.to_owned(),
-        },
-    )
-    .map_err(|_| "bounded launcher reconciliation request failed")?;
+    let response = photo::reconcile(&socket, instance.to_owned())
+        .map_err(|_| "bounded launcher reconciliation request failed")?;
 
     ready_response(response, instance, expected_policy, expected_bundle)
 }
@@ -114,7 +110,11 @@ fn ready_response(
     expected_bundle: &str,
 ) -> Result<(), &'static str> {
     match response {
-        Response::Result { version: 1, result } => match *result {
+        Response::Result {
+            mode,
+            version: 1,
+            result,
+        } if mode == PHOTO_CAPABILITY => match *result {
             ResultBody::Capability {
                 capability,
                 instance: response_instance,
@@ -124,7 +124,7 @@ fn ready_response(
                 bundle,
                 availability: Availability::Available,
                 ..
-            } if capability == "photo-processing"
+            } if capability == PHOTO_CAPABILITY
                 && response_instance == instance
                 && hex(&incarnation, 32)
                 && next_sequence > 0
@@ -151,19 +151,16 @@ mod tests {
     use super::*;
 
     fn capability(capability: &str, availability: Availability) -> Response {
-        Response::Result {
-            version: 1,
-            result: Box::new(ResultBody::Capability {
-                capability: capability.to_owned(),
-                instance: "0123456789abcdef0123456789abcdef".to_owned(),
-                incarnation: "a".repeat(32),
-                next_sequence: 1,
-                policy: "b".repeat(64),
-                bundle: "c".repeat(64),
-                availability,
-                active: None,
-            }),
-        }
+        Response::result(ResultBody::Capability {
+            capability: capability.to_owned(),
+            instance: "0123456789abcdef0123456789abcdef".to_owned(),
+            incarnation: "a".repeat(32),
+            next_sequence: 1,
+            policy: "b".repeat(64),
+            bundle: "c".repeat(64),
+            availability,
+            active: None,
+        })
     }
 
     #[test]

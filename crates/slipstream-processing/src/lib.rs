@@ -4,6 +4,7 @@ mod backend;
 mod environment;
 mod faults;
 mod journal;
+pub mod photo;
 pub mod protocol;
 mod slice;
 mod transport;

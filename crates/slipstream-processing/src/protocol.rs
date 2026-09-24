@@ -8,6 +8,14 @@ pub const TERMINAL_SNAPSHOT_BYTES: usize = 4 * 1024;
 pub const STORAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const PROFILE: &str = "slipstream-native-qualification-v1";
 
+// Production Photo admission is intentionally only named here for now. The
+// fixture transport and executor do not accept this mode until its descriptor
+// transport and worker contract are implemented.
+pub const PHOTO_PROTOCOL_VERSION: u8 = 1;
+pub const PHOTO_MODE: &str = "photo-processing";
+pub const PHOTO_CAPABILITY: &str = "photo-processing";
+pub const PHOTO_WORKLOAD: &str = "development-tiff";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -536,6 +544,37 @@ mod tests {
             assert!(Request::parse(changed.as_bytes()).is_err());
         }
         assert!(Request::parse(&vec![b' '; REQUEST_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn production_photo_mode_is_not_accepted_by_fixture_config() {
+        let mut value = config();
+        value.version = PHOTO_PROTOCOL_VERSION;
+        value.mode = PHOTO_MODE.into();
+
+        // A production mode must never silently fall back to the qualification
+        // executor, whose path and authority are fixture-only.
+        assert_eq!(value.validate(), Err(ErrorCode::InvalidRequest));
+        assert!(Config::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn production_workload_is_not_accepted_by_fixture_request() {
+        let request = serde_json::json!({
+            "op": "start",
+            "version": PHOTO_PROTOCOL_VERSION,
+            "instance": "0".repeat(32),
+            "incarnation": "1".repeat(32),
+            "sequence": 1,
+            "policy": "2".repeat(64),
+            "bundle": "3".repeat(64),
+            "workload": PHOTO_WORKLOAD,
+        });
+
+        assert!(matches!(
+            Request::parse(&serde_json::to_vec(&request).unwrap()),
+            Err(ErrorCode::InvalidRequest)
+        ));
     }
 
     #[test]
