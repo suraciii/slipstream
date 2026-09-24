@@ -223,11 +223,13 @@ pub(crate) fn process_jpeg_with_orientation(
 /// The result is a display derivative of a Development Result. It must never
 /// replace, or be written back into, the Development TIFF or the Film input.
 ///
-/// This conversion is not an integrity check. It verifies the embedded source
-/// profile identity and refuses anything it cannot decode as a float32 RGB
-/// TIFF, but a structurally valid TIFF whose strip data is unreadable decodes
-/// as black in libvips rather than failing, so artifact size and digest are
-/// established by the receipt that publishes the artifact.
+/// This conversion is also an integrity gate for the reader's inputs. It
+/// verifies the embedded source profile identity, refuses anything it cannot
+/// decode as a float32 RGB TIFF, and loads with `fail_on` set to
+/// `VIPS_FAIL_ON_WARNING`, so malformed input and decode failures inside the
+/// container are refused instead of decoding as partial or black data. The
+/// byte length and digest of a published artifact are still established by
+/// the receipt that publishes it.
 pub fn process_development_tiff(
     fd: RawFd,
     target: DerivativeTarget,
