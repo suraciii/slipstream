@@ -1,14 +1,14 @@
-# Rejected Photo Cleanup
+# Rejected Photo Cleanup Capability
 
 Photographers use `rejected` Photos as a review queue. After checking that queue, they need to remove the unwanted Photos without touching a `selected` or `undecided` Photo and without modifying an Original File. Cleanup therefore has its own confirmation and recovery flow instead of reusing ordinary Grid multi-selection.
 
-## Behavior
+## Capability
 
 The Library Browser keeps the existing Selection State values: `undecided`, `selected`, and `rejected`. The `Rejected` filter shows only Photos whose current state is `rejected` and reports the filtered result count separately from the source's complete decision counts.
 
 When the `Rejected` filter is active, View options may offer **Clean up rejected Photos**. The action is unavailable for other filters and does not appear as a general delete action. It opens a cleanup review that names the current result count and explains that the operation moves Photos to the Slipstream Recovery Area.
 
-The Photographer may select all Photos in the current rejected result, including Photos outside the currently loaded Grid windows. This selection is tied to the current source, order, and rejected filter. It is not the ordinary 100-Photo Grid multi-selection. If the source changes, the rejected filter changes, or the source is reopened, the cleanup selection is discarded and must be reviewed again.
+The Photographer may select all Photos in the current rejected result, including Photos outside the currently loaded Grid windows. This is a cleanup selection for the current source and rejected filter, separate from ordinary Grid multi-selection and its 100-Photo limit. If the source changes, the rejected filter changes, or the source is reopened, the cleanup selection is discarded and must be reviewed again.
 
 Before the operation is admitted, Slipstream must show the exact number of Photos and require an explicit **Move to Recovery Area** action. The confirmation must state that Original Files remain in place and read-only. It must not offer permanent deletion in this flow.
 
@@ -20,7 +20,7 @@ The completed result provides **Undo** while the result remains available. Undo 
 
 ## Failure Behavior
 
-The cleanup review must be based on one coherent Browse Snapshot. If that snapshot expires or the Library publication changes before confirmation, Slipstream must discard the pending cleanup selection and ask the Photographer to review the current rejected result again.
+The cleanup review must remain tied to the result the Photographer reviewed. If that result is no longer current before confirmation, Slipstream must discard the pending cleanup selection and ask the Photographer to review the current rejected result again.
 
 If a Photo is no longer `rejected` when the operation commits, Slipstream must leave it in place and report that it changed elsewhere. If the Photo is no longer in the Library, Slipstream must report that it is no longer available. Neither outcome counts as moved or as an implicit deletion.
 
