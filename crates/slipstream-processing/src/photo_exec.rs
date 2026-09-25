@@ -2245,7 +2245,10 @@ fn begin_start(
     }
     // The closed workload and approved profile set. A source kind, profile,
     // bundle or policy outside the fixed authority has no admitted plan.
-    if photo_profile::approved_profile(&source.profile_id).is_none() {
+    if !photo_profile::APPROVED_PROFILES
+        .iter()
+        .any(|profile| profile.profile_id == source.profile_id)
+    {
         return Err(ErrorCode::InvalidRequest);
     }
     if !EXPOSURE_MILLI_EV_RANGE.contains(&recipe.exposure_milli_ev) {
@@ -2360,7 +2363,9 @@ fn seal_source(
     // The pinned engine selects its decoder from the container extension, so
     // the snapshot carries the profile's qualified container class. The
     // original filename is not part of the admitted request.
-    let profile = photo_profile::approved_profile(&record.source.profile_id)
+    let profile = photo_profile::APPROVED_PROFILES
+        .iter()
+        .find(|profile| profile.profile_id == record.source.profile_id)
         .ok_or(ErrorCode::InvalidRequest)?;
     let destination_path = source_dir.join(format!("source.{}", profile.container));
     let mut destination = OpenOptions::new()
@@ -2709,7 +2714,9 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 != (record.state == State::Settling || record.state == State::Settled)
             || record.source.kind != "raw"
             || !photo::identifier(&record.source.profile_id, 64)
-            || photo_profile::approved_profile(&record.source.profile_id).is_none()
+            || !photo_profile::APPROVED_PROFILES
+                .iter()
+                .any(|profile| profile.profile_id == record.source.profile_id)
             || record.source.size == 0
             || record.source.size > config.source_bytes_max
             || !hex(&record.source.sha256, 64)
