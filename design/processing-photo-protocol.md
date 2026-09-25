@@ -329,8 +329,11 @@ that acknowledgement is durable. The service removes its uncommitted temporary
 file after a negative acknowledgement; the launcher retains its result and
 receipt for reconciliation. A disconnect, failed validation or lost
 acknowledgement leaves the receipt unsettled and never causes a second worker
-start. Only after publication and durable Export state commit may the service
-report success.
+start. The launcher answers a repeated `cancel` for a known attempt with that
+attempt's current or terminal receipt and never starts work for it, so a
+service that loses the answer retries the same cancellation instead of leaving
+the attempt behind. Only after publication and durable Export state commit may
+the service report success.
 
 On a source revision change or recipe conflict, the service refuses before IPC.
 On descriptor mismatch, unsupported RAW/source facts, bundle/policy mismatch,
