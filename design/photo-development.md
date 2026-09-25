@@ -409,12 +409,34 @@ Development TIFF Export whose captured snapshot is that identity and whose
 artifact retention has not expired; an artifact of any other identity is not
 retained for the derivation, and the derivation never publishes an Export.
 When that result is not retained, the service admits one render through the
-same closed production workload as an Export, marked as preview-class work.
+same closed production workload as an Export, marked as preview-class work. A
+preview-class attempt runs the same workload, policy, and bundle as an Export
+and shares the service's serialized heavy-work admission with Export attempts:
+the two queue behind one another instead of preempting each other, a
+preview-class attempt never cancels or supersedes Export work, and an Export
+submission never cancels an admitted render. At most one render is admitted per
+Photo and stage.
+
+A preview-class attempt is not an Export: it creates no Export record, holds no
+downloadable artifact, and its attempt identity is not an Export identity. Its
+Development TIFF is ephemeral service-private staging: it is never published as
+an artifact, never counted against the retained-output allowance, and is
+deleted when the attempt fails or is cancelled, when a newer intent supersedes
+it, when its ephemeral retention window elapses, or when the service lifetime
+that produced it ends: staging never outlives its owner. While that window is
+live it serves re-derivation of the same identity, so a request after a
+rendition's own expiry rebuilds the rendition instead of repeating the full
+render.
+
 Preview work is ephemeral and latest-intent-wins within its Photo and stage
 owner; a superseded request never publishes, and a completed request
-republishes only while its full identity is still current. A display-only
-change reuses a retained result; an exposure or white-balance change
-invalidates both stage renditions.
+republishes only while its full identity is still current. Every admission
+settles: completion, failure, and cancellation all free the identity, so a
+later request admits a new attempt instead of reporting `running` for work that
+no longer exists, and a launcher attempt the service gives up on is cancelled
+rather than left for the launcher to reap. A display-only change reuses a
+retained result; an exposure or white-balance change invalidates both stage
+renditions.
 
 The rendition response is either the current rendition, an admission result
 identifying queued or running work, or a refusal naming the unavailable stage

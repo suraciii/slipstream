@@ -6,11 +6,12 @@
 
 use std::{
     collections::HashMap,
+    fs,
     os::fd::AsRawFd,
     path::PathBuf,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex as SyncMutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
@@ -29,13 +30,15 @@ use slipstream_processing::photo_profile::{
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use slipstream_core::{
-    DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, EditRecipeRead,
+    DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, EditRecipeRead, WhiteBalanceIntent,
     process_development_tiff,
 };
 
 use crate::{
     ProcessingConfig,
-    export_manager::{ExportManager, RetainedDevelopmentIdentity},
+    export_manager::{
+        ExportManager, PreviewCancellation, PreviewRenderResult, RetainedDevelopmentIdentity,
+    },
     http::{
         CLI_CONTRACT_HEADER, HttpState, cli_error, require_cli_contract, require_published,
         valid_id,
@@ -52,6 +55,11 @@ const CLOSED_STAGES: [&str; 1] = ["develop"];
 /// `expiresAt` response header on every delivery.
 const RENDITION_TTL: Duration = Duration::from_secs(300);
 
+/// How often an idle service sweeps expired preview staging. The disclosed
+/// retention window governs serving; this bounds how long the private output
+/// of an expired rendition outlives that window when no request touches it.
+const PREVIEW_SWEEP_PERIOD: Duration = Duration::from_secs(60);
+
 /// The bounded patience for one admitted render intent. A render whose
 /// completion, failure, or cancellation never settles the intent — a lost
 /// receipt — frees its identity again after this bound.
@@ -67,10 +75,9 @@ const DERIVATION_QUEUE_BOUND: Duration = Duration::from_secs(30);
 /// owner here holds only rebuildable rendition bytes and one pending intent,
 /// and the bound evicts the least recently touched owner under pressure.
 const MAXIMUM_OWNERS: usize = 1024;
-
 /// The stored white-balance mode name of the first workload. The core state
 /// layer only stores this mode, and the processing baseline is as-shot.
-const WHITE_BALANCE_AS_SHOT: &str = "as-shot";
+pub(crate) const WHITE_BALANCE_AS_SHOT: &str = "as-shot";
 
 // ---------------------------------------------------------------- identity
 
@@ -78,14 +85,14 @@ const WHITE_BALANCE_AS_SHOT: &str = "as-shot";
 /// equality decides cache currency beside the source content evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreviewFacts {
-    stage: &'static str,
-    long_edge: u32,
-    display_transform: &'static str,
-    bundle_sha256: String,
-    source_revision: String,
-    recipe_revision: Option<String>,
-    exposure_milli_ev: i64,
-    white_balance: &'static str,
+    pub(crate) stage: &'static str,
+    pub(crate) long_edge: u32,
+    pub(crate) display_transform: &'static str,
+    pub(crate) bundle_sha256: String,
+    pub(crate) source_revision: String,
+    pub(crate) recipe_revision: Option<String>,
+    pub(crate) exposure_milli_ev: i64,
+    pub(crate) white_balance: &'static str,
 }
 
 /// The source content evidence of one rendition identity. Only a rendition
@@ -230,9 +237,9 @@ pub(crate) trait DevelopmentResultRetention: Send + Sync {
 /// The durable Development Result retention of the Export lifecycle: the
 /// published Development TIFF of a succeeded Export is the retained result,
 /// and its disclosed artifact expiry is its retention. A Photo without a
-/// matching retained result resolves to `None`, and preview-class render
-/// admission has not landed, so such a request refuses fail-closed instead of
-/// claiming queued work it cannot run.
+/// matching retained result resolves to `None`; production wraps this in
+/// `PreviewClassRenders`, which falls through to an ephemeral preview result
+/// and admits a render when neither exists.
 pub(crate) struct RetainedExportDevelopmentResults {
     exports: Arc<ExportManager>,
 }
@@ -292,13 +299,9 @@ impl DevelopmentResultRetention for UnlandedRetention {
 /// workload an Export uses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RenderAdmission {
-    /// Admitted behind the owner's current work.
-    // The production workload cannot express a bounded preview render yet
-    // (see `UnlandedRenderGate`), so only the route tests construct the
-    // queued and indeterminate outcomes; the closed contract keeps them.
-    #[allow(dead_code)]
+    /// A new attempt was admitted behind the serialized processing slot.
     Queued,
-    /// The same full identity is already admitted; the request coalesced.
+    /// The same identity is already running or has a live ephemeral result.
     Running,
     /// The admission may have reached the workload, but its outcome is
     /// unknowable from this side.
@@ -314,7 +317,8 @@ pub(crate) enum RenderAdmission {
 /// open `&'static str` a gate adapter could extend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderUnavailable {
-    /// The service-side admission of preview-class renders has not landed.
+    /// The service-side admission of preview-class renders is not available
+    /// in this deployment.
     AdmissionNotLanded,
 }
 
@@ -327,9 +331,9 @@ impl RenderUnavailable {
     }
 }
 
-/// The settlement of one admitted render, reported when the attempt completes,
-/// fails, or is cancelled. A completed render publishes through the owner; a
-/// failed or cancelled one frees its identity to be admitted again.
+/// The settlement of one admitted render. A completed render becomes a
+/// bounded ephemeral retained result; failure and cancellation release the
+/// identity so a later request admits a new attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderSettlement {
     #[allow(dead_code)]
@@ -339,8 +343,8 @@ pub(crate) enum RenderSettlement {
     Cancelled,
 }
 
-/// The admission request of one preview-class render. A production gate binds
-/// the attempt to the identity digest; today's fail-closed gate ignores it.
+/// The admission request of one preview-class render. The production gate
+/// binds the attempt to this opaque identity digest.
 #[allow(dead_code)]
 pub(crate) struct PreviewRenderRequest<'a> {
     pub(crate) photo_id: &'a str,
@@ -350,18 +354,19 @@ pub(crate) struct PreviewRenderRequest<'a> {
 
 pub(crate) trait PreviewRenderGate: Send + Sync {
     fn admit(&self, request: PreviewRenderRequest<'_>) -> RenderAdmission;
-    /// Settles one admitted render. Every admission must eventually settle:
-    /// completion, failure, and cancellation all free the identity, so a
-    /// failed or lost render is retried by the next request instead of
-    /// answering `running` forever.
+    /// Whether the gate still owns a live attempt or unexpired result for the
+    /// request. The default keeps the existing scripted test seam's local
+    /// coalescing behavior; production gates report their registry truth.
+    fn is_live(&self, _request: PreviewRenderRequest<'_>) -> bool {
+        true
+    }
+    /// Settles one admitted render. Every admission eventually settles:
+    /// completion, failure, and cancellation all release a dead identity.
     fn settle(&self, request: PreviewRenderRequest<'_>, settlement: RenderSettlement);
 }
 
-/// The service-side admission of preview-class development renders follows the
-/// same durable Export lifecycle that owns the production `development-tiff`
-/// path. Until that lifecycle lands, no render can be admitted and the route
-/// refuses fail-closed with the contract's `processing_unavailable` code; it
-/// never reports queued work that cannot run, and there is nothing to settle.
+/// The service-side admission of preview-class development renders for a
+/// deployment without the Export lifecycle.
 pub(crate) struct UnlandedRenderGate;
 
 impl PreviewRenderGate for UnlandedRenderGate {
@@ -370,6 +375,391 @@ impl PreviewRenderGate for UnlandedRenderGate {
     }
 
     fn settle(&self, _request: PreviewRenderRequest<'_>, _settlement: RenderSettlement) {}
+}
+
+type PreviewRenderKey = (String, &'static str);
+
+enum PreviewRenderState {
+    Running,
+    Ready {
+        identity: Box<PreviewFacts>,
+        output_path: PathBuf,
+        attempt_key: String,
+        size: u64,
+        sha256: String,
+        #[allow(dead_code)]
+        facts: Box<crate::export_manager::DevelopmentTiffFacts>,
+        deadline: SystemTime,
+    },
+    #[allow(dead_code)]
+    Failed,
+}
+
+struct PreviewRenderEntry {
+    identity_digest: String,
+    state: PreviewRenderState,
+    cancellation: PreviewCancellation,
+    last_used: u64,
+}
+
+struct PreviewClassRendersInner {
+    exports: Arc<ExportManager>,
+    retained: RetainedExportDevelopmentResults,
+    entries: SyncMutex<HashMap<PreviewRenderKey, PreviewRenderEntry>>,
+    touches: AtomicU64,
+}
+
+/// Production preview-class admission and ephemeral Development TIFF
+/// retention. One registry entry exists per Photo and stage, and all heavy
+/// attempts run through the ExportManager's serialized launcher slot.
+pub(crate) struct PreviewClassRenders {
+    inner: Arc<PreviewClassRendersInner>,
+}
+
+impl PreviewClassRenders {
+    pub(crate) fn new(exports: Arc<ExportManager>) -> Self {
+        let inner = Arc::new(PreviewClassRendersInner {
+            retained: RetainedExportDevelopmentResults::new(Arc::clone(&exports)),
+            exports,
+            entries: SyncMutex::new(HashMap::new()),
+            touches: AtomicU64::new(0),
+        });
+        // Ephemeral staging is deleted when its retention window elapses, not
+        // only when a later request touches the entry: an idle service must
+        // not hold a rendition past the retention it discloses. Starting the
+        // sweep needs a Tokio runtime, like every other spawned service task.
+        let swept = Arc::clone(&inner);
+        tokio::spawn(async move {
+            let mut period = tokio::time::interval(PREVIEW_SWEEP_PERIOD);
+            period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                period.tick().await;
+                PreviewClassRenders::sweep_expired(&swept);
+            }
+        });
+        Self { inner }
+    }
+
+    /// Deletes the private output of every rendition whose retention window
+    /// has elapsed. Called on a later admission or resolve, and by the sweep
+    /// that bounds how long an idle service keeps expired staging.
+    fn sweep_expired(inner: &PreviewClassRendersInner) {
+        let mut entries = inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::purge_expired_locked(inner, &mut entries, SystemTime::now());
+    }
+
+    fn remove_output(inner: &PreviewClassRendersInner, entry: &PreviewRenderEntry) {
+        if let PreviewRenderState::Ready { attempt_key, .. } = &entry.state {
+            inner.exports.delete_preview_output(attempt_key);
+        }
+    }
+
+    fn purge_expired_locked(
+        inner: &PreviewClassRendersInner,
+        entries: &mut HashMap<PreviewRenderKey, PreviewRenderEntry>,
+        now: SystemTime,
+    ) {
+        let expired = entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                matches!(
+                    &entry.state,
+                    PreviewRenderState::Ready { deadline, .. } if *deadline <= now
+                )
+                .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for key in expired {
+            if let Some(entry) = entries.remove(&key) {
+                Self::remove_output(inner, &entry);
+            }
+        }
+    }
+
+    fn settle_inner(
+        inner: &PreviewClassRendersInner,
+        photo_id: &str,
+        stage: &'static str,
+        identity_digest: &str,
+        settlement: RenderSettlement,
+    ) {
+        let key = (photo_id.to_owned(), stage);
+        let mut entries = inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let matches = entries
+            .get(&key)
+            .is_some_and(|entry| entry.identity_digest == identity_digest);
+        if !matches {
+            return;
+        }
+        if matches!(settlement, RenderSettlement::Completed) {
+            // A task that has not installed its Ready payload has no output
+            // to retain; release that dead running identity rather than
+            // leaving a permanent `running` answer.
+            if let Some(entry) = entries.get(&key)
+                && matches!(&entry.state, PreviewRenderState::Running)
+                && let Some(entry) = entries.remove(&key)
+            {
+                entry.cancellation.cancel();
+            }
+            return;
+        }
+        let Some(mut entry) = entries.remove(&key) else {
+            return;
+        };
+        Self::remove_output(inner, &entry);
+        entry.state = PreviewRenderState::Failed;
+        entry.cancellation.cancel();
+    }
+
+    fn complete(
+        inner: &PreviewClassRendersInner,
+        photo_id: &str,
+        stage: &'static str,
+        identity_digest: &str,
+        result: PreviewRenderResult,
+    ) {
+        let key = (photo_id.to_owned(), stage);
+        let mut entries = inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(entry) = entries.get_mut(&key) else {
+            inner.exports.delete_preview_output(&result.attempt_key);
+            return;
+        };
+        if entry.identity_digest != identity_digest
+            || !matches!(&entry.state, PreviewRenderState::Running)
+        {
+            inner.exports.delete_preview_output(&result.attempt_key);
+            return;
+        }
+        let deadline = SystemTime::now() + RENDITION_TTL;
+        entry.state = PreviewRenderState::Ready {
+            identity: Box::new(result.facts),
+            output_path: result.path,
+            attempt_key: result.attempt_key,
+            size: result.size,
+            sha256: result.sha256,
+            facts: Box::new(result.output_facts),
+            deadline,
+        };
+        entry.last_used = inner.touches.fetch_add(1, Ordering::Relaxed) + 1;
+    }
+
+    fn evict_one_locked(
+        inner: &PreviewClassRendersInner,
+        entries: &mut HashMap<PreviewRenderKey, PreviewRenderEntry>,
+    ) {
+        let victim = entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone());
+        if let Some(victim) = victim
+            && let Some(entry) = entries.remove(&victim)
+        {
+            entry.cancellation.cancel();
+            Self::remove_output(inner, &entry);
+        }
+    }
+}
+impl PreviewRenderGate for PreviewClassRenders {
+    fn admit(&self, request: PreviewRenderRequest<'_>) -> RenderAdmission {
+        let key = (request.photo_id.to_owned(), request.stage);
+        let now = SystemTime::now();
+        let mut entries = self
+            .inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::purge_expired_locked(&self.inner, &mut entries, now);
+        if let Some(entry) = entries.get_mut(&key) {
+            if entry.identity_digest == request.identity_digest {
+                match &entry.state {
+                    PreviewRenderState::Running => {
+                        entry.last_used = self.inner.touches.fetch_add(1, Ordering::Relaxed) + 1;
+                        return RenderAdmission::Running;
+                    }
+                    PreviewRenderState::Ready { deadline, .. } if *deadline > now => {
+                        entry.last_used = self.inner.touches.fetch_add(1, Ordering::Relaxed) + 1;
+                        return RenderAdmission::Running;
+                    }
+                    PreviewRenderState::Ready { .. } | PreviewRenderState::Failed => {}
+                }
+            }
+            if let Some(entry) = entries.remove(&key) {
+                entry.cancellation.cancel();
+                Self::remove_output(&self.inner, &entry);
+            }
+        }
+        if entries.len() >= MAXIMUM_OWNERS {
+            Self::evict_one_locked(&self.inner, &mut entries);
+        }
+        let cancellation = PreviewCancellation::new();
+        entries.insert(
+            key.clone(),
+            PreviewRenderEntry {
+                identity_digest: request.identity_digest.to_owned(),
+                state: PreviewRenderState::Running,
+                cancellation: cancellation.clone(),
+                last_used: self.inner.touches.fetch_add(1, Ordering::Relaxed) + 1,
+            },
+        );
+        drop(entries);
+
+        if tokio::runtime::Handle::try_current().is_err() {
+            Self::settle_inner(
+                &self.inner,
+                request.photo_id,
+                request.stage,
+                request.identity_digest,
+                RenderSettlement::Failed,
+            );
+            return RenderAdmission::Unavailable(RenderUnavailable::AdmissionNotLanded);
+        }
+        let inner = Arc::clone(&self.inner);
+        let photo_id = request.photo_id.to_owned();
+        let identity_digest = request.identity_digest.to_owned();
+        let stage = request.stage;
+        tokio::spawn(async move {
+            let result = inner
+                .exports
+                .render_preview(&photo_id, stage, cancellation)
+                .await;
+            match result {
+                Ok(result)
+                    if PreviewIdentity::build(&result.facts, None).digest() == identity_digest =>
+                {
+                    Self::complete(&inner, &photo_id, stage, &identity_digest, result);
+                }
+                Ok(result) => {
+                    inner.exports.delete_preview_output(&result.attempt_key);
+                    Self::settle_inner(
+                        &inner,
+                        &photo_id,
+                        stage,
+                        &identity_digest,
+                        RenderSettlement::Failed,
+                    );
+                }
+                Err(_) => Self::settle_inner(
+                    &inner,
+                    &photo_id,
+                    stage,
+                    &identity_digest,
+                    RenderSettlement::Failed,
+                ),
+            }
+        });
+        RenderAdmission::Queued
+    }
+
+    fn is_live(&self, request: PreviewRenderRequest<'_>) -> bool {
+        let key = (request.photo_id.to_owned(), request.stage);
+        let now = SystemTime::now();
+        let mut entries = self
+            .inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::purge_expired_locked(&self.inner, &mut entries, now);
+        let live = entries.get(&key).is_some_and(|entry| {
+            entry.identity_digest == request.identity_digest
+                && match &entry.state {
+                    PreviewRenderState::Running => true,
+                    PreviewRenderState::Ready {
+                        output_path,
+                        deadline,
+                        ..
+                    } => *deadline > now && fs::metadata(output_path).is_ok(),
+                    PreviewRenderState::Failed => false,
+                }
+        });
+        if !live
+            && entries
+                .get(&key)
+                .is_some_and(|entry| entry.identity_digest == request.identity_digest)
+            && let Some(entry) = entries.remove(&key)
+        {
+            Self::remove_output(&self.inner, &entry);
+        }
+        live
+    }
+
+    fn settle(&self, request: PreviewRenderRequest<'_>, settlement: RenderSettlement) {
+        Self::settle_inner(
+            &self.inner,
+            request.photo_id,
+            request.stage,
+            request.identity_digest,
+            settlement,
+        );
+    }
+}
+
+impl DevelopmentResultRetention for PreviewClassRenders {
+    fn resolve<'a>(
+        &'a self,
+        photo_id: &'a str,
+        facts: &'a PreviewFacts,
+    ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(retained) = self.inner.retained.resolve(photo_id, facts).await {
+                return Some(retained);
+            }
+            let key = (photo_id.to_owned(), facts.stage);
+            let now = SystemTime::now();
+            let mut entries = self
+                .inner
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            Self::purge_expired_locked(&self.inner, &mut entries, now);
+            let entry = entries.get_mut(&key)?;
+            let (identity, output_path, size, sha256, deadline) = match &entry.state {
+                PreviewRenderState::Ready {
+                    identity,
+                    output_path,
+                    size,
+                    sha256,
+                    deadline,
+                    ..
+                } => (
+                    identity.as_ref().clone(),
+                    output_path.clone(),
+                    *size,
+                    sha256.clone(),
+                    *deadline,
+                ),
+                _ => return None,
+            };
+            if deadline <= now || identity != *facts {
+                return None;
+            }
+            if fs::metadata(&output_path).is_err() {
+                if let Some(entry) = entries.remove(&key) {
+                    Self::remove_output(&self.inner, &entry);
+                }
+                return None;
+            }
+            entry.last_used = self.inner.touches.fetch_add(1, Ordering::Relaxed) + 1;
+            Some(RetainedDevelopmentResult {
+                sha256,
+                byte_length: size,
+                recipe_revision: identity.recipe_revision.clone(),
+                exposure_milli_ev: identity.exposure_milli_ev,
+                white_balance: WHITE_BALANCE_AS_SHOT,
+                source_revision: identity.source_revision.clone(),
+                bundle_sha256: identity.bundle_sha256.clone(),
+                path: output_path,
+            })
+        })
+    }
 }
 
 // ---------------------------------------------------------------- owner
@@ -524,18 +914,19 @@ pub(crate) struct EditPreviewOwner {
 }
 
 impl EditPreviewOwner {
-    /// The production owner. Retained Development Results resolve from the
-    /// durable Export lifecycle when the deployment has one: the published
-    /// Development TIFF of a succeeded Export is the retained result of its
-    /// captured identity. Preview-class render admission has not landed, so a
-    /// request without a matching retained result refuses fail-closed instead
-    /// of claiming queued work it cannot run.
+    /// The production owner. A deployment with the Export lifecycle shares
+    /// one preview-class registry between retention and render admission, so
+    /// an unretained identity is rendered through the same serialized
+    /// production workload. A deployment without processing remains
+    /// fail-closed through the unlanded seams.
     pub(crate) fn production(exports: Option<Arc<ExportManager>>) -> Self {
-        let retention: Arc<dyn DevelopmentResultRetention> = match exports {
-            Some(exports) => Arc::new(RetainedExportDevelopmentResults::new(exports)),
-            None => Arc::new(UnlandedRetention),
+        let Some(exports) = exports else {
+            return Self::new(Arc::new(UnlandedRetention), Arc::new(UnlandedRenderGate));
         };
-        Self::new(retention, Arc::new(UnlandedRenderGate))
+        let renders = Arc::new(PreviewClassRenders::new(exports));
+        let retention: Arc<dyn DevelopmentResultRetention> = renders.clone();
+        let render_gate: Arc<dyn PreviewRenderGate> = renders;
+        Self::new(retention, render_gate)
     }
 
     pub(crate) fn new(
@@ -709,8 +1100,28 @@ impl EditPreviewOwner {
                 )
             })
             .await;
-        if coalesced {
+        if coalesced
+            && self.render_gate.is_live(PreviewRenderRequest {
+                photo_id,
+                stage,
+                identity_digest: &digest,
+            })
+        {
             return RenderAdmission::Running;
+        }
+        if coalesced {
+            // The gate settled or expired the attempt while the owner still
+            // held its local pending receipt; make the gate authoritative.
+            self.touch_entry(key, |entry| {
+                if entry
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.digest == intent)
+                {
+                    entry.pending = None;
+                }
+            })
+            .await;
         }
         let admission = self.render_gate.admit(PreviewRenderRequest {
             photo_id,
@@ -960,7 +1371,12 @@ fn develop_executable(
         let representable = milli.is_finite()
             && (milli - rounded).abs() < 1e-6
             && rounded >= APPROVED_EXPOSURE_MILLI_EV_MIN as f64
-            && rounded <= APPROVED_EXPOSURE_MILLI_EV_MAX as f64;
+            && rounded <= APPROVED_EXPOSURE_MILLI_EV_MAX as f64
+            // The closed execution payload carries the approved mode only, so
+            // a stored mode the capability does not admit is retained intent
+            // that no admitted render can execute: it refuses here instead of
+            // admitting an attempt that cannot produce a result.
+            && recipe.settings.white_balance == WhiteBalanceIntent::AsShot;
         if !representable {
             return Err(Box::new(processing_unavailable(
                 stage,
