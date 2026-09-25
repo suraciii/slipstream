@@ -111,6 +111,26 @@ impl ExportManager {
         })
     }
 
+    /// The retained Development TIFF of one Photo whose captured snapshot
+    /// matches the current Edit identity and whose retention has not expired,
+    /// or `None` when no matching artifact is retained.
+    ///
+    /// This is the durable Development Result retention the Edit Preview
+    /// derivation resolves against: a published Development TIFF artifact is
+    /// the retained result, and its disclosed expiry is its retention. A
+    /// Library read failure resolves as "not retained" so the caller refuses
+    /// fail-closed instead of serving a result it cannot vouch for.
+    pub(crate) async fn retained_development_result(
+        &self,
+        photo_id: &str,
+        identity: &RetainedDevelopmentIdentity<'_>,
+    ) -> Option<RetainedDevelopmentTiff> {
+        let records = self.library.photo_exports(photo_id).await.ok().flatten()?;
+        retained_development_tiff_of(&records, identity, unix_seconds(), |export_id| {
+            self.artifact_path(export_id)
+        })
+    }
+
     /// Verifies one launcher capability against this deployment's configured
     /// identity: capability kind, instance, qualified policy and bundle, and
     /// a well-formed attempt identity. Any mismatch is a fail-closed refusal,
@@ -1089,6 +1109,84 @@ const RECONCILE_UNAVAILABLE: &str = "processing launcher is unavailable";
 /// Consecutive reconcile refusals tolerated before an attempt refuses to
 /// start; admission stays fail-closed instead of guessing.
 const RECONCILE_TOLERANCE: u32 = 5;
+
+/// The current Edit identity facts a retained Development TIFF must have been
+/// produced under to be current for one Edit Preview derivation: the exact
+/// recipe revision and exposure, the source revision, and the bundle.
+pub(crate) struct RetainedDevelopmentIdentity<'a> {
+    pub(crate) recipe_revision: Option<&'a str>,
+    pub(crate) exposure_milli_ev: i64,
+    pub(crate) source_revision: &'a str,
+    pub(crate) bundle_sha256: &'a str,
+}
+
+/// One retained Development TIFF: the published artifact of a succeeded
+/// Development TIFF Export with the identity its publication captured. The
+/// path stays private to the service; responses carry identity facts only.
+pub(crate) struct RetainedDevelopmentTiff {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+    pub(crate) byte_length: u64,
+    pub(crate) recipe_revision: String,
+    pub(crate) exposure_milli_ev: i64,
+    pub(crate) source_revision: String,
+    pub(crate) bundle_id: String,
+}
+
+/// The first retained Development TIFF in one Photo's Export records, in the
+/// Library's retention order, that was produced under exactly the current
+/// identity. The caller reads the records through the durable Export
+/// lifecycle; this selection is pure so the ordering and identity rules are
+/// testable without a Library.
+pub(crate) fn retained_development_tiff_of(
+    records: &[ExportRecord],
+    identity: &RetainedDevelopmentIdentity<'_>,
+    now_unix_seconds: u64,
+    artifact_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<RetainedDevelopmentTiff> {
+    records.iter().find_map(|record| {
+        retained_development_tiff(record, identity, now_unix_seconds, &artifact_path)
+    })
+}
+
+/// The retained Development TIFF of one Export record when it was produced
+/// under exactly the current identity, its Export settled successfully, and
+/// its artifact retention is still live. Any other identity is not current
+/// and must never be served as one.
+pub(crate) fn retained_development_tiff(
+    record: &ExportRecord,
+    identity: &RetainedDevelopmentIdentity<'_>,
+    now_unix_seconds: u64,
+    artifact_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<RetainedDevelopmentTiff> {
+    if record.state != ExportState::Succeeded {
+        return None;
+    }
+    // The captured snapshot's own execution payload is the identity the
+    // attempt ran under: a snapshot that cannot produce one never ran.
+    let payload = record.snapshot.recipe_payload().ok()?;
+    let snapshot = &record.snapshot;
+    let matches = Some(snapshot.recipe_revision.as_str()) == identity.recipe_revision
+        && payload.exposure_milli_ev == identity.exposure_milli_ev
+        && snapshot.source_revision == identity.source_revision
+        && snapshot.bundle_id == identity.bundle_sha256;
+    if !matches {
+        return None;
+    }
+    let artifact = record.artifact.as_ref()?;
+    if artifact.expires_at <= now_unix_seconds {
+        return None;
+    }
+    Some(RetainedDevelopmentTiff {
+        path: artifact_path(&record.id)?,
+        sha256: artifact.sha256.clone(),
+        byte_length: artifact.size,
+        recipe_revision: snapshot.recipe_revision.clone(),
+        exposure_milli_ev: payload.exposure_milli_ev,
+        source_revision: snapshot.source_revision.clone(),
+        bundle_id: snapshot.bundle_id.clone(),
+    })
+}
 
 /// An attempt whose validated output waits for collection reports `settling`
 /// with no outcome: the launcher records the service's acknowledgement before
