@@ -9050,57 +9050,51 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v4_binary_fence_rejects_canonical_v5_without_changes() {
-        let (_base, library, _state, _name, path) = fixture();
-        seed(
-            &path,
-            include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
-        );
-        let connection = Connection::open(&path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V5).unwrap();
-
-        let sidecars = ["-journal", "-wal", "-shm"]
-            .map(|suffix| path.with_file_name(format!("library.sqlite{suffix}")));
-        let persisted_paths = std::iter::once(path.clone())
-            .chain(sidecars.iter().cloned())
-            .collect::<Vec<_>>();
-        let before = persisted_paths
-            .iter()
-            .map(|path| fs::read(path).ok())
-            .collect::<Vec<_>>();
-
-        assert!(matches!(
-            preflight_schema_for_max_version(
-                &connection,
-                library.canonical_path().to_str().unwrap(),
+    fn legacy_binary_fence_rejects_canonical_schema_above_the_max_version_without_changes() {
+        // Every legacy database whose canonical version exceeds the supported
+        // maximum is rejected without touching a byte, for both fence gaps.
+        for (sql, version, max_version) in [
+            (
+                include_str!("../../../../compatibility/sqlite/schema-v5.sql"),
+                SchemaVersion::V5,
                 4,
             ),
-            Err(PersistenceError::NewerSchema)
-        ));
-
-        let after = persisted_paths
-            .iter()
-            .map(|path| fs::read(path).ok())
-            .collect::<Vec<_>>();
-        assert_eq!(after, before);
-    }
-
-    #[test]
-    fn legacy_v3_binary_fence_rejects_canonical_v4() {
-        let (_base, library, _state, _name, path) = fixture();
-        seed(
-            &path,
-            include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
-        );
-        let connection = Connection::open(path).unwrap();
-        assert!(matches!(
-            preflight_schema_for_max_version(
-                &connection,
-                library.canonical_path().to_str().unwrap(),
+            (
+                include_str!("../../../../compatibility/sqlite/schema-v4.sql"),
+                SchemaVersion::V4,
                 3,
             ),
-            Err(PersistenceError::NewerSchema)
-        ));
+        ] {
+            let (_base, library, _state, _name, path) = fixture();
+            seed(&path, sql);
+            let connection = Connection::open(&path).unwrap();
+            validate_canonical_schema(&connection, version).unwrap();
+
+            let sidecars = ["-journal", "-wal", "-shm"]
+                .map(|suffix| path.with_file_name(format!("library.sqlite{suffix}")));
+            let persisted_paths = std::iter::once(path.clone())
+                .chain(sidecars.iter().cloned())
+                .collect::<Vec<_>>();
+            let before = persisted_paths
+                .iter()
+                .map(|path| fs::read(path).ok())
+                .collect::<Vec<_>>();
+
+            assert!(matches!(
+                preflight_schema_for_max_version(
+                    &connection,
+                    library.canonical_path().to_str().unwrap(),
+                    max_version,
+                ),
+                Err(PersistenceError::NewerSchema)
+            ));
+
+            let after = persisted_paths
+                .iter()
+                .map(|path| fs::read(path).ok())
+                .collect::<Vec<_>>();
+            assert_eq!(after, before);
+        }
     }
 
     #[tokio::test]
@@ -10256,47 +10250,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn library_snapshot_orders_raw_first_capture_then_missing_paths() {
-        let (_base, library, state, name, _path) = fixture();
-        let mut z = discovered("shoot/Z.JPG", OriginalKind::Jpeg, 1, 1.0);
-        let mut a = discovered("shoot/A.JPG", OriginalKind::Jpeg, 2, 2.0);
-        let b = discovered("shoot/B.JPG", OriginalKind::Jpeg, 3, 3.0);
-        z.capture = CaptureFact {
-            state: CaptureMetadataState::Known,
-            order_key: Some("2026-01-01T09:00:00.000000000".to_owned()),
-            field: Some(CaptureTimeField::DateTimeOriginal),
-            offset_minutes: None,
-            source_revision: Some("z-revision".to_owned()),
-        };
-        a.capture = CaptureFact {
-            state: CaptureMetadataState::Known,
-            order_key: Some("2026-01-01T10:00:00.000000000".to_owned()),
-            field: Some(CaptureTimeField::DateTimeOriginal),
-            offset_minutes: Some(60),
-            source_revision: Some("a-revision".to_owned()),
-        };
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let snapshot = persistence
-            .apply_scan(vec![a, b, z], Vec::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            snapshot
-                .photos
-                .iter()
-                .map(|photo| photo.sort_path.as_str())
-                .collect::<Vec<_>>(),
-            ["shoot/Z.JPG", "shoot/A.JPG", "shoot/B.JPG"]
-        );
-        persistence.shutdown().unwrap();
-    }
-
-    #[tokio::test]
     async fn capture_order_orders_each_photo_by_its_own_original_and_retains_unavailable_facts() {
         let (_base, library, state, name, _path) = fixture();
         let vectors = capture_order_vectors();
@@ -10627,81 +10580,6 @@ mod tests {
     // album-language-legacy:end v2-reconciliation-test
 
     #[tokio::test]
-    async fn preserves_preview_facts_only_for_unchanged_original_and_uses_cas() {
-        let (_base, library, state, name, _path) = fixture();
-        let persistence = Persistence::open(
-            state,
-            name,
-            library.canonical_path().to_string_lossy().into_owned(),
-        )
-        .unwrap();
-        let first = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        let photo_id = first.photos[0].id.clone();
-        let revision = source_revision("one.JPG", 4, 1000.0).unwrap();
-        assert_eq!(
-            persistence
-                .seed_preview(PreviewSeed {
-                    photo_id: photo_id.clone(),
-                    state: PreviewState::Ready,
-                    source: crate::PreviewSource::JpegOriginal,
-                    expected_source_revision: revision.clone(),
-                    width: Some(100),
-                    height: Some(50),
-                    cache_revision: Some("cache-v1".to_owned()),
-                })
-                .await
-                .unwrap(),
-            PreviewSeedResult::Applied
-        );
-        let unchanged = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 4, 1000.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(unchanged.photos[0].preview_state, PreviewState::Ready);
-        assert_eq!(
-            unchanged.photos[0].cache_revision.as_deref(),
-            Some("cache-v1")
-        );
-
-        let changed = persistence
-            .apply_scan(
-                vec![discovered("one.JPG", OriginalKind::Jpeg, 5, 1001.0)],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            changed.photos[0].preview_state,
-            PreviewState::InspectionPending
-        );
-        assert_eq!(
-            persistence
-                .seed_preview(PreviewSeed {
-                    photo_id,
-                    state: PreviewState::Ready,
-                    source: crate::PreviewSource::JpegOriginal,
-                    expected_source_revision: revision,
-                    width: Some(100),
-                    height: Some(50),
-                    cache_revision: Some("stale".to_owned()),
-                })
-                .await
-                .unwrap(),
-            PreviewSeedResult::StaleIgnored
-        );
-        persistence.shutdown().unwrap();
-    }
-
-    #[tokio::test]
     async fn relocation_resets_preview_and_moves_identity_in_one_transaction() {
         let (_base, library, state, name, _path) = fixture();
         let persistence = Persistence::open(
@@ -10834,6 +10712,20 @@ mod tests {
                 .unwrap(),
             PreviewSeedResult::Applied
         );
+        // An unchanged rescan keeps the seeded preview facts bound to the
+        // unchanged original.
+        let unchanged = first
+            .apply_scan(
+                vec![discovered("one.ARW", OriginalKind::Raw, 3, 1000.0)],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unchanged.photos[0].preview_state, PreviewState::Ready);
+        assert_eq!(
+            unchanged.photos[0].cache_revision.as_deref(),
+            Some("raw-cache")
+        );
         // A second scan with changed RAW facts makes the old revision stale.
         let changed = discovered("one.ARW", OriginalKind::Raw, 7, 1002.0);
         let updated = first.apply_scan(vec![changed], Vec::new()).await.unwrap();
@@ -10843,12 +10735,14 @@ mod tests {
             .find(|photo| photo.id == photo_id)
             .unwrap();
         assert_eq!(updated_photo.preview_state, PreviewState::InspectionPending);
+        // Seeding with the superseded revision must lose the compare-and-swap
+        // on the RAW revision itself, not merely a source-kind guard.
         assert_eq!(
             first
                 .seed_preview(PreviewSeed {
                     photo_id,
                     state: PreviewState::Ready,
-                    source: crate::PreviewSource::JpegOriginal,
+                    source: crate::PreviewSource::RawEmbeddedJpeg,
                     expected_source_revision: raw_revision,
                     width: Some(512),
                     height: Some(341),

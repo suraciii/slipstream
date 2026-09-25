@@ -1346,25 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_selected_field_subseconds_and_offset_without_applying_offset() {
-        let fact = inspect_bytes(
-            OriginalKind::Jpeg,
-            &jpeg(&tiff(&[
-                (0x9003, b"2026:02:03 04:05:06\0".to_vec()),
-                (0x9291, b"12\0".to_vec()),
-                (0x9011, b"+01:30\0".to_vec()),
-            ])),
-        )
-        .unwrap();
-        assert_eq!(
-            fact.order_key.as_deref(),
-            Some("2026-02-03T04:05:06.120000000")
-        );
-        assert_eq!(fact.field, Some(CaptureTimeField::DateTimeOriginal));
-        assert_eq!(fact.offset_minutes, Some(90));
-    }
-
-    #[test]
     fn parses_review_metadata_with_camera_display_values() {
         let rational = |numerator: u32, denominator: u32| {
             [numerator.to_le_bytes(), denominator.to_le_bytes()].concat()

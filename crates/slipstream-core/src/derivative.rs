@@ -246,8 +246,10 @@ pub(crate) fn process_jpeg_with_orientation(
 /// This conversion is also an integrity gate for the reader's inputs. It
 /// verifies the embedded source profile identity, refuses anything it cannot
 /// decode as a float32 RGB TIFF, and loads with `fail_on` set to
-/// `VIPS_FAIL_ON_WARNING`, so malformed input and decode failures inside the
-/// container are refused instead of decoding as partial or black data. The
+/// `VIPS_FAIL_ON_ERROR`, so malformed input, truncated payloads, and decode
+/// failures inside the container are refused instead of decoding as partial
+/// or black data, while the private metadata warnings an engine writes into
+/// its own artifact do not refuse a decodable image. The
 /// byte length and digest of a published artifact are still established by
 /// the receipt that publishes it.
 pub fn process_development_tiff(
@@ -441,7 +443,7 @@ fn tiff_bytes(
     sample_format: u16,
     profile: &[u8],
 ) -> Vec<u8> {
-    let entries: [[u32; 4]; 11] = [
+    let entries: [[u32; 4]; 12] = [
         [256, 4, 1, width],
         [257, 4, 1, height],
         [258, 3, 3, 0],
@@ -453,6 +455,10 @@ fn tiff_bytes(
         [279, 4, 1, pixels.len() as u32],
         [339, 3, 3, 0],
         [34675, 7, profile.len() as u32, 0],
+        // An engine artifact carries private metadata tags libtiff reports as
+        // warnings. The fixture reproduces that accepted shape so a reader
+        // that refuses benign warnings fails here instead of in deployment.
+        [50341, 7, 4, 0],
     ];
     let ifd_offset = 8u32;
     let ifd_bytes = 2 + entries.len() as u32 * 12 + 4;
@@ -500,8 +506,8 @@ fn tiff_bytes(
 }
 
 /// Builds a minimal generated float32 RGB TIFF that carries the pinned linear
-/// ProPhoto source profile: the input shape `process_development_tiff`
-/// accepts. Tests across the workspace share this builder so generated
+/// ProPhoto source profile and one private metadata tag, the input shape
+/// `process_development_tiff` accepts from a real engine artifact. Tests across the workspace share this builder so generated
 /// fixture bytes never drift from the accepted source-profile identity.
 /// `samples` holds `width * height * 3` row-major interleaved RGB values.
 pub fn development_tiff_fixture(samples: &[f32], width: u32, height: u32) -> Vec<u8> {
@@ -750,6 +756,33 @@ mod tests {
         assert_eq!((result.width, result.height), (512, 320));
         assert_eq!(result.profile, DerivativeProfile::Srgb);
 
+        // The near-corner pixels of the downscaled `pattern` gradient are
+        // checked against the recorded values of the Lanczos normalization
+        // within a per-channel tolerance: the resampler's SIMD dispatch rounds
+        // differently across runner CPUs (CI measured up to 3 units on the same
+        // source), while a channel swap, a collapse toward black, or a
+        // mismatched sample point each moves a channel by far more.
+        const PIXEL_TOLERANCE: i32 = 12;
+        let decoded = DynamicImage::from_decoder(
+            JpegDecoder::new(std::io::Cursor::new(&result.jpeg)).unwrap(),
+        )
+        .unwrap()
+        .to_rgb8();
+        for (x, y, pixel) in [
+            (1, 1, [153, 144, 49]),
+            (decoded.width() - 2, 1, [144, 100, 235]),
+            (1, decoded.height() - 2, [127, 139, 41]),
+        ] {
+            let actual = decoded.get_pixel(x, y).0;
+            for (channel, (actual, expected)) in actual.iter().zip(pixel).enumerate() {
+                assert!(
+                    (i32::from(*actual) - expected).abs() <= PIXEL_TOLERANCE,
+                    "pixel ({x}, {y}) channel {channel}: {actual} is not within \
+                     {PIXEL_TOLERANCE} of {expected}"
+                );
+            }
+        }
+
         let mut profiled = Vec::new();
         let mut encoder = JpegEncoder::new_with_quality(&mut profiled, 100);
         encoder
@@ -776,21 +809,6 @@ mod tests {
             process_jpeg(&source[..source.len() - 7], DerivativeTarget::Thumbnail512),
             Err(DerivativeError::Malformed)
         );
-    }
-
-    #[test]
-    fn representative_pixels_are_stable_after_lanczos_normalization() {
-        let source = encode(3200, 2000);
-        let result = process_jpeg(&source, DerivativeTarget::Thumbnail512).unwrap();
-        let decoded = DynamicImage::from_decoder(
-            JpegDecoder::new(std::io::Cursor::new(&result.jpeg)).unwrap(),
-        )
-        .unwrap()
-        .to_rgb8();
-        for (x, y) in [(1, 1), (decoded.width() - 2, 1), (1, decoded.height() - 2)] {
-            let pixel = decoded.get_pixel(x, y);
-            assert!(pixel.0.iter().any(|channel| *channel > 0));
-        }
     }
 
     /// The inputs and expected bytes are the reference vectors recorded for

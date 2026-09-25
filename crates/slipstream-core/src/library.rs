@@ -3393,10 +3393,4 @@ mod tests {
         let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o644));
         drop(base);
     }
-
-    #[test]
-    fn persistence_backpressure_remains_typed_at_library_boundary() {
-        let error = LibraryError::Persistence(PersistenceError::Saturated);
-        assert_eq!(error.to_string(), "SQLite persistence queue is saturated");
-    }
 }

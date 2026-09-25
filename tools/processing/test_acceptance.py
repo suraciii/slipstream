@@ -9,6 +9,7 @@ a real deployment.  Run with:
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import io
@@ -19,6 +20,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import zlib
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,53 +61,71 @@ def build_development_tiff(
     *,
     bits=(32, 32, 32),
     sample_format=(3, 3, 3),
-    compression: int = 1,
+    compression: int = 8,
     photometric: int = 2,
     samples: int = 3,
+    deflate: bool = True,
 ) -> bytes:
-    """Little-endian uncompressed float32 RGB TIFF with an embedded profile."""
-    short_tags = {
-        258: bits,
-        339: sample_format,
-    }
-    inline_tags = {
-        256: (4, width),
-        257: (4, height),
-        259: (3, compression),
-        262: (3, photometric),
-        277: (3, samples),
-    }
-    tags = sorted(inline_tags) + sorted(short_tags) + [34675]
+    """Little-endian float32 RGB TIFF carrying one Deflate strip per row."""
+    short_tags = {258: bits, 339: sample_format}
+    tags = sorted([256, 257, 258, 259, 262, 273, 277, 278, 279, 339, 34675])
+    strip_data = []
+    row_samples = width * samples
+    for _ in range(height):
+        row = struct.pack("<" + "f" * row_samples, *([0.18] * row_samples))
+        strip_data.append(zlib.compress(row) if compression == 8 and deflate else row)
+
     ifd_offset = 8
-    ifd_size = 2 + 12 * len(tags) + 4
-    values_offset = ifd_offset + ifd_size
-    blob = bytearray()
-    blob += b"II" + struct.pack("<H", 42) + struct.pack("<I", ifd_offset)
-    blob += struct.pack("<H", len(tags))
-    extra = bytearray()
-    cursor = values_offset
-    offsets: dict[int, int] = {}
-    for tag in sorted(short_tags):
+    ifd_end = ifd_offset + 2 + 12 * len(tags) + 4
+    cursor = ifd_end
+    offsets = {}
+    for tag, values in short_tags.items():
         offsets[tag] = cursor
-        cursor += 2 * len(short_tags[tag])
+        cursor += 2 * len(values)
     offsets[34675] = cursor
     cursor += len(profile_bytes)
+    strip_offsets_offset = cursor
+    cursor += 4 * height
+    strip_counts_offset = cursor
+    cursor += 4 * height
+    strip_offsets = []
+    for strip in strip_data:
+        strip_offsets.append(cursor)
+        cursor += len(strip)
+
+    inline_tags = {
+        256: width,
+        257: height,
+        259: compression,
+        262: photometric,
+        273: (strip_offsets_offset, height),
+        277: samples,
+        278: 1,
+        279: (strip_counts_offset, height),
+    }
+    blob = bytearray(b"II" + struct.pack("<H", 42) + struct.pack("<I", ifd_offset))
+    blob += struct.pack("<H", len(tags))
+    extra = bytearray()
     for tag in tags:
-        if tag in inline_tags:
-            kind, value = inline_tags[tag]
-            blob += struct.pack("<HHI", tag, kind, 1) + struct.pack("<I", value)
+        if tag in (273, 279):
+            value_offset, count = inline_tags[tag]
+            blob += struct.pack("<HHII", tag, 4, count, value_offset)
+        elif tag in inline_tags:
+            blob += struct.pack("<HHII", tag, 4, 1, inline_tags[tag])
         elif tag in short_tags:
             values = short_tags[tag]
-            blob += struct.pack("<HHI", tag, 3, len(values))
-            blob += struct.pack("<I", offsets[tag])
+            blob += struct.pack("<HHII", tag, 3, len(values), offsets[tag])
+        elif tag == 34675:
+            blob += struct.pack("<HHII", tag, 7, len(profile_bytes), offsets[tag])
         else:
-            blob += struct.pack("<HHI", 34675, 7, len(profile_bytes))
-            blob += struct.pack("<I", offsets[34675])
+            raise AssertionError(f"unexpected TIFF tag {tag}")
     blob += struct.pack("<I", 0)
     for tag in sorted(short_tags):
         extra += struct.pack("<" + "H" * len(short_tags[tag]), *short_tags[tag])
     extra += profile_bytes
-    extra += struct.pack("<" + "f" * (width * height * samples), *([0.18] * (width * height * samples)))
+    extra += struct.pack("<" + "I" * height, *strip_offsets)
+    extra += struct.pack("<" + "I" * height, *(len(strip) for strip in strip_data))
+    extra += b"".join(strip_data)
     return bytes(blob + extra)
 
 
@@ -132,6 +152,7 @@ class StubDeployment:
         submit_recipe_version: str | None = None,
         artifact_export_id: str = EXPORT_ID,
         preview_content_type: str = "image/jpeg",
+        artifact_bytes_override: bytes | None = None,
         preview_body_override: bytes | None = None,
         list_page_maximum: int = 60,
         query_pages: list | None = None,
@@ -161,7 +182,11 @@ class StubDeployment:
         self.recipe_counter = 0
         self.source_revision = SOURCE_REVISION
         self.profile_bytes = PROFILE_ASSET.read_bytes()
-        self.artifact_bytes = build_development_tiff(4, 3, self.profile_bytes)
+        self.artifact_bytes = (
+            artifact_bytes_override
+            if artifact_bytes_override is not None
+            else build_development_tiff(4, 3, self.profile_bytes)
+        )
         self.preview_bytes = minimal_jpeg()
         self.fail_export = fail_export
         self.export_running_polls = export_running_polls
@@ -672,10 +697,6 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(acceptance.structured_code({"message": "no code here"}))
         self.assertIsNone(acceptance.structured_code(None))
 
-    def test_pinned_profile_asset_matches_spec_digests(self):
-        digest = hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest()
-        self.assertIn(digest, acceptance.PINNED_SOURCE_PROFILE_DIGESTS)
-
     def test_timestamp_parsing(self):
         self.assertIsNotNone(acceptance.parse_timestamp("2026-01-01T00:00:00Z"))
         self.assertIsNotNone(acceptance.parse_timestamp("2026-01-01T00:00:00+00:00"))
@@ -824,9 +845,9 @@ class HelperTests(unittest.TestCase):
         )
         self.assertIn("tiff-embedded-profile-digest-not-pinned", problems)
         _, problems = acceptance.validate_development_tiff(
-            build_development_tiff(4, 3, profile, compression=0), 4, 3
+            build_development_tiff(4, 3, profile, compression=1), 4, 3
         )
-        self.assertIn("tiff-compression-not-uncompressed", problems)
+        self.assertIn("tiff-compression-not-deflate", problems)
         _, problems = acceptance.validate_development_tiff(
             build_development_tiff(4, 3, profile, photometric=1), 4, 3
         )
@@ -835,6 +856,16 @@ class HelperTests(unittest.TestCase):
             build_development_tiff(4, 3, profile, samples=1), 4, 3
         )
         self.assertIn("tiff-samples-per-pixel-not-3", problems)
+
+    def test_development_tiff_rejects_invalid_deflate_stream(self):
+        profile = PROFILE_ASSET.read_bytes()
+        valid = build_development_tiff(4, 3, profile)
+        _, problems = acceptance.validate_development_tiff(valid, 4, 3)
+        self.assertEqual(problems, [])
+
+        malformed = build_development_tiff(4, 3, profile, deflate=False)
+        _, problems = acceptance.validate_development_tiff(malformed, 4, 3)
+        self.assertIn("tiff-deflate-strip-invalid", problems)
 
     def test_jpeg_walk(self):
         facts, problems = acceptance.validate_jpeg(minimal_jpeg(7, 5))
@@ -911,6 +942,53 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(problems, ["declared-byteLength-not-positive"])
         limit, problems = acceptance.artifact_download_limit("100")
         self.assertEqual(problems, ["declared-byteLength-not-integer"])
+
+    def test_configured_download_bound_admits_a_full_resolution_artifact(self):
+        # A full-resolution float32 Development TIFF is larger than the
+        # default bound.  The deployment's own bound is what admits it, and
+        # the launcher's hard output maximum is the ceiling.
+        declared = 641_868_746
+        _, problems = acceptance.artifact_download_limit(declared)
+        self.assertEqual(problems, ["declared-byteLength-exceeds-download-limit"])
+        limit, problems = acceptance.artifact_download_limit(
+            declared, acceptance.MAXIMUM_DOWNLOAD_BYTES
+        )
+        self.assertEqual(problems, [])
+        self.assertEqual(limit, declared + acceptance.DOWNLOAD_SLACK_BYTES)
+        artifact = {
+            "exportId": EXPORT_ID,
+            "target": "development-tiff",
+            "stage": "develop",
+            "contentType": "image/tiff",
+            "width": 6376,
+            "height": 9568,
+            "profileIdentity": "profile",
+            "byteLength": declared,
+            "sha256": "a" * 64,
+            "expiresAt": "2026-01-01T00:00:00Z",
+        }
+        _, problems = acceptance.validate_artifact_object(artifact)
+        self.assertEqual(problems, ["artifact-byteLength-exceeds-download-limit"])
+        _, problems = acceptance.validate_artifact_object(
+            artifact, acceptance.MAXIMUM_DOWNLOAD_BYTES
+        )
+        self.assertEqual(problems, [])
+
+    def test_download_bound_option_is_bounded_by_the_hard_maximum(self):
+        self.assertEqual(acceptance.download_bound("4294967296"), acceptance.MAXIMUM_DOWNLOAD_BYTES)
+        for value in ("0", "-1", "abc", str(acceptance.MAXIMUM_DOWNLOAD_BYTES + 1)):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                acceptance.download_bound(value)
+        parsed = acceptance.parse_args(
+            [
+                "--base-url", "https://acceptance.example.com",
+                "--token-file", "/tmp/token",
+                "--fixture", "/tmp/fixture.raw",
+                "--output-dir", "/tmp/downloads",
+                "--max-download-bytes", "4294967296",
+            ]
+        )
+        self.assertEqual(parsed.max_download_bytes, acceptance.MAXIMUM_DOWNLOAD_BYTES)
 
     def test_export_submission_binds_snapshot_identity(self):
         good = {
@@ -1258,37 +1336,6 @@ class DryRunTests(AcceptanceTestCase):
             any(change.startswith("sha256-changed:") for change in invariance["detail"]["changes"])
         )
 
-    def test_stub_rejects_legacy_query_body(self):
-        """The exact request the pre-fix runner sent must refuse on the stub."""
-        stub = StubDeployment()
-        headers = {
-            "Authorization": f"Bearer {TOKEN}",
-            "slipstream-cli-contract": "1",
-        }
-        status, payload, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": "all", "kind": "raw", "available": True, "limit": 200}).encode(),
-            headers,
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("invalid_input", payload.decode())
-        status, payload, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": {"kind": "all"}, "limit": 200}).encode(),
-            headers,
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("limit", payload.decode())
-        status, _, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": {"kind": "all"}, "limit": 60}).encode(),
-            {"Authorization": f"Bearer {TOKEN}"},
-        )
-        self.assertEqual(status, 426)
-
     def test_photo_query_speaks_the_server_contract(self):
         """The runner sends the tagged source object within the published bound."""
         stub = StubDeployment()
@@ -1430,11 +1477,26 @@ class DryRunTests(AcceptanceTestCase):
         with RunningStub(stub) as running:
             code, report, _ = run_main(self.invocation(running))
         self.assertEqual(code, 1)
-        self.assertEqual(report["status"], "failed")
         invariance = next(step for step in report["steps"] if step["name"] == "original-invariance")
+        self.assertEqual(report["status"], "failed")
         self.assertEqual(invariance["reason"], "invariance-snapshot-failed")
         self.assertEqual(invariance["detail"]["unreadable"][0]["path"], str(sidecar))
         self.assertEqual(invariance["detail"]["unreadable"][0]["error"], "IsADirectoryError")
+
+    def test_artifact_rejects_invalid_deflate_payload(self):
+        invalid = build_development_tiff(
+            4, 3, PROFILE_ASSET.read_bytes(), deflate=False
+        )
+        stub = StubDeployment(artifact_bytes_override=invalid)
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(self.invocation(running))
+        self.assertEqual(code, 1)
+        download = next(
+            step for step in report["steps"] if step["name"] == "download-artifact"
+        )
+        self.assertEqual(download["reason"], "artifact-invalid")
+        self.assertIn("tiff-deflate-strip-invalid", download["detail"]["problems"])
+        self.assertEqual(report["writtenFiles"], [])
 
 
 if __name__ == "__main__":

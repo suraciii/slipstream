@@ -312,6 +312,15 @@ launcher-owned result into it with bounded chunks. The launcher returns a
 bounded `OutputReceipt` containing the attempt identity, target, byte length and
 SHA-256; no filesystem path or multi-gigabyte control response is used.
 
+Before it offers any output, the launcher validates its own engine artifact
+against the closed Development TIFF contract: IEEE float32 RGB samples, Deflate
+strip ranges that account for the declared full geometry with no unaccounted
+trailing payload, no hidden orientation, and the exact pinned embedded profile
+bytes. The strip layout is the qualified writer's shape, one entry per declared
+row block, so the launcher bounds the parsed arrays by the qualified geometry
+instead of a fixed small count. An artifact outside that shape settles as
+`refused-output-validation` and is never offered.
+
 The service hashes and validates the received file as the captured
 `development-tiff` target, including dimensions, sample type, color profile,
 size and content identity, syncs it, and sends an explicit validation

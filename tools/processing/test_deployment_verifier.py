@@ -37,6 +37,14 @@ def fake_command(arguments):
         return deployment.CommandResult(0, "active\n", "")
     if arguments[:4] == ("systemctl", "--system", "show", "--property=SubState"):
         return deployment.CommandResult(0, "running\n", "")
+    if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+        "--property=PrivateTmp"
+    ):
+        properties = arguments[3].split("=", 1)[1].split(",")
+        body = "".join(f"{name}=\n" for name in properties)
+        return deployment.CommandResult(0, body + "ProtectProc=default\n", "")
+    if arguments[:4] == ("systemctl", "--system", "show", "--property=MainPID"):
+        return deployment.CommandResult(0, "4242\n", "")
     return deployment.CommandResult(1, "", "unknown command")
 
 
@@ -91,7 +99,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         required = [
             deployment.Check(name, True) for name in (
                 "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
-                "launcher-config", "launcher-service", "launcher-runtime",
+                "launcher-mount-namespace", "launcher-config", "launcher-service", "launcher-runtime",
             )
         ]
         required[-1] = deployment.Check("launcher-runtime", False, "launcher-socket-missing")
@@ -104,7 +112,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         required = [
             deployment.Check(name, True) for name in (
                 "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
-                "launcher-config", "launcher-service", "launcher-runtime",
+                "launcher-mount-namespace", "launcher-config", "launcher-service", "launcher-runtime",
             )
         ]
         observed = []
@@ -148,6 +156,82 @@ class DeploymentVerifierTests(unittest.TestCase):
             self.assertEqual(launcher["reason"], "launcher-installation-missing")
             self.assertEqual(snapshot["status"], "read-only-checks-failed")
             self.assertFalse(snapshot["production_ready"])
+
+    def test_installed_unit_keeps_attempt_storage_visible_to_the_engine(self):
+        with patch.object(deployment.os, "readlink", side_effect=lambda _: "mnt:[111]") as readlink:
+            self.assertEqual(
+                deployment.DeploymentSnapshot(
+                    instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=fake_command
+                )._mount_namespace_check(),
+                deployment.Check("launcher-mount-namespace", True),
+            )
+        self.assertEqual(
+            [call.args[0] for call in readlink.call_args_list],
+            ["/proc/1/ns/mnt", "/proc/4242/ns/mnt"],
+        )
+
+    def test_installed_unit_with_private_mount_namespace_is_rejected(self):
+        def namespaced_command(arguments):
+            if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+                "--property=PrivateTmp"
+            ):
+                return deployment.CommandResult(
+                    0,
+                    "PrivateTmp=yes\nProtectSystem=strict\nProtectKernelTunables=yes\n"
+                    "ReadWritePaths=/run/slipstream-processing/x /var/lib/slipstream-processing\n"
+                    "RestrictAddressFamilies=AF_UNIX\n",
+                    "",
+                )
+            return fake_command(arguments)
+
+        result = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=namespaced_command
+        )._mount_namespace_check()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "launcher-private-mount-namespace")
+        self.assertEqual(
+            result.detail,
+            "PrivateTmp=yes, ProtectSystem=strict, ProtectKernelTunables=yes, "
+            "ReadWritePaths=/run/slipstream-processing/x /var/lib/slipstream-processing",
+        )
+
+    def test_other_mount_namespacing_properties_are_rejected(self):
+        for name in ("ProtectHome", "PrivateDevices", "ProtectProc", "ExecPaths", "NoExecPaths"):
+            with self.subTest(name=name):
+                def command(arguments):
+                    if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+                        "--property=PrivateTmp"
+                    ):
+                        return deployment.CommandResult(0, f"{name}=yes\n", "")
+                    return fake_command(arguments)
+
+                result = deployment.DeploymentSnapshot(
+                    instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=command
+                )._mount_namespace_check()
+                self.assertEqual(result.reason, "launcher-private-mount-namespace")
+                self.assertEqual(result.detail, f"{name}=yes")
+
+    def test_running_launcher_mount_namespace_must_match_pid_one(self):
+        checker = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=fake_command
+        )
+        with patch.object(deployment.os, "readlink", side_effect=["mnt:[111]", "mnt:[222]"]):
+            result = checker._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-private-mount-namespace")
+
+        with patch.object(deployment.os, "readlink", side_effect=OSError):
+            result = checker._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-process-unavailable")
+
+        def stopped_command(arguments):
+            if arguments[:4] == ("systemctl", "--system", "show", "--property=MainPID"):
+                return deployment.CommandResult(0, "0\n", "")
+            return fake_command(arguments)
+
+        result = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=stopped_command
+        )._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-process-unavailable")
 
     def test_missing_socket_is_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -196,7 +280,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             )
             self.assertEqual(checker._cgroup_check().reason, "attempt-memory-unlimited")
 
-    def test_positive_finite_attempt_fixture(self):
+    def test_attempt_cgroup_rejects_unbounded_cpu_or_tasks_and_missing_io(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cgroup = root / "cgroup"
@@ -217,25 +301,7 @@ class DeploymentVerifierTests(unittest.TestCase):
             )
             self.assertEqual(checker._cgroup_check(), deployment.Check("attempt-cgroup", True))
 
-    def test_attempt_cgroup_rejects_unbounded_cpu_or_tasks_and_missing_io(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            cgroup = root / "cgroup"
-            attempt = cgroup / "slipstreamprocessing" / "attempt"
-            attempt.mkdir(parents=True)
-            (cgroup / "cgroup.controllers").write_text("cpu io memory pids\n")
-            (attempt / "memory.max").write_text(str(4 * 1024**3) + "\n")
-            (attempt / "memory.swap.max").write_text("0\n")
             (attempt / "cpu.max").write_text("max 100000\n")
-            (attempt / "pids.max").write_text("256\n")
-            (attempt / "io.stat").write_text("")
-            checker = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                paths=deployment.Paths(cgroup_root=cgroup, attempt_cgroup=attempt),
-                command=fake_command,
-            )
             self.assertEqual(checker._cgroup_check().reason, "attempt-cpu-unlimited")
 
             (attempt / "cpu.max").write_text("400000 100000\n")
@@ -258,6 +324,13 @@ class DeploymentVerifierTests(unittest.TestCase):
             token_file.write_text("synthetic-token\n")
             token_file.chmod(0o600)
 
+            def profile_entry(profile_id):
+                return {
+                    "profileId": profile_id,
+                    "whiteBalanceModes": ["as-shot"],
+                    "whiteBalanceRanges": None,
+                }
+
             def ready_capability():
                 return {
                     "state": "ready",
@@ -265,221 +338,90 @@ class DeploymentVerifierTests(unittest.TestCase):
                     "incarnation": "a" * 32,
                     "exposure": {"minimumEv": 0.0, "maximumEv": 1.0, "stepEv": 0.001},
                     "profiles": [
-                        {
-                            "profileId": "sony-ilce-7rm5-arw",
-                            "whiteBalanceModes": ["as-shot"],
-                            "whiteBalanceRanges": None,
-                        },
-                        {
-                            "profileId": "sony-ilce-7cm2-arw",
-                            "whiteBalanceModes": ["as-shot"],
-                            "whiteBalanceRanges": None,
-                        },
+                        profile_entry("sony-ilce-7rm5-arw"),
+                        profile_entry("sony-ilce-7cm2-arw"),
                     ],
                     "stages": {"develop": "ready", "film": "unavailable"},
                 }
 
-            def urlopen(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                return FakeResponse(ready_capability())
+            def checks_for(overrides):
+                def urlopen(request, timeout):
+                    path = request.full_url.split("/", 3)[-1]
+                    if path == "healthz":
+                        return FakeResponse({"status": "ok"})
+                    if path == "api/status":
+                        return FakeResponse({"state": "published"})
+                    if path == "api/overview":
+                        return FakeResponse({"albums": []})
+                    capability = ready_capability()
+                    capability.update(overrides)
+                    return FakeResponse(capability)
 
-            checker = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen,
-            )
-            checks = checker._web_checks()
-            self.assertTrue(all(check.ok for check in checks), checks)
+                checker = deployment.DeploymentSnapshot(
+                    instance=INSTANCE,
+                    policy=POLICY,
+                    bundle=BUNDLE,
+                    web_url="https://photos.example.com",
+                    web_token_file=token_file,
+                    urlopen=urlopen,
+                )
+                return checker._web_checks()
 
-            # A deployment that cannot prove readiness fails closed with the
-            # observed condition as the detail.
-            def urlopen_blocked(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["state"] = "resource-unavailable"
-                capability["stages"]["develop"] = "unavailable"
-                return FakeResponse(capability)
+            ready = checks_for({})
+            self.assertTrue(all(check.ok for check in ready), ready)
 
-            blocked = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_blocked,
-            )
-            checks = blocked._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-unavailable")
-            self.assertEqual(checks[0].detail, "resource-unavailable")
-
-            # The profile list stays empty only for `source-unsupported`, so
-            # a `ready` answer without profiles is a failed check.
-            def urlopen_no_profiles(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["profiles"] = []
-                return FakeResponse(capability)
-
-            empty = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_no_profiles,
-            )
-            checks = empty._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-unavailable")
-            self.assertEqual(checks[0].detail, "profiles")
-
-            # A ready answer advertising a profile outside the closed
-            # qualified set is a failed check.
-            def urlopen_unapproved(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["profiles"] = [
+            # Each row overrides one part of the ready answer; the reason and
+            # detail are the contract the verifier reports for it.
+            for description, overrides, reason, detail in [
+                (
+                    "a blocked deployment reports the observed condition",
                     {
-                        "profileId": "unapproved-camera",
-                        "whiteBalanceModes": ["as-shot"],
-                        "whiteBalanceRanges": None,
-                    }
-                ]
-                return FakeResponse(capability)
-
-            unapproved = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_unapproved,
-            )
-            checks = unapproved._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-response-invalid")
-            self.assertEqual(checks[0].detail, "profiles")
-
-            # A ready response naming a different, well-formed bundle fails
-            # the check: readiness proves the exact deployed bundle.
-            def urlopen_bundle_mismatch(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["bundleId"] = "d" * 64
-                return FakeResponse(capability)
-
-            mismatched = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_bundle_mismatch,
-            )
-            checks = mismatched._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-unavailable")
-            self.assertEqual(checks[0].detail, "bundle-mismatch")
-
-            # A ready response advertising only one of the two approved
-            # source classes is also a failed check: the wire contract gives
-            # profiles one object per approved source class, not a subset.
-            def urlopen_subset(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["profiles"] = [
-                    {
-                        "profileId": "sony-ilce-7rm5-arw",
-                        "whiteBalanceModes": ["as-shot"],
-                        "whiteBalanceRanges": None,
-                    }
-                ]
-                return FakeResponse(capability)
-
-            subset = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_subset,
-            )
-            checks = subset._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-response-invalid")
-            self.assertEqual(checks[0].detail, "profiles")
-
-            # A profile id of the wrong JSON type is a failed check, not a
-            # verifier crash.
-            def urlopen_malformed_profile_id(request, timeout):
-                path = request.full_url.split("/", 3)[-1]
-                if path == "healthz":
-                    return FakeResponse({"status": "ok"})
-                if path == "api/status":
-                    return FakeResponse({"state": "published"})
-                if path == "api/overview":
-                    return FakeResponse({"albums": []})
-                capability = ready_capability()
-                capability["profiles"] = [
-                    {
-                        "profileId": ["sony-ilce-7rm5-arw"],
-                        "whiteBalanceModes": ["as-shot"],
-                        "whiteBalanceRanges": None,
+                        "state": "resource-unavailable",
+                        "stages": {"develop": "unavailable"},
                     },
+                    "web-capability-unavailable",
+                    "resource-unavailable",
+                ),
+                (
+                    "an empty profile list is refused outside source-unsupported",
+                    {"profiles": []},
+                    "web-capability-unavailable",
+                    "profiles",
+                ),
+                (
+                    "a profile outside the closed qualified set is refused",
+                    {"profiles": [profile_entry("unapproved-camera")]},
+                    "web-capability-response-invalid",
+                    "profiles",
+                ),
+                (
+                    "a different well-formed bundle fails readiness",
+                    {"bundleId": "d" * 64},
+                    "web-capability-unavailable",
+                    "bundle-mismatch",
+                ),
+                (
+                    "a subset of the approved source classes is refused",
+                    {"profiles": [profile_entry("sony-ilce-7rm5-arw")]},
+                    "web-capability-response-invalid",
+                    "profiles",
+                ),
+                (
+                    "a profile id of the wrong JSON type is a failed check",
                     {
-                        "profileId": "sony-ilce-7cm2-arw",
-                        "whiteBalanceModes": ["as-shot"],
-                        "whiteBalanceRanges": None,
+                        "profiles": [
+                            profile_entry(["sony-ilce-7rm5-arw"]),
+                            profile_entry("sony-ilce-7cm2-arw"),
+                        ]
                     },
-                ]
-                return FakeResponse(capability)
+                    "web-capability-response-invalid",
+                    "profiles",
+                ),
+            ]:
+                checks = checks_for(overrides)
+                self.assertEqual(checks[0].reason, reason, description)
+                self.assertEqual(checks[0].detail, detail, description)
 
-            malformed = deployment.DeploymentSnapshot(
-                instance=INSTANCE,
-                policy=POLICY,
-                bundle=BUNDLE,
-                web_url="https://photos.example.com",
-                web_token_file=token_file,
-                urlopen=urlopen_malformed_profile_id,
-            )
-            checks = malformed._web_checks()
-            self.assertEqual(checks[0].reason, "web-capability-response-invalid")
-            self.assertEqual(checks[0].detail, "profiles")
 
     def test_web_rejects_plain_http_before_sending_bearer(self):
         with tempfile.TemporaryDirectory() as directory:

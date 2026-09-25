@@ -17,6 +17,9 @@ exercise it.
 The tool must never run against an operator's live library.  It refuses to run
 without `--i-acknowledge-this-is-an-acceptance-instance`, and the documented
 target is a dedicated acceptance deployment (see tools/processing/README.md).
+`--max-download-bytes` carries that deployment's retained-output allowance, so
+the runner admits the qualified Development TIFF's declared size instead of
+refusing it against a smaller default bound.
 
 Exit codes: 0 when every step that ran passed, 1 when any step failed, and 2
 when the run was blocked (steps could not run, for example because a route of
@@ -39,12 +42,23 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_JSON_BYTES = 1024 * 1024
+# The read bound for an artifact download.  The default covers a small
+# deployment; a full-resolution float32 Development TIFF is larger, so the
+# operator passes the deployment's own published bound with
+# `--max-download-bytes` (its `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
+# value, see docs/deployment.md).
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+# The launcher's hard output maximum (`MAX_OUTPUT_BYTES` in
+# `crates/slipstream-processing/src/photo.rs`): the most any single published
+# artifact can be.  A larger configured bound would only invite reading bytes
+# the deployment cannot legitimately publish.
+MAXIMUM_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 DOWNLOAD_SLACK_BYTES = 65536
 MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
@@ -518,28 +532,28 @@ def header_object_mismatches(metadata: dict, artifact: dict) -> list:
     return problems
 
 
-def artifact_download_limit(declared: object) -> tuple[int, list]:
-    """Clamp the read limit for a download to the hard maximum.
+def artifact_download_limit(declared: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[int, list]:
+    """Clamp the read limit for a download to the configured maximum.
 
     Returns the applied byte limit and problems for an unusable declared
-    size.  A declared size above `MAX_DOWNLOAD_BYTES` is refused instead of
-    being clamped, because accepting it would mean reading an artifact the
+    size.  A declared size above `maximum` is refused instead of being
+    clamped, because accepting it would mean reading an artifact the
     deployment cannot legitimately publish.
     """
     problems: list = []
     if not isinstance(declared, int) or isinstance(declared, bool):
         problems.append("declared-byteLength-not-integer")
-        return MAX_DOWNLOAD_BYTES, problems
+        return maximum, problems
     if declared <= 0:
         problems.append("declared-byteLength-not-positive")
-        return MAX_DOWNLOAD_BYTES, problems
-    if declared > MAX_DOWNLOAD_BYTES:
+        return maximum, problems
+    if declared > maximum:
         problems.append("declared-byteLength-exceeds-download-limit")
-        return MAX_DOWNLOAD_BYTES, problems
-    return min(declared + DOWNLOAD_SLACK_BYTES, MAX_DOWNLOAD_BYTES), problems
+        return maximum, problems
+    return min(declared + DOWNLOAD_SLACK_BYTES, maximum), problems
 
 
-def validate_artifact_object(artifact: object) -> tuple[dict, list]:
+def validate_artifact_object(artifact: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[dict, list]:
     """Validate the closed artifact metadata object of `GET /api/exports/{id}`."""
     problems: list = []
     if not isinstance(artifact, dict):
@@ -554,7 +568,7 @@ def validate_artifact_object(artifact: object) -> tuple[dict, list]:
     if isinstance(declared, int) and not isinstance(declared, bool):
         if declared <= 0:
             problems.append("artifact-byteLength-not-positive")
-        elif declared > MAX_DOWNLOAD_BYTES:
+        elif declared > maximum:
             problems.append("artifact-byteLength-exceeds-download-limit")
     if not _LOWER_HEX_64.match(str(artifact.get("sha256", ""))):
         problems.append("artifact-sha256-not-lowercase-hex-64")
@@ -608,6 +622,7 @@ def validate_export_inspection(
     photo_id: str | None = None,
     recipe_version: str | None = None,
     source_revision: str | None = None,
+    maximum_download_bytes: int = MAX_DOWNLOAD_BYTES,
 ) -> tuple[dict, list]:
     """Validate `GET /api/exports/{id}` against the wire contract."""
     problems: list = []
@@ -643,7 +658,9 @@ def validate_export_inspection(
         if artifact is None:
             problems.append("artifact-null-after-succeeded")
         else:
-            artifact_facts, artifact_problems = validate_artifact_object(artifact)
+            artifact_facts, artifact_problems = validate_artifact_object(
+                artifact, maximum_download_bytes
+            )
             if isinstance(artifact, dict) and artifact.get("exportId") != payload.get("exportId"):
                 problems.append("artifact-exportId-mismatch")
             facts["artifact"] = artifact_facts
@@ -734,6 +751,38 @@ def _optional_int(value: object) -> int | None:
 
 
 _TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
+_MAXIMUM_TIFF_BYTES = MAXIMUM_DOWNLOAD_BYTES
+_MAXIMUM_TIFF_PIXELS = 200_000_000
+_MAXIMUM_TIFF_ENTRIES = 512
+_MAXIMUM_TIFF_VALUE_BYTES = 1024 * 1024
+_MAXIMUM_TIFF_STRIPS = 65_536
+_TIFF_DECODE_CHUNK_BYTES = 64 * 1024
+
+
+def _deflate_strip_matches(data: bytes, offset: int, length: int, expected: int) -> bool:
+    """Validate one zlib-wrapped strip without retaining decoded pixels."""
+    decoder = zlib.decompressobj()
+    decoded = 0
+    end = offset + length
+    try:
+        for start in range(offset, end, _TIFF_DECODE_CHUNK_BYTES):
+            if decoder.eof:
+                return False
+            pending = data[start : min(start + _TIFF_DECODE_CHUNK_BYTES, end)]
+            while pending:
+                limit = min(_TIFF_DECODE_CHUNK_BYTES, expected - decoded + 1)
+                output = decoder.decompress(pending, limit)
+                decoded += len(output)
+                if decoded > expected or decoder.unused_data:
+                    return False
+                pending = decoder.unconsumed_tail
+                if not pending:
+                    break
+                if not output:
+                    return False
+    except zlib.error:
+        return False
+    return decoder.eof and decoded == expected and not decoder.unused_data
 
 
 def validate_development_tiff(
@@ -742,52 +791,70 @@ def validate_development_tiff(
     expected_height: int | None = None,
     accepted_profile_digests: tuple[str, ...] = PINNED_SOURCE_PROFILE_DIGESTS,
 ) -> tuple[dict, list]:
-    """Structurally validate a Development TIFF and its embedded profile."""
+    """Validate TIFF framing and inflate every bounded Deflate strip."""
     problems: list = []
-    facts: dict = {"decode": "ifd-structural"}
+    facts: dict = {"decode": "ifd-and-deflate-strips"}
     if len(data) < 8:
         return facts, ["tiff-truncated-header"]
+    if len(data) > _MAXIMUM_TIFF_BYTES:
+        return facts, ["tiff-size-exceeds-maximum"]
     byte_order = data[:2]
-    if byte_order == b"II":
-        endian = "<"
-    elif byte_order == b"MM":
-        endian = ">"
-    else:
+    endian = "<" if byte_order == b"II" else ">" if byte_order == b"MM" else None
+    if endian is None:
         return facts, ["tiff-byte-order-invalid"]
-    magic = struct.unpack(endian + "H", data[2:4])[0]
-    if magic != 42:
-        problems.append("tiff-magic-invalid")
-        return facts
+    if struct.unpack(endian + "H", data[2:4])[0] != 42:
+        return facts, ["tiff-magic-invalid"]
+
     ifd_offset = struct.unpack(endian + "I", data[4:8])[0]
     if ifd_offset + 2 > len(data):
         return facts, ["tiff-ifd-out-of-range"]
     entry_count = struct.unpack(endian + "H", data[ifd_offset : ifd_offset + 2])[0]
-    if ifd_offset + 2 + 12 * entry_count > len(data):
+    if entry_count == 0 or entry_count > _MAXIMUM_TIFF_ENTRIES:
+        return facts, ["tiff-ifd-entry-count-out-of-range"]
+    ifd_end = ifd_offset + 2 + 12 * entry_count + 4
+    if ifd_end > len(data):
         return facts, ["tiff-ifd-out-of-range"]
-    entries: dict[int, tuple[int, int, bytes]] = {}
+
+    entries: dict[int, tuple[int, int, bytes, int]] = {}
+    value_ranges: list[tuple[int, int]] = []
     for index in range(entry_count):
         start = ifd_offset + 2 + 12 * index
         tag, kind, count = struct.unpack(endian + "HHI", data[start : start + 8])
-        size = _TIFF_TYPE_SIZES.get(kind)
-        if size is None:
+        type_size = _TIFF_TYPE_SIZES.get(kind)
+        if type_size is None:
             continue
-        byte_count = size * count
+        byte_count = type_size * count
         if byte_count <= 4:
-            raw = data[start + 8 : start + 8 + byte_count]
+            value_offset = start + 8
         else:
-            offset = struct.unpack(endian + "I", data[start + 8 : start + 12])[0]
-            if offset + byte_count > len(data):
-                problems.append(f"tiff-tag-{tag}-value-out-of-range")
-                continue
-            raw = data[offset : offset + byte_count]
-        entries[tag] = (kind, count, raw)
-
+            value_offset = struct.unpack(endian + "I", data[start + 8 : start + 12])[0]
+        value_end = value_offset + byte_count
+        if value_end > len(data):
+            problems.append(f"tiff-tag-{tag}-value-out-of-range")
+            continue
+        value_ranges.append((value_offset, value_end))
+        if tag in (273, 279):
+            maximum = _MAXIMUM_TIFF_STRIPS * 4
+        elif tag == 34675:
+            maximum = _MAXIMUM_TIFF_VALUE_BYTES
+        elif tag in (256, 257, 258, 259, 262, 273, 274, 277, 278, 279, 339):
+            maximum = 64
+        else:
+            # Engine metadata such as XMP and private tags is part of the
+            # bounded file, but is not part of the closed pixel contract.
+            # Account for its range without retaining an unbounded value.
+            maximum = None
+        if maximum is not None and byte_count > maximum:
+            problems.append(f"tiff-tag-{tag}-value-exceeds-bound")
+            continue
+        raw = data[value_offset:value_end]
+        entries[tag] = (kind, count, raw, value_offset)
     def unsigned(tag: int) -> int | None:
         entry = entries.get(tag)
         if entry is None:
             problems.append(f"tiff-tag-{tag}-missing")
             return None
-        kind, count, raw = entry
+        kind, count, raw, _ = entry
         if kind == 3 and count == 1 and len(raw) >= 2:
             return struct.unpack(endian + "H", raw[:2])[0]
         if kind == 4 and count == 1 and len(raw) >= 4:
@@ -795,45 +862,63 @@ def validate_development_tiff(
         problems.append(f"tiff-tag-{tag}-unexpected-type")
         return None
 
-    def short_list(tag: int, expected_count: int) -> list | None:
+    def integer_list(tag: int, expected_count: int | None = None) -> list[int] | None:
         entry = entries.get(tag)
         if entry is None:
             problems.append(f"tiff-tag-{tag}-missing")
             return None
-        kind, count, raw = entry
-        if kind != 3 or count != expected_count or len(raw) < 2 * expected_count:
+        kind, count, raw, _ = entry
+        if kind not in (3, 4) or (expected_count is not None and count != expected_count):
             problems.append(f"tiff-tag-{tag}-unexpected-shape")
             return None
-        return list(struct.unpack(endian + "H" * expected_count, raw[: 2 * expected_count]))
+        width = 2 if kind == 3 else 4
+        if len(raw) != width * count:
+            problems.append(f"tiff-tag-{tag}-unexpected-shape")
+            return None
+        code = "H" if kind == 3 else "I"
+        return list(struct.unpack(endian + code * count, raw))
 
     width = unsigned(256)
     height = unsigned(257)
-    bits = short_list(258, 3)
+    bits = integer_list(258, 3)
     compression = unsigned(259)
     photometric = unsigned(262)
     samples = unsigned(277)
-    sample_format = short_list(339, 3)
-    facts["width"] = width
-    facts["height"] = height
-    facts["bitsPerSample"] = bits
-    facts["sampleFormat"] = sample_format
-    facts["compression"] = compression
-    facts["photometricInterpretation"] = photometric
-    facts["samplesPerPixel"] = samples
+    rows_per_strip = unsigned(278)
+    sample_format = integer_list(339, 3)
+    facts.update(
+        {
+            "width": width,
+            "height": height,
+            "bitsPerSample": bits,
+            "sampleFormat": sample_format,
+            "compression": compression,
+            "photometricInterpretation": photometric,
+            "samplesPerPixel": samples,
+        }
+    )
+    if width is None or height is None:
+        return facts, problems
+    if width == 0 or height == 0 or width * height > _MAXIMUM_TIFF_PIXELS:
+        problems.append("tiff-dimensions-out-of-range")
     if samples != 3:
         problems.append("tiff-samples-per-pixel-not-3")
     if bits != [32, 32, 32]:
         problems.append("tiff-bits-per-sample-not-float32-rgb")
     if sample_format != [3, 3, 3]:
         problems.append("tiff-sample-format-not-ieee-float")
-    if compression != 1:
-        problems.append("tiff-compression-not-uncompressed")
+    # design/processing-photo-protocol.md: the closed Development TIFF
+    # contract is IEEE float32 RGB samples with Deflate strip ranges, and the
+    # launcher refuses anything else before it publishes.
+    if compression != 8:
+        problems.append("tiff-compression-not-deflate")
     if photometric != 2:
         problems.append("tiff-photometric-not-rgb")
     if expected_width is not None and width != expected_width:
         problems.append("tiff-width-mismatch")
     if expected_height is not None and height != expected_height:
         problems.append("tiff-height-mismatch")
+
     profile_entry = entries.get(34675)
     if profile_entry is None:
         problems.append("tiff-embedded-profile-missing")
@@ -845,8 +930,49 @@ def validate_development_tiff(
         facts["profileAccepted"] = digest in accepted_profile_digests
         if digest not in accepted_profile_digests:
             problems.append("tiff-embedded-profile-digest-not-pinned")
-    return facts, problems
 
+    if (
+        width == 0 or height == 0 or width * height > _MAXIMUM_TIFF_PIXELS
+        or (expected_width is not None and width != expected_width)
+        or (expected_height is not None and height != expected_height)
+    ):
+        return facts, problems
+    if compression != 8 or photometric != 2 or bits != [32, 32, 32] or sample_format != [3, 3, 3]:
+        return facts, problems
+    if samples != 3 or rows_per_strip is None or rows_per_strip == 0:
+        return facts, problems
+    offsets = integer_list(273)
+    byte_counts = integer_list(279)
+    if offsets is None or byte_counts is None:
+        return facts, problems
+    expected_strips = (height + rows_per_strip - 1) // rows_per_strip
+    if (
+        expected_strips == 0 or expected_strips > _MAXIMUM_TIFF_STRIPS
+        or len(offsets) != expected_strips or len(byte_counts) != expected_strips
+    ):
+        problems.append("tiff-strip-layout-shape-invalid")
+        return facts, problems
+    covered_end = max(
+        ifd_end,
+        max((end for _, end in value_ranges), default=ifd_end),
+    )
+    decoded_bytes = 0
+    for index, (offset, byte_count) in enumerate(zip(offsets, byte_counts)):
+        rows = min(rows_per_strip, height - index * rows_per_strip)
+        expected_bytes = rows * width * samples * 4
+        end = offset + byte_count
+        if byte_count == 0 or offset < covered_end or end > len(data):
+            problems.append("tiff-strip-range-invalid")
+            return facts, problems
+        covered_end = end
+        if not _deflate_strip_matches(data, offset, byte_count, expected_bytes):
+            problems.append("tiff-deflate-strip-invalid")
+            return facts, problems
+        decoded_bytes += expected_bytes
+    facts["decodedBytes"] = decoded_bytes
+    if covered_end != len(data):
+        problems.append("tiff-unaccounted-trailing-payload")
+    return facts, problems
 
 def validate_jpeg(body: bytes) -> tuple[dict, list]:
     """Walk the JPEG marker structure far enough to trust container dimensions."""
@@ -1182,11 +1308,12 @@ class Runner:
         settlement_timeout: float = 900.0,
         preview_timeout: float = 120.0,
         poll_interval: float = 2.0,
+        max_download_bytes: int = MAX_DOWNLOAD_BYTES,
         accepted_profile_digests: tuple[str, ...] = PINNED_SOURCE_PROFILE_DIGESTS,
         expected_identities: dict | None = None,
         monotonic=time.monotonic,
     ):
-        self.client = Client(base_url, token, timeout=request_timeout)
+        self.client = Client(base_url, token, timeout=request_timeout, max_download_bytes=max_download_bytes)
         self.fixture = fixture
         self.output_dir = output_dir
         self.settlement_timeout = settlement_timeout
@@ -1598,6 +1725,7 @@ class Runner:
                 photo_id=self.photo_id,
                 recipe_version=self.recipe_version,
                 source_revision=self.source_revision,
+                maximum_download_bytes=self.client.max_download_bytes,
             )
             state = facts.get("state")
             if state in ("succeeded", "failed", "cancelled"):
@@ -1641,7 +1769,7 @@ class Runner:
         declared = None
         if self.export_artifact:
             declared = self.export_artifact.get("byteLength")
-        limit, limit_problems = artifact_download_limit(declared)
+        limit, limit_problems = artifact_download_limit(declared, self.client.max_download_bytes)
         if limit_problems:
             raise AcceptanceFailure(
                 "artifact-declared-size-invalid", {"problems": limit_problems}
@@ -1928,6 +2056,21 @@ def render_summary(report: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def download_bound(value: str) -> int:
+    """Parse `--max-download-bytes`: a positive read bound within the hard maximum."""
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a decimal byte count") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive byte count")
+    if parsed > MAXIMUM_DOWNLOAD_BYTES:
+        raise argparse.ArgumentTypeError(
+            f"must not exceed the launcher's hard output maximum of {MAXIMUM_DOWNLOAD_BYTES} bytes"
+        )
+    return parsed
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", required=True, help="Deployment base URL (https, or http on loopback).")
@@ -1942,6 +2085,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--settlement-timeout", type=float, default=900.0)
     parser.add_argument("--preview-timeout", type=float, default=120.0)
     parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument(
+        "--max-download-bytes",
+        type=download_bound,
+        default=MAX_DOWNLOAD_BYTES,
+        help=(
+            "Read bound for artifact downloads: the deployment's retained-output allowance in bytes "
+            "(`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, docs/deployment.md), which must cover a "
+            f"full-resolution Development TIFF. Defaults to {MAX_DOWNLOAD_BYTES}; the launcher's hard "
+            f"output maximum is {MAXIMUM_DOWNLOAD_BYTES}."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1993,6 +2147,7 @@ def main(argv: list[str] | None = None) -> int:
         settlement_timeout=arguments.settlement_timeout,
         preview_timeout=arguments.preview_timeout,
         poll_interval=arguments.poll_interval,
+        max_download_bytes=arguments.max_download_bytes,
         expected_identities=expected,
     )
     try:

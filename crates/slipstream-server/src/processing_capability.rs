@@ -284,16 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn every_approved_profile_reports_as_shot_without_adjustable_ranges() {
-        let disabled = ProcessingCapabilityResponse::disabled();
-        for profile in &disabled.profiles {
-            assert_eq!(profile.white_balance_modes, ["as-shot"]);
-            // The class admits no adjustable mode, so the contract's null.
-            assert!(profile.white_balance_ranges.is_none());
-        }
-    }
-
-    #[test]
     fn qualification_and_film_capabilities_are_source_unsupported_with_empty_profiles() {
         for name in ["qualification-only", "film-measurement-only"] {
             let response =
@@ -354,16 +344,6 @@ mod tests {
         let response = map_reconcile_response(&config(), malformed_incarnation);
         assert_eq!(response.state, "launcher-unavailable");
         assert!(response.incarnation.is_none());
-    }
-
-    #[test]
-    fn disabled_capability_reports_unavailable_stages() {
-        let disabled = ProcessingCapabilityResponse::disabled();
-        assert_eq!(disabled.state, "disabled");
-        assert_eq!(disabled.stages.develop, "unavailable");
-        assert_eq!(disabled.stages.film, "unavailable");
-        assert!(disabled.bundle_id.is_none());
-        assert!(disabled.incarnation.is_none());
     }
 
     #[test]

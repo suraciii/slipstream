@@ -65,11 +65,12 @@ recipe revision and source revision), the `develop` Edit Preview with its
 typed response-header metadata, a `development-tiff` Export through terminal
 settlement, and artifact download. It validates the download against the
 bytes: digest, byte length, geometry, content type, the embedded float32
-linear ProPhoto RGB framing, and the pinned source-profile identity. It hashes
-the fixture Original and any external XMP sidecar before and after the run and
-fails if bytes, size, mode, or modification time changed; it never opens them
-for writing. The only files it creates are downloaded artifacts inside the
-explicit output directory.
+linear ProPhoto RGB framing, pinned source-profile identity, and decoded size
+of every Deflate strip. Decoding uses a fixed-size output bound, never retaining
+the full decompressed image. It hashes the fixture Original and any external
+XMP sidecar before and after the run and fails if bytes, size, mode, or
+modification time changed; it never opens them for writing. The only files it
+creates are downloaded artifacts inside the explicit output directory.
 
 The runner must never target an operator's live library. It refuses to start
 without an explicit acknowledgement flag, and it is meant for a dedicated
@@ -82,6 +83,7 @@ python3 tools/processing/acceptance.py \
   --token-file /run/secrets/slipstream-cli-token \
   --fixture /absolute/private/fixtures/approved-camera.raw \
   --output-dir /absolute/private/acceptance-downloads \
+  --max-download-bytes 4294967296 \
   --i-acknowledge-this-is-an-acceptance-instance \
   --expected-instance 0123456789abcdef0123456789abcdef \
   --expected-policy POLICY_SHA256 \
@@ -91,7 +93,14 @@ python3 tools/processing/acceptance.py \
 `--base-url` must be HTTPS (plain HTTP is accepted only for loopback hosts),
 `--token-file` holds the bearer token and must not be group- or other-writable,
 and the fixture path is the operator's own copy of the approved-profile RAW
-file; the tool reads it read-only. `--expected-*` identities are recorded in
+file; the tool reads it read-only. `--max-download-bytes` is the read bound for
+artifact downloads and must carry the deployment's own retained-output
+allowance (`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, `docs/deployment.md`):
+the default is smaller than a full-resolution float32 Development TIFF, so a
+default run refuses the qualified artifact's declared size. The option is
+capped at the launcher's hard output maximum
+(`MAX_OUTPUT_BYTES`, `crates/slipstream-processing/src/photo.rs`).
+`--expected-*` identities are recorded in
 the report; the bundle identity is additionally checked against the
 capability report's `bundleId`. A JSON report goes to standard output with a
 per-step pass/fail/skipped record, the exact requests, identities, digests,

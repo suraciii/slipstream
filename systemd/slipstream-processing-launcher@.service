@@ -5,6 +5,17 @@ After=docker.service
 ConditionPathExists=/etc/slipstream-processing/%i/config.json
 
 [Service]
+# The launcher owns the attempt storage: it mounts the size- and inode-capped
+# attempt tmpfs and the engine's bind sources beneath its instance root, reads
+# the worker's bounded result metadata back from that path, and unmounts it at
+# cleanup. Those mounts must land in the host mount namespace, because the
+# engine container resolves its bind sources there. Do not enable a directive
+# that gives this service a private mount namespace (for example PrivateTmp,
+# PrivateDevices, ProtectHome, ProtectProc, ProtectSystem, ProtectKernelTunables,
+# ProtectKernelModules, ProtectKernelLogs, ReadWritePaths, ExecPaths,
+# NoExecPaths, PrivateMounts, or Bind/TemporaryFileSystem paths). The container
+# would then bind the empty placeholder directory instead of the mounted
+# storage, and the fixed UID-1000 worker would fail before any engine work.
 Type=simple
 User=root
 Group=root
@@ -18,14 +29,8 @@ RuntimeDirectoryPreserve=yes
 StateDirectory=slipstream-processing/%i
 StateDirectoryMode=0700
 NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
 ProtectControlGroups=no
 RestrictAddressFamilies=AF_UNIX
-ReadWritePaths=/run/slipstream-processing/%i /var/lib/slipstream-processing
 
 [Install]
 WantedBy=multi-user.target

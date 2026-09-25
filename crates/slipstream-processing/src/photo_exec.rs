@@ -10,6 +10,7 @@ use crate::{
     backend,
     journal::{self, ManagerPhase, ParentIdentity},
     photo::{self, Config, OutputReceipt, PhotoReceipt, Recipe, Request, ResultBody, Source},
+    photo_profile,
     protocol::{
         self, Availability, Cleanup, ErrorCode, Evidence, Limits, Outcome, State, digest, hex, now,
     },
@@ -43,10 +44,6 @@ const REGISTRY_BYTES: usize = 4 * 1024 * 1024;
 /// Sealed source, source dir, control dir, gate, tmpfs dir, result file,
 /// output dir, and the output file: the fixed inode shape of one workspace.
 const INODES_PER_ATTEMPT: u64 = 8;
-/// The approved `profile_id` set of the pinned processing bundle. This is the
-/// supported source-class decision recorded for the v1 bundle; any other
-/// source class has no admitted plan (issue #329 v1 go/no-go).
-const APPROVED_PROFILES: [&str; 2] = ["sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"];
 /// The finite exposure range covered by the executed bundle evidence, in
 /// thousandths of an EV. Values outside this range are refused at admission.
 const EXPOSURE_MILLI_EV_RANGE: std::ops::RangeInclusive<i64> = 0..=1000;
@@ -319,6 +316,7 @@ pub struct PhotoExecutor {
 
 struct Live {
     running: bool,
+    paused: bool,
     pid: u32,
     exit_code: Option<u8>,
     oom: bool,
@@ -529,6 +527,18 @@ impl PhotoExecutor {
                 .collect::<Vec<_>>()
         };
         for sequence in janitor {
+            // Reconcile the recorded attempt from the host before finishing a
+            // settlement an earlier launcher interrupted: an attempt whose
+            // manager phase the observed slice, mount and container identities
+            // settle here can complete its cleanup instead of blocking
+            // admission until an operator intervenes.
+            let mut record = match self.record(sequence) {
+                Ok(record) => record,
+                Err(_) => continue,
+            };
+            if self.discover(&mut record).is_err() || self.update(&record).is_err() {
+                continue;
+            }
             let _ = self.settle_tail(sequence);
         }
         let (available, identity) = {
@@ -843,6 +853,11 @@ impl PhotoExecutor {
                 .map_err(|_| ErrorCode::Uncertain)?;
         }
         self.release(&mut record)?;
+        // The worker reads the release token until end of file, so the write
+        // end must close before the worker can pass its gate. The reference
+        // release does the same, and holding it open would deadlock the worker
+        // until its absolute deadline.
+        drop(gate);
         record.phase = Phase::Released;
         record.state = State::Running;
         self.update(&record)?;
@@ -863,9 +878,9 @@ impl PhotoExecutor {
     }
 
     fn finish(self: &Arc<Self>, sequence: u64) -> Result<(), ErrorCode> {
-        let record = self.record(sequence)?;
+        let mut record = self.record(sequence)?;
         if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&record)?;
+            self.stop(&mut record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
                 if Instant::now() >= deadline {
@@ -1002,7 +1017,7 @@ impl PhotoExecutor {
     fn settle_tail(&self, sequence: u64) -> Result<ResultBody, ErrorCode> {
         let mut record = self.record(sequence)?;
         if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&record)?;
+            self.stop(&mut record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
                 if Instant::now() >= deadline {
@@ -1100,7 +1115,7 @@ impl PhotoExecutor {
                 continue;
             }
             if self.live(&record).is_ok_and(|live| live.running) {
-                self.stop(&record)?;
+                self.stop(&mut record)?;
             }
             let requested = if record.cancellation_requested {
                 Outcome::Cancelled
@@ -1148,6 +1163,24 @@ impl PhotoExecutor {
                 && found.height == identity.height
         })
     }
+}
+
+fn stop_container(
+    record: &mut PhotoRecord,
+    paused: bool,
+    mut update: impl FnMut(&PhotoRecord) -> Result<(), ErrorCode>,
+    mut command: impl FnMut(&[String]) -> Result<String, ErrorCode>,
+) -> Result<(), ErrorCode> {
+    let id = record.container_id.clone().ok_or(ErrorCode::Uncertain)?;
+    if paused {
+        record.manager_pending = Some(ManagerPhase::Unpause);
+        update(record)?;
+        command(&backend::strings(&["unpause", &id]))?;
+        record.manager_pending = None;
+        update(record)?;
+    }
+    command(&backend::strings(&["kill", "--signal", "KILL", &id]))?;
+    Ok(())
 }
 
 // Host boundary --------------------------------------------------------
@@ -1412,14 +1445,17 @@ impl PhotoExecutor {
     }
 
     fn discover(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
-        if record
-            .manager_pending
-            .is_some_and(|phase| phase != ManagerPhase::CreateReturned)
-        {
+        if record.manager_pending == Some(ManagerPhase::SliceStop) {
+            // A pending slice stop decides whether the attempt boundary still
+            // exists, and it is cleared only with its confirmed return. A
+            // restart cannot assume its effect, so it stays ambiguous and
+            // requires operator reconciliation.
             return Err(ErrorCode::Uncertain);
         }
-        if record.manager_pending == Some(ManagerPhase::CreateReturned)
-            && record.container_id.is_none()
+        if matches!(
+            record.manager_pending,
+            Some(ManagerPhase::Create | ManagerPhase::CreateReturned)
+        ) && record.container_id.is_none()
         {
             let ids = docker(
                 &self.config,
@@ -1442,6 +1478,7 @@ impl PhotoExecutor {
                         return Err(ErrorCode::Uncertain);
                     }
                 }
+                [] => {}
                 _ => return Err(ErrorCode::Uncertain),
             }
         }
@@ -1456,6 +1493,14 @@ impl PhotoExecutor {
         if mount.is_some() && mount != record.mount_id {
             return Err(ErrorCode::Uncertain);
         }
+        // The remaining recorded phases mark an effect whose outcome the
+        // observed slice, mount and container identities settle here: the
+        // attempt boundary is exactly what the launcher recorded, and every
+        // later step fails closed on the actual container state instead of on
+        // this marker. Leaving them set would block settlement and cleanup
+        // forever after a worker that failed before its release gate, because
+        // the release-gate pause cannot complete on a worker that already
+        // exited.
         record.manager_pending = None;
         Ok(())
     }
@@ -1566,6 +1611,9 @@ impl PhotoExecutor {
         let value = self.owned_container(record)?;
         Ok(Live {
             running: value["State"]["Running"]
+                .as_bool()
+                .ok_or(ErrorCode::Uncertain)?,
+            paused: value["State"]["Paused"]
                 .as_bool()
                 .ok_or(ErrorCode::Uncertain)?,
             pid: value["State"]["Pid"]
@@ -1730,14 +1778,12 @@ impl PhotoExecutor {
         {
             return Err(ErrorCode::Unavailable);
         }
-        if !backend::read(
-            &scope
-                .parent()
-                .ok_or(ErrorCode::Uncertain)?
-                .join("cgroup.events"),
-        )?
-        .lines()
-        .any(|line| line == "frozen 1")
+        // The release-gate pause freezes the worker's own cgroup scope; the
+        // attempt slice above it stays unfrozen, so the frozen state is read
+        // from the scope, exactly as the reference placement check does.
+        if !backend::read(&scope.join("cgroup.events"))?
+            .lines()
+            .any(|line| line == "frozen 1")
             || self.owned_container(record)?["State"]["Paused"] != true
         {
             return Err(ErrorCode::Uncertain);
@@ -1810,16 +1856,18 @@ impl PhotoExecutor {
         record.released = true;
         self.update(record)
     }
-
-    fn stop(&self, record: &PhotoRecord) -> Result<(), ErrorCode> {
-        let Some(id) = record.container_id.clone() else {
+    fn stop(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
+        if record.container_id.is_none() {
             return Ok(());
-        };
-        if self.live(record)?.running {
+        }
+        let live = self.live(record)?;
+        if live.running {
             self.verify_unit(record)?;
-            docker(
-                &self.config,
-                &backend::strings(&["kill", "--signal", "KILL", &id]),
+            stop_container(
+                record,
+                live.paused,
+                |record| self.update(record),
+                |args| docker(&self.config, args),
             )?;
         }
         Ok(())
@@ -2197,7 +2245,10 @@ fn begin_start(
     }
     // The closed workload and approved profile set. A source kind, profile,
     // bundle or policy outside the fixed authority has no admitted plan.
-    if !APPROVED_PROFILES.contains(&source.profile_id.as_str()) {
+    if !photo_profile::APPROVED_PROFILES
+        .iter()
+        .any(|profile| profile.profile_id == source.profile_id)
+    {
         return Err(ErrorCode::InvalidRequest);
     }
     if !EXPOSURE_MILLI_EV_RANGE.contains(&recipe.exposure_milli_ev) {
@@ -2309,7 +2360,14 @@ fn seal_source(
         .mode(0o700)
         .create(&source_dir)
         .map_err(|_| ErrorCode::Unavailable)?;
-    let destination_path = source_dir.join("source");
+    // The pinned engine selects its decoder from the container extension, so
+    // the snapshot carries the profile's qualified container class. The
+    // original filename is not part of the admitted request.
+    let profile = photo_profile::APPROVED_PROFILES
+        .iter()
+        .find(|profile| profile.profile_id == record.source.profile_id)
+        .ok_or(ErrorCode::InvalidRequest)?;
+    let destination_path = source_dir.join(format!("source.{}", profile.container));
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -2328,6 +2386,14 @@ fn seal_source(
     // Sync the private snapshot and seal it read-only before continuing.
     destination.sync_all().map_err(|_| ErrorCode::Unavailable)?;
     fs::set_permissions(&destination_path, fs::Permissions::from_mode(0o444))
+        .map_err(|_| ErrorCode::Unavailable)?;
+    // The worker runs as an unprivileged uid inside the container and must
+    // traverse the staged directory to reach the sealed snapshot, so the
+    // directory becomes world-traversable while the snapshot itself stays
+    // sealed and nobody but the launcher can write it. Privacy comes from the
+    // 0700 attempt workspace holding both. The mode is set explicitly because
+    // the process umask would otherwise strip the traversal bits.
+    fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755))
         .map_err(|_| ErrorCode::Unavailable)?;
     File::open(&source_dir)
         .and_then(|directory| directory.sync_all())
@@ -2588,7 +2654,11 @@ fn expire(registry: &mut Registry, time: u64, retention: u64) -> Result<(), Erro
 }
 
 /// The durable snapshot is tamper-checked and internally coherent. A record
-/// can never claim success without a validated output and completed cleanup.
+/// can never claim success without a validated output and completed cleanup,
+/// and an unsettled record never claims a cleanup. A terminal outcome with a
+/// pending cleanup is the launcher's own intermediate settlement state: the
+/// outcome is persisted before the attempt boundary is removed, and
+/// `reconcile` retries that cleanup on the next start, so it must load.
 fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCode> {
     if registry.version != 1
         || registry.instance != config.instance
@@ -2633,7 +2703,7 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 .outcome
                 .as_deref()
                 .is_some_and(|outcome| !OUTCOMES.contains(&outcome))
-            || record.outcome.is_none() != (record.cleanup == Cleanup::Pending)
+            || (record.outcome.is_none() && record.cleanup != Cleanup::Pending)
             || (record.state == State::Settled)
                 != (record.outcome.is_some() && record.cleanup == Cleanup::Complete)
             || (record.state == State::Settled
@@ -2644,7 +2714,9 @@ fn validate_registry(registry: &Registry, config: &Config) -> Result<(), ErrorCo
                 != (record.state == State::Settling || record.state == State::Settled)
             || record.source.kind != "raw"
             || !photo::identifier(&record.source.profile_id, 64)
-            || !APPROVED_PROFILES.contains(&record.source.profile_id.as_str())
+            || !photo_profile::APPROVED_PROFILES
+                .iter()
+                .any(|profile| profile.profile_id == record.source.profile_id)
             || record.source.size == 0
             || record.source.size > config.source_bytes_max
             || !hex(&record.source.sha256, 64)
@@ -3184,11 +3256,20 @@ mod tests {
         let mut descriptor = descriptor;
         let copied = seal_source(&config, &root, &record, &mut descriptor).unwrap();
         assert_eq!(copied.sha256, record.source.sha256);
-        // The sealed snapshot is read-only inside a launcher-owned directory.
-        let sealed_path = record.workspace(&root).join("source").join("source");
+        // The sealed snapshot carries the qualified container extension so
+        // the pinned engine selects the qualified decoder, and it is read-only
+        // inside a directory the unprivileged worker can traverse.
+        let sealed_path = record.workspace(&root).join("source").join("source.ARW");
         let metadata = fs::metadata(&sealed_path).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o444);
         assert_eq!(fs::read(&sealed_path).unwrap(), payload);
+        assert_eq!(
+            fs::metadata(record.workspace(&root).join("source"))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o755
+        );
         let body = finalize_start(&mut registry, &config, &root, &request, Ok(copied)).unwrap();
         let ResultBody::Receipt { receipt } = body else {
             panic!("expected a receipt");
@@ -3992,6 +4073,182 @@ mod tests {
         assert_eq!(
             validate_registry(&fabricated, &config).unwrap_err(),
             ErrorCode::Uncertain
+        );
+        // An unsettled record never claims a cleanup it cannot have run.
+        let mut premature = load(&root).unwrap().unwrap();
+        premature.records.get_mut(&2).unwrap().cleanup = Cleanup::Complete;
+        assert_eq!(
+            validate_registry(&premature, &config).unwrap_err(),
+            ErrorCode::Uncertain
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_settlement_loads_so_reconcile_can_finish_it() {
+        let root = temp_dir("settling-recovery");
+        let config = test_config(&root);
+        let mut registry = empty_registry(&config.instance);
+        // A settlement records the terminal outcome and persists it before the
+        // attempt boundary is removed. A launcher killed in that window leaves
+        // exactly this state, and `reconcile` retries the pending cleanup, so
+        // it must load instead of refusing every later start.
+        let mut settling = record_for(1, Phase::Released);
+        settling.state = State::Settling;
+        settling.outcome = Some("interrupted".into());
+        registry.records.insert(1, settling);
+        registry.active = Some(1);
+        registry.watermark = 1;
+        registry.parent_identity = Some(ParentIdentity {
+            invocation: "c".repeat(32),
+            inode: 2,
+        });
+        persist(&root, &registry).unwrap();
+
+        let loaded = load(&root).unwrap().unwrap();
+        validate_registry(&loaded, &config).unwrap();
+        let pending = loaded.records.get(&1).unwrap();
+        assert_eq!(pending.cleanup, Cleanup::Pending);
+        assert!(pending.outcome.is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovery_resolves_a_pending_manager_phase_from_the_observed_attempt() {
+        let root = temp_dir("discover-phase");
+        // A worker that exits before its release-gate pause leaves that pause
+        // recorded: `docker pause` cannot succeed on a worker that already
+        // exited. The recorded slice, mount and container identities are what
+        // the launcher owns, so reconciliation resolves the marker here instead
+        // of blocking settlement and cleanup forever.
+        for phase in [
+            ManagerPhase::Slice,
+            ManagerPhase::Mount,
+            ManagerPhase::Start,
+            ManagerPhase::Pause,
+            ManagerPhase::Unpause,
+        ] {
+            let mut registry = empty_registry("0".repeat(32).as_str());
+            let mut record = record_for(1, Phase::Released);
+            record.state = State::Settling;
+            record.outcome = Some("interrupted".into());
+            record.manager_pending = Some(phase);
+            registry.records.insert(1, record);
+            registry.active = Some(1);
+            registry.watermark = 1;
+            registry.parent_identity = Some(ParentIdentity {
+                invocation: "c".repeat(32),
+                inode: 2,
+            });
+            let executor = executor_with(&root, registry);
+            let mut record = executor.record(1).unwrap();
+            executor.discover(&mut record).unwrap();
+            assert_eq!(record.manager_pending, None, "{phase:?}");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovery_keeps_a_pending_slice_stop_ambiguous() {
+        let root = temp_dir("discover-stop");
+        let mut registry = empty_registry("0".repeat(32).as_str());
+        let mut record = record_for(1, Phase::Released);
+        record.state = State::Settling;
+        record.outcome = Some("interrupted".into());
+        record.manager_pending = Some(ManagerPhase::SliceStop);
+        registry.records.insert(1, record);
+        registry.active = Some(1);
+        registry.watermark = 1;
+        registry.parent_identity = Some(ParentIdentity {
+            invocation: "c".repeat(32),
+            inode: 2,
+        });
+        let executor = executor_with(&root, registry);
+        let mut record = executor.record(1).unwrap();
+        // Whether the attempt boundary still exists decides what cleanup may
+        // remove, and only a confirmed stop return clears this phase.
+        assert_eq!(
+            executor.discover(&mut record).unwrap_err(),
+            ErrorCode::Uncertain
+        );
+        assert_eq!(record.manager_pending, Some(ManagerPhase::SliceStop));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_refuses_a_record_whose_manager_phase_is_still_pending() {
+        let root = temp_dir("cleanup-phase");
+        let registry = empty_registry("0".repeat(32).as_str());
+        let executor = executor_with(&root, registry);
+        let mut record = record_for(1, Phase::Released);
+        record.manager_pending = Some(ManagerPhase::Pause);
+        // An unresolved manager effect is never torn down on an assumption.
+        assert_eq!(
+            executor.cleanup(&mut record).unwrap_err(),
+            ErrorCode::Uncertain
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn manager_crash_after_pause_unpauses_before_killing_container() {
+        let root = temp_dir("pause-recovery");
+        let id = "c".repeat(64);
+        let mut registry = empty_registry("0".repeat(32).as_str());
+        let mut persisted = record_for(1, Phase::Released);
+        persisted.container_id = Some(id.clone());
+        persisted.manager_pending = Some(ManagerPhase::Pause);
+        registry.records.insert(1, persisted);
+        // The restart view contains the durable Pause marker before
+        // reconciliation settles the observed attempt.
+        let executor = executor_with(&root, registry);
+        let mut record = executor.record(1).unwrap();
+        assert_eq!(record.manager_pending, Some(ManagerPhase::Pause));
+        executor.discover(&mut record).unwrap();
+        assert_eq!(record.manager_pending, None);
+        let mut paused = true;
+        let mut running = true;
+        let mut updates = Vec::new();
+        let mut commands = Vec::new();
+        let pending = std::cell::Cell::new(None);
+
+        stop_container(
+            &mut record,
+            paused,
+            |record| {
+                pending.set(record.manager_pending);
+                updates.push(record.manager_pending);
+                Ok(())
+            },
+            |args| {
+                commands.push(args.to_vec());
+                match args.first().map(String::as_str) {
+                    Some("unpause") => {
+                        assert_eq!(pending.get(), Some(ManagerPhase::Unpause));
+                        assert!(paused);
+                        paused = false;
+                    }
+                    Some("kill") => {
+                        assert_eq!(pending.get(), None);
+                        assert!(!paused);
+                        running = false;
+                    }
+                    _ => panic!("unexpected Docker command"),
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+
+        assert!(!paused);
+        assert!(!running);
+        assert_eq!(updates, [Some(ManagerPhase::Unpause), None]);
+        assert_eq!(
+            commands,
+            vec![
+                backend::strings(&["unpause", &id]),
+                backend::strings(&["kill", "--signal", "KILL", &id]),
+            ]
         );
         fs::remove_dir_all(&root).unwrap();
     }

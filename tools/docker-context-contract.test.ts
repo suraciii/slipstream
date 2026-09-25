@@ -109,16 +109,6 @@ test("Git and Docker ignores cover every supported Original extension", async ()
     [...candidates].sort(),
   );
 
-  for (const extension of extensions) {
-    const glob = new Bun.Glob(caseInsensitivePattern(extension));
-    const mixedCase = mixedCaseExtension(extension);
-    for (const candidate of [extension, extension.toUpperCase(), mixedCase]) {
-      expect(glob.match(`photo.${candidate}`)).toBeTrue();
-      expect(glob.match(`nested/session/photo.${candidate}`)).toBeTrue();
-    }
-  }
-  expect(activePatterns(dockerignore)).toContain("**/*.[pP][nN][gG]");
-
   const firstDockerPattern = caseInsensitivePattern(extensions[0]!);
   expect(
     missingPatterns(

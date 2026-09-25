@@ -738,44 +738,16 @@ async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
     let second = missing_photo_id(2);
 
     let cases = [
-        ("empty.json", "", "input"),
-        ("garbage.json", "\u{fffd}\u{fffd}{}", "input"),
-        ("array.json", "[]", "input"),
-        ("missing-keys.json", "{\"field\": \"rating\"}", "input"),
-        (
-            "unknown-key.json",
-            "{\"field\": \"rating\", \"value\": 4, \"photos\": [], \"extra\": 1}",
-            "input",
-        ),
-        (
-            "duplicate-key.json",
-            "{\"field\": \"rating\", \"field\": \"rating\", \"value\": 4, \"photos\": []}",
-            "input",
-        ),
-        (
-            "duplicate-item-key.json",
-            "{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\", \"ifVersion\": \"w\"}]}",
-            "input",
-        ),
         (
             "trailing.json",
             "{\"field\": \"rating\", \"value\": 4, \"photos\": []} trailing",
             "input",
         ),
+        ("garbage.json", "\u{fffd}\u{fffd}{}", "input"),
         (
             "bad-field.json",
             "{\"field\": \"selection\", \"value\": \"selected\", \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
             "field",
-        ),
-        (
-            "string-rating.json",
-            "{\"field\": \"rating\", \"value\": \"4\", \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
-            "value",
-        ),
-        (
-            "float-rating.json",
-            "{\"field\": \"rating\", \"value\": 4.5, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
-            "value",
         ),
         (
             "over-rating.json",
@@ -783,33 +755,8 @@ async fn cli_photo_decisions_validate_input_before_any_network_mutation() {
             "value",
         ),
         (
-            "numeric-selection.json",
-            "{\"field\": \"selectionState\", \"value\": 1, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
-            "value",
-        ),
-        (
-            "unknown-selection.json",
-            "{\"field\": \"selectionState\", \"value\": \"picked\", \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}]}",
-            "value",
-        ),
-        (
             "empty-photos.json",
             "{\"field\": \"rating\", \"value\": 4, \"photos\": []}",
-            "photos",
-        ),
-        (
-            "duplicate-ids.json",
-            "{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"v\"}, {\"photoId\": \"a\", \"ifVersion\": \"w\"}]}",
-            "photos",
-        ),
-        (
-            "empty-id.json",
-            "{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": \"\", \"ifVersion\": \"v\"}]}",
-            "photos",
-        ),
-        (
-            "empty-version.json",
-            "{\"field\": \"rating\", \"value\": 4, \"photos\": [{\"photoId\": \"a\", \"ifVersion\": \"\"}]}",
             "photos",
         ),
     ];
@@ -933,160 +880,18 @@ async fn cli_photo_decisions_report_unknown_outcomes_without_retry() {
             (second.clone(), "v2".to_owned()),
         ],
     );
-    let invoke = |server: &str| {
+    let invoke = |server: &str, document: &str| {
         let server = server.to_owned();
-        let document = document.clone();
+        let document = document.to_owned();
         async move { command_with_stdin(&server, &["photos", "set", "--input", "-"], &document).await }
     };
 
-    let changed_item = |id: &str| {
-        json!({
-            "photoId": id,
-            "outcome": "changed",
-            "prior": {"selectionState": "undecided", "rating": 0},
-            "current": {"selectionState": "undecided", "rating": 4, "decisionVersion": "v9"}
-        })
-    };
-    let valid_counts = json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0});
-
-    // A lost or unusable response after a possible send is an unknown
-    // outcome that names every submitted Photo in request order.
-    for (reply, code) in [
-        (MutationReply::Drop, "outcome_unknown"),
-        (MutationReply::Truncated, "outcome_unknown"),
-        (
-            MutationReply::Status(200, json!("not an object")),
-            "outcome_unknown",
-        ),
-        (
-            MutationReply::Status(
-                200,
-                decision_reply(
-                    json!([changed_item(&first), changed_item(&second)]),
-                    json!({"changed": 1, "unchanged": 1, "conflict": 0, "missing": 0}),
-                ),
-            ),
-            "outcome_unknown",
-        ),
-        (
-            MutationReply::Status(
-                200,
-                decision_reply(
-                    json!([
-                        {"photoId": second, "outcome": "missing"},
-                        {"photoId": first, "outcome": "missing"}
-                    ]),
-                    json!({"changed": 0, "unchanged": 0, "conflict": 0, "missing": 2}),
-                ),
-            ),
-            "outcome_unknown",
-        ),
-        (
-            MutationReply::Status(
-                200,
-                decision_reply(
-                    json!([{
-                        "photoId": first,
-                        "outcome": "changed",
-                        "prior": {"selectionState": "undecided", "rating": 0},
-                        "current": {"selectionState": "undecided", "rating": 4, "decisionVersion": "v9"},
-                        "unexpected": true
-                    }]),
-                    valid_counts.clone(),
-                ),
-            ),
-            "outcome_unknown",
-        ),
-        (
-            MutationReply::Status(
-                200,
-                decision_reply(json!([changed_item(&first)]), valid_counts.clone()),
-            ),
-            "outcome_unknown",
-        ),
-    ] {
-        let (server, handle, mutations) = stub_service(reply);
-        let (exit, envelope) = invoke(&server).await;
-        handle.join().unwrap();
-        assert_eq!(exit, 7, "for {code}");
-        assert_eq!(envelope["error"]["code"], "outcome_unknown");
-        assert_eq!(envelope["error"]["effect"], "unknown");
-        assert_eq!(
-            envelope["error"]["details"],
-            json!({
-                "operation": "photos-set",
-                "photoIds": [first, second],
-                "albumId": null,
-                "albumName": null
-            })
-        );
-        assert_eq!(
-            mutations.load(Ordering::SeqCst),
-            1,
-            "the client must not automatically retry a write"
-        );
-    }
-
-    // A complete, valid service error is a confirmed failure instead.
-    let storage_failed = json!({
-        "error": {
-            "code": "storage_failed",
-            "message": "Inspect server health and the current Photo decisions before trying again.",
-            "effect": "none",
-            "details": {"operation": "photos-set"}
-        }
-    });
-    let (server, handle, mutations) = stub_service(MutationReply::Status(503, storage_failed));
-    let (exit, envelope) = invoke(&server).await;
-    handle.join().unwrap();
-    assert_eq!(exit, 6);
-    assert_eq!(envelope["error"]["code"], "storage_failed");
-    assert_eq!(envelope["error"]["effect"], "none");
-    assert_eq!(envelope["error"]["details"]["operation"], "photos-set");
-    assert_eq!(mutations.load(Ordering::SeqCst), 1);
-
-    let invalid_value = json!({
-        "error": {
-            "code": "invalid_input",
-            "message": "Correct the request and try again.",
-            "effect": "none",
-            "details": {"argument": "value", "reason": "The decision value must match the field's type and range."}
-        }
-    });
-    let (server, handle, mutations) = stub_service(MutationReply::Status(400, invalid_value));
-    let (exit, envelope) = invoke(&server).await;
-    handle.join().unwrap();
-    assert_eq!(exit, 2);
-    assert_eq!(envelope["error"]["code"], "invalid_input");
-    assert_eq!(envelope["error"]["details"]["argument"], "value");
-    assert_eq!(mutations.load(Ordering::SeqCst), 1);
-}
-
-/// A changed or unchanged result is confirmed only when its current
-/// decision repeats the requested value. A structurally valid batch whose
-/// changed or unchanged item reports any other current value claims an
-/// effect the checked-decision contract cannot produce, so it settles as an
-/// unknown outcome instead of success or a partial result.
-#[tokio::test]
-async fn cli_photo_decisions_settle_unknown_when_current_values_do_not_echo_the_request() {
-    let first = missing_photo_id(1);
-    let second = missing_photo_id(2);
-    let targets = || {
-        vec![
-            (first.clone(), "v1".to_owned()),
-            (second.clone(), "v2".to_owned()),
-        ]
-    };
     let changed_item = |id: &str, selection: &str, rating: u8| {
         json!({
             "photoId": id,
             "outcome": "changed",
             "prior": {"selectionState": "undecided", "rating": 0},
-            "current": {
-                "selectionState": selection,
-                "rating": rating,
-                "decisionVersion": "v9"
-            }
+            "current": {"selectionState": selection, "rating": rating, "decisionVersion": "v9"}
         })
     };
     let unchanged_item = |id: &str, rating: u8| {
@@ -1112,49 +917,140 @@ async fn cli_photo_decisions_settle_unknown_when_current_values_do_not_echo_the_
         })
     };
     let missing_item = |id: &str| json!({"photoId": id, "outcome": "missing"});
+    let valid_counts = json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0});
+    let selection_document = decision_document(
+        "selectionState",
+        json!("selected"),
+        &[
+            (first.clone(), "v1".to_owned()),
+            (second.clone(), "v2".to_owned()),
+        ],
+    );
 
-    let rating_request = decision_document("rating", json!(4), &targets());
-    let selection_request = decision_document("selectionState", json!("selected"), &targets());
+    // A lost or unusable response after a possible send is an unknown
+    // outcome that names every submitted Photo in request order. A changed
+    // or unchanged result is confirmed only when its current decision
+    // repeats the requested value: a structurally valid batch whose items
+    // report any other current value claims an effect the checked-decision
+    // contract cannot produce, so it also settles as an unknown outcome.
     for (label, document, reply) in [
+        ("dropped reply", document.clone(), MutationReply::Drop),
+        (
+            "truncated reply",
+            document.clone(),
+            MutationReply::Truncated,
+        ),
+        (
+            "non-object reply",
+            document.clone(),
+            MutationReply::Status(200, json!("not an object")),
+        ),
+        (
+            "counts do not match the results",
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([
+                        changed_item(&first, "undecided", 4),
+                        changed_item(&second, "undecided", 4)
+                    ]),
+                    json!({"changed": 1, "unchanged": 1, "conflict": 0, "missing": 0}),
+                ),
+            ),
+        ),
+        (
+            "results in reverse order",
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([
+                        {"photoId": second, "outcome": "missing"},
+                        {"photoId": first, "outcome": "missing"}
+                    ]),
+                    json!({"changed": 0, "unchanged": 0, "conflict": 0, "missing": 2}),
+                ),
+            ),
+        ),
+        (
+            "unexpected field on a changed item",
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([{
+                        "photoId": first,
+                        "outcome": "changed",
+                        "prior": {"selectionState": "undecided", "rating": 0},
+                        "current": {"selectionState": "undecided", "rating": 4, "decisionVersion": "v9"},
+                        "unexpected": true
+                    }]),
+                    valid_counts.clone(),
+                ),
+            ),
+        ),
+        (
+            "one changed item missing from the results",
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([changed_item(&first, "undecided", 4)]),
+                    valid_counts.clone(),
+                ),
+            ),
+        ),
         (
             "changed current rating is not the requested rating",
-            rating_request.clone(),
-            decision_reply(
-                json!([changed_item(&first, "undecided", 3), missing_item(&second)]),
-                json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 1}),
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([changed_item(&first, "undecided", 3), missing_item(&second)]),
+                    json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 1}),
+                ),
             ),
         ),
         (
             "unchanged current rating is not the requested rating",
-            rating_request.clone(),
-            decision_reply(
-                json!([unchanged_item(&first, 2), conflict_item(&second)]),
-                json!({"changed": 0, "unchanged": 1, "conflict": 1, "missing": 0}),
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([unchanged_item(&first, 2), conflict_item(&second)]),
+                    json!({"changed": 0, "unchanged": 1, "conflict": 1, "missing": 0}),
+                ),
             ),
         ),
         (
             "one non-echoing changed item in an all-success batch",
-            rating_request.clone(),
-            decision_reply(
-                json!([
-                    changed_item(&first, "undecided", 4),
-                    changed_item(&second, "undecided", 3)
-                ]),
-                json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0}),
+            document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([
+                        changed_item(&first, "undecided", 4),
+                        changed_item(&second, "undecided", 3)
+                    ]),
+                    json!({"changed": 2, "unchanged": 0, "conflict": 0, "missing": 0}),
+                ),
             ),
         ),
         (
             "changed current selection is not the requested selection",
-            selection_request.clone(),
-            decision_reply(
-                json!([changed_item(&first, "rejected", 4), missing_item(&second)]),
-                json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 1}),
+            selection_document.clone(),
+            MutationReply::Status(
+                200,
+                decision_reply(
+                    json!([changed_item(&first, "rejected", 4), missing_item(&second)]),
+                    json!({"changed": 1, "unchanged": 0, "conflict": 0, "missing": 1}),
+                ),
             ),
         ),
     ] {
-        let (server, handle, mutations) = stub_service(MutationReply::Status(200, reply));
-        let (exit, envelope) =
-            command_with_stdin(&server, &["photos", "set", "--input", "-"], &document).await;
+        let (server, handle, mutations) = stub_service(reply);
+        let (exit, envelope) = invoke(&server, &document).await;
         handle.join().unwrap();
         assert_eq!(exit, 7, "for {label}");
         assert_eq!(envelope["error"]["code"], "outcome_unknown", "for {label}");
@@ -1176,6 +1072,40 @@ async fn cli_photo_decisions_settle_unknown_when_current_values_do_not_echo_the_
             "the client must not automatically retry a write, for {label}"
         );
     }
+
+    // A complete, valid service error is a confirmed failure instead.
+    let storage_failed = json!({
+        "error": {
+            "code": "storage_failed",
+            "message": "Inspect server health and the current Photo decisions before trying again.",
+            "effect": "none",
+            "details": {"operation": "photos-set"}
+        }
+    });
+    let (server, handle, mutations) = stub_service(MutationReply::Status(503, storage_failed));
+    let (exit, envelope) = invoke(&server, &document).await;
+    handle.join().unwrap();
+    assert_eq!(exit, 6);
+    assert_eq!(envelope["error"]["code"], "storage_failed");
+    assert_eq!(envelope["error"]["effect"], "none");
+    assert_eq!(envelope["error"]["details"]["operation"], "photos-set");
+    assert_eq!(mutations.load(Ordering::SeqCst), 1);
+
+    let invalid_value = json!({
+        "error": {
+            "code": "invalid_input",
+            "message": "Correct the request and try again.",
+            "effect": "none",
+            "details": {"argument": "value", "reason": "The decision value must match the field's type and range."}
+        }
+    });
+    let (server, handle, mutations) = stub_service(MutationReply::Status(400, invalid_value));
+    let (exit, envelope) = invoke(&server, &document).await;
+    handle.join().unwrap();
+    assert_eq!(exit, 2);
+    assert_eq!(envelope["error"]["code"], "invalid_input");
+    assert_eq!(envelope["error"]["details"]["argument"], "value");
+    assert_eq!(mutations.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

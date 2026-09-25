@@ -44,12 +44,6 @@ pub const APPROVED_EXPOSURE_MILLI_EV_MAX: i64 = 1000;
 /// it and the capability report's `whiteBalanceRanges` stays `null`.
 pub const APPROVED_WHITE_BALANCE_MODE: &str = "as-shot";
 
-pub fn approved_profile(profile_id: &str) -> Option<&'static ApprovedProfile> {
-    APPROVED_PROFILES
-        .iter()
-        .find(|profile| profile.profile_id == profile_id)
-}
-
 pub fn approved_profile_ids() -> impl Iterator<Item = &'static str> {
     APPROVED_PROFILES.iter().map(|profile| profile.profile_id)
 }
@@ -108,15 +102,5 @@ mod tests {
         assert_eq!(container_of_filename("shot.v2.arw").as_deref(), Some("ARW"));
         assert_eq!(container_of_filename("shot"), None);
         assert_eq!(container_of_filename("shot."), None);
-    }
-
-    #[test]
-    fn profile_ids_are_looked_up_by_exact_identity() {
-        assert!(approved_profile("sony-ilce-7rm5-arw").is_some());
-        assert!(approved_profile("sony-ilce-7rm5-arw ").is_none());
-        assert_eq!(
-            approved_profile_ids().collect::<Vec<_>>(),
-            vec!["sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"]
-        );
     }
 }

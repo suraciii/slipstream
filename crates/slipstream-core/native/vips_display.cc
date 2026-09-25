@@ -112,8 +112,11 @@ extern "C" int32_t slipstream_vips_linear_from_fd(
   const int written = std::snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
   if (written <= 0 || static_cast<size_t>(written) >= sizeof(path))
     return SLIPSTREAM_VIPS_INTERNAL_ERROR;
+  // Fail on decode errors, never on warnings: an engine artifact carries
+  // private metadata tags that libtiff reports as warnings, while a truncated
+  // or undecodable strip still fails the read under this mode.
   VipsImage *input = vips_image_new_from_file(
-      path, "access", VIPS_ACCESS_SEQUENTIAL, "fail_on", VIPS_FAIL_ON_WARNING,
+      path, "access", VIPS_ACCESS_SEQUENTIAL, "fail_on", VIPS_FAIL_ON_ERROR,
       nullptr);
   if (input == nullptr) return LinearStatus();
   VipsImage *resized = nullptr;
