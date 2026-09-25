@@ -2,7 +2,7 @@ use super::*;
 use crate::config::{MAX_BROWSE_WINDOW, MAX_REMOVED_WINDOW, NEXT_BROWSE_NAMESPACE};
 use crate::http::{is_hex_key, valid_id};
 use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
-use crate::wire::CliDerivativeFacts;
+use crate::wire::{CliDerivativeFacts, PhotoOperationRemainderWire};
 /// The published Library plus id indices, rebuilt atomically on each snapshot
 /// replacement so bounded window requests never rescan the whole Library.
 pub(crate) struct Published {
@@ -148,6 +148,54 @@ fn publication_generation() -> u64 {
     base.wrapping_add(COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
+/// The derived CLI projection of one snapshot: the Photos a machine client may
+/// resolve, in capture-time-descending order. Removed Photos are excluded here
+/// rather than at read time, so a committed removal and its projection are one
+/// step and no reader can observe a removed Photo as present.
+fn photo_query_projection(
+    snapshot: &slipstream_core::ScanSnapshot,
+    originals_by_id: &std::collections::HashMap<String, usize>,
+) -> Arc<slipstream_core::PhotoQueryProjection> {
+    let candidates = snapshot
+        .photos
+        .iter()
+        .filter(|photo| !photo.removed)
+        .map(|photo| {
+            let original = &snapshot.originals[originals_by_id[&photo.original_id]];
+            slipstream_core::PhotoQueryCandidate {
+                photo_id: photo.id.clone(),
+                relative_path: original.relative_path.as_str().to_owned(),
+                sort_path: photo.sort_path.clone(),
+                original_kind: original.kind,
+                original_available: original.available,
+                capture: original.capture.clone(),
+                preview_state: photo.preview_state,
+                preview_source_revision: photo.preview_source_revision.clone(),
+                preview_width: photo.preview_width,
+                preview_height: photo.preview_height,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut descending = (0..candidates.len()).collect::<Vec<_>>();
+    descending.sort_by(|a, b| {
+        let a = &candidates[*a];
+        let b = &candidates[*b];
+        a.capture_order_key()
+            .is_none()
+            .cmp(&b.capture_order_key().is_none())
+            .then_with(|| match (a.capture_order_key(), b.capture_order_key()) {
+                (Some(a), Some(b)) => b.cmp(a),
+                _ => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.sort_path.cmp(&b.sort_path))
+            .then_with(|| a.photo_id.cmp(&b.photo_id))
+    });
+    Arc::new(
+        slipstream_core::PhotoQueryProjection::new(candidates, descending)
+            .expect("Published Photos have unique identities and complete order"),
+    )
+}
+
 impl Published {
     fn new(snapshot: slipstream_core::ScanSnapshot) -> Self {
         let photos_by_id = snapshot
@@ -162,44 +210,7 @@ impl Published {
             .enumerate()
             .map(|(position, original)| (original.id.clone(), position))
             .collect::<std::collections::HashMap<_, _>>();
-        let candidates = snapshot
-            .photos
-            .iter()
-            .filter(|photo| !photo.removed)
-            .map(|photo| {
-                let original = &snapshot.originals[originals_by_id[&photo.original_id]];
-                slipstream_core::PhotoQueryCandidate {
-                    photo_id: photo.id.clone(),
-                    relative_path: original.relative_path.as_str().to_owned(),
-                    sort_path: photo.sort_path.clone(),
-                    original_kind: original.kind,
-                    original_available: original.available,
-                    capture: original.capture.clone(),
-                    preview_state: photo.preview_state,
-                    preview_source_revision: photo.preview_source_revision.clone(),
-                    preview_width: photo.preview_width,
-                    preview_height: photo.preview_height,
-                }
-            })
-            .collect::<Vec<_>>();
-        let mut descending = (0..candidates.len()).collect::<Vec<_>>();
-        descending.sort_by(|a, b| {
-            let a = &candidates[*a];
-            let b = &candidates[*b];
-            a.capture_order_key()
-                .is_none()
-                .cmp(&b.capture_order_key().is_none())
-                .then_with(|| match (a.capture_order_key(), b.capture_order_key()) {
-                    (Some(a), Some(b)) => b.cmp(a),
-                    _ => std::cmp::Ordering::Equal,
-                })
-                .then_with(|| a.sort_path.cmp(&b.sort_path))
-                .then_with(|| a.photo_id.cmp(&b.photo_id))
-        });
-        let photo_query_projection = Arc::new(
-            slipstream_core::PhotoQueryProjection::new(candidates, descending)
-                .expect("Published Photos have unique identities and complete order"),
-        );
+        let photo_query_projection = photo_query_projection(&snapshot, &originals_by_id);
         Self {
             snapshot,
             photos_by_id,
@@ -233,6 +244,14 @@ impl Published {
                 .expect("folder index poisoned")
                 .get_or_insert_with(|| Arc::clone(&derived)),
         )
+    }
+
+    /// Rebuilds the derived CLI projection from the current Photo facts. Called
+    /// from the same critical section that patches removal facts, so a removed
+    /// Photo leaves the CLI query, and a restored Photo re-enters it, in the
+    /// same step the Web sources change.
+    fn rebuild_query_projection(&mut self) {
+        self.photo_query_projection = photo_query_projection(&self.snapshot, &self.originals_by_id);
     }
 
     /// Drops the derived Folder index. Called from the same critical section
@@ -581,9 +600,10 @@ impl SharedLibrary {
     }
 
     /// Patches the removed fact of many Photos in one critical section and
-    /// drops the derived Folder index with them, so a removal is either wholly
-    /// visible to a reader or not visible at all. Called only after the owning
-    /// SQLite write committed, under `publication`.
+    /// drops the derived Folder index and CLI projection with them, so a
+    /// removal is either wholly visible to a reader or not visible at all.
+    /// Called only after the owning SQLite write committed, under
+    /// `publication`.
     async fn patch_photo_removals(&self, photo_ids: &[String], removed: bool) {
         let _publication = self.publication.lock().await;
         let mut guard = self.snapshot.write().expect("published Library poisoned");
@@ -600,6 +620,7 @@ impl SharedLibrary {
             photo.removed = removed;
         }
         published.invalidate_folder_index();
+        published.rebuild_query_projection();
     }
 
     /// Patches Preview facts only while the source bundle that produced them is
@@ -1568,6 +1589,10 @@ impl Application {
                 )
             }
             BrowseSourceRequest::Album(id) => {
+                // The persisted member list and the published facts are read
+                // as one publication: a removal committed in between must not
+                // leave a removed Photo in the Album source that open returns.
+                let _publication = self.shared.publication.lock().await;
                 let target = self
                     .library
                     .album_browse_target(&id)
@@ -1807,6 +1832,14 @@ impl Application {
             },
             changed_elsewhere: result.changed_elsewhere,
             missing: result.missing,
+            operations: result
+                .operations
+                .into_iter()
+                .map(|remainder| PhotoOperationRemainderWire {
+                    operation_id: remainder.operation_id,
+                    removed: remainder.removed,
+                })
+                .collect(),
         })
     }
 
@@ -1823,6 +1856,10 @@ impl Application {
             return Err(ServerError::RemovedWindow);
         }
         let (records, total) = self.library.removed_photos(start, limit).await?;
+        // The persisted page and the published facts are read as one
+        // publication, so a removal or restore committed between them cannot
+        // present a row whose removal the Library no longer holds.
+        let _publication = self.shared.publication.lock().await;
         let facts = {
             let guard = self
                 .shared
@@ -1861,7 +1898,7 @@ impl Application {
                 .map(|(position, original)| (original.id.clone(), position))
                 .collect::<std::collections::HashMap<_, _>>();
             photos.push(RemovedPhotoWire {
-                removed_at: crate::queries::format_unix_millis(removed_at_ms),
+                removed_at_ms,
                 photo: photo_summary_indexed_with_url(
                     &facts.photo,
                     &facts.originals,

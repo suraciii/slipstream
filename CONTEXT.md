@@ -51,6 +51,10 @@ _Avoid_: Photo Set, Collection, Favorites
 A Photo whose removal marker is set: it keeps its row, identity, Original Location, Rating, Album membership, and Selection State, and it leaves every normal Library source. Removing a Photo never modifies or deletes its Original File.
 _Avoid_: deleted Photo, trashed Photo, purged Photo
 
+**Removal marker**:
+The millisecond a removal was confirmed, stored on the Photo row beside the operation that set it. It is what makes Restore a compare-and-set: a restore names the marker it was listed under, so it clears exactly that removal and never a newer one.
+_Avoid_: deleted flag, timestamp field, tombstone
+
 **Removal Operation**:
 One confirmed removal of one reviewed `Rejected` result, named by a browser-supplied operation id so a retried request repeats one operation instead of creating a second. The operation owns the group of Photos that Undo restores in one transaction.
 _Avoid_: batch delete, purge, cleanup job
@@ -60,7 +64,7 @@ The removal action that clears removal markers through a compare-and-set, return
 _Avoid_: undelete, relink, reimport
 
 **Removed Photos listing**:
-The bounded, newest-removal-first listing of Removed Photos, and the only ordinary surface a Removed Photo has. It offers per-Photo Restore and the operation-level Undo of the last removal.
+The bounded, newest-removal-first listing of Removed Photos, and the only ordinary surface a Removed Photo has. Each row presents the Removal marker it was listed under and offers per-Photo Restore against it; the listing also offers the operation-level Undo of the last removal, for as long as that operation still owns a Removed Photo.
 _Avoid_: Trash, Recycle Bin, Recovery Area
 
 ## Metadata

@@ -615,6 +615,7 @@ pub struct PhotoRestorationResponse {
     pub counts: PhotoRestorationCountsWire,
     pub changed_elsewhere: Vec<String>,
     pub missing: Vec<String>,
+    pub operations: Vec<PhotoOperationRemainderWire>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -623,6 +624,16 @@ pub struct PhotoRestorationCountsWire {
     pub restored: usize,
     pub changed_elsewhere: usize,
     pub missing: usize,
+}
+
+/// How many Photos one touched removal operation still owns. An operation with
+/// nothing left is reported with zero, so the surface offering its Undo stops
+/// claiming a count the Library no longer holds.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoOperationRemainderWire {
+    pub operation_id: String,
+    pub removed: usize,
 }
 
 /// One bounded page of removed Photos, newest removal first, with the same
@@ -636,10 +647,13 @@ pub struct RemovedPhotosResponse {
     pub photos: Vec<RemovedPhotoWire>,
 }
 
+/// One removed Photo with the exact removal marker the Photographer reviewed,
+/// so a restore can compare and set against it instead of clearing whatever
+/// removal the Photo carries now.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemovedPhotoWire {
-    pub removed_at: String,
+    pub removed_at_ms: i64,
     pub photo: PhotoSummary,
 }
 

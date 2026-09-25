@@ -63,13 +63,17 @@ The operation is one transaction: a persistence failure leaves the whole request
 
 Undo restores every Photo of one operation that is still removed, in one transaction. It is a compare-and-set against the removal marker: a Photo that another action already restored is simply no longer part of the operation and is not overwritten.
 
-The durable Restore action restores named Photos through the same compare-and-set, and reports one outcome per requested Photo: `restored`, `changedElsewhere` (it is already in the Library), or `missing`.
+The durable Restore action restores named Photos through the same compare-and-set, and reports one outcome per requested Photo: `restored`, `changedElsewhere`, or `missing`. Each named Photo carries the removal marker the listing presented, and the compare-and-set is against that marker: a Photo removed again since the listing was read is reported as `changedElsewhere` instead of being restored past its newer removal, and a marker that does not match the current removal is refused before any state changes. A request naming neither one operation nor a bounded non-empty list of markers is refused.
+
+The response also reports what each operation it touched still owns. An operation with nothing left is reported with a zero count, and an operation the restore did not touch is absent, so the browser withdraws Undo exactly when the operation emptied and keeps the remaining count when a restore took part of it.
 
 Restoring clears the removal marker. It never rescans, renames, moves, or rewrites an Original File, and it never changes Selection State, Rating, or Album membership.
 
 ### In-Memory Publication
 
 The running server serves browsing from one in-memory published Library. A confirmed removal or restore patches that publication in place — the removal marker and the derived Original Folder index — so a source opened immediately afterwards already excludes or re-admits the Photo. A rescan publishes a replacement that carries the persisted markers unchanged.
+
+The derived projection a machine client queries moves with the same commit. A retained query keeps its ordered identities and reports a Photo removed after the query was created as `{"id":"…","state":"missing"}` in its original position, and re-admits it after a restore, without waiting for a rescan. Only a committed removal or restore may move that projection: a refused or rolled-back request leaves it exactly as it was.
 
 ### Failure Behavior
 
@@ -110,7 +114,9 @@ manages the Library and never as a Grid decision:
 
 The listing is not a source: it creates no Browse Snapshot, no second browsing
 model, and no Grid position. It reads one bounded page at a time and restores
-named Photos through the same compare-and-set the operation-level Undo uses.
+named Photos through the same compare-and-set the operation-level Undo uses,
+naming the removal marker each row presented. Undo stays offered beside the
+listing exactly while the confirmed operation still owns a Photo.
 
 ## Options
 
@@ -139,10 +145,12 @@ The implementation must prove that:
 - a rejected Snapshot can remove a result larger than one Grid window in one confirmation;
 - removal is refused for a Snapshot whose filter is not `Rejected`, and for an expired or unknown token;
 - every requested Photo yields exactly one `removed`, `changedElsewhere`, `missing`, or `alreadyRemoved` outcome, and a retried request with the same operation id adopts what it already removed;
+- a restore names the removal marker each Photo was listed under, so a stale marker is refused and a Photo removed again since is reported as `changedElsewhere` rather than cleared;
+- a restore reports what each operation it touched still owns, including a zero remainder for one it emptied, so Undo is withdrawn when the operation is empty and keeps its remaining count otherwise;
 - a changed, missing, or already-removed Photo is never removed by that request;
 - removed Photos leave every normal source, Album listing, Album count, Overview count, Folder count, and CLI query, while keeping their Album membership rows;
 - a removed Photo's bytes and Original Location are unchanged, and its Selection State, Rating, identity, and Album membership survive removal and restore;
 - a restart preserves removal markers, the Removed Photos listing, and operation-based Undo; and
 - malformed, incomplete, stale, and transport-failed responses do not update visible state or claim success.
 
-The Web surfaces carry their own proof: the page-model unit tests characterize the removal owner's review, admission, retry, Undo, and restoration policy, and the browser suite proves against the real stack that a reviewed `Rejected` result leaves the Library in one confirmation, that the Overview count and the open source read again, that Undo restores the operation from the listing, and that a named Photo is restored and stays restored across a reload.
+The Web surfaces carry their own proof: the page-model unit tests characterize the removal owner's review, admission, retry, Undo, and restoration policy, and the browser suite proves against the real stack that a reviewed `Rejected` result leaves the Library in one confirmation, that the Overview count and the open source read again, that Undo restores the operation from the listing and is withdrawn once the operation is empty, and that a named Photo is restored and stays restored across a reload.

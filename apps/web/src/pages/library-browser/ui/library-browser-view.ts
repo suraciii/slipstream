@@ -181,7 +181,13 @@ export type LibraryBrowserIntent =
   | Readonly<{ kind: "removed-list-close" }>
   | Readonly<{ kind: "removed-page"; direction: -1 | 1 }>
   | Readonly<{ kind: "removed-retry" }>
-  | Readonly<{ kind: "removed-restore"; photoId: string }>
+  | Readonly<{
+      kind: "removed-restore";
+      photoId: string;
+      /// The removal marker the rendered row presented, so the restore names
+      /// the removal the Photographer saw.
+      removedAtMs: number;
+    }>
   | Readonly<{
       kind:
         | "show-grid"
@@ -516,7 +522,7 @@ export type RemovedPanelViewModel = Readonly<{
     Readonly<{
       photoId: string;
       filename: string;
-      removedAt: string;
+      removedAtMs: number;
       preview: GridPhotoViewModel["preview"];
     }>
   >;
@@ -4408,7 +4414,7 @@ export function createLibraryBrowserView(
       name.textContent = item.filename;
       const when = document.createElement("p");
       when.className = "removed-when";
-      when.textContent = `Removed ${removalTimestamp(item.removedAt)}`;
+      when.textContent = `Removed ${removalTimestamp(item.removedAtMs)}`;
       facts.append(name, when);
       const restore = document.createElement("button");
       restore.type = "button";
@@ -4417,7 +4423,11 @@ export function createLibraryBrowserView(
       restore.textContent = restoring ? "Restoring…" : "Restore";
       restore.disabled = model.pending || restoring;
       restore.addEventListener("click", () =>
-        send({ kind: "removed-restore", photoId: item.photoId }),
+        send({
+          kind: "removed-restore",
+          photoId: item.photoId,
+          removedAtMs: item.removedAtMs,
+        }),
       );
       row.append(image, facts, restore);
       const binding: GridThumbnailBinding = {
@@ -5098,9 +5108,11 @@ function selectionLabel(value?: ViewSelectionState): string {
 
 /// When a Photo was removed, in the Photographer's own locale. A timestamp the
 /// platform cannot parse is presented verbatim rather than invented.
-function removalTimestamp(value: string): string {
-  const time = Date.parse(value);
-  return Number.isFinite(time) ? new Date(time).toLocaleString() : value;
+/// The removal marker as a local reading. The listing reports the millisecond
+/// the removal was confirmed, so the row shows the same instant the restore
+/// names and no timezone-less text is parsed as if it were local.
+function removalTimestamp(removedAtMs: number): string {
+  return new Date(removedAtMs).toLocaleString();
 }
 
 function gridPhotoFacts(

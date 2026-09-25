@@ -43,6 +43,30 @@ const removalBody = (
   };
 };
 
+const restorationBody = (
+  input: Readonly<{
+    restored?: number;
+    changedElsewhere?: ReadonlyArray<string>;
+    missing?: ReadonlyArray<string>;
+    operations?: ReadonlyArray<
+      Readonly<{ operationId: string; removed: number }>
+    >;
+  }>,
+) => {
+  const changedElsewhere = input.changedElsewhere ?? [];
+  const missing = input.missing ?? [];
+  return {
+    counts: {
+      restored: input.restored ?? 0,
+      changedElsewhere: changedElsewhere.length,
+      missing: missing.length,
+    },
+    changedElsewhere,
+    missing,
+    operations: input.operations ?? [],
+  };
+};
+
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
     status,
@@ -185,15 +209,16 @@ describe("removal owner review", () => {
     expect(owner.undo()).toBeUndefined();
   });
 
-  test("undo restores the confirmed operation and forgets it only when asked", async () => {
+  test("undo restores the confirmed operation and withdraws it once it is empty", async () => {
     const { fetcher, requests } = recordingFetch((path) =>
       path === removalPath
         ? json(removalBody("op-1", { removed: 2 }))
-        : json({
-            counts: { restored: 2, changedElsewhere: 0, missing: 0 },
-            changedElsewhere: [],
-            missing: [],
-          }),
+        : json(
+            restorationBody({
+              restored: 2,
+              operations: [{ operationId: "op-1", removed: 0 }],
+            }),
+          ),
     );
     const owner = createRemovalOwner(fetcher, {
       newOperationId: () => "op-1",
@@ -210,52 +235,124 @@ describe("removal owner review", () => {
     expect(outcome.kind).toBe("restored");
     if (outcome.kind !== "restored") return;
     expect(outcome.result.counts.restored).toBe(2);
-    expect(owner.operation).toEqual({ operationId: "op-1", removed: 2 });
-    owner.forgetOperation("op-other");
-    expect(owner.operation).toBeDefined();
-    owner.forgetOperation("op-1");
+    // The operation owns nothing now, so Undo is not offered for it again.
     expect(owner.operation).toBeUndefined();
+    expect(owner.undo()).toBeUndefined();
     expect(requests.map((request) => request.body)).toEqual([
       { token: "token-1", operationId: "op-1" },
       { operation: "op-1" },
     ]);
   });
 
-  test("restoring explicit Photos admits one request per Photo list", async () => {
+  test("a partial restore keeps the tracked operation with the count it still owns", async () => {
+    const { fetcher } = recordingFetch((path) =>
+      path === removalPath
+        ? json(removalBody("op-1", { removed: 3 }))
+        : json(
+            restorationBody({
+              restored: 1,
+              operations: [{ operationId: "op-1", removed: 2 }],
+            }),
+          ),
+    );
+    const owner = createRemovalOwner(fetcher, {
+      newOperationId: () => "op-1",
+    });
+    owner.openReview("token-1", 3, authority);
+    await owner.confirm()!.settlement;
+    expect(owner.operation).toEqual({ operationId: "op-1", removed: 3 });
+    const admission = owner.restorePhotos([
+      { photoId: "photo-a", removedAtMs: 1_700_000_000_000 },
+    ]);
+    expect((await admission!.settlement).kind).toBe("restored");
+    expect(owner.operation).toEqual({ operationId: "op-1", removed: 2 });
+  });
+
+  test("a restore of another operation leaves the tracked operation alone", async () => {
+    const { fetcher } = recordingFetch((path) =>
+      path === removalPath
+        ? json(removalBody("op-1", { removed: 2 }))
+        : json(
+            restorationBody({
+              restored: 1,
+              operations: [{ operationId: "op-2", removed: 0 }],
+            }),
+          ),
+    );
+    const owner = createRemovalOwner(fetcher, {
+      newOperationId: () => "op-1",
+    });
+    owner.openReview("token-1", 2, authority);
+    await owner.confirm()!.settlement;
+    const admission = owner.restorePhotos([
+      { photoId: "photo-other", removedAtMs: 1_600_000_000_000 },
+    ]);
+    await admission!.settlement;
+    expect(owner.operation).toEqual({ operationId: "op-1", removed: 2 });
+  });
+
+  test("a malformed operation remainder fails without moving the tracked operation", async () => {
+    const { fetcher } = recordingFetch((path) =>
+      path === removalPath
+        ? json(removalBody("op-1", { removed: 2 }))
+        : json(
+            restorationBody({
+              restored: 1,
+              operations: [{ operationId: "op-1", removed: -1 }],
+            }),
+          ),
+    );
+    const owner = createRemovalOwner(fetcher, {
+      newOperationId: () => "op-1",
+    });
+    owner.openReview("token-1", 2, authority);
+    await owner.confirm()!.settlement;
+    const admission = owner.restorePhotos([
+      { photoId: "photo-a", removedAtMs: 1_700_000_000_000 },
+    ]);
+    expect((await admission!.settlement).kind).toBe("failed");
+    expect(owner.operation).toEqual({ operationId: "op-1", removed: 2 });
+  });
+
+  test("restoring explicit Photos names the markers and admits one request per Photo list", async () => {
     const held = deferred<Response>();
     const { fetcher, requests } = recordingFetch(() => held.promise);
     const owner = createRemovalOwner(fetcher);
+    const marker = { photoId: "photo-a", removedAtMs: 1_700_000_000_000 };
     expect(owner.restorePhotos([])).toBeUndefined();
-    const admission = owner.restorePhotos(["photo-a"]);
+    const admission = owner.restorePhotos([marker]);
     expect(admission).toBeDefined();
-    expect(owner.isRestoringPhotos(["photo-a"])).toBe(true);
-    expect(owner.restorePhotos(["photo-a"])).toBeUndefined();
-    expect(owner.restorePhotos(["photo-b"])).toBeDefined();
-    held.resolve(
-      json({
-        counts: { restored: 1, changedElsewhere: 0, missing: 0 },
-        changedElsewhere: [],
-        missing: [],
-      }),
-    );
+    expect(owner.isRestoringPhotos([marker])).toBe(true);
+    expect(owner.restorePhotos([marker])).toBeUndefined();
+    expect(
+      owner.restorePhotos([{ photoId: "photo-b", removedAtMs: 1 }]),
+    ).toBeDefined();
+    held.resolve(json(restorationBody({ restored: 1 })));
     expect((await admission!.settlement).kind).toBe("restored");
-    expect(owner.isRestoringPhotos(["photo-a"])).toBe(false);
+    expect(owner.isRestoringPhotos([marker])).toBe(false);
+    // The request names each Photo with the removal the listing presented, so
+    // a Photo removed again since then is not restored past its newer removal.
     expect(requests).toEqual([
-      { path: restorePath, body: { photoIds: ["photo-a"] } },
-      { path: restorePath, body: { photoIds: ["photo-b"] } },
+      {
+        path: restorePath,
+        body: { photos: [{ id: "photo-a", removedAtMs: 1_700_000_000_000 }] },
+      },
+      {
+        path: restorePath,
+        body: { photos: [{ id: "photo-b", removedAtMs: 1 }] },
+      },
     ]);
   });
 
   test("a restore response that does not partition the requested Photos fails", async () => {
     const { fetcher } = recordingFetch(() =>
-      json({
-        counts: { restored: 1, changedElsewhere: 0, missing: 0 },
-        changedElsewhere: [],
-        missing: [],
-      }),
+      json(restorationBody({ restored: 1 })),
     );
     const owner = createRemovalOwner(fetcher);
-    const admission = owner.restorePhotos(["photo-a", "photo-b"]);
+    const admission = owner.restorePhotos([
+      { photoId: "photo-a", removedAtMs: 1 },
+      { photoId: "photo-b", removedAtMs: 1 },
+    ]);
     expect(await admission!.settlement).toEqual({ kind: "failed" });
   });
 

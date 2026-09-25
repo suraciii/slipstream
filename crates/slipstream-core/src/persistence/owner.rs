@@ -16,10 +16,10 @@ use crate::{
     ExportSubmissionResolution, ExportSubmitOutcome, ExportSweepResult, LibraryRoot,
     MAXIMUM_FOLDER_ALBUM_PHOTOS, MAXIMUM_PHOTO_RATING, OriginalErrorCategory, OriginalFacts,
     OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
-    PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery, PhotoQueryCandidate, PhotoQueryError,
-    PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord,
-    PhotoRemovalCounts, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
-    PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
+    PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoOperationRemainder, PhotoQuery,
+    PhotoQueryCandidate, PhotoQueryError, PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource,
+    PhotoRead, PhotoRecord, PhotoRemovalCounts, PhotoRemovalMutation, PhotoRemovalResult,
+    PhotoRestoration, PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
     PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
     PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
     PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
@@ -1685,8 +1685,8 @@ impl Persistence {
         restoration: PhotoRestoration,
     ) -> Result<oneshot::Receiver<Result<PhotoRestorationResult, MutationError>>, MutationError>
     {
-        if let PhotoRestoration::Photos(photo_ids) = &restoration
-            && photo_ids.is_empty()
+        if let PhotoRestoration::Photos(markers) = &restoration
+            && markers.is_empty()
         {
             return Err(MutationError::Invalid);
         }
@@ -7476,7 +7476,9 @@ fn remove_photos(
 }
 
 /// One restore request: every Photo one operation still owns, or an explicit
-/// set. Each requested Photo is compared and set inside one transaction.
+/// set of Photos with the removal marker each was reviewed at. Each requested
+/// Photo is compared and set inside one transaction, so a removal that changed
+/// after the caller read it is reported instead of overwritten.
 fn restore_photos(
     state: &StateDirectory,
     database_name: &DatabaseName,
@@ -7489,62 +7491,97 @@ fn restore_photos(
             counts: PhotoRestorationCounts::default(),
             changed_elsewhere: Vec::new(),
             missing: Vec::new(),
+            operations: Vec::new(),
         };
-        let photo_ids = match restoration {
-            PhotoRestoration::Operation(operation_id) => transaction
-                .prepare(
-                    "SELECT id FROM photos
-                     WHERE removed_operation=? AND removed_at_ms IS NOT NULL
-                     ORDER BY removed_at_ms, id",
-                )
-                .map_err(mutation_error_from_sqlite)?
-                .query_map([operation_id.as_str()], |row| row.get::<_, String>(0))
-                .map_err(mutation_error_from_sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(mutation_error_from_sqlite)?,
-            PhotoRestoration::Photos(photo_ids) => photo_ids,
+        // Operations this request changed, so the response can report how many
+        // Photos each still owns. The named operation counts even when it owns
+        // nothing, because that is exactly what its Undo surface must learn.
+        let mut touched = std::collections::BTreeSet::new();
+        let requests = match restoration {
+            PhotoRestoration::Operation(operation_id) => {
+                touched.insert(operation_id.clone());
+                let photo_ids = transaction
+                    .prepare(
+                        "SELECT id FROM photos
+                         WHERE removed_operation=? AND removed_at_ms IS NOT NULL
+                         ORDER BY removed_at_ms, id",
+                    )
+                    .map_err(mutation_error_from_sqlite)?
+                    .query_map([operation_id.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(mutation_error_from_sqlite)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(mutation_error_from_sqlite)?;
+                photo_ids
+                    .into_iter()
+                    .map(|photo_id| (photo_id, None))
+                    .collect::<Vec<_>>()
+            }
+            PhotoRestoration::Photos(markers) => markers
+                .into_iter()
+                .map(|marker| (marker.photo_id, Some(marker.removed_at_ms)))
+                .collect(),
         };
-        for chunk in photo_ids.chunks(PHOTO_REMOVAL_CHUNK) {
+        for chunk in requests.chunks(PHOTO_REMOVAL_CHUNK) {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let mut statement = transaction
                 .prepare(&format!(
-                    "SELECT id,removed_at_ms FROM photos WHERE id IN ({placeholders})"
+                    "SELECT id,removed_at_ms,removed_operation FROM photos WHERE id IN ({placeholders})"
                 ))
                 .map_err(mutation_error_from_sqlite)?;
             let rows = statement
-                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-                })
+                .query_map(
+                    rusqlite::params_from_iter(chunk.iter().map(|(photo_id, _)| photo_id)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
                 .map_err(mutation_error_from_sqlite)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(mutation_error_from_sqlite)?;
-            let mut removed = std::collections::HashSet::with_capacity(rows.len());
-            for (photo_id, removed_at) in rows {
-                if removed_at.is_some() {
-                    removed.insert(photo_id);
-                }
+            let mut facts = std::collections::HashMap::with_capacity(rows.len());
+            for (photo_id, removed_at, removed_operation) in rows {
+                facts.insert(photo_id, (removed_at, removed_operation));
             }
-            for photo_id in chunk {
-                if removed.contains(photo_id) {
-                    transaction
-                        .execute(
-                            "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL WHERE id=?",
-                            [photo_id],
-                        )
-                        .map_err(mutation_error_from_sqlite)?;
-                    result.restored.push(photo_id.clone());
-                } else if transaction
-                    .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
-                    .optional()
-                    .map_err(mutation_error_from_sqlite)?
-                    .is_some()
-                {
-                    result.changed_elsewhere.push(photo_id.clone());
-                } else {
+            for (photo_id, expected_removed_at) in chunk {
+                let Some((removed_at, removed_operation)) = facts.get(photo_id) else {
                     result.missing.push(photo_id.clone());
+                    continue;
+                };
+                // An explicit request restores the removal it reviewed. A
+                // Photo whose marker moved on — restored and removed again, or
+                // removed by another operation — is reported, never cleared.
+                let reviewed = expected_removed_at.is_none_or(|expected| {
+                    removed_at.is_some_and(|removed_at| removed_at == expected)
+                });
+                if !reviewed {
+                    result.changed_elsewhere.push(photo_id.clone());
+                    continue;
                 }
+                let Some(removed_at) = removed_at else {
+                    result.changed_elsewhere.push(photo_id.clone());
+                    continue;
+                };
+                let updated = transaction
+                    .execute(
+                        "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL
+                         WHERE id=? AND removed_at_ms=?",
+                        params![photo_id, removed_at],
+                    )
+                    .map_err(mutation_error_from_sqlite)?;
+                if updated == 0 {
+                    result.changed_elsewhere.push(photo_id.clone());
+                    continue;
+                }
+                if let Some(operation_id) = removed_operation {
+                    touched.insert(operation_id.clone());
+                }
+                result.restored.push(photo_id.clone());
             }
         }
         result.counts = PhotoRestorationCounts {
@@ -7552,8 +7589,54 @@ fn restore_photos(
             changed_elsewhere: result.changed_elsewhere.len(),
             missing: result.missing.len(),
         };
+        result.operations = operation_remainders(transaction, &touched)?;
         Ok(result)
     })
+}
+
+/// How many Photos each named operation still owns. An operation with nothing
+/// left is reported with zero rather than omitted, so a surface holding an
+/// Undo for it can stop offering a count the Library no longer holds.
+fn operation_remainders(
+    transaction: &Transaction<'_>,
+    operation_ids: &std::collections::BTreeSet<String>,
+) -> Result<Vec<PhotoOperationRemainder>, MutationError> {
+    let mut remainders = operation_ids
+        .iter()
+        .map(|operation_id| PhotoOperationRemainder {
+            operation_id: operation_id.clone(),
+            removed: 0,
+        })
+        .collect::<Vec<_>>();
+    let ids = operation_ids.iter().cloned().collect::<Vec<_>>();
+    for chunk in ids.chunks(PHOTO_REMOVAL_CHUNK) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = transaction
+            .prepare(&format!(
+                "SELECT removed_operation,count(*) FROM photos
+                 WHERE removed_at_ms IS NOT NULL AND removed_operation IN ({placeholders})
+                 GROUP BY removed_operation"
+            ))
+            .map_err(mutation_error_from_sqlite)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(mutation_error_from_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(mutation_error_from_sqlite)?;
+        for (operation_id, remaining) in rows {
+            if let Some(remainder) = remainders
+                .iter_mut()
+                .find(|remainder| remainder.operation_id == operation_id)
+            {
+                remainder.removed = usize::try_from(remaining).unwrap_or(usize::MAX);
+            }
+        }
+    }
+    Ok(remainders)
 }
 
 /// One bounded page of removed Photos, newest removal first.
@@ -7789,8 +7872,8 @@ mod tests {
     use super::*;
     use crate::identity::source_revision;
     use crate::{
-        CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoStateBatchItem,
-        identity::original_id,
+        CaptureTimeBound, CheckedPhotoDecisionItem, LibraryRoot, PhotoRemovalMarker,
+        PhotoStateBatchItem, identity::original_id,
     };
     use serde::Deserialize;
     use std::{
@@ -12761,11 +12844,19 @@ mod tests {
             .unwrap();
         assert_eq!(second.counts.restored, 0);
 
-        // Named restores compare against the current marker.
+        // A named restore compares and sets against the marker it reviewed:
+        // a Photo already in the Library, and a Photo that does not exist, are
+        // reported instead of cleared.
         let named = persistence
             .restore_photos_receiver(PhotoRestoration::Photos(vec![
-                "photo-1".to_owned(),
-                "photo-missing".to_owned(),
+                PhotoRemovalMarker {
+                    photo_id: "photo-1".to_owned(),
+                    removed_at_ms: 0,
+                },
+                PhotoRemovalMarker {
+                    photo_id: "photo-missing".to_owned(),
+                    removed_at_ms: 0,
+                },
             ]))
             .unwrap()
             .await
@@ -12773,6 +12864,85 @@ mod tests {
             .unwrap();
         assert_eq!(named.changed_elsewhere, vec!["photo-1".to_owned()]);
         assert_eq!(named.missing, vec!["photo-missing".to_owned()]);
+        assert!(named.operations.is_empty());
+
+        // A stale marker never overwrites a newer removal: the Photo is
+        // reported as changed elsewhere and stays removed by its own
+        // operation, whose remaining count the response carries.
+        persistence
+            .mutate_photo_state(PhotoStateMutation {
+                photo_id: "photo-2".to_owned(),
+                field: PhotoStateField::SelectionState,
+                value: PhotoStateValue::Selection(SelectionState::Rejected),
+                expected_current: None,
+                album_id: None,
+            })
+            .await
+            .unwrap();
+        let re_removed = remove(vec!["photo-2"], "operation-two")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(re_removed.counts.removed, 1);
+        let (records, _) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_marker = records
+            .iter()
+            .find(|record| record.photo_id == "photo-2")
+            .unwrap()
+            .removed_at_ms;
+        let stale = persistence
+            .restore_photos_receiver(PhotoRestoration::Photos(vec![PhotoRemovalMarker {
+                photo_id: "photo-2".to_owned(),
+                removed_at_ms: stale_marker - 1,
+            }]))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.counts.restored, 0);
+        assert_eq!(stale.changed_elsewhere, vec!["photo-2".to_owned()]);
+        assert!(stale.operations.is_empty());
+        let (records, total) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records[0].photo_id, "photo-2");
+
+        // The reviewed marker restores exactly that removal, and the response
+        // reports that the operation now owns nothing.
+        let exact = persistence
+            .restore_photos_receiver(PhotoRestoration::Photos(vec![PhotoRemovalMarker {
+                photo_id: "photo-2".to_owned(),
+                removed_at_ms: stale_marker,
+            }]))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.restored, vec!["photo-2".to_owned()]);
+        assert_eq!(
+            exact.operations,
+            vec![PhotoOperationRemainder {
+                operation_id: "operation-two".to_owned(),
+                removed: 0,
+            }]
+        );
+        let (records, total) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 0);
+        assert!(records.is_empty());
 
         // Removal is Library state only: decisions and identity are untouched.
         let snapshot = persistence

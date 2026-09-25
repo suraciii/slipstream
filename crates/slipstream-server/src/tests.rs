@@ -7863,11 +7863,11 @@ async fn rejected_result_removal_hides_photos_and_undo_restores_them_exactly() {
         listed_ids,
         BTreeSet::from([rejected_one.clone(), rejected_two.clone()])
     );
-    assert!(listed.iter().all(|item| {
-        item["removedAt"]
-            .as_str()
-            .is_some_and(|at| at.ends_with('Z'))
-    }));
+    assert!(
+        listed
+            .iter()
+            .all(|item| item["removedAtMs"].as_u64().is_some_and(|at| at > 0))
+    );
     assert!(
         listed
             .iter()
@@ -8068,11 +8068,16 @@ async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
     let (_, overview) = get_json(&router, "/api/overview").await;
     assert_eq!(overview["photoCount"], 2);
 
-    // A restore body that names two different sets, or none, is refused.
+    // A restore body that names two different sets, none, or a marker the
+    // caller could not have read is refused before any state changes.
     for body in [
-        serde_json::json!({"operation": operation_id, "photoIds": [removed_id]}),
-        serde_json::json!({"photoIds": []}),
+        serde_json::json!({"operation": operation_id, "photos": [{"id": removed_id, "removedAtMs": 1}]}),
+        serde_json::json!({"photos": []}),
         serde_json::json!({"unknown": operation_id}),
+        serde_json::json!({"photos": [{"id": removed_id}]}),
+        serde_json::json!({"photos": [{"id": removed_id, "removedAtMs": -1}]}),
+        serde_json::json!({"photos": [{"id": removed_id, "removedAtMs": 1, "extra": true}]}),
+        serde_json::json!({"photos": [{"id": removed_id, "removedAtMs": 1}, {"id": removed_id, "removedAtMs": 2}]}),
     ] {
         let response = post_json(
             &router,
@@ -8096,6 +8101,10 @@ async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
     )
     .await;
     assert_eq!(restored["counts"]["restored"], 1);
+    assert_eq!(
+        restored["operations"],
+        serde_json::json!([{"operationId": operation_id, "removed": 0}])
+    );
     let (_, overview) = get_json(&router, "/api/overview").await;
     assert_eq!(overview["photoCount"], 3);
 
@@ -8228,9 +8237,129 @@ async fn removed_photos_leave_folder_counts_and_cli_queries_but_stay_recoverable
     let first = first_page["photos"][0]["photo"]["id"].as_str().unwrap();
     let second = second_page["photos"][0]["photo"]["id"].as_str().unwrap();
     assert_ne!(first, second);
-    let at_first = first_page["photos"][0]["removedAt"].as_str().unwrap();
-    let at_second = second_page["photos"][0]["removedAt"].as_str().unwrap();
+    let at_first = first_page["photos"][0]["removedAtMs"].as_u64().unwrap();
+    let at_second = second_page["photos"][0]["removedAtMs"].as_u64().unwrap();
     assert!(at_first >= at_second);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn removal_keeps_the_cli_projection_in_step_without_a_rescan() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(ids.len(), 2);
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    for name in ["a.jpg", "b.jpg"] {
+        let response = post_json(
+            &router,
+            &format!("/api/photos/{}/state", by_location[name]),
+            serde_json::json!({"field": "selectionState", "value": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let removed_id = by_location["a.jpg"].clone();
+
+    // A machine client reads its query before the removal, so the retained
+    // sequence holds the identities the removal is about to hide. The second
+    // page is read back after the removal.
+    let query = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-queries",
+            serde_json::json!({"limit": 1}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(query["total"], 2);
+    assert_eq!(query["items"].as_array().unwrap().len(), 1);
+    let cursor = query["nextCursor"].as_str().unwrap().to_owned();
+    let before =
+        response_json(get_cli_json(&router, &format!("/api/photos/{removed_id}")).await).await;
+    assert_eq!(before["id"], removed_id);
+
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let removed = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({
+                "token": opened["token"],
+                "operationId": "00000000-0000-4000-8000-000000000004",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed["counts"]["removed"], 2);
+
+    // The committed removal moves the derived CLI projection with it, so the
+    // retained page reports the removed Photo as missing instead of present,
+    // and reading that Photo is not found.
+    let page =
+        response_json(get_cli_json(&router, &format!("/api/photo-queries/{cursor}")).await).await;
+    assert_eq!(page["total"], 2);
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["state"], "missing");
+    assert!(items[0].get("preview").is_none());
+    let removed_id = items[0]["id"].as_str().unwrap().to_owned();
+    let after = get_cli_json(&router, &format!("/api/photos/{removed_id}")).await;
+    assert_eq!(after.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response_json(after).await["error"]["code"], "not_found");
+
+    // Undo re-admits the Photo into the projection in the same step, so a
+    // query created afterwards already lists it again.
+    let restored = response_json(
+        post_json(
+            &router,
+            "/api/photos/restore",
+            serde_json::json!({"operation": "00000000-0000-4000-8000-000000000004"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restored["counts"]["restored"], 2);
+    let query = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-queries",
+            serde_json::json!({"limit": 10}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(query["total"], 2);
+    assert!(
+        query["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["state"].is_null())
+    );
+    let after = get_cli_json(&router, &format!("/api/photos/{removed_id}")).await;
+    assert_eq!(after.status(), StatusCode::OK);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

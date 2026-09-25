@@ -831,7 +831,17 @@ pub struct PhotoRemovalResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PhotoRestoration {
     Operation(String),
-    Photos(Vec<String>),
+    Photos(Vec<PhotoRemovalMarker>),
+}
+
+/// One Photo an explicit restore names together with the removal marker the
+/// caller reviewed. The marker makes the restore a compare-and-set: a removal
+/// that changed after the caller read it is reported as changed elsewhere
+/// instead of being overwritten.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRemovalMarker {
+    pub photo_id: String,
+    pub removed_at_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -841,12 +851,22 @@ pub struct PhotoRestorationCounts {
     pub missing: usize,
 }
 
+/// How many Photos one removal operation still owns. An operation with nothing
+/// left is reported with zero, so a surface that offers Undo for it can stop
+/// claiming a count the Library no longer holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoOperationRemainder {
+    pub operation_id: String,
+    pub removed: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoRestorationResult {
     pub restored: Vec<String>,
     pub counts: PhotoRestorationCounts,
     pub changed_elsewhere: Vec<String>,
     pub missing: Vec<String>,
+    pub operations: Vec<PhotoOperationRemainder>,
 }
 
 /// One removed Photo in removal order.

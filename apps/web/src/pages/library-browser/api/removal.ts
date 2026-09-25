@@ -36,6 +36,11 @@ export type RestorationResult = Readonly<{
   }>;
   changedElsewhere: ReadonlyArray<string>;
   missing: ReadonlyArray<string>;
+  /// What each removal operation the restore touched still owns. An operation
+  /// with nothing left is reported with zero, and an operation the restore did
+  /// not touch is absent, so a surface holding an Undo for one operation never
+  /// claims a count the Library no longer holds.
+  operations: ReadonlyArray<Readonly<{ operationId: string; removed: number }>>;
 }>;
 
 export type RestorationWriteResult =
@@ -44,8 +49,18 @@ export type RestorationWriteResult =
   | Readonly<{ kind: "malformed" }>;
 
 export type RemovedPhotoItem = Readonly<{
-  removedAt: string;
+  /// The removal marker the listing reported: the millisecond the removal was
+  /// confirmed. A restore names it so a listing read before a newer removal
+  /// cannot restore a Photo past the marker it was read under.
+  removedAtMs: number;
   photo: PhotoSummary;
+}>;
+
+/// One removed Photo as a listing showed it. A restore names the identity and
+/// the marker that must still be in force.
+export type RemovalMarker = Readonly<{
+  photoId: string;
+  removedAtMs: number;
 }>;
 
 export type RemovedPhotosResult =
@@ -183,21 +198,31 @@ export async function restoreRemovalOperation(
   return restorationWrite(fetcher, { operation: operationId }, undefined);
 }
 
-/// Restores one bounded explicit list of Photos. Every requested Photo yields
-/// exactly one outcome, so the counts and the named lists must partition the
-/// requested identities.
+/// Restores one bounded explicit list of removed Photos. Every marker names the
+/// identity to restore and the removal the listing showed, so a Photo that was
+/// removed again since the listing was read is reported as changed elsewhere
+/// instead of being restored past its newer removal.
 export async function restoreRemovedPhotos(
   fetcher: RemovalFetch,
-  photoIds: ReadonlyArray<string>,
+  markers: ReadonlyArray<RemovalMarker>,
 ): Promise<RestorationWriteResult> {
-  return restorationWrite(fetcher, { photoIds }, photoIds);
+  return restorationWrite(
+    fetcher,
+    {
+      photos: markers.map((marker) => ({
+        id: marker.photoId,
+        removedAtMs: marker.removedAtMs,
+      })),
+    },
+    markers.map((marker) => marker.photoId),
+  );
 }
 
 async function restorationWrite(
   fetcher: RemovalFetch,
   body:
     | Readonly<{ operation: string }>
-    | Readonly<{ photoIds: ReadonlyArray<string> }>,
+    | Readonly<{ photos: ReadonlyArray<{ id: string; removedAtMs: number }> }>,
   requested: ReadonlyArray<string> | undefined,
 ): Promise<RestorationWriteResult> {
   let response: Response;
@@ -220,10 +245,16 @@ async function restorationWrite(
   }
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["counts", "changedElsewhere", "missing"]) ||
+    !hasExactKeys(value, [
+      "counts",
+      "changedElsewhere",
+      "missing",
+      "operations",
+    ]) ||
     !validRestorationCounts(value.counts) ||
     !validIdentityList(value.changedElsewhere) ||
-    !validIdentityList(value.missing)
+    !validIdentityList(value.missing) ||
+    !validRestoredOperations(value.operations)
   )
     return Object.freeze({ kind: "malformed" });
   const counts = value.counts;
@@ -245,9 +276,44 @@ async function restorationWrite(
       counts: Object.freeze({ ...counts }),
       changedElsewhere: Object.freeze([...value.changedElsewhere]),
       missing: Object.freeze([...value.missing]),
+      operations: Object.freeze(
+        value.operations.map((entry) =>
+          Object.freeze({
+            operationId: entry.operationId,
+            removed: entry.removed,
+          }),
+        ),
+      ),
     }),
   });
 }
+
+/// The operation ids a restore touched, each naming how many Photos it still
+/// owns. Ids are distinct and non-empty and every count is a non-negative
+/// integer: zero says the operation owns nothing and may be withdrawn.
+const validRestoredOperations = (
+  value: unknown,
+): value is ReadonlyArray<
+  Readonly<{ operationId: string; removed: number }>
+> => {
+  if (!Array.isArray(value)) return false;
+  const operationIds = new Set<string>();
+  for (const entry of value) {
+    if (
+      !isRecord(entry) ||
+      !hasExactKeys(entry, ["operationId", "removed"]) ||
+      typeof entry.operationId !== "string" ||
+      entry.operationId.length === 0 ||
+      typeof entry.removed !== "number" ||
+      !Number.isInteger(entry.removed) ||
+      entry.removed < 0 ||
+      operationIds.has(entry.operationId)
+    )
+      return false;
+    operationIds.add(entry.operationId);
+  }
+  return true;
+};
 
 /// One bounded page of removed Photos, newest removal first.
 export async function fetchRemovedPhotos(
@@ -294,7 +360,7 @@ export async function fetchRemovedPhotos(
       total: value.total,
       photos: Object.freeze(
         photos.map((item) =>
-          Object.freeze({ removedAt: item.removedAt, photo: item.photo }),
+          Object.freeze({ removedAtMs: item.removedAtMs, photo: item.photo }),
         ),
       ),
     });
@@ -305,7 +371,8 @@ export async function fetchRemovedPhotos(
 
 const validRemovedPhotoItem = (value: unknown): value is RemovedPhotoItem =>
   isRecord(value) &&
-  hasExactKeys(value, ["removedAt", "photo"]) &&
-  typeof value.removedAt === "string" &&
-  value.removedAt.length > 0 &&
+  hasExactKeys(value, ["removedAtMs", "photo"]) &&
+  typeof value.removedAtMs === "number" &&
+  Number.isSafeInteger(value.removedAtMs) &&
+  value.removedAtMs >= 0 &&
   validPhotoSummary(value.photo);

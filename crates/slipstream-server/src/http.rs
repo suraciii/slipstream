@@ -1308,11 +1308,7 @@ pub(crate) async fn restore_photos(
     let Some(body) = body.as_object() else {
         return api_error(StatusCode::BAD_REQUEST, "Invalid restore request");
     };
-    if body.is_empty()
-        || !body
-            .keys()
-            .all(|key| key == "operation" || key == "photoIds")
-    {
+    if body.is_empty() || !body.keys().all(|key| key == "operation" || key == "photos") {
         return api_error(StatusCode::BAD_REQUEST, "Invalid restore request");
     }
     let operation = match body.get("operation") {
@@ -1320,18 +1316,21 @@ pub(crate) async fn restore_photos(
         Some(Value::String(operation)) if valid_id(operation) => Some(operation.to_owned()),
         Some(_) => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
     };
-    let photo_ids = match body.get("photoIds") {
+    // An explicit restore names each Photo together with the removal marker it
+    // was reviewed at, so the request is a compare-and-set instead of a clear
+    // of whatever removal the Photo carries now.
+    let photos = match body.get("photos") {
         None | Some(Value::Null) => None,
-        value => match valid_ids(value, MAX_RESTORATION_PHOTOS) {
-            Some(photo_ids) if !photo_ids.is_empty() => Some(photo_ids),
+        Some(value) => match valid_removal_markers(value) {
+            Some(markers) if !markers.is_empty() => Some(markers),
             _ => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
         },
     };
     // One named operation or one named Photo list, never both and never
     // neither: a restore that could mean two different sets is refused.
-    let restoration = match (operation, photo_ids) {
+    let restoration = match (operation, photos) {
         (Some(operation), None) => slipstream_core::PhotoRestoration::Operation(operation),
-        (None, Some(photo_ids)) => slipstream_core::PhotoRestoration::Photos(photo_ids),
+        (None, Some(markers)) => slipstream_core::PhotoRestoration::Photos(markers),
         _ => return api_error(StatusCode::BAD_REQUEST, "Invalid restore request"),
     };
     match state.application.restore_photos(restoration).await {
@@ -3045,6 +3044,45 @@ pub(crate) fn valid_ids(value: Option<&Value>, max_ids: usize) -> Option<Vec<Str
     }
     let unique = ids.iter().collect::<std::collections::BTreeSet<_>>().len();
     (unique == ids.len()).then(|| ids.into_iter().map(str::to_owned).collect())
+}
+
+/// One explicit restore list: each Photo named with the removal marker the
+/// caller reviewed. A marker must be a non-negative count of milliseconds, and
+/// no Photo may be named twice.
+pub(crate) fn valid_removal_markers(
+    value: &Value,
+) -> Option<Vec<slipstream_core::PhotoRemovalMarker>> {
+    let values = value.as_array()?;
+    if values.len() > MAX_RESTORATION_PHOTOS {
+        return None;
+    }
+    let markers = values
+        .iter()
+        .map(|value| {
+            let entry = value.as_object()?;
+            if !has_exact_keys(entry, &["id", "removedAtMs"]) {
+                return None;
+            }
+            let photo_id = entry.get("id")?.as_str()?;
+            if !valid_id(photo_id) {
+                return None;
+            }
+            let removed_at_ms = entry.get("removedAtMs")?.as_i64()?;
+            if removed_at_ms < 0 {
+                return None;
+            }
+            Some(slipstream_core::PhotoRemovalMarker {
+                photo_id: photo_id.to_owned(),
+                removed_at_ms,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let unique = markers
+        .iter()
+        .map(|marker| marker.photo_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    (unique == markers.len()).then_some(markers)
 }
 
 pub(crate) fn valid_selection(value: &Value) -> Option<SelectionState> {

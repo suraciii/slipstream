@@ -400,16 +400,6 @@ pub(crate) fn format_time(value: SystemTime) -> String {
         .expect("SystemTime formats as RFC 3339")
 }
 
-/// Formats one persisted Unix millisecond instant as RFC 3339. The value is
-/// written by this server from a clock reading; an out-of-range value falls
-/// back to the Unix epoch instead of failing a read.
-pub(crate) fn format_unix_millis(value: i64) -> String {
-    OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000_000)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
-        .format(&Rfc3339)
-        .expect("OffsetDateTime formats as RFC 3339")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

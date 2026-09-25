@@ -826,6 +826,9 @@ function mountPrivateLibraryBrowser(
     renderSortControl();
     renderFilterControl();
     renderProgress();
+    // Every state that moves the presented result passes here, so a review
+    // that no longer covers it is withdrawn with the same update.
+    reconcileRemovalReview();
   };
 
   /// Sends one admitted Album mutation and reports truthful outcomes.
@@ -4060,7 +4063,7 @@ function mountPrivateLibraryBrowser(
         void loadRemovedPage(removedPage?.start ?? 0);
         return;
       case "removed-restore":
-        void restoreRemovedPhoto(intent.photoId);
+        void restoreRemovedPhoto(intent.photoId, intent.removedAtMs);
         return;
       case "show-grid":
         returnToSourceGrid();
@@ -4200,6 +4203,22 @@ function mountPrivateLibraryBrowser(
     return parts.join(" ");
   };
 
+  /// Whether the presented result is still the one a review covers. A review
+  /// names the Snapshot token it was opened on, so a source that was reopened
+  /// or filtered since then cannot be confirmed against a result the
+  /// Photographer no longer sees.
+  const reviewCoversPresentedResult = (): boolean => {
+    const review = removal.review;
+    return (
+      review !== undefined &&
+      sourceGrid.token !== "" &&
+      sourceGrid.token === review.token &&
+      sourceGrid.total === review.reviewed &&
+      sourceGrid.authority === review.sourceAuthority &&
+      sourceGrid.selection === "rejected"
+    );
+  };
+
   const removalReviewModel = (): Parameters<
     LibraryBrowserView["renderRemovalReview"]
   >[0] => {
@@ -4207,7 +4226,7 @@ function mountPrivateLibraryBrowser(
     return {
       reviewed: review?.reviewed ?? removalReviewed,
       pending: removal.busy,
-      canConfirm: review !== undefined,
+      canConfirm: reviewCoversPresentedResult(),
       ...(removalResult
         ? { tone: removalResult.tone, message: removalResult.message }
         : {}),
@@ -4220,6 +4239,21 @@ function mountPrivateLibraryBrowser(
   const renderRemoval = () => {
     if (!applicationAlive || !removalReviewOpen) return;
     view.renderRemovalReview(removalReviewModel());
+  };
+
+  /// Withdraws a review whose result is no longer presented, so the dialog
+  /// never offers a confirmation the server would refuse. The Photographer
+  /// reviews the result that is presented instead.
+  const reconcileRemovalReview = () => {
+    if (!applicationAlive || !removalReviewOpen) return;
+    if (removal.review === undefined || reviewCoversPresentedResult()) return;
+    removal.discardReview();
+    removalResult = {
+      tone: "warning",
+      message:
+        "The reviewed result changed. Review the current rejected result again.",
+    };
+    renderRemoval();
   };
 
   /// Opens the review of the current `Rejected` result. The review names the
@@ -4352,7 +4386,7 @@ function mountPrivateLibraryBrowser(
       items: (removedPage?.items ?? []).map((item) => ({
         photoId: item.photo.id,
         filename: item.photo.originalFilename ?? item.photo.id,
-        removedAt: item.removedAt,
+        removedAtMs: item.removedAtMs,
         preview: item.photo.preview,
       })),
     });
@@ -4420,8 +4454,11 @@ function mountPrivateLibraryBrowser(
     view.closeRemovedPanel();
   };
 
-  const restoreRemovedPhoto = async (photoId: string): Promise<void> => {
-    const admission = removal.restorePhotos([photoId]);
+  const restoreRemovedPhoto = async (
+    photoId: string,
+    removedAtMs: number,
+  ): Promise<void> => {
+    const admission = removal.restorePhotos([{ photoId, removedAtMs }]);
     if (!admission) return;
     removedRestoringId = photoId;
     removedMessage = undefined;

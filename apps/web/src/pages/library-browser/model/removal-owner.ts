@@ -3,6 +3,7 @@ import {
   restoreRemovedPhotos,
   restoreRemovalOperation,
   type RemovalFetch,
+  type RemovalMarker,
   type RemovalResult,
   type RestorationResult,
   type RestorationWriteResult,
@@ -60,11 +61,20 @@ export interface RemovalOwner {
     | undefined;
   forgetOperation(operationId: string): void;
   restorePhotos(
-    photoIds: ReadonlyArray<string>,
+    markers: ReadonlyArray<RemovalMarker>,
   ): Readonly<{ settlement: Promise<RestorationOutcome> }> | undefined;
-  isRestoringPhotos(photoIds: ReadonlyArray<string>): boolean;
+  isRestoringPhotos(markers: ReadonlyArray<RemovalMarker>): boolean;
   dispose(): void;
 }
+
+/// One admission key per in-flight explicit-list restore: the identities the
+/// request names, sorted, so a second identical request is refused while the
+/// first is unanswered.
+const restoreAdmissionKey = (markers: ReadonlyArray<RemovalMarker>): string =>
+  `restore:${markers
+    .map((marker) => marker.photoId)
+    .sort()
+    .join(",")}`;
 
 export type RemovalOwnerOptions = Readonly<{
   /// Test seam: the identity one removal operation is confirmed under.
@@ -105,13 +115,31 @@ export function createRemovalOwner(
 
   const restorationOutcome = (
     result: RestorationWriteResult,
-  ): RestorationOutcome =>
-    result.kind === "restored"
-      ? Object.freeze({ kind: "restored", result: result.value })
-      : Object.freeze({
-          kind: "failed",
-          ...(result.kind === "rejected" ? { status: result.status } : {}),
-        });
+  ): RestorationOutcome => {
+    if (result.kind !== "restored")
+      return Object.freeze({
+        kind: "failed",
+        ...(result.kind === "rejected" ? { status: result.status } : {}),
+      });
+    // The answer names every operation the restore touched, and an operation
+    // it did not touch is absent: a tracked operation the restore never
+    // reached keeps its count, one that emptied is withdrawn. A disposed owner
+    // mutates nothing.
+    if (!closed && operation) {
+      const tracked = result.value.operations.find(
+        (entry) => entry.operationId === operation?.operationId,
+      );
+      if (tracked)
+        operation =
+          tracked.removed > 0
+            ? Object.freeze({
+                operationId: tracked.operationId,
+                removed: tracked.removed,
+              })
+            : undefined;
+    }
+    return Object.freeze({ kind: "restored", result: result.value });
+  };
 
   return {
     get review() {
@@ -195,18 +223,15 @@ export function createRemovalOwner(
     forgetOperation: (operationId) => {
       if (operation?.operationId === operationId) operation = undefined;
     },
-    restorePhotos: (photoIds) => {
-      if (photoIds.length === 0) return undefined;
-      const admission = run(
-        `restore:${[...photoIds].sort().join(",")}`,
-        async () =>
-          restorationOutcome(await restoreRemovedPhotos(fetcher, photoIds)),
+    restorePhotos: (markers) => {
+      if (markers.length === 0) return undefined;
+      const admission = run(restoreAdmissionKey(markers), async () =>
+        restorationOutcome(await restoreRemovedPhotos(fetcher, markers)),
       );
       return admission;
     },
-    isRestoringPhotos: (photoIds) =>
-      photoIds.length > 0 &&
-      inFlight.has(`restore:${[...photoIds].sort().join(",")}`),
+    isRestoringPhotos: (markers) =>
+      markers.length > 0 && inFlight.has(restoreAdmissionKey(markers)),
     dispose: () => {
       if (closed) return;
       closed = true;
