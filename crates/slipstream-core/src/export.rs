@@ -1,6 +1,6 @@
-//! Private source staging and durable Development TIFF publication.
+//! Private source staging and Development TIFF publication/preview staging.
 //!
-//! This module only owns the filesystem boundary for a future Export caller.
+//! This module owns the filesystem boundary for Export and preview callers.
 //! It does not start an image engine, persist Export state, or enable a
 //! processing capability. Callers resolve an [`OriginalCapability`] through
 //! the Library first, then use this workspace for one bounded attempt.
@@ -84,6 +84,7 @@ struct WorkspaceInner {
     root: PathBuf,
     staging: PathBuf,
     artifacts: PathBuf,
+    previews: PathBuf,
     work: PathBuf,
 }
 
@@ -182,12 +183,19 @@ impl ExportWorkspace {
         set_private_directory(&root)?;
         let staging = create_private_child(&root, "staging")?;
         let artifacts = create_private_child(&root, "artifacts")?;
+        let previews = create_private_child(&root, "previews")?;
+        // A freshly opened workspace owns no preview admission, so every
+        // preview output it inherits belongs to a service lifetime that ended
+        // without its owner: ephemeral preview staging never outlives the
+        // admission that produced it.
+        clear_private_child(&previews);
         let work = create_private_child(&root, "work")?;
         Ok(Self {
             inner: Arc::new(WorkspaceInner {
                 root,
                 staging,
                 artifacts,
+                previews,
                 work,
             }),
         })
@@ -252,6 +260,46 @@ impl ExportWorkspace {
             target: ExportTarget::DevelopmentTiff,
             committed: false,
         })
+    }
+
+    /// Starts a private ephemeral preview output. The caller writes through
+    /// the returned path, validates the engine output, then calls `publish`.
+    /// Preview outputs are kept below their own directory and never enter the
+    /// retained Export artifact namespace.
+    pub fn begin_preview_tiff(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+        if !valid_export_id(attempt_key) {
+            return Err(ExportError::InvalidExportId);
+        }
+        let token = unique_token();
+        let temporary_path = self.inner.work.join(format!("{token}.tiff"));
+        let final_path = self.inner.previews.join(format!("{attempt_key}.tiff"));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&temporary_path)?;
+        drop(file);
+        Ok(ArtifactWriter {
+            temporary_path,
+            final_path,
+            target: ExportTarget::DevelopmentTiff,
+            committed: false,
+        })
+    }
+
+    /// Deletes one ephemeral preview output. Expiry and supersession are
+    /// idempotent: an already-removed output is no longer retained.
+    pub fn delete_preview_tiff(&self, attempt_key: &str) -> Result<(), ExportError> {
+        if !valid_export_id(attempt_key) {
+            return Err(ExportError::InvalidExportId);
+        }
+        let path = self.inner.previews.join(format!("{attempt_key}.tiff"));
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -406,6 +454,26 @@ fn create_private_child(root: &Path, name: &str) -> Result<PathBuf, ExportError>
         return Err(ExportError::InvalidWorkspace);
     }
     Ok(canonical)
+}
+
+/// Removes everything a previous lifetime left in a private workspace child.
+/// Removal is best effort: a file that cannot be deleted must not stop the
+/// owner from opening its workspace, and the next open retries.
+fn clear_private_child(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let target = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            continue;
+        };
+        let _ = if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+    }
 }
 
 fn seal_read_only(file: &File) -> Result<(), ExportError> {
@@ -580,6 +648,52 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn preview_output_is_private_and_deletable() {
+        let (root, _library, workspace) = fixture();
+        let writer = workspace.begin_preview_tiff("prev-test-1").unwrap();
+        fs::write(writer.temporary_path(), b"preview").unwrap();
+        let published = writer.publish(|_| Ok(())).unwrap();
+        assert!(
+            published
+                .path
+                .starts_with(workspace.root().join("previews"))
+        );
+        assert!(!workspace.root().join("artifacts/prev-test-1.tiff").exists());
+        assert!(published.path.exists());
+        workspace.delete_preview_tiff("prev-test-1").unwrap();
+        assert!(!published.path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Ephemeral preview staging never outlives the service lifetime that
+    /// produced it: a reopened workspace inherits no preview output, while a
+    /// retained Export artifact of the same lifetime stays.
+    #[test]
+    fn reopening_the_workspace_removes_inherited_preview_outputs() {
+        let (root, library, workspace) = fixture();
+        let writer = workspace.begin_preview_tiff("prev-test-2").unwrap();
+        fs::write(writer.temporary_path(), b"preview").unwrap();
+        let preview = writer.publish(|_| Ok(())).unwrap();
+        let retained = workspace.begin_development_tiff("request-3").unwrap();
+        fs::write(retained.temporary_path(), b"II*\0tiff").unwrap();
+        retained.publish(|_| Ok(())).unwrap();
+
+        let reopened =
+            ExportWorkspace::open(root.join("exports"), library.canonical_path()).unwrap();
+        assert!(!preview.path.exists());
+        assert!(
+            reopened
+                .root()
+                .join("previews")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(reopened.root().join("artifacts/request-3.tiff").exists());
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn publication_does_not_replace_an_existing_export_identity() {
         let (root, _library, workspace) = fixture();

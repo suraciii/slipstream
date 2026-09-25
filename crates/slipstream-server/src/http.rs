@@ -164,9 +164,9 @@ pub(crate) fn create_router_with_processing(
 }
 
 /// Builds the router with explicit Edit Preview seams. Production resolves
-/// retained Development Results from the Export lifecycle and refuses
-/// preview-class render admission, which has not landed; route tests inject
-/// scripted seams.
+/// retained Development Results from the Export lifecycle and admits
+/// unretained identities through the preview-class render gate; route tests
+/// may inject scripted seams.
 pub(crate) fn create_router_with_preview(
     application: Arc<Application>,
     web_root: WebRoot,
