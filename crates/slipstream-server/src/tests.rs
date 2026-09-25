@@ -13369,8 +13369,8 @@ async fn edit_preview_races_a_recipe_save_against_an_in_flight_render() {
     assert_eq!(body["error"]["details"]["reason"], "preview-superseded");
     assert_eq!(
         owner.derivations_started(),
-        1,
-        "the parked request did start its derivation"
+        0,
+        "the superseded request must be cancelled before its native conversion starts"
     );
 
     // The stale rendition was never published: the next request goes to

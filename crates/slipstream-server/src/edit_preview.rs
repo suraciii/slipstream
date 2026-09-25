@@ -334,15 +334,36 @@ type OwnerKey = (String, &'static str);
 
 /// Evicts the least recently touched other owner when the retained-owner
 /// bound is full; every owner insert path runs this first.
-fn evict_if_full(owners: &mut HashMap<OwnerKey, OwnerEntry>, key: &OwnerKey) {
+fn evict_if_full(
+    owners: &mut HashMap<OwnerKey, OwnerEntry>,
+    key: &OwnerKey,
+    render_gate: &Arc<dyn PreviewRenderGate>,
+) {
     if !owners.contains_key(key) && owners.len() >= MAXIMUM_OWNERS {
         let victim = owners
             .iter()
             .filter(|(existing, _)| *existing != key)
             .min_by_key(|(_, entry)| entry.last_used)
             .map(|(existing, _)| existing.clone());
-        if let Some(victim) = victim {
-            owners.remove(&victim);
+        let evicted = victim.and_then(|victim| owners.remove(&victim).map(|entry| (victim, entry)));
+        if let Some((victim, entry)) = evicted {
+            // An evicted owner can no longer cancel or settle its own work:
+            // its queued admission settles as cancelled so the gate never
+            // answers `running` forever, and its in-flight token flips so a
+            // conversion that already started discards its result.
+            if let Some(pending) = entry.pending {
+                render_gate.settle(
+                    PreviewRenderRequest {
+                        photo_id: &victim.0,
+                        stage: victim.1,
+                        identity_digest: &pending.digest,
+                    },
+                    RenderSettlement::Cancelled,
+                );
+            }
+            if let Some(inflight) = entry.inflight {
+                inflight.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -404,7 +425,7 @@ impl EditPreviewOwner {
     async fn touch_entry<R>(&self, key: &OwnerKey, read: impl FnOnce(&mut OwnerEntry) -> R) -> R {
         let mut owners = self.owners.lock().await;
         let touch = self.touches.fetch_add(1, Ordering::Relaxed) + 1;
-        evict_if_full(&mut owners, key);
+        evict_if_full(&mut owners, key, &self.render_gate);
         let entry = owners.entry(key.clone()).or_default();
         entry.last_used = touch;
         read(entry)
@@ -602,7 +623,7 @@ impl EditPreviewOwner {
             return PublishOutcome::Superseded;
         }
         let touch = self.touches.fetch_add(1, Ordering::Relaxed) + 1;
-        evict_if_full(&mut owners, key);
+        evict_if_full(&mut owners, key, &self.render_gate);
         let entry = owners.entry(key.clone()).or_default();
         entry.last_used = touch;
         entry.pending = None;
@@ -810,9 +831,17 @@ async fn serve_preview(
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
         return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
     };
+    // Register the intent before queuing for the heavy conversion: a newer
+    // admission can then cancel this token while it waits, and the queued
+    // request discovers the supersession before any native work starts.
+    let token = owner.begin_derivation(&key).await;
+    if token.load(Ordering::Relaxed) {
+        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+    }
     // One heavy native conversion at a time, instance-wide.
     let _derivation_permit = owner.derivation_permit().await;
-    let token = owner.begin_derivation(&key).await;
+    // Superseded while queued: leave without starting the native conversion,
+    // so supersession releases the heavy slot instead of consuming it.
     if token.load(Ordering::Relaxed) {
         return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
     }
@@ -1425,6 +1454,33 @@ mod tests {
                 .await
         );
         assert!(owner.current(&key, &published).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn evicting_a_pending_owner_settles_its_admission_as_cancelled() {
+        let gate = ScriptedGate::queued(1);
+        let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
+        let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
+        let key = ("photo".to_owned(), "develop");
+        let admitted = identity(250);
+        assert_eq!(
+            owner
+                .admit(&key, "photo", "develop", &admitted, SystemTime::now())
+                .await,
+            RenderAdmission::Queued
+        );
+        // Pressure the bound: the pending owner is the least recently
+        // touched entry, so it is the eviction victim.
+        for index in 0..MAXIMUM_OWNERS {
+            let filling_key = (format!("photo-{index}"), "develop");
+            let filling_identity = scripted_identity(&format!("source-{index}"), 250);
+            let current = filling_identity.clone();
+            publish(&owner, &filling_key, &filling_identity, Some(current)).await;
+        }
+        assert!(owner.owner_count().await <= MAXIMUM_OWNERS);
+        let settlements = gate.settlements.lock().unwrap();
+        assert_eq!(settlements.len(), 1, "the evicted admission settles once");
+        assert!(matches!(settlements[0], RenderSettlement::Cancelled));
     }
 
     #[tokio::test]
