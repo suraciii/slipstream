@@ -15,11 +15,13 @@ The `Rejected` filter shows Photos whose current Selection State is `rejected`. 
 Deleting a Photo is a separate capability from marking it. It has two distinct outcomes:
 
 - **Remove from Library** removes a Photo from normal Slipstream Library views while preserving a recoverable Photo record and its Original File. This is the capability specified here.
-- **Delete Original Files** physically deletes the Photographer's Original File. It is a separate, higher-risk capability and is outside this specification. Marking a Photo or removing it from the Library must never trigger it implicitly.
+- **Delete Original Files** physically deletes the Photographer's Original File only through [Trash and Permanent Deletion](library-management-trash.md). It is separate from reversible removal. Marking a Photo or removing it from the Library must never trigger it implicitly.
 
 ## Remove Rejected Photos
 
 ### Entry and review
+
+The user-facing destination for removed Photos is **Trash**, governed by [Trash and Permanent Deletion](library-management-trash.md). Removal places Photos there; it never deletes their Original Files.
 
 When the `Rejected` filter is active, the Library Browser may offer **Remove rejected Photos**. The action is unavailable for other filters and does not appear as a general delete action.
 
@@ -39,7 +41,7 @@ The result must report the number removed and identify Photos that could not be 
 
 The completed result provides **Undo** while the result remains available. Undo restores every Photo removed by that operation, including its prior Selection State and other retained facts, as one unit.
 
-Slipstream must also provide a durable **Restore** action for removed Photos after the immediate Undo affordance is gone. Restoring a Photo makes it available to normal Library views again without changing its Original File.
+Durable single and batch Restore follow [Trash and Permanent Deletion](library-management-trash.md#selection-and-restore).
 
 ### Failure behavior
 

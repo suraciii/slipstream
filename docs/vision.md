@@ -3,7 +3,7 @@
 Slipstream is a photo selection and organization workspace for a Photographer
 and the Photographer's own Agent. Its Web application supports direct visual
 review on a phone, tablet, or desktop. Its command-line client exposes the same
-photo-management capabilities for delegated use. Original Files remain unchanged.
+photo-management capabilities for delegated use. Original Files remain unchanged except for explicit [Permanent Deletion from Trash](library-management-trash.md).
 
 ## Goal
 
@@ -85,7 +85,7 @@ Edit Preview and Export contracts are in [Photo Development](photo-development.m
 - **One set of facts**: Clients share domain rules and durable state.
 - **Camera-produced preview**: Preserve truthful source and detail information.
 - **RAW-first independence**: Each Original File has independent Photo state.
-- **Original ownership**: Original Files remain in place and unchanged.
+- **Original ownership**: Original Files remain in place and unchanged except for separately confirmed [Permanent Deletion from Trash](library-management-trash.md).
 - **Touch-native browsing**: Gestures coexist with visible and keyboard controls.
 - **Bounded work**: Large Libraries do not require whole-Library transfer,
   client retention, or Preview generation before useful work.
