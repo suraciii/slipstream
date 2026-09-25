@@ -349,7 +349,10 @@ impl PhotoExecutor {
             0,
         )?;
         // The instance claim is shared with the other processing executors; it
-        // binds one root per instance identity across the whole host.
+        // binds one root per instance identity across the whole host. An
+        // existing claim whose root has no registry stays quarantined by the
+        // shared claim path, so the only registry-less state this process can
+        // observe is one it created itself.
         let authority = protocol::Config {
             version: 1,
             mode: "qualification".into(),
@@ -361,7 +364,18 @@ impl PhotoExecutor {
             memory_bytes: 128 * 1024 * 1024,
             receipt_retention_seconds: config.receipt_retention_seconds,
         };
-        let instance_claim = journal::claim_instance(&authority)?;
+        // The claim comes back as a lease: a claim this process created is
+        // removed by the guard if any step below fails, so a refused start
+        // never leaves a registry-less claim behind. The acquisition itself
+        // arms the lease, so no call-site ordering can skip it; the retained
+        // descriptor keeps the exclusive flock while the file is unlinked.
+        let claim = journal::claim_instance(&authority)?;
+        // The registry is made durable before any check that can refuse the
+        // start. Every later failure leaves a claim with a durable registry,
+        // which the next start loads instead of re-initializing.
+        let registry = restore_registry(root, &config)?;
+        validate_registry(&registry, &config)?;
+        persist(root, &registry)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -389,17 +403,6 @@ impl PhotoExecutor {
         // The pinned worker image is a deployment prerequisite: an unavailable
         // or foreign image leaves the whole capability unavailable.
         let image_id = inspect_image(&config)?;
-        let registry = load(root)?.unwrap_or(Registry {
-            version: 1,
-            instance: config.instance.clone(),
-            incarnation: random_id()?,
-            watermark: 0,
-            parent_pending: false,
-            parent_identity: None,
-            active: None,
-            records: BTreeMap::new(),
-        });
-        validate_registry(&registry, &config)?;
         for entry in fs::read_dir(root.join("attempts")).map_err(|_| ErrorCode::Unavailable)? {
             let entry = entry.map_err(|_| ErrorCode::Unavailable)?;
             if !registry
@@ -410,7 +413,7 @@ impl PhotoExecutor {
                 return Err(ErrorCode::Uncertain);
             }
         }
-        persist(root, &registry)?;
+        let _instance_claim = claim.take();
         Ok(Arc::new(Self {
             config,
             data: Mutex::new(Data {
@@ -419,7 +422,7 @@ impl PhotoExecutor {
             }),
             image_id,
             _lock: lock,
-            _instance_claim: instance_claim,
+            _instance_claim,
         }))
     }
 
@@ -2796,6 +2799,22 @@ fn random_id() -> Result<String, ErrorCode> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// Restore the durable registry, or initialize a fresh one with a new
+/// incarnation, exactly as a first start. An existing claim whose root has
+/// no registry never reaches here: the shared claim path quarantines it.
+fn restore_registry(root: &Path, config: &Config) -> Result<Registry, ErrorCode> {
+    Ok(load(root)?.unwrap_or(Registry {
+        version: 1,
+        instance: config.instance.clone(),
+        incarnation: random_id()?,
+        watermark: 0,
+        parent_pending: false,
+        parent_identity: None,
+        active: None,
+        records: BTreeMap::new(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3959,6 +3978,53 @@ mod tests {
             validate_registry(&fabricated, &config).unwrap_err(),
             ErrorCode::Uncertain
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_registry_initializes_a_fresh_incarnation() {
+        let root = temp_dir("fresh-registry");
+        let config = test_config(&root);
+        // A root with no registry restores nothing and initializes a fresh
+        // registry, exactly as a first start.
+        let registry = restore_registry(&root, &config).unwrap();
+        validate_registry(&registry, &config).unwrap();
+        assert_eq!(registry.version, 1);
+        assert_eq!(registry.instance, config.instance);
+        assert!(registry.records.is_empty());
+        assert!(!registry.parent_pending);
+        assert_eq!(registry.active, None);
+        // Each uninitialized root gets its own incarnation.
+        let again = restore_registry(&root, &config).unwrap();
+        assert_ne!(again.incarnation, registry.incarnation);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_failed_open_removes_only_the_claim_this_process_created() {
+        let root = temp_dir("fresh-claim");
+        let path = root.join("instance.claim");
+        let claim_root = root.display().to_string();
+        // The acquisition itself arms the lease: a fresh claim is removed
+        // when the open fails after claiming.
+        let claim = journal::hold_claim(&path, &root, &claim_root).unwrap();
+        drop(claim);
+        assert!(!path.try_exists().unwrap());
+        // Disarming by value keeps the claim for the executor's lifetime.
+        drop(
+            journal::hold_claim(&path, &root, &claim_root)
+                .unwrap()
+                .take(),
+        );
+        assert!(path.try_exists().unwrap());
+        // A claim created by an earlier owner is never a lease, so a failure
+        // here can never remove it; the quarantine in the shared claim path
+        // is what refuses a registry-less one.
+        fs::File::create(root.join("registry.json")).unwrap();
+        // Dropping the non-lease keeps the file: a failure here can never
+        // remove a claim created by an earlier owner.
+        drop(journal::hold_claim(&path, &root, &claim_root).unwrap());
+        assert!(path.try_exists().unwrap());
         fs::remove_dir_all(&root).unwrap();
     }
 

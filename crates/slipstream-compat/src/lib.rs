@@ -451,6 +451,8 @@ mod tests {
             "sqlite/schema-v6.sql",
             "sqlite/schema-v7.json",
             "sqlite/schema-v7.sql",
+            "sqlite/schema-v8.json",
+            "sqlite/schema-v8.sql",
             "sqlite/v0.sql",
             "sqlite/v1.sql",
             "startup/vectors.json",
@@ -528,7 +530,7 @@ mod tests {
                 "{file} lost its executing consumer {source}"
             );
         }
-        for version in 1..=7 {
+        for version in 1..=8 {
             let schema = fs::read_to_string(
                 repository.join("crates/slipstream-core/src/persistence/schema.rs"),
             )

@@ -238,12 +238,46 @@ pub struct PhotoRead {
     pub has_saved_edits: bool,
 }
 
-/// White-balance intent currently supported by the engine-independent state
-/// layer. Custom temperature and tint values remain unavailable until their
-/// processing mapping and ranges are qualified.
+/// White-balance intent stored by the engine-independent state layer. The
+/// closed payload bounds are published independent of admission: `as-shot`
+/// is the only mode the qualified capability admits for execution, while a
+/// stored `temperature-tint` value is retained editing intent that reads
+/// back and renders but is never executed until the capability report
+/// admits the mode again.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WhiteBalanceIntent {
     AsShot,
+    TemperatureTint {
+        /// 1,000 through 40,000 Kelvin.
+        temperature_kelvin: i32,
+        /// -150,000 through 150,000 thousandths of the green–magenta unit.
+        tint_milli: i32,
+    },
+}
+
+impl WhiteBalanceIntent {
+    /// The shared wire mode name of this intent.
+    pub fn mode_name(self) -> &'static str {
+        match self {
+            Self::AsShot => "as-shot",
+            Self::TemperatureTint { .. } => "temperature-tint",
+        }
+    }
+
+    /// True while the intent stays within the closed payload bounds, so a
+    /// persisted value can never leave the published shape.
+    pub fn within_payload_bounds(self) -> bool {
+        match self {
+            Self::AsShot => true,
+            Self::TemperatureTint {
+                temperature_kelvin,
+                tint_milli,
+            } => {
+                (1_000..=40_000).contains(&temperature_kelvin)
+                    && (-150_000..=150_000).contains(&tint_milli)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -274,10 +308,10 @@ pub struct EditRecipeRead {
 pub struct SaveEditRecipe {
     pub photo_id: String,
     /// Stable caller-owned identity used to resolve a retry after a lost
-    /// response. It is not the recipe revision and must not be regenerated
+    /// response. It is not the recipe version and must not be regenerated
     /// while retrying one save.
     pub request_id: String,
-    pub expected_recipe_revision: Option<String>,
+    pub expected_recipe_version: Option<String>,
     pub expected_source_revision: String,
     pub settings: EditRecipeSettings,
 }
@@ -285,13 +319,21 @@ pub struct SaveEditRecipe {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RebindEditRecipe {
     pub photo_id: String,
-    pub expected_recipe_revision: String,
-    pub expected_source_revision: String,
+    /// The caller-owned identity that makes one rebind idempotent, exactly
+    /// like a save identity.
+    pub request_id: String,
+    pub expected_recipe_version: String,
+    pub new_source_revision: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditRecipeWriteOutcome {
+    /// A fresh commit installed a new recipe version inside the write
+    /// transaction.
     Saved(EditRecipe),
+    /// A receipt replay of a committed write: nothing was written, and the
+    /// carried recipe is the committed receipt, whatever advanced since.
+    Replayed(EditRecipe),
     Unchanged(EditRecipe),
     Conflict(EditRecipeRead),
     SourceChanged(EditRecipeRead),

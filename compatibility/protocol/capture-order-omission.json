@@ -7,6 +7,7 @@
     "originalFilename",
     "selectionState",
     "rating",
+    "hasSavedEdits",
     "preview"
   ],
   "optionalKeys": ["originalFilename"]

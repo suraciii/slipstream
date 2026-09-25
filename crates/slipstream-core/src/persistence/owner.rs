@@ -64,6 +64,10 @@ struct EditRecipeReceipt {
     source_revision: String,
     exposure_ev: f64,
     white_balance_mode: String,
+    #[serde(default)]
+    temperature_kelvin: Option<i32>,
+    #[serde(default)]
+    tint_milli: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -1716,7 +1720,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 7)
+    preflight_schema_for_max_version(connection, canonical_root, 8)
 }
 
 fn preflight_schema_for_max_version(
@@ -1747,6 +1751,8 @@ fn preflight_schema_for_max_version(
         6 => validate_canonical_schema(connection, SchemaVersion::V6)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         7 => validate_canonical_schema(connection, SchemaVersion::V7)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        8 => validate_canonical_schema(connection, SchemaVersion::V8)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -1784,7 +1790,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 7 {
+    if version > 8 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -1831,13 +1837,18 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         7 => validate_canonical_schema(&transaction, SchemaVersion::V7)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        8 => validate_canonical_schema(&transaction, SchemaVersion::V8)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
         migrate_v5(&transaction)?;
     }
-    if version != 7 {
+    if version < 7 {
         migrate_v6(&transaction)?;
+    }
+    if version < 8 {
+        migrate_v7(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -1856,7 +1867,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -2237,6 +2248,36 @@ fn migrate_v6(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         )
         .map_err(|_| PersistenceError::Storage)?;
     validate_canonical_schema(transaction, SchemaVersion::V7)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
+fn migrate_v7(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V7)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // The closed white-balance payload bounds are published independent of
+    // admission, so a recipe can retain a temperature-tint editing intent
+    // that no capability admits for execution. The rebuild widens the mode
+    // column and adds the two nullable intent values; existing as-shot rows
+    // keep null values.
+    transaction
+        .execute_batch(
+            "ALTER TABLE edit_recipes RENAME TO edit_recipes_v7;
+             CREATE TABLE edit_recipes(
+               photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE RESTRICT,
+               revision TEXT NOT NULL CHECK(length(revision) > 0),
+               source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+               exposure_ev REAL NOT NULL CHECK(exposure_ev BETWEEN -1.7976931348623157e308 AND 1.7976931348623157e308),
+               white_balance_mode TEXT NOT NULL CHECK(white_balance_mode IN ('as-shot','temperature-tint')),
+               temperature_kelvin INTEGER CHECK(temperature_kelvin IS NULL OR temperature_kelvin BETWEEN 1000 AND 40000),
+               tint_milli INTEGER CHECK(tint_milli IS NULL OR tint_milli BETWEEN -150000 AND 150000)
+             );
+             INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
+               SELECT photo_id,revision,source_revision,exposure_ev,white_balance_mode FROM edit_recipes_v7;
+             DROP TABLE edit_recipes_v7;
+             PRAGMA user_version = 8;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
@@ -2823,8 +2864,13 @@ pub(crate) fn expand_library_binding(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&readonly, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // A library written by the previous release is still canonical at V7;
+    // the writable pass below brings it to the current schema.
+    if validate_canonical_schema(&readonly, SchemaVersion::V8).is_err()
+        && validate_canonical_schema(&readonly, SchemaVersion::V7).is_err()
+    {
+        return Err(PersistenceError::UnsupportedSchema);
+    }
     let stored_root = required_root_binding(&readonly)?;
     drop(readonly);
 
@@ -2874,8 +2920,10 @@ pub(crate) fn expand_library_binding(
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&connection, SchemaVersion::V7)
-        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    // Bring a previous-release schema up to the current one with the same
+    // migration chain startup uses, so the expansion writes against the
+    // canonical current tables.
+    startup_schema(&state, &database_name, &mut connection, &stored_root)?;
     if required_root_binding(&connection)? != stored_root {
         return Err(PersistenceError::RootMismatch);
     }
@@ -2887,7 +2935,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -2937,7 +2985,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V7)
+    validate_canonical_schema(&transaction, SchemaVersion::V8)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3725,7 +3773,8 @@ fn read_edit_recipe(
     let row = connection
         .query_row(
             "SELECT o.relative_path,o.size,o.mtime_ms,o.available,p.available,
-                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode
+                    e.revision,e.source_revision,e.exposure_ev,e.white_balance_mode,
+                    e.temperature_kelvin,e.tint_milli
              FROM photos p JOIN original_files o ON o.id=p.original_id
              LEFT JOIN edit_recipes e ON e.photo_id=p.id WHERE p.id=?",
             [photo_id],
@@ -3739,6 +3788,8 @@ fn read_edit_recipe(
                 let recipe_source_revision: Option<String> = row.get(6)?;
                 let exposure_ev: Option<f64> = row.get(7)?;
                 let white_balance_mode: Option<String> = row.get(8)?;
+                let temperature_kelvin: Option<i32> = row.get(9)?;
+                let tint_milli: Option<i32> = row.get(10)?;
                 let recipe = match (
                     recipe_revision,
                     recipe_source_revision,
@@ -3753,7 +3804,11 @@ fn read_edit_recipe(
                             source_revision,
                             settings: EditRecipeSettings {
                                 exposure_ev,
-                                white_balance: parse_white_balance_intent(&mode)?,
+                                white_balance: parse_white_balance_intent(
+                                    &mode,
+                                    temperature_kelvin,
+                                    tint_milli,
+                                )?,
                             },
                         })
                     }
@@ -3783,12 +3838,29 @@ fn validate_edit_recipe_request_id(request_id: &str) -> bool {
 }
 
 fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, PersistenceError> {
+    // The digest formula is durable, not a wire field: receipts written by
+    // earlier releases hold digests over these exact serialized keys, so the
+    // internal rename of the recipe-version field must not change them.
+    // The as-shot white-balance value stays a bare string for the same
+    // reason; a value-carrying intent serializes its values because two
+    // different payloads under one request identity must never collide.
+    let white_balance = match mutation.settings.white_balance {
+        WhiteBalanceIntent::AsShot => serde_json::json!("as-shot"),
+        WhiteBalanceIntent::TemperatureTint {
+            temperature_kelvin,
+            tint_milli,
+        } => serde_json::json!({
+            "mode": "temperature-tint",
+            "temperature_kelvin": temperature_kelvin,
+            "tint_milli": tint_milli,
+        }),
+    };
     let payload = serde_json::json!({
         "photo_id": mutation.photo_id,
-        "expected_recipe_revision": mutation.expected_recipe_revision,
+        "expected_recipe_revision": mutation.expected_recipe_version,
         "expected_source_revision": mutation.expected_source_revision,
         "exposure_ev": mutation.settings.exposure_ev,
-        "white_balance": white_balance_intent_name(mutation.settings.white_balance),
+        "white_balance": white_balance,
     });
     let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -3832,8 +3904,12 @@ fn write_edit_recipe_receipt(
 }
 
 fn receipt_recipe(receipt: EditRecipeReceipt) -> Result<EditRecipe, PersistenceError> {
-    let white_balance = parse_white_balance_intent(&receipt.white_balance_mode)
-        .map_err(|_| PersistenceError::Storage)?;
+    let white_balance = parse_white_balance_intent(
+        &receipt.white_balance_mode,
+        receipt.temperature_kelvin,
+        receipt.tint_milli,
+    )
+    .map_err(|_| PersistenceError::Storage)?;
     Ok(EditRecipe {
         photo_id: receipt.photo_id,
         revision: receipt.revision,
@@ -3852,6 +3928,7 @@ fn save_edit_recipe(
     mutation: SaveEditRecipe,
 ) -> Result<EditRecipeWriteOutcome, PersistenceError> {
     if !mutation.settings.exposure_ev.is_finite()
+        || !mutation.settings.white_balance.within_payload_bounds()
         || mutation.expected_source_revision.is_empty()
         || !validate_edit_recipe_request_id(&mutation.request_id)
     {
@@ -3865,7 +3942,7 @@ fn save_edit_recipe(
             }
             let recipe = receipt_recipe(receipt.clone())?;
             return Ok(match receipt.outcome {
-                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Saved(recipe),
+                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
                 EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
             });
         }
@@ -3889,7 +3966,7 @@ fn save_edit_recipe(
             .recipe
             .as_ref()
             .map(|recipe| recipe.revision.as_str())
-            != mutation.expected_recipe_revision.as_deref()
+            != mutation.expected_recipe_version.as_deref()
         {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
@@ -3903,6 +3980,8 @@ fn save_edit_recipe(
         if let Some(recipe) = &current.recipe
             && recipe.settings == mutation.settings
         {
+            let (temperature_kelvin, tint_milli) =
+                white_balance_intent_values(recipe.settings.white_balance);
             write_edit_recipe_receipt(
                 transaction,
                 &mutation.request_id,
@@ -3915,25 +3994,32 @@ fn save_edit_recipe(
                     exposure_ev: recipe.settings.exposure_ev,
                     white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
                         .to_owned(),
+                    temperature_kelvin,
+                    tint_milli,
                 },
             )?;
             return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
         }
 
         let revision = random_uuid_v4()?;
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(mutation.settings.white_balance);
         transaction
             .execute(
-                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode)
-                 VALUES(?,?,?,?,?)
+                "INSERT INTO edit_recipes(photo_id,revision,source_revision,exposure_ev,white_balance_mode,temperature_kelvin,tint_milli)
+                 VALUES(?,?,?,?,?,?,?)
                  ON CONFLICT(photo_id) DO UPDATE SET revision=excluded.revision,
                     source_revision=excluded.source_revision,exposure_ev=excluded.exposure_ev,
-                    white_balance_mode=excluded.white_balance_mode",
+                    white_balance_mode=excluded.white_balance_mode,
+                    temperature_kelvin=excluded.temperature_kelvin,tint_milli=excluded.tint_milli",
                 params![
                     mutation.photo_id,
                     revision,
                     mutation.expected_source_revision,
                     mutation.settings.exposure_ev,
                     white_balance_intent_name(mutation.settings.white_balance),
+                    temperature_kelvin,
+                    tint_milli,
                 ],
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -3943,6 +4029,8 @@ fn save_edit_recipe(
             source_revision: mutation.expected_source_revision,
             settings: mutation.settings,
         };
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(recipe.settings.white_balance);
         write_edit_recipe_receipt(
             transaction,
             &mutation.request_id,
@@ -3955,10 +4043,25 @@ fn save_edit_recipe(
                 exposure_ev: recipe.settings.exposure_ev,
                 white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
                     .to_owned(),
+                temperature_kelvin,
+                tint_milli,
             },
         )?;
         Ok(EditRecipeWriteOutcome::Saved(recipe))
     })
+}
+
+fn edit_recipe_rebind_payload_digest(
+    mutation: &RebindEditRecipe,
+) -> Result<String, PersistenceError> {
+    let payload = serde_json::json!({
+        "kind": "rebind",
+        "photo_id": mutation.photo_id,
+        "expected_recipe_version": mutation.expected_recipe_version,
+        "new_source_revision": mutation.new_source_revision,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn rebind_edit_recipe(
@@ -3967,10 +4070,26 @@ fn rebind_edit_recipe(
     connection: &mut Connection,
     mutation: RebindEditRecipe,
 ) -> Result<EditRecipeWriteOutcome, PersistenceError> {
-    if mutation.expected_source_revision.is_empty() {
+    if mutation.new_source_revision.is_empty()
+        || !validate_edit_recipe_request_id(&mutation.request_id)
+    {
         return Ok(EditRecipeWriteOutcome::InvalidSettings);
     }
+    let payload_digest = edit_recipe_rebind_payload_digest(&mutation)?;
     write_transaction(state, database_name, connection, |transaction| {
+        // The rebind identity follows the save rules: the same identity and
+        // payload replays the committed receipt, and the same identity with
+        // a different payload is refused.
+        if let Some(receipt) = read_edit_recipe_receipt(transaction, &mutation.request_id)? {
+            if receipt.photo_id != mutation.photo_id || receipt.payload_digest != payload_digest {
+                return Ok(EditRecipeWriteOutcome::RequestConflict);
+            }
+            let recipe = receipt_recipe(receipt.clone())?;
+            return Ok(match receipt.outcome {
+                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
+                EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
+            });
+        }
         let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
             return Ok(EditRecipeWriteOutcome::MissingPhoto);
         };
@@ -3987,13 +4106,31 @@ fn rebind_edit_recipe(
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(EditRecipeWriteOutcome::MissingRecipe);
         };
-        if recipe.revision != mutation.expected_recipe_revision {
+        if recipe.revision != mutation.expected_recipe_version {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        if current.current_source_revision != mutation.expected_source_revision {
+        if current.current_source_revision != mutation.new_source_revision {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
-        if recipe.source_revision == mutation.expected_source_revision {
+        if recipe.source_revision == mutation.new_source_revision {
+            let (temperature_kelvin, tint_milli) =
+                white_balance_intent_values(recipe.settings.white_balance);
+            write_edit_recipe_receipt(
+                transaction,
+                &mutation.request_id,
+                &EditRecipeReceipt {
+                    photo_id: recipe.photo_id.clone(),
+                    payload_digest,
+                    outcome: EditRecipeReceiptOutcome::Unchanged,
+                    revision: recipe.revision.clone(),
+                    source_revision: recipe.source_revision.clone(),
+                    exposure_ev: recipe.settings.exposure_ev,
+                    white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
+                        .to_owned(),
+                    temperature_kelvin,
+                    tint_milli,
+                },
+            )?;
             return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
         }
         let revision = random_uuid_v4()?;
@@ -4003,21 +4140,40 @@ fn rebind_edit_recipe(
                  WHERE photo_id=? AND revision=?",
                 params![
                     revision,
-                    mutation.expected_source_revision,
+                    mutation.new_source_revision,
                     mutation.photo_id,
-                    mutation.expected_recipe_revision,
+                    mutation.expected_recipe_version,
                 ],
             )
             .map_err(|_| PersistenceError::Storage)?;
         if changed != 1 {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        Ok(EditRecipeWriteOutcome::Saved(EditRecipe {
+        let rebound = EditRecipe {
             photo_id: mutation.photo_id,
             revision,
-            source_revision: mutation.expected_source_revision,
+            source_revision: mutation.new_source_revision,
             settings: recipe.settings,
-        }))
+        };
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(rebound.settings.white_balance);
+        write_edit_recipe_receipt(
+            transaction,
+            &mutation.request_id,
+            &EditRecipeReceipt {
+                photo_id: rebound.photo_id.clone(),
+                payload_digest,
+                outcome: EditRecipeReceiptOutcome::Saved,
+                revision: rebound.revision.clone(),
+                source_revision: rebound.source_revision.clone(),
+                exposure_ev: rebound.settings.exposure_ev,
+                white_balance_mode: white_balance_intent_name(rebound.settings.white_balance)
+                    .to_owned(),
+                temperature_kelvin,
+                tint_milli,
+            },
+        )?;
+        Ok(EditRecipeWriteOutcome::Saved(rebound))
     })
 }
 
@@ -4042,15 +4198,38 @@ fn photo_processing_source(
 }
 
 fn white_balance_intent_name(intent: WhiteBalanceIntent) -> &'static str {
+    intent.mode_name()
+}
+
+fn white_balance_intent_values(intent: WhiteBalanceIntent) -> (Option<i32>, Option<i32>) {
     match intent {
-        WhiteBalanceIntent::AsShot => "as-shot",
+        WhiteBalanceIntent::AsShot => (None, None),
+        WhiteBalanceIntent::TemperatureTint {
+            temperature_kelvin,
+            tint_milli,
+        } => (Some(temperature_kelvin), Some(tint_milli)),
     }
 }
 
-fn parse_white_balance_intent(value: &str) -> rusqlite::Result<WhiteBalanceIntent> {
-    match value {
-        "as-shot" => Ok(WhiteBalanceIntent::AsShot),
-        _ => Err(rusqlite::Error::InvalidQuery),
+fn parse_white_balance_intent(
+    mode: &str,
+    temperature_kelvin: Option<i32>,
+    tint_milli: Option<i32>,
+) -> rusqlite::Result<WhiteBalanceIntent> {
+    let intent = match (mode, temperature_kelvin, tint_milli) {
+        ("as-shot", None, None) => WhiteBalanceIntent::AsShot,
+        ("temperature-tint", Some(temperature_kelvin), Some(tint_milli)) => {
+            WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin,
+                tint_milli,
+            }
+        }
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    if intent.within_payload_bounds() {
+        Ok(intent)
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
     }
 }
 
@@ -6002,7 +6181,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
     }
 
     #[tokio::test]
@@ -6083,12 +6262,12 @@ mod tests {
         persistence.shutdown().unwrap();
 
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             connection
@@ -6158,7 +6337,7 @@ mod tests {
         let mutation = SaveEditRecipe {
             photo_id: "raw-photo".to_owned(),
             request_id: "first-save".to_owned(),
-            expected_recipe_revision: None,
+            expected_recipe_version: None,
             expected_source_revision: initial_source.clone(),
             settings: EditRecipeSettings {
                 exposure_ev: 0.0,
@@ -6194,7 +6373,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "unchanged-save".to_owned(),
-                expected_recipe_revision: Some(recipe.revision.clone()),
+                expected_recipe_version: Some(recipe.revision.clone()),
                 expected_source_revision: initial_source.clone(),
                 settings: recipe.settings,
             })
@@ -6208,7 +6387,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "first-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -6219,13 +6398,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(replay, EditRecipeWriteOutcome::Saved(recipe.clone()));
+        assert_eq!(replay, EditRecipeWriteOutcome::Replayed(recipe.clone()));
 
         let request_conflict = persistence
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "first-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 1.0,
@@ -6251,8 +6430,8 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "stale-save".to_owned(),
-                expected_recipe_revision: Some(recipe.revision.clone()),
-                expected_source_revision: initial_source,
+                expected_recipe_version: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 1.0,
                     white_balance: WhiteBalanceIntent::AsShot,
@@ -6272,8 +6451,9 @@ mod tests {
         let rebound = persistence
             .rebind_edit_recipe_receiver(RebindEditRecipe {
                 photo_id: "raw-photo".to_owned(),
-                expected_recipe_revision: recipe.revision.clone(),
-                expected_source_revision: changed_source.clone(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
             })
             .unwrap()
             .await
@@ -6286,12 +6466,81 @@ mod tests {
         assert_ne!(rebound.revision, recipe.revision);
         assert_eq!(rebound.source_revision, changed_source);
         assert_eq!(rebound.settings, recipe.settings);
+
+        // A replay stays exact even after another write advanced the recipe:
+        // persistence decides the outcome inside the write transaction, so
+        // the receipt's version is reported whatever happened since.
+        persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "advance-save".to_owned(),
+                expected_recipe_version: Some(rebound.revision.clone()),
+                expected_source_revision: rebound.source_revision.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.5,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "first-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stale_replay,
+            EditRecipeWriteOutcome::Replayed(recipe.clone()),
+            "the replay must carry the receipt's version, not the current one"
+        );
+
+        // The rebind identity replays exactly like a save identity: the same
+        // payload replays the receipt, a different payload is refused.
+        let rebind_replay = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rebind_replay,
+            EditRecipeWriteOutcome::Replayed(rebound.clone())
+        );
+        let rebind_conflict = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: rebound.revision.clone(),
+                new_source_revision: rebound.source_revision.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebind_conflict, EditRecipeWriteOutcome::RequestConflict);
         assert!(matches!(
             persistence
                 .save_edit_recipe_receiver(SaveEditRecipe {
                     photo_id: "raw-photo".to_owned(),
                     request_id: "after-rebind-save".to_owned(),
-                    expected_recipe_revision: Some(recipe.revision),
+                    expected_recipe_version: Some(recipe.revision),
                     expected_source_revision: changed_source,
                     settings: EditRecipeSettings {
                         exposure_ev: 2.0,
@@ -6333,6 +6582,93 @@ mod tests {
             .unwrap();
         assert!(!edit_read.source_available);
         assert!(persistence.snapshot().await.unwrap().photos[0].has_saved_edits);
+        persistence.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_receipts_replay_with_the_original_digest_formula() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+
+        // A receipt written by a release before the internal recipe-version
+        // rename: its digest covers the original serialized key set, and its
+        // shape carries no temperature or tint values because the as-shot
+        // intent predates the value-carrying columns.
+        let source_revision = "legacy-source-revision";
+        let legacy_payload = serde_json::json!({
+            "photo_id": "raw-photo",
+            "expected_recipe_revision": serde_json::Value::Null,
+            "expected_source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance": "as-shot",
+        });
+        let legacy_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&legacy_payload).unwrap())
+        );
+        let legacy_receipt = serde_json::json!({
+            "photo_id": "raw-photo",
+            "payload_digest": legacy_digest,
+            "outcome": "Saved",
+            "revision": "legacy-recipe-version",
+            "source_revision": source_revision,
+            "exposure_ev": 0.25,
+            "white_balance_mode": "as-shot",
+        });
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('edit_recipe_receipt:legacy-save',?)",
+                [serde_json::to_string(&legacy_receipt).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+
+        // The same logical save retried after the upgrade must replay the
+        // committed receipt, not refuse the identity as conflicted.
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "legacy-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replay,
+            EditRecipeWriteOutcome::Replayed(EditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                revision: "legacy-recipe-version".to_owned(),
+                source_revision: source_revision.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            }),
+            "a pre-upgrade receipt must keep replaying with the committed version"
+        );
         persistence.shutdown().unwrap();
     }
 
@@ -6386,7 +6722,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "missing-raw-photo".to_owned(),
                 request_id: "unavailable-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: source_revision("shoot/missing.ARW", 13, 1_000.0)
                     .unwrap(),
                 settings: EditRecipeSettings {
@@ -6404,7 +6740,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "jpeg-photo".to_owned(),
                 request_id: "jpeg-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: source_revision("shoot/one.JPG", 11, 2_000.0).unwrap(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -6421,7 +6757,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "not-a-photo".to_owned(),
                 request_id: "missing-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: "source-revision".to_owned(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -6634,9 +6970,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -6645,7 +6981,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v8_database_is_rejected_without_changes() {
+    fn newer_v9_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -6653,7 +6989,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 8)
+            .pragma_update(None, "user_version", 9)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -6737,7 +7073,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -6908,7 +7244,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V7).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 

@@ -362,14 +362,14 @@ A missing launcher, incompatible protocol, unavailable controller or invalid
 allocation disables processing while normal browsing and saved edits remain
 available. Availability is not proven by an open socket or a healthy container.
 
-Processing capability is separate from Library readiness. Report `disabled`
-when the operator has not selected the processing-enabled deployment,
-`unavailable` when it is selected but the launcher, approved policy, bundle,
-resource boundary or reconciliation is not ready, and `available` only when
-all of those checks pass for the exact deployed identities. Report source and
-bundle availability separately from launcher/resource capability. The
-qualification profile reports `qualification-only`; it never reports
-production processing as available.
+Processing capability is separate from Library readiness, and the merged Photo
+Development service surface specification owns its contract: read
+`design/photo-development.md` for the closed capability condition set
+(`disabled`, `launcher-unavailable`, `bundle-unavailable`,
+`source-unsupported`, `resource-unavailable`, `ready`), the per-profile
+`whiteBalanceModes` and `whiteBalanceRanges` report, the stage states, and
+the response fields. The qualification profile reports
+`qualification-only`; it never reports production processing as ready.
 
 `GET /api/processing/capability` reports this read-only state independently of
 `/healthz` and the CLI contract endpoint. A base deployment reports
@@ -378,22 +378,13 @@ receives the operator-pinned instance, policy digest and bundle digest as
 read-only startup values and derives the fixed socket path from the instance.
 It sends Reconcile to that socket and accepts launcher readiness only for the
 version-1 `photo-processing` capability, the matching instance and digests, a
-valid incarnation, a positive next sequence and `available` admission. A
-blocked response, protocol mismatch, unsupported capability or transport
-failure reports `unavailable` with a stable reason code; it never changes
+valid incarnation, a positive next sequence and `available` admission; a
+launcher that does not expose that capability reports `source-unsupported`
+with an empty profile list. Any other refusal or transport failure reports
+the closed condition its answer names, with the launcher-observed bundle
+digest and incarnation when the answer carried them; it never changes
 Library readiness or starts an attempt. The endpoint does not return paths,
 raw launcher errors or pinned digests.
-
-The response has `state` (`disabled`, `unavailable` or `available`), `launcher`,
-`source`, `bundle`, and `reason`. `launcher`, `source` and `bundle` each report
-`disabled`, `available` or `unavailable`. Bundle availability requires the
-exact configured digest to match the launcher response. Source availability
-remains `unavailable` until the qualified source and Export path is connected,
-so the overall state cannot report `available` before that boundary exists.
-`reason` is null only when the overall state is `available`; otherwise it is
-one of `operator-disabled`, `launcher-unavailable`,
-`unsupported-capability`, `identity-mismatch`, `launcher-blocked`, or
-`source-unavailable`.
 
 This state could be added to `/api/capabilities`, but that endpoint is versioned
 for static CLI contract support. A separate path keeps changing launcher

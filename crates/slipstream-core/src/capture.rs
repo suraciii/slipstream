@@ -14,6 +14,8 @@ use std::fmt;
 /// Total metadata bytes one Capture Time inspection may read or allocate.
 pub const MAXIMUM_CAPTURE_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAXIMUM_TAG_VALUE_BYTES: usize = 64 * 1024;
+/// Camera identity strings are short; a longer value is not a camera name.
+const MAXIMUM_TEXT_TAG_BYTES: usize = 128;
 const MAXIMUM_TIFF_DIRECTORY_ENTRIES: usize = 1024;
 const MAXIMUM_JPEG_MARKERS: usize = 4096;
 
@@ -67,6 +69,10 @@ pub struct CaptureReviewMetadata {
     pub iso: Option<u32>,
     pub shutter_speed: Option<String>,
     pub focal_length: Option<String>,
+    /// Camera make and model as recorded by the camera. They identify the
+    /// source class of a RAW Original and are not user-editable facts.
+    pub make: Option<String>,
+    pub model: Option<String>,
 }
 
 impl CaptureFact {
@@ -437,6 +443,8 @@ enum TagValue {
 
 #[derive(Clone, Debug)]
 struct ExifFields {
+    make: TagValue,
+    model: TagValue,
     original: TagValue,
     digitized: TagValue,
     subsec_original: TagValue,
@@ -453,6 +461,8 @@ struct ExifFields {
 impl Default for ExifFields {
     fn default() -> Self {
         Self {
+            make: TagValue::Absent,
+            model: TagValue::Absent,
             original: TagValue::Absent,
             digitized: TagValue::Absent,
             subsec_original: TagValue::Absent,
@@ -658,10 +668,22 @@ fn parse_tiff(
         order: Some(order),
         ..ExifFields::default()
     };
-    collect_capture_tags(&mut tiff, order, &entries, &mut fields)?;
+    collect_capture_tags(
+        &mut tiff,
+        order,
+        &entries,
+        &mut fields,
+        CaptureDirectory::Primary,
+    )?;
     if let Some(exif_offset) = single_exif_offset(&mut tiff, order, &entries)? {
         let entries = read_directory(&mut tiff, exif_offset, order)?;
-        collect_capture_tags(&mut tiff, order, &entries, &mut fields)?;
+        collect_capture_tags(
+            &mut tiff,
+            order,
+            &entries,
+            &mut fields,
+            CaptureDirectory::Exif,
+        )?;
     }
     Ok(Some(fields))
 }
@@ -726,14 +748,37 @@ fn scalar_u32(
     }
 }
 
+/// Which TIFF directory a collection pass reads.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CaptureDirectory {
+    /// The primary image directory.
+    Primary,
+    /// The Exif subdirectory referenced from the primary directory.
+    Exif,
+}
+
+/// Camera identity tags, which are only meaningful in the primary directory.
+fn is_camera_identity(tag: u16) -> bool {
+    matches!(tag, 0x010f | 0x0110)
+}
+
 fn collect_capture_tags(
     reader: &mut TiffReader<'_, '_>,
     _order: ByteOrder,
     entries: &[TiffEntry],
     fields: &mut ExifFields,
+    directory: CaptureDirectory,
 ) -> Result<(), MetadataError> {
     for entry in entries {
+        // A Make or Model in the Exif subdirectory is not the camera identity:
+        // accepting it would let a file with no primary identity be classified
+        // as an approved camera, so it is ignored rather than invalidated.
+        if directory == CaptureDirectory::Exif && is_camera_identity(entry.tag) {
+            continue;
+        }
         let (target, expected_types): (Option<&mut TagValue>, &[u16]) = match entry.tag {
+            0x010f => (Some(&mut fields.make), &[2]),
+            0x0110 => (Some(&mut fields.model), &[2]),
             0x9003 => (Some(&mut fields.original), &[2]),
             0x9004 => (Some(&mut fields.digitized), &[2]),
             0x9291 => (Some(&mut fields.subsec_original), &[2]),
@@ -754,6 +799,10 @@ fn collect_capture_tags(
         *target = match field_bytes(reader, entry) {
             Ok(value) => TagValue::Valid(value),
             Err(MetadataError::Invalid) => TagValue::Invalid,
+            // A camera identity larger than the bounded tag ceiling is
+            // unusable, but it must not discard the rest of the bounded
+            // metadata: report the identity as unavailable and keep the facts.
+            Err(MetadataError::Resource) if is_camera_identity(entry.tag) => TagValue::Invalid,
             Err(error) => return Err(error),
         };
     }
@@ -845,7 +894,35 @@ fn review_metadata(fields: &ExifFields) -> CaptureReviewMetadata {
         focal_length: parse_rational(&fields.focal_length, order).map(
             |(numerator, denominator)| format!("{} mm", format_decimal(numerator, denominator)),
         ),
+        make: parse_text(&fields.make),
+        model: parse_text(&fields.model),
     }
+}
+
+/// One bounded ASCII tag value: camera strings are NUL-terminated and may carry
+/// padding. A value that is not printable ASCII is reported as absent rather
+/// than guessed.
+fn parse_text(value: &TagValue) -> Option<String> {
+    let TagValue::Valid(value) = value else {
+        return None;
+    };
+    let end = value
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(value.len());
+    let text = value.get(..end)?;
+    if text.is_empty() || text.len() > MAXIMUM_TEXT_TAG_BYTES {
+        return None;
+    }
+    if !text
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        return None;
+    }
+    let text = String::from_utf8_lossy(text);
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 fn parse_integer(value: &TagValue, order: ByteOrder) -> Option<u32> {
@@ -1298,6 +1375,8 @@ mod tests {
             (0x8827, 3, 400_u16.to_le_bytes().to_vec()),
             (0x829a, 5, rational(1, 125)),
             (0x920a, 5, rational(50, 1)),
+            (0x010f, 2, b"SONY\0".to_vec()),
+            (0x0110, 2, b"ILCE-7RM5\0\0\0".to_vec()),
         ]));
         let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
         assert_eq!(
@@ -1308,6 +1387,118 @@ mod tests {
         assert_eq!(metadata.iso, Some(400));
         assert_eq!(metadata.shutter_speed.as_deref(), Some("1/125 s"));
         assert_eq!(metadata.focal_length.as_deref(), Some("50 mm"));
+        assert_eq!(metadata.make.as_deref(), Some("SONY"));
+        assert_eq!(metadata.model.as_deref(), Some("ILCE-7RM5"));
+    }
+
+    /// Encodes one TIFF directory with its out-of-line data, so a caller can
+    /// place the two parts at known offsets.
+    fn directory(entries: &[(u16, u16, Vec<u8>)], ifd_offset: usize) -> (Vec<u8>, Vec<u8>) {
+        let data_start = ifd_offset + 2 + entries.len() * 12 + 4;
+        let mut ifd = Vec::new();
+        ifd.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        let mut data = Vec::new();
+        for (tag, field_type, value) in entries {
+            ifd.extend_from_slice(&tag.to_le_bytes());
+            ifd.extend_from_slice(&field_type.to_le_bytes());
+            let count = if matches!(field_type, 3..=5) {
+                1
+            } else {
+                value.len() as u32
+            };
+            ifd.extend_from_slice(&count.to_le_bytes());
+            if value.len() <= 4 {
+                let mut inline = [0; 4];
+                inline[..value.len()].copy_from_slice(value);
+                ifd.extend_from_slice(&inline);
+            } else {
+                ifd.extend_from_slice(&((data_start + data.len()) as u32).to_le_bytes());
+                data.extend_from_slice(value);
+            }
+        }
+        ifd.extend_from_slice(&0_u32.to_le_bytes());
+        (ifd, data)
+    }
+
+    /// One TIFF whose primary directory holds `primary` and whose Exif
+    /// subdirectory holds `exif`.
+    fn tiff_with_exif_directory(
+        primary: &[(u16, u16, Vec<u8>)],
+        exif: &[(u16, u16, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut primary_entries = primary.to_vec();
+        primary_entries.push((0x8769, 4, 0_u32.to_le_bytes().to_vec()));
+        let (mut primary_ifd, primary_data) = directory(&primary_entries, 8);
+        let exif_offset = (8 + primary_ifd.len() + primary_data.len() + 3) & !3;
+        // The Exif pointer is the last primary entry, so its inline value sits
+        // immediately before the next-directory offset.
+        let value_at = primary_ifd.len() - 8;
+        primary_ifd[value_at..value_at + 4].copy_from_slice(&(exif_offset as u32).to_le_bytes());
+        let (exif_ifd, exif_data) = directory(exif, exif_offset);
+        let mut bytes = b"II*\0\x08\0\0\0".to_vec();
+        bytes.extend_from_slice(&primary_ifd);
+        bytes.extend_from_slice(&primary_data);
+        bytes.resize(exif_offset, 0);
+        bytes.extend_from_slice(&exif_ifd);
+        bytes.extend_from_slice(&exif_data);
+        bytes
+    }
+
+    #[test]
+    fn camera_identity_is_read_only_from_the_primary_directory() {
+        let bytes = jpeg(&tiff_with_exif_directory(
+            &[(0x9003, 2, b"2026:02:03 04:05:06\0".to_vec())],
+            &[
+                (0x010f, 2, b"SONY\0".to_vec()),
+                (0x0110, 2, b"ILCE-7RM5\0\0\0".to_vec()),
+            ],
+        ));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(
+            metadata.capture_time.as_deref(),
+            Some("2026-02-03T04:05:06.000000000")
+        );
+        assert_eq!(
+            metadata.make, None,
+            "an Exif-directory Make must not classify the source"
+        );
+        assert_eq!(metadata.model, None);
+    }
+
+    #[test]
+    fn an_oversized_camera_identity_is_absent_without_discarding_other_facts() {
+        // A JPEG segment cannot carry a value this large, so the oversized tag
+        // has to be exercised through a RAW container.
+        let bytes = tiff_typed(&[
+            (0x010f, 2, vec![b'N'; MAXIMUM_TAG_VALUE_BYTES + 1]),
+            (0x0110, 2, b"ILCE-7RM5\0\0\0".to_vec()),
+            (0x8827, 3, 400_u16.to_le_bytes().to_vec()),
+            (0x9003, 2, b"2026:02:03 04:05:06\0".to_vec()),
+        ]);
+        let metadata = inspect_review_bytes(OriginalKind::Raw, &bytes).unwrap();
+        assert_eq!(metadata.make, None);
+        assert_eq!(metadata.model.as_deref(), Some("ILCE-7RM5"));
+        assert_eq!(metadata.iso, Some(400));
+        assert_eq!(
+            metadata.capture_time.as_deref(),
+            Some("2026-02-03T04:05:06.000000000")
+        );
+    }
+
+    #[test]
+    fn camera_identity_rejects_non_text_and_oversized_values() {
+        let bytes = jpeg(&tiff_typed(&[
+            (0x010f, 2, vec![0x01, 0x02, 0x00]),
+            (0x0110, 3, 7_u16.to_le_bytes().to_vec()),
+        ]));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(metadata.make, None);
+        assert_eq!(metadata.model, None);
+
+        let oversized = format!("{}\0", "N".repeat(MAXIMUM_TEXT_TAG_BYTES + 1));
+        let bytes = jpeg(&tiff_typed(&[(0x010f, 2, oversized.into_bytes())]));
+        let metadata = inspect_review_bytes(OriginalKind::Jpeg, &bytes).unwrap();
+        assert_eq!(metadata.make, None);
     }
 
     #[test]
