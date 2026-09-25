@@ -4185,13 +4185,19 @@ mod tests {
 
     #[test]
     fn manager_crash_after_pause_unpauses_before_killing_container() {
+        let root = temp_dir("pause-recovery");
         let id = "c".repeat(64);
-        let mut record = record_for(1, Phase::Released);
-        record.container_id = Some(id.clone());
-        record.manager_pending = Some(ManagerPhase::Pause);
-        // Reconciliation verifies the owned identities and clears the stale
-        // Pause marker, while Docker still reflects the successful side effect.
-        record.manager_pending = None;
+        let mut registry = empty_registry("0".repeat(32).as_str());
+        let mut persisted = record_for(1, Phase::Released);
+        persisted.container_id = Some(id.clone());
+        persisted.manager_pending = Some(ManagerPhase::Pause);
+        registry.records.insert(1, persisted);
+        // The restart view contains the durable Pause marker before
+        // reconciliation settles the observed attempt.
+        let executor = executor_with(&root, registry);
+        let mut record = executor.record(1).unwrap();
+        assert_eq!(record.manager_pending, Some(ManagerPhase::Pause));
+        executor.discover(&mut record).unwrap();
         assert_eq!(record.manager_pending, None);
         let mut paused = true;
         let mut running = true;
@@ -4237,6 +4243,7 @@ mod tests {
                 backend::strings(&["kill", "--signal", "KILL", &id]),
             ]
         );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
