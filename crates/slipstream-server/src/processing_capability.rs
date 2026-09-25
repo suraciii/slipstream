@@ -228,6 +228,7 @@ mod tests {
             instance: INSTANCE.to_owned(),
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
+            socket_override: None,
         }
     }
 

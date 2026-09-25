@@ -2,7 +2,9 @@ use crate::{
     AlbumBrowseTarget, AlbumCreationResult, AlbumMembershipMutation, AlbumMembershipResult,
     AlbumMutation, AlbumMutationResult, AlbumQueryFilter, AlbumRecord, AlbumSummary,
     AppliedRelocations, CaptureFact, CheckedAlbumMutation, CheckedAlbumMutationResult,
-    EditRecipeRead, EditRecipeWriteOutcome, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
+    EditRecipeRead, EditRecipeWriteOutcome, ExportAttempt, ExportLeaseOutcome, ExportRecord,
+    ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
+    ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
     OriginalCapability, PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection,
     PhotoRead, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
     PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
@@ -647,6 +649,278 @@ impl Library {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.rebind_edit_recipe_receiver(mutation)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Validates both expected revisions inside one serialized transaction,
+    /// captures the immutable Export snapshot, reserves output capacity, and
+    /// records the request-identity receipt. A repeated identity resolves to
+    /// the existing Export without starting work.
+    pub async fn submit_export(
+        &self,
+        submission: ExportSubmission,
+    ) -> Result<ExportSubmitOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.submit_export_receiver(submission)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Reads one Export record. `None` means the identity is unknown or its
+    /// retention window has passed.
+    pub async fn export(&self, export_id: &str) -> Result<Option<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.export_receiver(export_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Bounded most-recent list of one Photo's retained Exports. `None` means
+    /// the Photo is unknown.
+    pub async fn photo_exports(
+        &self,
+        photo_id: &str,
+    ) -> Result<Option<Vec<ExportRecord>>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.photo_exports_receiver(photo_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Cancels one Export exactly once against its actual completion state;
+    /// a settled Export is returned unchanged.
+    pub async fn cancel_export(
+        &self,
+        export_id: &str,
+    ) -> Result<Option<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.cancel_export_receiver(export_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Applies one terminal settlement exactly once; an already settled
+    /// Export is returned unchanged.
+    pub async fn settle_export(
+        &self,
+        export_id: &str,
+        settlement: ExportSettlement,
+    ) -> Result<Option<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .settle_export_receiver(export_id, settlement)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Persists the launcher attempt identity before any work starts. A
+    /// terminal record is returned untouched so the caller aborts.
+    pub async fn begin_export_attempt(
+        &self,
+        export_id: &str,
+        attempt: ExportAttempt,
+    ) -> Result<Option<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .begin_export_attempt_receiver(export_id, attempt)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Records verified staged source evidence between acceptance and launch.
+    pub async fn record_export_source(
+        &self,
+        export_id: &str,
+        size: u64,
+        sha256: &str,
+    ) -> Result<Option<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .record_export_source_receiver(export_id, size, sha256)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Re-arms a failed or cancelled Export against its retained snapshot
+    /// with the caller's new request identity while its retention window
+    /// remains open and the captured source and approved bundle remain
+    /// available. A repeated retry identity resolves to its Export and
+    /// starts no work.
+    pub async fn retry_export(
+        &self,
+        export_id: &str,
+        request_id: &str,
+        expected_bundle_id: &str,
+        allowance: u64,
+    ) -> Result<ExportRetryOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.retry_export_receiver(
+                export_id,
+                request_id,
+                expected_bundle_id,
+                allowance,
+            )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Resolves a request identity without admission or state change: a
+    /// recorded identity replays, expires, or conflicts before the submit
+    /// transaction runs. `None` means the identity was never recorded.
+    pub async fn resolve_export_receipt(
+        &self,
+        photo_id: &str,
+        request_id: &str,
+        payload_digest: &str,
+    ) -> Result<Option<ExportSubmissionResolution>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.resolve_export_submission_receiver(
+                photo_id,
+                request_id,
+                payload_digest,
+            )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Durably claims the publication of one export attempt before its
+    /// artifact is renamed into place.
+    pub async fn claim_export_publication(
+        &self,
+        export_id: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<(), LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .claim_export_publication_receiver(export_id, incarnation, sequence)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(LibraryError::from)?;
+        Ok(())
+    }
+
+    /// Reads an export's durable publication claim, if any: the attempt
+    /// whose validated artifact is (about to be) published.
+    pub async fn export_publication_claim(
+        &self,
+        export_id: &str,
+    ) -> Result<Option<(String, u64)>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .export_publication_claim_receiver(export_id)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Refreshes a download lease's liveness anchor while its stream runs.
+    /// `false` means the lease is gone and the stream must stop renewing.
+    pub async fn renew_export_lease(&self, lease_id: &str, now: u64) -> Result<bool, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.renew_export_lease_receiver(lease_id, now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Removes expired artifacts, records, and stale leases. The caller
+    /// removes the named artifact files after the deletions commit.
+    pub async fn sweep_export_expiry(&self, now: u64) -> Result<ExportSweepResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.sweep_export_expiry_receiver(now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Lists unfinished Exports for restart reconciliation.
+    pub async fn unfinished_exports(&self) -> Result<Vec<ExportRecord>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.unfinished_exports_receiver()
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Holds one Export's artifact and snapshot against expiry cleanup until
+    /// the matching download stream settles.
+    pub async fn acquire_export_lease(
+        &self,
+        export_id: &str,
+        now: u64,
+    ) -> Result<ExportLeaseOutcome, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .acquire_export_lease_receiver(export_id, now)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Releases a download lease once its response stream has settled.
+    pub async fn release_export_lease(&self, lease_id: &str) -> Result<bool, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.release_export_lease_receiver(lease_id)
         }?;
         receive
             .await
@@ -1982,7 +2256,7 @@ mod tests {
         let database = state.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v7.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v8.sql"))
             .unwrap();
         connection
             .execute(
@@ -2355,7 +2629,7 @@ mod tests {
         let database = config.state_directory.join("library.sqlite");
         let connection = Connection::open(&database).unwrap();
         connection
-            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v7.sql"))
+            .execute_batch(include_str!("../../../compatibility/sqlite/schema-v8.sql"))
             .unwrap();
         connection
             .execute(

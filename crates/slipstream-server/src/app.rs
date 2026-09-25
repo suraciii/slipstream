@@ -637,6 +637,8 @@ pub struct Application {
     library_root: PathBuf,
     pub(crate) preview: PreviewService,
     pub(crate) shared: Arc<SharedLibrary>,
+    /// The Export lifecycle owner when the deployment configures processing.
+    pub(crate) exports: Option<Arc<crate::export_manager::ExportManager>>,
     scan_cycle: ScanCycle,
     pub(crate) retained_queries: Mutex<QueryRegistry>,
     pub(crate) browse_namespace: u128,
@@ -762,6 +764,49 @@ impl Application {
             runs_completed: AtomicU64::new(0),
             publication: tokio::sync::Mutex::new(()),
         });
+        // The Export lifecycle runs only when the deployment configures the
+        // processing capability and its finite retained-output allowance.
+        let exports = match (&config.processing, config.export_retained_output_bytes) {
+            (Some(processing), Some(allowance)) => {
+                let processing = processing.clone();
+                let library_for_exports = Arc::clone(&library);
+                let root_for_exports = config.library_root.clone();
+                let state_for_exports = config.state_directory.clone();
+                let shared_for_exports = Arc::clone(&shared);
+                let resolver = Arc::new(move |photo_id: &str| {
+                    let guard = shared_for_exports
+                        .snapshot
+                        .read()
+                        .expect("published Library poisoned");
+                    let published = guard.as_ref()?;
+                    published
+                        .photo_metadata_source(photo_id)
+                        .map(|source| source.relative_path)
+                });
+                let opened = tokio::task::spawn_blocking(move || {
+                    crate::export_manager::ExportManager::open(
+                        library_for_exports,
+                        root_for_exports,
+                        &state_for_exports,
+                        resolver,
+                        processing,
+                        allowance,
+                    )
+                })
+                .await
+                .map_err(|error| ServerError::Join(error.to_string()))?;
+                match opened {
+                    Ok(manager) => Some(Arc::new(manager)),
+                    Err(message) => {
+                        let library_for_close = Arc::clone(&library);
+                        let _ =
+                            tokio::task::spawn_blocking(move || library_for_close.shutdown()).await;
+                        return Err(ServerError::Export(message));
+                    }
+                }
+            }
+            _ => None,
+        };
         let library_for_preview = Arc::clone(&library);
         let preview = match tokio::task::spawn_blocking(move || {
             PreviewService::from_cache(library_for_preview, cache)
@@ -788,6 +833,7 @@ impl Application {
             library_root: config.library_root.clone(),
             preview,
             shared,
+            exports,
             scan_cycle: ScanCycle::new(),
             retained_queries: Mutex::new(QueryRegistry::production()),
             browse_namespace,
@@ -801,6 +847,13 @@ impl Application {
             .admit_scan_cycle(scan_gate, publish_gate)
             .expect("a new Application admits its startup scan");
         drop(startup);
+        // Reconcile unfinished Exports once the published Library is served.
+        // Queued work restarts through ordinary admission; interrupted running
+        // work resolves from its launcher receipt without a replacement.
+        if let Some(manager) = application.exports.as_ref() {
+            manager.reconcile_after_restart();
+            manager.schedule_expiry_sweep();
+        }
         Ok(application)
     }
 

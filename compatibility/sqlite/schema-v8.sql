@@ -71,4 +71,40 @@ CREATE TABLE edit_recipes(
   temperature_kelvin INTEGER CHECK(temperature_kelvin IS NULL OR temperature_kelvin BETWEEN 1000 AND 40000),
   tint_milli INTEGER CHECK(tint_milli IS NULL OR tint_milli BETWEEN -150000 AND 150000)
 );
+CREATE TABLE exports(
+  id TEXT PRIMARY KEY,
+  photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+  target TEXT NOT NULL CHECK(target = 'development-tiff'),
+  state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
+  outcome TEXT CHECK(outcome IS NULL OR length(outcome) BETWEEN 1 AND 200),
+  recipe_revision TEXT NOT NULL CHECK(length(recipe_revision) > 0),
+  exposure_ev REAL NOT NULL,
+  white_balance_mode TEXT NOT NULL CHECK(white_balance_mode = 'as-shot'),
+  source_revision TEXT NOT NULL CHECK(length(source_revision) > 0),
+  source_profile_id TEXT NOT NULL CHECK(length(source_profile_id) BETWEEN 1 AND 64),
+  source_kind TEXT NOT NULL CHECK(source_kind = 'raw'),
+  source_size INTEGER CHECK(source_size IS NULL OR source_size > 0),
+  source_sha256 TEXT CHECK(source_sha256 IS NULL OR length(source_sha256) = 64),
+  recipe_digest TEXT NOT NULL CHECK(length(recipe_digest) = 64),
+  policy_id TEXT NOT NULL CHECK(length(policy_id) = 64),
+  bundle_id TEXT NOT NULL CHECK(length(bundle_id) = 64),
+  workload TEXT NOT NULL CHECK(workload = 'development-tiff'),
+  attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 32),
+  attempt_sequence INTEGER CHECK(attempt_sequence IS NULL OR attempt_sequence > 0),
+  artifact_size INTEGER CHECK(artifact_size IS NULL OR artifact_size > 0),
+  artifact_sha256 TEXT CHECK(artifact_sha256 IS NULL OR length(artifact_sha256) = 64),
+  artifact_expires_at INTEGER CHECK(artifact_expires_at IS NULL OR artifact_expires_at >= 0),
+  artifact_width INTEGER CHECK(artifact_width IS NULL OR artifact_width > 0),
+  artifact_height INTEGER CHECK(artifact_height IS NULL OR artifact_height > 0),
+  artifact_profile_identity TEXT CHECK(artifact_profile_identity IS NULL OR length(artifact_profile_identity) = 64),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0),
+  settled_at INTEGER CHECK(settled_at IS NULL OR settled_at >= 0),
+  retain_until INTEGER CHECK(retain_until IS NULL OR retain_until >= 0)
+);
+CREATE INDEX exports_photo ON exports(photo_id);
+CREATE TABLE export_download_leases(
+  id TEXT PRIMARY KEY,
+  export_id TEXT NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+);
 PRAGMA user_version = 8;

@@ -650,6 +650,7 @@ mod tests {
                 public_origin: "https://camera.local".into(),
                 web_root: Some(base.join("web")),
                 processing: None,
+                export_retained_output_bytes: None,
             };
             Self { base, config }
         }

@@ -76,6 +76,7 @@ impl Fixture {
             public_origin: "https://photos.example.test".into(),
             web_root: Some(self.0.join("web")),
             processing: None,
+            export_retained_output_bytes: None,
         }
     }
 }

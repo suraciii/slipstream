@@ -22,6 +22,10 @@ pub struct Config {
     pub web_root: Option<PathBuf>,
     /// Exact launcher identities for the opt-in processing deployment.
     pub processing: Option<ProcessingConfig>,
+    /// Finite retained-output allowance for Development TIFF artifacts. The
+    /// service refuses a new Export before acceptance when the complete
+    /// artifact cannot be reserved inside it.
+    pub export_retained_output_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,10 +33,18 @@ pub struct ProcessingConfig {
     pub(crate) instance: String,
     pub(crate) policy_sha256: String,
     pub(crate) bundle_sha256: String,
+    /// Test-only launcher socket override; production always derives the
+    /// launcher socket from the instance identity.
+    #[cfg(test)]
+    pub(crate) socket_override: Option<std::path::PathBuf>,
 }
 
 impl ProcessingConfig {
     pub(crate) fn socket_path(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(path) = &self.socket_override {
+            return path.clone();
+        }
         PathBuf::from(format!(
             "/run/slipstream-processing/{}/launcher.sock",
             self.instance
@@ -125,7 +137,25 @@ impl Config {
                     instance,
                     policy_sha256: policy,
                     bundle_sha256: bundle,
+                    #[cfg(test)]
+                    socket_override: None,
                 })
+            }
+        };
+        let export_retained_output_bytes = match get("SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES") {
+            None => None,
+            Some(value) => {
+                let Ok(bytes) = value.parse::<u64>() else {
+                    return Err(ConfigError::Invalid(
+                        "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
+                    ));
+                };
+                if bytes == 0 {
+                    return Err(ConfigError::Invalid(
+                        "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
+                    ));
+                }
+                Some(bytes)
             }
         };
         Ok(Self {
@@ -138,6 +168,7 @@ impl Config {
             port,
             web_root,
             processing,
+            export_retained_output_bytes,
         })
     }
 
@@ -250,6 +281,7 @@ pub enum ServerError {
     Library(LibraryError),
     Preview(String),
     PreviewUnavailable,
+    Export(String),
     WebUnavailable,
     StorageLayout,
     Io(io::Error),
@@ -275,6 +307,7 @@ impl fmt::Display for ServerError {
             Self::Library(error) => error.fmt(formatter),
             Self::Preview(error) => formatter.write_str(error),
             Self::PreviewUnavailable => formatter.write_str("Preview service is unavailable"),
+            Self::Export(error) => formatter.write_str(error),
             Self::WebUnavailable => formatter.write_str("Web application is not built"),
             Self::StorageLayout => {
                 formatter.write_str("Photo Library, state, and cache directories must not overlap")
