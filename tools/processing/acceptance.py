@@ -42,6 +42,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -750,6 +751,38 @@ def _optional_int(value: object) -> int | None:
 
 
 _TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
+_MAXIMUM_TIFF_BYTES = MAXIMUM_DOWNLOAD_BYTES
+_MAXIMUM_TIFF_PIXELS = 200_000_000
+_MAXIMUM_TIFF_ENTRIES = 512
+_MAXIMUM_TIFF_VALUE_BYTES = 1024 * 1024
+_MAXIMUM_TIFF_STRIPS = 65_536
+_TIFF_DECODE_CHUNK_BYTES = 64 * 1024
+
+
+def _deflate_strip_matches(data: bytes, offset: int, length: int, expected: int) -> bool:
+    """Validate one zlib-wrapped strip without retaining decoded pixels."""
+    decoder = zlib.decompressobj()
+    decoded = 0
+    end = offset + length
+    try:
+        for start in range(offset, end, _TIFF_DECODE_CHUNK_BYTES):
+            if decoder.eof:
+                return False
+            pending = data[start : min(start + _TIFF_DECODE_CHUNK_BYTES, end)]
+            while pending:
+                limit = min(_TIFF_DECODE_CHUNK_BYTES, expected - decoded + 1)
+                output = decoder.decompress(pending, limit)
+                decoded += len(output)
+                if decoded > expected or decoder.unused_data:
+                    return False
+                pending = decoder.unconsumed_tail
+                if not pending:
+                    break
+                if not output:
+                    return False
+    except zlib.error:
+        return False
+    return decoder.eof and decoded == expected and not decoder.unused_data
 
 
 def validate_development_tiff(
@@ -758,52 +791,64 @@ def validate_development_tiff(
     expected_height: int | None = None,
     accepted_profile_digests: tuple[str, ...] = PINNED_SOURCE_PROFILE_DIGESTS,
 ) -> tuple[dict, list]:
-    """Structurally validate a Development TIFF and its embedded profile."""
+    """Validate TIFF framing and inflate every bounded Deflate strip."""
     problems: list = []
-    facts: dict = {"decode": "ifd-structural"}
+    facts: dict = {"decode": "ifd-and-deflate-strips"}
     if len(data) < 8:
         return facts, ["tiff-truncated-header"]
+    if len(data) > _MAXIMUM_TIFF_BYTES:
+        return facts, ["tiff-size-exceeds-maximum"]
     byte_order = data[:2]
-    if byte_order == b"II":
-        endian = "<"
-    elif byte_order == b"MM":
-        endian = ">"
-    else:
+    endian = "<" if byte_order == b"II" else ">" if byte_order == b"MM" else None
+    if endian is None:
         return facts, ["tiff-byte-order-invalid"]
-    magic = struct.unpack(endian + "H", data[2:4])[0]
-    if magic != 42:
-        problems.append("tiff-magic-invalid")
-        return facts
+    if struct.unpack(endian + "H", data[2:4])[0] != 42:
+        return facts, ["tiff-magic-invalid"]
+
     ifd_offset = struct.unpack(endian + "I", data[4:8])[0]
     if ifd_offset + 2 > len(data):
         return facts, ["tiff-ifd-out-of-range"]
     entry_count = struct.unpack(endian + "H", data[ifd_offset : ifd_offset + 2])[0]
-    if ifd_offset + 2 + 12 * entry_count > len(data):
+    if entry_count == 0 or entry_count > _MAXIMUM_TIFF_ENTRIES:
+        return facts, ["tiff-ifd-entry-count-out-of-range"]
+    ifd_end = ifd_offset + 2 + 12 * entry_count + 4
+    if ifd_end > len(data):
         return facts, ["tiff-ifd-out-of-range"]
-    entries: dict[int, tuple[int, int, bytes]] = {}
+
+    entries: dict[int, tuple[int, int, bytes, int]] = {}
     for index in range(entry_count):
         start = ifd_offset + 2 + 12 * index
         tag, kind, count = struct.unpack(endian + "HHI", data[start : start + 8])
-        size = _TIFF_TYPE_SIZES.get(kind)
-        if size is None:
+        type_size = _TIFF_TYPE_SIZES.get(kind)
+        if type_size is None:
             continue
-        byte_count = size * count
+        byte_count = type_size * count
+        if tag in (273, 279):
+            max_bytes = _MAXIMUM_TIFF_STRIPS * 4
+        elif tag == 34675:
+            max_bytes = _MAXIMUM_TIFF_VALUE_BYTES
+        else:
+            max_bytes = 64
+        if byte_count > max_bytes:
+            problems.append(f"tiff-tag-{tag}-value-exceeds-bound")
+            continue
         if byte_count <= 4:
             raw = data[start + 8 : start + 8 + byte_count]
+            value_offset = start + 8
         else:
-            offset = struct.unpack(endian + "I", data[start + 8 : start + 12])[0]
-            if offset + byte_count > len(data):
+            value_offset = struct.unpack(endian + "I", data[start + 8 : start + 12])[0]
+            if value_offset + byte_count > len(data):
                 problems.append(f"tiff-tag-{tag}-value-out-of-range")
                 continue
-            raw = data[offset : offset + byte_count]
-        entries[tag] = (kind, count, raw)
+            raw = data[value_offset : value_offset + byte_count]
+        entries[tag] = (kind, count, raw, value_offset)
 
     def unsigned(tag: int) -> int | None:
         entry = entries.get(tag)
         if entry is None:
             problems.append(f"tiff-tag-{tag}-missing")
             return None
-        kind, count, raw = entry
+        kind, count, raw, _ = entry
         if kind == 3 and count == 1 and len(raw) >= 2:
             return struct.unpack(endian + "H", raw[:2])[0]
         if kind == 4 and count == 1 and len(raw) >= 4:
@@ -811,31 +856,45 @@ def validate_development_tiff(
         problems.append(f"tiff-tag-{tag}-unexpected-type")
         return None
 
-    def short_list(tag: int, expected_count: int) -> list | None:
+    def integer_list(tag: int, expected_count: int | None = None) -> list[int] | None:
         entry = entries.get(tag)
         if entry is None:
             problems.append(f"tiff-tag-{tag}-missing")
             return None
-        kind, count, raw = entry
-        if kind != 3 or count != expected_count or len(raw) < 2 * expected_count:
+        kind, count, raw, _ = entry
+        if kind not in (3, 4) or (expected_count is not None and count != expected_count):
             problems.append(f"tiff-tag-{tag}-unexpected-shape")
             return None
-        return list(struct.unpack(endian + "H" * expected_count, raw[: 2 * expected_count]))
+        width = 2 if kind == 3 else 4
+        if len(raw) != width * count:
+            problems.append(f"tiff-tag-{tag}-unexpected-shape")
+            return None
+        code = "H" if kind == 3 else "I"
+        return list(struct.unpack(endian + code * count, raw))
 
     width = unsigned(256)
     height = unsigned(257)
-    bits = short_list(258, 3)
+    bits = integer_list(258, 3)
     compression = unsigned(259)
     photometric = unsigned(262)
     samples = unsigned(277)
-    sample_format = short_list(339, 3)
-    facts["width"] = width
-    facts["height"] = height
-    facts["bitsPerSample"] = bits
-    facts["sampleFormat"] = sample_format
-    facts["compression"] = compression
-    facts["photometricInterpretation"] = photometric
-    facts["samplesPerPixel"] = samples
+    rows_per_strip = unsigned(278)
+    sample_format = integer_list(339, 3)
+    facts.update(
+        {
+            "width": width,
+            "height": height,
+            "bitsPerSample": bits,
+            "sampleFormat": sample_format,
+            "compression": compression,
+            "photometricInterpretation": photometric,
+            "samplesPerPixel": samples,
+        }
+    )
+    if width is None or height is None:
+        return facts, problems
+    if width == 0 or height == 0 or width * height > _MAXIMUM_TIFF_PIXELS:
+        problems.append("tiff-dimensions-out-of-range")
     if samples != 3:
         problems.append("tiff-samples-per-pixel-not-3")
     if bits != [32, 32, 32]:
@@ -853,6 +912,7 @@ def validate_development_tiff(
         problems.append("tiff-width-mismatch")
     if expected_height is not None and height != expected_height:
         problems.append("tiff-height-mismatch")
+
     profile_entry = entries.get(34675)
     if profile_entry is None:
         problems.append("tiff-embedded-profile-missing")
@@ -864,8 +924,50 @@ def validate_development_tiff(
         facts["profileAccepted"] = digest in accepted_profile_digests
         if digest not in accepted_profile_digests:
             problems.append("tiff-embedded-profile-digest-not-pinned")
-    return facts, problems
 
+    if (
+        width == 0 or height == 0 or width * height > _MAXIMUM_TIFF_PIXELS
+        or (expected_width is not None and width != expected_width)
+        or (expected_height is not None and height != expected_height)
+    ):
+        return facts, problems
+    if compression != 8 or photometric != 2 or bits != [32, 32, 32] or sample_format != [3, 3, 3]:
+        return facts, problems
+    if samples != 3 or rows_per_strip is None or rows_per_strip == 0:
+        return facts, problems
+    offsets = integer_list(273)
+    byte_counts = integer_list(279)
+    if offsets is None or byte_counts is None:
+        return facts, problems
+    expected_strips = (height + rows_per_strip - 1) // rows_per_strip
+    if (
+        expected_strips == 0 or expected_strips > _MAXIMUM_TIFF_STRIPS
+        or len(offsets) != expected_strips or len(byte_counts) != expected_strips
+    ):
+        problems.append("tiff-strip-layout-shape-invalid")
+        return facts, problems
+
+    covered_end = max(
+        ifd_end,
+        max((entry[3] + len(entry[2]) for entry in entries.values()), default=ifd_end),
+    )
+    decoded_bytes = 0
+    for index, (offset, byte_count) in enumerate(zip(offsets, byte_counts)):
+        rows = min(rows_per_strip, height - index * rows_per_strip)
+        expected_bytes = rows * width * samples * 4
+        end = offset + byte_count
+        if byte_count == 0 or offset < covered_end or end > len(data):
+            problems.append("tiff-strip-range-invalid")
+            return facts, problems
+        covered_end = end
+        if not _deflate_strip_matches(data, offset, byte_count, expected_bytes):
+            problems.append("tiff-deflate-strip-invalid")
+            return facts, problems
+        decoded_bytes += expected_bytes
+    facts["decodedBytes"] = decoded_bytes
+    if covered_end != len(data):
+        problems.append("tiff-unaccounted-trailing-payload")
+    return facts, problems
 
 def validate_jpeg(body: bytes) -> tuple[dict, list]:
     """Walk the JPEG marker structure far enough to trust container dimensions."""

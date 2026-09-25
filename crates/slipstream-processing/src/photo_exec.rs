@@ -316,6 +316,7 @@ pub struct PhotoExecutor {
 
 struct Live {
     running: bool,
+    paused: bool,
     pid: u32,
     exit_code: Option<u8>,
     oom: bool,
@@ -877,9 +878,9 @@ impl PhotoExecutor {
     }
 
     fn finish(self: &Arc<Self>, sequence: u64) -> Result<(), ErrorCode> {
-        let record = self.record(sequence)?;
+        let mut record = self.record(sequence)?;
         if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&record)?;
+            self.stop(&mut record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
                 if Instant::now() >= deadline {
@@ -1016,7 +1017,7 @@ impl PhotoExecutor {
     fn settle_tail(&self, sequence: u64) -> Result<ResultBody, ErrorCode> {
         let mut record = self.record(sequence)?;
         if self.live(&record).is_ok_and(|live| live.running) {
-            self.stop(&record)?;
+            self.stop(&mut record)?;
             let deadline = Instant::now() + Duration::from_secs(5);
             while self.live(&record)?.running {
                 if Instant::now() >= deadline {
@@ -1114,7 +1115,7 @@ impl PhotoExecutor {
                 continue;
             }
             if self.live(&record).is_ok_and(|live| live.running) {
-                self.stop(&record)?;
+                self.stop(&mut record)?;
             }
             let requested = if record.cancellation_requested {
                 Outcome::Cancelled
@@ -1162,6 +1163,24 @@ impl PhotoExecutor {
                 && found.height == identity.height
         })
     }
+}
+
+fn stop_container(
+    record: &mut PhotoRecord,
+    paused: bool,
+    mut update: impl FnMut(&PhotoRecord) -> Result<(), ErrorCode>,
+    mut command: impl FnMut(&[String]) -> Result<String, ErrorCode>,
+) -> Result<(), ErrorCode> {
+    let id = record.container_id.clone().ok_or(ErrorCode::Uncertain)?;
+    if paused {
+        record.manager_pending = Some(ManagerPhase::Unpause);
+        update(record)?;
+        command(&backend::strings(&["unpause", &id]))?;
+        record.manager_pending = None;
+        update(record)?;
+    }
+    command(&backend::strings(&["kill", "--signal", "KILL", &id]))?;
+    Ok(())
 }
 
 // Host boundary --------------------------------------------------------
@@ -1594,6 +1613,9 @@ impl PhotoExecutor {
             running: value["State"]["Running"]
                 .as_bool()
                 .ok_or(ErrorCode::Uncertain)?,
+            paused: value["State"]["Paused"]
+                .as_bool()
+                .ok_or(ErrorCode::Uncertain)?,
             pid: value["State"]["Pid"]
                 .as_u64()
                 .and_then(|pid| u32::try_from(pid).ok())
@@ -1834,16 +1856,18 @@ impl PhotoExecutor {
         record.released = true;
         self.update(record)
     }
-
-    fn stop(&self, record: &PhotoRecord) -> Result<(), ErrorCode> {
-        let Some(id) = record.container_id.clone() else {
+    fn stop(&self, record: &mut PhotoRecord) -> Result<(), ErrorCode> {
+        if record.container_id.is_none() {
             return Ok(());
-        };
-        if self.live(record)?.running {
+        }
+        let live = self.live(record)?;
+        if live.running {
             self.verify_unit(record)?;
-            docker(
-                &self.config,
-                &backend::strings(&["kill", "--signal", "KILL", &id]),
+            stop_container(
+                record,
+                live.paused,
+                |record| self.update(record),
+                |args| docker(&self.config, args),
             )?;
         }
         Ok(())
@@ -4157,6 +4181,62 @@ mod tests {
             ErrorCode::Uncertain
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn manager_crash_after_pause_unpauses_before_killing_container() {
+        let id = "c".repeat(64);
+        let mut record = record_for(1, Phase::Released);
+        record.container_id = Some(id.clone());
+        record.manager_pending = Some(ManagerPhase::Pause);
+        // Reconciliation verifies the owned identities and clears the stale
+        // Pause marker, while Docker still reflects the successful side effect.
+        record.manager_pending = None;
+        assert_eq!(record.manager_pending, None);
+        let mut paused = true;
+        let mut running = true;
+        let mut updates = Vec::new();
+        let mut commands = Vec::new();
+        let pending = std::cell::Cell::new(None);
+
+        stop_container(
+            &mut record,
+            paused,
+            |record| {
+                pending.set(record.manager_pending);
+                updates.push(record.manager_pending);
+                Ok(())
+            },
+            |args| {
+                commands.push(args.to_vec());
+                match args.first().map(String::as_str) {
+                    Some("unpause") => {
+                        assert_eq!(pending.get(), Some(ManagerPhase::Unpause));
+                        assert!(paused);
+                        paused = false;
+                    }
+                    Some("kill") => {
+                        assert_eq!(pending.get(), None);
+                        assert!(!paused);
+                        running = false;
+                    }
+                    _ => panic!("unexpected Docker command"),
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+
+        assert!(!paused);
+        assert!(!running);
+        assert_eq!(updates, [Some(ManagerPhase::Unpause), None]);
+        assert_eq!(
+            commands,
+            vec![
+                backend::strings(&["unpause", &id]),
+                backend::strings(&["kill", "--signal", "KILL", &id]),
+            ]
+        );
     }
 
     #[test]

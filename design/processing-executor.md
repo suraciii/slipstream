@@ -78,6 +78,12 @@ confirmed stop return. Every later step still fails closed on the actual
 container state, so a worker that failed before its release-gate pause leaves a
 resolvable phase instead of an attempt that can never settle.
 
+If an owned container is observed paused while settlement must stop it, persist
+an Unpause phase before calling Docker, unpause it, clear the phase only after
+the command returns successfully, and then issue the kill. A launcher restart
+between these operations can resolve Unpause from the recorded container and
+attempt identities and repeat settlement without signaling a paused container.
+
 The socket parent and every ancestor are canonical, symlink-free, root-owned
 and not writable by the Web UID. The parent contains only the fixed socket and
 its root-only persistent owner-claim file. Give the Web UID search permission

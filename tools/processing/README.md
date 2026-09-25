@@ -65,11 +65,12 @@ recipe revision and source revision), the `develop` Edit Preview with its
 typed response-header metadata, a `development-tiff` Export through terminal
 settlement, and artifact download. It validates the download against the
 bytes: digest, byte length, geometry, content type, the embedded float32
-linear ProPhoto RGB framing, and the pinned source-profile identity. It hashes
-the fixture Original and any external XMP sidecar before and after the run and
-fails if bytes, size, mode, or modification time changed; it never opens them
-for writing. The only files it creates are downloaded artifacts inside the
-explicit output directory.
+linear ProPhoto RGB framing, pinned source-profile identity, and decoded size
+of every Deflate strip. Decoding uses a fixed-size output bound, never retaining
+the full decompressed image. It hashes the fixture Original and any external
+XMP sidecar before and after the run and fails if bytes, size, mode, or
+modification time changed; it never opens them for writing. The only files it
+creates are downloaded artifacts inside the explicit output directory.
 
 The runner must never target an operator's live library. It refuses to start
 without an explicit acknowledgement flag, and it is meant for a dedicated
