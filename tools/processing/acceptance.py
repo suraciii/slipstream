@@ -60,6 +60,14 @@ MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 # the deployment cannot legitimately publish.
 MAXIMUM_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 DOWNLOAD_SLACK_BYTES = 65536
+
+# The qualified writer writes each compressed strip through its own buffer, so
+# a written strip can extend one byte past its declared `StripByteCounts` entry
+# and the artifact can end a few bytes past the last declared strip
+# (`design/processing-photo-protocol.md#output-and-settlement`). That padding
+# is not payload: every declared strip is inflated and compared to its declared
+# row bytes above, which is what proves the artifact covers its geometry.
+STRIP_PADDING_MAXIMUM = 64
 MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
 
@@ -970,7 +978,7 @@ def validate_development_tiff(
             return facts, problems
         decoded_bytes += expected_bytes
     facts["decodedBytes"] = decoded_bytes
-    if covered_end != len(data):
+    if len(data) - covered_end > STRIP_PADDING_MAXIMUM:
         problems.append("tiff-unaccounted-trailing-payload")
     return facts, problems
 
