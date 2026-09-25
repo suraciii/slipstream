@@ -1101,11 +1101,22 @@ class Client:
 
 
 def structured_code(payload: object) -> str | None:
-    """The authoritative error code of a contract refusal, if any."""
+    """The authoritative error code of a contract refusal, if any.
+
+    The merged server maps every refusal onto the shared error envelope
+    (`cli_error`): `{"error": {"code": ..., "message": ..., "details": ...}}`.
+    A flat top-level `code` is accepted as well, so both conforming shapes
+    and the spec's flat wording are honored.
+    """
     if isinstance(payload, dict):
         code = payload.get("code")
         if isinstance(code, str) and code:
             return code
+        error = payload.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code:
+                return code
     return None
 
 

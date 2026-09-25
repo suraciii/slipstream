@@ -213,19 +213,27 @@ class StubDeployment:
     def guarded_save(self, body: dict) -> tuple[int, dict]:
         if body.get("expectedSourceRevision") != self.source_revision:
             return 409, {
-                "code": "source_changed",
-                "message": "stub",
-                "currentSourceRevision": self.source_revision,
-                "currentRecipeVersion": self.recipe["recipeVersion"] if self.recipe else None,
+                "error": {
+                    "code": "source_changed",
+                    "message": "stub",
+                    "details": {
+                        "currentSourceRevision": self.source_revision,
+                        "currentRecipeVersion": self.recipe["recipeVersion"] if self.recipe else None,
+                    },
+                }
             }
         expected = body.get("expectedRecipeVersion")
         current = self.recipe["recipeVersion"] if self.recipe else None
         if expected != current:
             return 409, {
-                "code": "recipe_conflict",
-                "message": "stub",
-                "currentSourceRevision": self.source_revision,
-                "currentRecipeVersion": current,
+                "error": {
+                    "code": "recipe_conflict",
+                    "message": "stub",
+                    "details": {
+                        "currentSourceRevision": self.source_revision,
+                        "currentRecipeVersion": current,
+                    },
+                }
             }
         self.recipe_counter += 1
         version = f"rv-{self.recipe_counter}"
@@ -376,7 +384,7 @@ class StubDeployment:
         if headers.get("slipstream-cli-contract") != "1":
             return 426, json.dumps({"error": {"code": "incompatible_server", "message": "stub"}}).encode(), []
         if headers.get("Authorization") != f"Bearer {'wrong' if self.wrong_token else TOKEN}":
-            return 401, json.dumps({"code": "unauthorized", "message": "stub"}).encode(), []
+            return 401, json.dumps({"error": {"code": "unauthorized", "message": "stub"}}).encode(), []
         try:
             parsed_body: object = json.loads(body) if body else None
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -425,9 +433,11 @@ class StubDeployment:
             422,
             json.dumps(
                 {
-                    "code": "invalid_settings",
-                    "message": "Correct the settings against the approved ranges and shape.",
-                    "details": {"argument": argument, "reason": reason},
+                    "error": {
+                        "code": "invalid_settings",
+                        "message": "Correct the settings against the approved ranges and shape.",
+                        "details": {"argument": argument, "reason": reason},
+                    }
                 }
             ).encode(),
             [],
@@ -483,10 +493,10 @@ class StubDeployment:
         ):
             return self._invalid_settings("target", "The submission carries a value outside the closed wire shape")
         if body["expectedSourceRevision"] != self.source_revision:
-            return 409, json.dumps({"code": "source_changed", "message": "stub"}).encode(), []
+            return 409, json.dumps({"error": {"code": "source_changed", "message": "stub"}}).encode(), []
         current = self.recipe["recipeVersion"] if self.recipe else None
         if body["expectedRecipeVersion"] != current:
-            return 409, json.dumps({"code": "recipe_conflict", "message": "stub"}).encode(), []
+            return 409, json.dumps({"error": {"code": "recipe_conflict", "message": "stub"}}).encode(), []
         self.export_recipe_version = (
             self.submit_recipe_version if self.submit_recipe_version is not None else current
         )
@@ -643,6 +653,24 @@ class HelperTests(unittest.TestCase):
         identity = acceptance.new_request_identity("save")
         self.assertTrue(acceptance.valid_request_identity(identity))
         self.assertIn("-save-", identity)
+
+    def test_structured_code_reads_the_merged_error_envelope(self):
+        """The merged server nests refusal codes under `error` (`cli_error`)."""
+        self.assertEqual(
+            acceptance.structured_code(
+                {
+                    "error": {
+                        "code": "processing_unavailable",
+                        "message": "The develop stage cannot execute for this Photo right now.",
+                        "details": {"reason": "preview-render-admission-unavailable"},
+                    }
+                }
+            ),
+            "processing_unavailable",
+        )
+        self.assertEqual(acceptance.structured_code({"code": "unknown_photo"}), "unknown_photo")
+        self.assertIsNone(acceptance.structured_code({"message": "no code here"}))
+        self.assertIsNone(acceptance.structured_code(None))
 
     def test_pinned_profile_asset_matches_spec_digests(self):
         digest = hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest()
