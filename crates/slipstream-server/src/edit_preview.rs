@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     os::fd::AsRawFd,
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -34,6 +35,7 @@ use slipstream_core::{
 
 use crate::{
     ProcessingConfig,
+    export_manager::{ExportManager, RetainedDevelopmentIdentity},
     http::{
         CLI_CONTRACT_HEADER, HttpState, cli_error, require_cli_contract, require_published,
         valid_id,
@@ -75,7 +77,7 @@ const WHITE_BALANCE_AS_SHOT: &str = "as-shot";
 /// The identity facts of one stage rendition: the complete fact set whose
 /// equality decides cache currency beside the source content evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct PreviewFacts {
+pub(crate) struct PreviewFacts {
     stage: &'static str,
     long_edge: u32,
     display_transform: &'static str,
@@ -212,21 +214,77 @@ impl RetainedDevelopmentResult {
     }
 }
 
-/// Resolves the retained Development Result of one Photo, or `None` when no
-/// result of the current identity is retained.
+/// Resolves the retained Development Result of one Photo whose captured
+/// identity is exactly the current facts, or `None` when no such result is
+/// retained. Resolution reads the durable Export lifecycle, so it is
+/// asynchronous; a read that cannot be answered resolves as "not retained"
+/// and the caller refuses fail-closed.
 pub(crate) trait DevelopmentResultRetention: Send + Sync {
-    fn resolve(&self, photo_id: &str) -> Option<RetainedDevelopmentResult>;
+    fn resolve<'a>(
+        &'a self,
+        photo_id: &'a str,
+        facts: &'a PreviewFacts,
+    ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>>;
 }
 
-/// The durable Development Result retention lands with the Export lifecycle.
-/// Until that lifecycle retains results, the production resolver retains
-/// nothing and every render request refuses fail-closed instead of claiming
-/// queued work it cannot run.
+/// The durable Development Result retention of the Export lifecycle: the
+/// published Development TIFF of a succeeded Export is the retained result,
+/// and its disclosed artifact expiry is its retention. A Photo without a
+/// matching retained result resolves to `None`, and preview-class render
+/// admission has not landed, so such a request refuses fail-closed instead of
+/// claiming queued work it cannot run.
+pub(crate) struct RetainedExportDevelopmentResults {
+    exports: Arc<ExportManager>,
+}
+
+impl RetainedExportDevelopmentResults {
+    pub(crate) fn new(exports: Arc<ExportManager>) -> Self {
+        Self { exports }
+    }
+}
+
+impl DevelopmentResultRetention for RetainedExportDevelopmentResults {
+    fn resolve<'a>(
+        &'a self,
+        photo_id: &'a str,
+        facts: &'a PreviewFacts,
+    ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
+        Box::pin(async move {
+            let identity = RetainedDevelopmentIdentity {
+                recipe_revision: facts.recipe_revision.as_deref(),
+                exposure_milli_ev: facts.exposure_milli_ev,
+                source_revision: &facts.source_revision,
+                bundle_sha256: &facts.bundle_sha256,
+            };
+            let retained = self
+                .exports
+                .retained_development_result(photo_id, &identity)
+                .await?;
+            Some(RetainedDevelopmentResult {
+                sha256: retained.sha256,
+                byte_length: retained.byte_length,
+                recipe_revision: Some(retained.recipe_revision),
+                exposure_milli_ev: retained.exposure_milli_ev,
+                white_balance: WHITE_BALANCE_AS_SHOT,
+                source_revision: retained.source_revision,
+                bundle_sha256: retained.bundle_id,
+                path: retained.path,
+            })
+        })
+    }
+}
+
+/// The retention of a deployment without the Export lifecycle: nothing is
+/// retained, so every render request refuses fail-closed.
 pub(crate) struct UnlandedRetention;
 
 impl DevelopmentResultRetention for UnlandedRetention {
-    fn resolve(&self, _photo_id: &str) -> Option<RetainedDevelopmentResult> {
-        None
+    fn resolve<'a>(
+        &'a self,
+        _photo_id: &'a str,
+        _facts: &'a PreviewFacts,
+    ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
+        Box::pin(async { None })
     }
 }
 
@@ -466,11 +524,18 @@ pub(crate) struct EditPreviewOwner {
 }
 
 impl EditPreviewOwner {
-    /// The production owner: no durable Development Result retention and no
-    /// preview-class render admission exist yet, so renders refuse
-    /// fail-closed until the Export lifecycle lands.
-    pub(crate) fn production() -> Self {
-        Self::new(Arc::new(UnlandedRetention), Arc::new(UnlandedRenderGate))
+    /// The production owner. Retained Development Results resolve from the
+    /// durable Export lifecycle when the deployment has one: the published
+    /// Development TIFF of a succeeded Export is the retained result of its
+    /// captured identity. Preview-class render admission has not landed, so a
+    /// request without a matching retained result refuses fail-closed instead
+    /// of claiming queued work it cannot run.
+    pub(crate) fn production(exports: Option<Arc<ExportManager>>) -> Self {
+        let retention: Arc<dyn DevelopmentResultRetention> = match exports {
+            Some(exports) => Arc::new(RetainedExportDevelopmentResults::new(exports)),
+            None => Arc::new(UnlandedRetention),
+        };
+        Self::new(retention, Arc::new(UnlandedRenderGate))
     }
 
     pub(crate) fn new(
@@ -916,8 +981,8 @@ async fn serve_preview(
 ) -> Response<Body> {
     let owner = &state.edit_preview;
     let key = (photo_id.to_owned(), stage);
-    let retained = owner.retention.resolve(photo_id);
     let facts = current_facts(state, stage, read);
+    let retained = owner.retention.resolve(photo_id, &facts).await;
     let identity = PreviewIdentity::build(&facts, retained.as_ref());
     if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
@@ -941,7 +1006,7 @@ async fn serve_preview(
         return rendition_response(photo_id, &rendition);
     }
     // The retention may have moved while this request waited for the permit.
-    let retained = owner.retention.resolve(photo_id);
+    let retained = owner.retention.resolve(photo_id, &facts).await;
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
         return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
     };
@@ -1090,7 +1155,7 @@ async fn fresh_identity(
     }
     develop_executable(state, stage, &read).map_err(|response| *response)?;
     let facts = current_facts(state, stage, &read);
-    let retained = state.edit_preview.retention.resolve(photo_id);
+    let retained = state.edit_preview.retention.resolve(photo_id, &facts).await;
     Ok(PreviewIdentity::build(&facts, retained.as_ref()))
 }
 
@@ -1407,7 +1472,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_serves_only_the_current_full_identity() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         let key = ("photo".to_owned(), "develop");
         let first = identity(250);
         assert!(matches!(
@@ -1520,7 +1585,7 @@ mod tests {
 
     #[tokio::test]
     async fn publication_is_conditional_on_the_identity_current_at_publish_time() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         let key = ("photo".to_owned(), "develop");
         let derived = identity(250);
         let newer = identity(500);
@@ -1546,7 +1611,7 @@ mod tests {
 
     #[tokio::test]
     async fn publication_is_confirmed_against_persistence_after_publishing() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         let key = ("photo".to_owned(), "develop");
         let published = identity(250);
         let newer = identity(500);
@@ -1617,7 +1682,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_eviction_releases_the_derive_permit() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         let key = ("photo".to_owned(), "develop");
         let permit = owner.derive_permit(&key).await;
         assert_eq!(Arc::strong_count(&permit), 2, "entry and test hold it");
@@ -1637,7 +1702,7 @@ mod tests {
 
     #[tokio::test]
     async fn heavy_derivations_are_bounded_instance_wide() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         let first = owner.try_derivation_permit();
         assert!(first.is_some(), "the first heavy conversion is admitted");
         assert!(
@@ -1650,7 +1715,7 @@ mod tests {
 
     #[tokio::test]
     async fn owners_are_bounded_and_evict_the_least_recently_touched() {
-        let owner = EditPreviewOwner::production();
+        let owner = EditPreviewOwner::production(None);
         for index in 0..(MAXIMUM_OWNERS + 100) {
             let key = (format!("photo-{index}"), "develop");
             let identity = scripted_identity(&format!("source-{index}"), 250);
