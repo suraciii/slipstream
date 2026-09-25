@@ -764,9 +764,7 @@ export interface LibraryBrowserView {
     index: number,
     total: number,
   ): ReviewImagePresentation | undefined;
-  /// The URL of the camera Preview the stage currently presents, so the
-  /// camera reference can be named without a second request.
-  reviewImageUrl(): string | undefined;
+  /// True while the presented camera Preview is the given URL.
   reviewImageMatches(url: string): boolean;
   showPreviewUnavailable(text: string): void;
   setPreviewFacts(
@@ -897,7 +895,7 @@ export function createLibraryBrowserView(
                       <div class="photo-editor-field"><label for="photo-editor-tint">Tint</label><output data-photo-editor-tint-value for="photo-editor-tint">—</output><input id="photo-editor-tint" data-photo-editor-tint type="range" min="-150000" max="150000" step="1" value="0" aria-label="Tint" disabled></div>
                       <button type="button" class="quiet" data-photo-editor-reset-white-balance disabled>Reset white balance</button>
                     </div>
-                    <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" disabled>Camera reference</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
+                    <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" title="Press to compare the current settings with the as-shot/baseline development of this stage" disabled>Baseline comparison</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
                     <p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p>
                     <p class="photo-editor-fact"><span>Source support</span><span data-photo-editor-support>Checking…</span></p>
                     <p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p>
@@ -2085,7 +2083,11 @@ export function createLibraryBrowserView(
     editorUndo.disabled = model.loading || !model.canUndo;
     editorRedo.disabled = model.loading || !model.canRedo;
     editorReset.disabled = model.loading || model.saving || atBaseline;
-    editorCompare.disabled = model.loading || !model.canPreview;
+    // The comparison compares a stage's baseline development with the current
+    // settings; the Camera stage presents the camera Preview itself, so it
+    // offers no comparison of its own.
+    editorCompare.disabled =
+      model.loading || !model.canPreview || model.stage === "camera";
     editorCompare.setAttribute("aria-pressed", String(model.comparing));
     editorPreview.disabled =
       model.loading || model.previewing || !model.canPreview;
@@ -5525,10 +5527,6 @@ export function createLibraryBrowserView(
     presentEditorPreview,
     clearEditorPreview,
     presentReviewImage,
-    reviewImageUrl() {
-      const image = stage.querySelector<HTMLImageElement>("img");
-      return image?.src || undefined;
-    },
     reviewImageMatches(url) {
       if (!alive) return false;
       const image = stage.querySelector<HTMLImageElement>("img");

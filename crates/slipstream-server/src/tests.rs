@@ -13209,6 +13209,24 @@ mod export_routes {
         .await
     }
 
+    async fn edit_preview_settings_request(
+        router: &Router,
+        photo_id: &str,
+        settings: &str,
+    ) -> Response<Body> {
+        send(
+            router,
+            authenticated_request()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/edit-preview/develop?settings={settings}"
+                ))
+                .header("slipstream-cli-contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
     /// The Edit Preview derives the `develop` rendition from the retained
     /// Development TIFF of a succeeded Export while that Export's captured
     /// identity is the current one, then admits a preview-class render after a
@@ -13325,6 +13343,109 @@ mod export_routes {
                 .count()
         });
         assert_eq!(starts, 2, "one Export and one coalesced preview attempt");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// The baseline comparison selector serves the as-shot/baseline
+    /// development from the retained result captured at exactly those
+    /// settings, independently of the saved recipe revision, and it keeps
+    /// serving while the saved recipe moves on.
+    #[tokio::test]
+    async fn edit_preview_serves_the_baseline_comparison_independently_of_the_recipe() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        // The saved recipe is the processing baseline itself: 0 EV, as-shot.
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.0).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let artifact_bytes = valid_development_tiff();
+        launcher.with_script(|s| {
+            s.output = Some(artifact_bytes.clone());
+            s.settle_attempt(1, "completed");
+        });
+        wait_for_state(&router, &export_id, "succeeded").await;
+
+        let current = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(current.status(), StatusCode::OK);
+        let current_sha = current.headers()["slipstream-edit-preview-sha256"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            current.headers()["slipstream-edit-preview-settings"],
+            "current"
+        );
+        assert_eq!(
+            current.headers()["slipstream-edit-preview-recipe-version"],
+            recipe.revision
+        );
+
+        // The comparison is the baseline development: the same retained
+        // result, named as the baseline rather than as the saved recipe.
+        let baseline = edit_preview_settings_request(&router, &photo_id, "baseline").await;
+        assert_eq!(baseline.status(), StatusCode::OK);
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-settings"],
+            "baseline"
+        );
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-recipe-version"],
+            "",
+            "a baseline rendition is not a saved recipe's"
+        );
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-sha256"],
+            current_sha,
+            "the baseline of a baseline recipe is the same development"
+        );
+
+        // A later edit moves the current identity. The comparison is
+        // unchanged — it still resolves from the retained baseline result —
+        // while the current rendition is no longer retained and is admitted
+        // as its own render work.
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(recipe.revision.clone()),
+            0.5,
+        )
+        .await;
+        assert_ne!(second.revision, recipe.revision);
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+        });
+        let baseline = edit_preview_settings_request(&router, &photo_id, "baseline").await;
+        assert_eq!(baseline.status(), StatusCode::OK);
+        assert_eq!(
+            baseline.headers()["slipstream-edit-preview-sha256"],
+            current_sha
+        );
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let payload = response_json(admitted).await;
+        assert!(
+            payload["state"] == "queued" || payload["state"] == "running",
+            "the edited recipe is new render work: {payload}"
+        );
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
@@ -13601,6 +13722,7 @@ mod retained_development_result {
 
     fn identity<'a>(exposure_milli_ev: i64) -> RetainedDevelopmentIdentity<'a> {
         RetainedDevelopmentIdentity {
+            settings: "current",
             recipe_revision: Some(REVISION),
             exposure_milli_ev,
             source_revision: SOURCE_REVISION,
@@ -13812,6 +13934,46 @@ mod retained_development_result {
         let retained = resolve_all(&[first, second], &identity(EXPOSURE_MILLI_EV), 1_000)
             .expect("one of the matching records is retained");
         assert_eq!(retained.path, PathBuf::from("/artifacts/export-1.tiff"));
+    }
+
+    #[test]
+    fn a_baseline_identity_matches_the_captured_baseline_settings() {
+        let mut record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        record.snapshot.settings.exposure_ev = 0.0;
+        // The baseline selector names the processing baseline rather than a
+        // saved recipe, so the captured revision is not part of its identity:
+        // a result produced under exactly the baseline settings is the same
+        // development whatever revision captured it.
+        let baseline = RetainedDevelopmentIdentity {
+            settings: "baseline",
+            recipe_revision: None,
+            exposure_milli_ev: 0,
+            source_revision: SOURCE_REVISION,
+            bundle_sha256: BUNDLE,
+        };
+        assert!(resolve(&record, &baseline, 1_000).is_some());
+        // The current selector still matches the captured revision exactly,
+        // so a request that names no revision is not current.
+        let current = RetainedDevelopmentIdentity {
+            settings: "current",
+            exposure_milli_ev: 0,
+            ..baseline
+        };
+        assert!(resolve(&record, &current, 1_000).is_none());
+        let named = RetainedDevelopmentIdentity {
+            recipe_revision: Some(REVISION),
+            ..current
+        };
+        assert!(resolve(&record, &named, 1_000).is_some());
+        // A result captured at another exposure is a different development,
+        // so it is not the baseline comparison either.
+        let mut other = record.clone();
+        other.snapshot.settings.exposure_ev = EXPOSURE_MILLI_EV as f64 / 1_000.0;
+        assert!(resolve(&other, &baseline, 1_000).is_none());
     }
 
     #[test]
@@ -14218,6 +14380,83 @@ async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
     let unknown = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
     assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(error_code(&response_json(unknown).await), "outcome_unknown");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// The baseline comparison is its own owner: it reaches the gate as its own
+/// admission, never coalesces with the current rendition of the same stage,
+/// and a selector outside the closed set refuses before any admission.
+#[tokio::test]
+async fn edit_preview_owns_the_baseline_comparison_separately_from_the_current_rendition() {
+    let (base, config, application, photo_id, _, _) =
+        approved_photo_with_recipe_and_result("preview-save", 0.25).await;
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+        crate::edit_preview::RenderAdmission::Queued,
+    ]));
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
+    let (router, _preview_owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        gate_dyn,
+    );
+    let baseline_uri = format!("{}?settings=baseline", preview_uri(&photo_id, "develop"));
+
+    // 422 invalid_settings: a selector outside the closed set refuses before
+    // any admission, so a client cannot ask for a rendition the contract does
+    // not define.
+    let refused = get_preview_response(
+        &router,
+        &format!("{}?settings=as-shot", preview_uri(&photo_id, "develop")),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(refused).await;
+    assert_eq!(error_code(&body), "invalid_settings");
+    assert_eq!(body["error"]["details"]["argument"], "settings");
+    assert_eq!(
+        gate.calls.load(Ordering::Relaxed),
+        0,
+        "a refused selector admits nothing"
+    );
+
+    // The current rendition and the comparison are separate owners: each one
+    // is admitted, and neither coalesces into or supersedes the other.
+    let current = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(current.status(), StatusCode::ACCEPTED);
+    let repeated_current = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(
+        response_json(repeated_current).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+    let baseline = get_preview_response(&router, &baseline_uri).await;
+    assert_eq!(baseline.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(baseline).await,
+        serde_json::json!({"state": "queued", "stage": "develop"})
+    );
+    assert_eq!(
+        gate.calls.load(Ordering::Relaxed),
+        2,
+        "the comparison is its own admission"
+    );
+    // The comparison neither superseded the current intent nor admitted
+    // again: each selector still coalesces onto its own live admission.
+    let current_again = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(
+        response_json(current_again).await,
+        serde_json::json!({"state": "running", "stage": "develop"}),
+        "the comparison left the current intent live"
+    );
+    let repeated = get_preview_response(&router, &baseline_uri).await;
+    assert_eq!(
+        response_json(repeated).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+    assert_eq!(gate.calls.load(Ordering::Relaxed), 2);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

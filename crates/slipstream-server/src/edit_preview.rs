@@ -50,6 +50,15 @@ use crate::{
 /// `develop` until the Film capability is enabled.
 const CLOSED_STAGES: [&str; 1] = ["develop"];
 
+/// The closed `settings` selector of the route. `current` is the saved Edit
+/// Recipe's settings and the default. `baseline` is the as-shot/baseline
+/// development settings the comparison presents — the processing baseline of
+/// 0 EV against the documented baseline and as-shot white balance — and it is
+/// derived from the Photo rather than from the saved recipe.
+const CLOSED_SETTINGS: [&str; 2] = [SETTINGS_CURRENT, SETTINGS_BASELINE];
+const SETTINGS_CURRENT: &str = "current";
+const SETTINGS_BASELINE: &str = "baseline";
+
 /// The disclosed bounded retention of one published rendition. Renditions are
 /// rebuildable intermediates, so the bound is short and disclosed through the
 /// `expiresAt` response header on every delivery.
@@ -86,6 +95,10 @@ pub(crate) const WHITE_BALANCE_AS_SHOT: &str = "as-shot";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PreviewFacts {
     pub(crate) stage: &'static str,
+    /// The settings selector this rendition was requested under: `current`
+    /// for the saved recipe's settings, `baseline` for the comparison's
+    /// as-shot/baseline development settings.
+    pub(crate) settings: &'static str,
     pub(crate) long_edge: u32,
     pub(crate) display_transform: &'static str,
     pub(crate) bundle_sha256: String,
@@ -158,6 +171,7 @@ impl PreviewIdentity {
         let mut hasher = Sha256::new();
         for part in [
             facts.stage.as_bytes(),
+            facts.settings.as_bytes(),
             facts.long_edge.to_le_bytes().as_slice(),
             facts.display_transform.as_bytes(),
             facts.bundle_sha256.as_bytes(),
@@ -205,8 +219,14 @@ impl RetainedDevelopmentResult {
     /// True when the result was produced under exactly the current recipe
     /// revision and content, source revision, and bundle. A result captured
     /// under any other identity is not current and must not be served.
+    ///
+    /// A baseline identity is defined by its settings alone: it names no saved
+    /// recipe, so a retained result produced under exactly those settings is
+    /// the same development whatever revision captured them.
     fn matches_facts(&self, facts: &PreviewFacts) -> bool {
-        self.recipe_revision == facts.recipe_revision
+        let revision_matches =
+            facts.settings == SETTINGS_BASELINE || self.recipe_revision == facts.recipe_revision;
+        revision_matches
             && self.exposure_milli_ev == facts.exposure_milli_ev
             && self.white_balance == facts.white_balance
             && self.source_revision == facts.source_revision
@@ -258,6 +278,7 @@ impl DevelopmentResultRetention for RetainedExportDevelopmentResults {
     ) -> Pin<Box<dyn Future<Output = Option<RetainedDevelopmentResult>> + Send + 'a>> {
         Box::pin(async move {
             let identity = RetainedDevelopmentIdentity {
+                settings: facts.settings,
                 recipe_revision: facts.recipe_revision.as_deref(),
                 exposure_milli_ev: facts.exposure_milli_ev,
                 source_revision: &facts.source_revision,
@@ -349,6 +370,7 @@ pub(crate) enum RenderSettlement {
 pub(crate) struct PreviewRenderRequest<'a> {
     pub(crate) photo_id: &'a str,
     pub(crate) stage: &'static str,
+    pub(crate) settings: &'static str,
     pub(crate) identity_digest: &'a str,
 }
 
@@ -377,7 +399,11 @@ impl PreviewRenderGate for UnlandedRenderGate {
     fn settle(&self, _request: PreviewRenderRequest<'_>, _settlement: RenderSettlement) {}
 }
 
-type PreviewRenderKey = (String, &'static str);
+/// One preview-class render registry key: the Photo, the stage, and the
+/// settings selector. The comparison of a stage is its own owner, so a
+/// baseline render never publishes over, or is superseded by, the current
+/// rendition of the same stage.
+type PreviewRenderKey = (String, &'static str, &'static str);
 
 enum PreviewRenderState {
     Running,
@@ -483,10 +509,11 @@ impl PreviewClassRenders {
         inner: &PreviewClassRendersInner,
         photo_id: &str,
         stage: &'static str,
+        settings: &'static str,
         identity_digest: &str,
         settlement: RenderSettlement,
     ) {
-        let key = (photo_id.to_owned(), stage);
+        let key = (photo_id.to_owned(), stage, settings);
         let mut entries = inner
             .entries
             .lock()
@@ -521,10 +548,11 @@ impl PreviewClassRenders {
         inner: &PreviewClassRendersInner,
         photo_id: &str,
         stage: &'static str,
+        settings: &'static str,
         identity_digest: &str,
         result: PreviewRenderResult,
     ) {
-        let key = (photo_id.to_owned(), stage);
+        let key = (photo_id.to_owned(), stage, settings);
         let mut entries = inner
             .entries
             .lock()
@@ -570,7 +598,7 @@ impl PreviewClassRenders {
 }
 impl PreviewRenderGate for PreviewClassRenders {
     fn admit(&self, request: PreviewRenderRequest<'_>) -> RenderAdmission {
-        let key = (request.photo_id.to_owned(), request.stage);
+        let key = (request.photo_id.to_owned(), request.stage, request.settings);
         let now = SystemTime::now();
         let mut entries = self
             .inner
@@ -617,6 +645,7 @@ impl PreviewRenderGate for PreviewClassRenders {
                 &self.inner,
                 request.photo_id,
                 request.stage,
+                request.settings,
                 request.identity_digest,
                 RenderSettlement::Failed,
             );
@@ -626,16 +655,17 @@ impl PreviewRenderGate for PreviewClassRenders {
         let photo_id = request.photo_id.to_owned();
         let identity_digest = request.identity_digest.to_owned();
         let stage = request.stage;
+        let settings = request.settings;
         tokio::spawn(async move {
             let result = inner
                 .exports
-                .render_preview(&photo_id, stage, cancellation)
+                .render_preview(&photo_id, stage, settings, cancellation)
                 .await;
             match result {
                 Ok(result)
                     if PreviewIdentity::build(&result.facts, None).digest() == identity_digest =>
                 {
-                    Self::complete(&inner, &photo_id, stage, &identity_digest, result);
+                    Self::complete(&inner, &photo_id, stage, settings, &identity_digest, result);
                 }
                 Ok(result) => {
                     inner.exports.delete_preview_output(&result.attempt_key);
@@ -643,6 +673,7 @@ impl PreviewRenderGate for PreviewClassRenders {
                         &inner,
                         &photo_id,
                         stage,
+                        settings,
                         &identity_digest,
                         RenderSettlement::Failed,
                     );
@@ -651,6 +682,7 @@ impl PreviewRenderGate for PreviewClassRenders {
                     &inner,
                     &photo_id,
                     stage,
+                    settings,
                     &identity_digest,
                     RenderSettlement::Failed,
                 ),
@@ -660,7 +692,7 @@ impl PreviewRenderGate for PreviewClassRenders {
     }
 
     fn is_live(&self, request: PreviewRenderRequest<'_>) -> bool {
-        let key = (request.photo_id.to_owned(), request.stage);
+        let key = (request.photo_id.to_owned(), request.stage, request.settings);
         let now = SystemTime::now();
         let mut entries = self
             .inner
@@ -696,6 +728,7 @@ impl PreviewRenderGate for PreviewClassRenders {
             &self.inner,
             request.photo_id,
             request.stage,
+            request.settings,
             request.identity_digest,
             settlement,
         );
@@ -712,7 +745,7 @@ impl DevelopmentResultRetention for PreviewClassRenders {
             if let Some(retained) = self.inner.retained.resolve(photo_id, facts).await {
                 return Some(retained);
             }
-            let key = (photo_id.to_owned(), facts.stage);
+            let key = (photo_id.to_owned(), facts.stage, facts.settings);
             let now = SystemTime::now();
             let mut entries = self
                 .inner
@@ -842,7 +875,10 @@ struct OwnerEntry {
     last_used: u64,
 }
 
-type OwnerKey = (String, &'static str);
+/// One rendition owner: the Photo, the stage, and the settings selector. The
+/// comparison of a stage owns its rendition separately, so a baseline request
+/// never publishes over, or supersedes, the current rendition of that stage.
+type OwnerKey = (String, &'static str, &'static str);
 
 /// Evicts the least recently touched other owner when the retained-owner
 /// bound is full; every owner insert path runs this first.
@@ -868,6 +904,7 @@ fn evict_if_full(
                     PreviewRenderRequest {
                         photo_id: &victim.0,
                         stage: victim.1,
+                        settings: victim.2,
                         identity_digest: &pending.digest,
                     },
                     RenderSettlement::Cancelled,
@@ -1082,6 +1119,7 @@ impl EditPreviewOwner {
         key: &OwnerKey,
         photo_id: &str,
         stage: &'static str,
+        settings: &'static str,
         identity: &PreviewIdentity,
         now: SystemTime,
     ) -> RenderAdmission {
@@ -1104,6 +1142,7 @@ impl EditPreviewOwner {
             && self.render_gate.is_live(PreviewRenderRequest {
                 photo_id,
                 stage,
+                settings,
                 identity_digest: &digest,
             })
         {
@@ -1126,6 +1165,7 @@ impl EditPreviewOwner {
         let admission = self.render_gate.admit(PreviewRenderRequest {
             photo_id,
             stage,
+            settings,
             identity_digest: &digest,
         });
         if matches!(
@@ -1170,6 +1210,7 @@ impl EditPreviewOwner {
             PreviewRenderRequest {
                 photo_id,
                 stage,
+                settings: key.2,
                 identity_digest: &digest,
             },
             settlement,
@@ -1309,6 +1350,9 @@ pub(crate) async fn get_edit_preview(
     let Some(stage) = closed_stage(&stage) else {
         return stage_outside_closed_set();
     };
+    let Some(settings) = closed_settings(request.uri().query()) else {
+        return settings_outside_closed_set();
+    };
     if !valid_id(&photo_id) {
         return unknown_photo(&photo_id);
     }
@@ -1321,10 +1365,10 @@ pub(crate) async fn get_edit_preview(
     if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
         return response;
     }
-    if let Err(response) = develop_executable(&state, stage, &read) {
+    if let Err(response) = develop_executable(&state, stage, settings, &read) {
         return *response;
     }
-    serve_preview(&state, &photo_id, stage, &read).await
+    serve_preview(&state, &photo_id, stage, settings, &read).await
 }
 
 /// The support refusal of one Photo, if its class or facts refuse the route.
@@ -1355,16 +1399,44 @@ fn closed_stage(stage: &str) -> Option<&'static str> {
         .find(|closed| *closed == stage)
 }
 
+/// The closed `settings` selector of the route. An absent selector is the
+/// saved recipe's settings; `baseline` is the as-shot/baseline development
+/// settings the comparison presents. Any other value is outside the closed
+/// set and refuses the request rather than serving a rendition the client did
+/// not ask for.
+fn closed_settings(query: Option<&str>) -> Option<&'static str> {
+    let mut selected = SETTINGS_CURRENT;
+    for part in query.unwrap_or_default().split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key == "settings" {
+            selected = CLOSED_SETTINGS
+                .iter()
+                .copied()
+                .find(|closed| *closed == value)?;
+        }
+    }
+    Some(selected)
+}
+
 /// The develop stage executes only when the deployment admits processing and
-/// the stored recipe is representable by the qualified execution payload.
+/// the settings the request selects are representable by the qualified
+/// execution payload. The baseline selector names the processing baseline
+/// itself, so it is representable by construction and does not depend on the
+/// stored recipe.
 fn develop_executable(
     state: &HttpState,
     stage: &'static str,
+    settings: &'static str,
     read: &EditRecipeRead,
 ) -> Result<(), Box<Response<Body>>> {
     let Some(_config) = state.processing.as_ref() else {
         return Err(Box::new(processing_unavailable(stage, "operator-disabled")));
     };
+    if settings == SETTINGS_BASELINE {
+        return Ok(());
+    }
     if let Some(recipe) = read.recipe.as_ref() {
         let milli = recipe.settings.exposure_ev * 1000.0;
         let rounded = milli.round();
@@ -1393,11 +1465,12 @@ async fn serve_preview(
     state: &HttpState,
     photo_id: &str,
     stage: &'static str,
+    settings: &'static str,
     read: &EditRecipeRead,
 ) -> Response<Body> {
     let owner = &state.edit_preview;
-    let key = (photo_id.to_owned(), stage);
-    let facts = current_facts(state, stage, read);
+    let key = (photo_id.to_owned(), stage, settings);
+    let facts = current_facts(state, stage, settings, read);
     let retained = owner.retention.resolve(photo_id, &facts).await;
     let identity = PreviewIdentity::build(&facts, retained.as_ref());
     if let Some(rendition) = owner.current(&key, &identity).await {
@@ -1412,7 +1485,16 @@ async fn serve_preview(
         .as_ref()
         .is_some_and(|record| record.matches_facts(&facts))
     {
-        return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
+        return admit_render(
+            owner,
+            &key,
+            photo_id,
+            stage,
+            settings,
+            &identity,
+            SystemTime::now(),
+        )
+        .await;
     }
     // Serialize derive-and-publish per owner: a concurrent request with the
     // same full identity coalesces onto the first derivation.
@@ -1424,7 +1506,16 @@ async fn serve_preview(
     // The retention may have moved while this request waited for the permit.
     let retained = owner.retention.resolve(photo_id, &facts).await;
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
-        return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
+        return admit_render(
+            owner,
+            &key,
+            photo_id,
+            stage,
+            settings,
+            &identity,
+            SystemTime::now(),
+        )
+        .await;
     };
     // A newer intent registered while this request waited for the mutex
     // supersedes it: refuse without starting any conversion.
@@ -1453,7 +1544,7 @@ async fn serve_preview(
             // The bounded wait fell through to the admission path: the
             // stage is reported as queued render work instead of hanging
             // on the slot.
-            return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now())
+            return admit_render(owner, &key, photo_id, stage, settings, &identity, SystemTime::now())
                 .await;
         }
         permit = acquisition => permit,
@@ -1480,7 +1571,7 @@ async fn serve_preview(
         .publish_if_current(
             &key,
             &identity,
-            || async { fresh_identity(state, photo_id, stage).await.ok() },
+            || async { fresh_identity(state, photo_id, stage, settings).await.ok() },
             DerivedRendition {
                 bytes: axum::body::Bytes::from(derivative.jpeg),
                 sha256,
@@ -1499,7 +1590,7 @@ async fn serve_preview(
             // has, and the next request serves the newer identity.
             if owner
                 .confirm_publication(&key, &identity, || async {
-                    fresh_identity(state, photo_id, stage).await.ok()
+                    fresh_identity(state, photo_id, stage, settings).await.ok()
                 })
                 .await
             {
@@ -1561,6 +1652,7 @@ async fn fresh_identity(
     state: &HttpState,
     photo_id: &str,
     stage: &'static str,
+    settings: &'static str,
 ) -> Result<PreviewIdentity, Response<Body>> {
     let (photo, metadata, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
         Ok(facts) => facts,
@@ -1569,8 +1661,8 @@ async fn fresh_identity(
     if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
         return Err(response);
     }
-    develop_executable(state, stage, &read).map_err(|response| *response)?;
-    let facts = current_facts(state, stage, &read);
+    develop_executable(state, stage, settings, &read).map_err(|response| *response)?;
+    let facts = current_facts(state, stage, settings, &read);
     let retained = state.edit_preview.retention.resolve(photo_id, &facts).await;
     Ok(PreviewIdentity::build(&facts, retained.as_ref()))
 }
@@ -1582,10 +1674,14 @@ async fn admit_render(
     key: &OwnerKey,
     photo_id: &str,
     stage: &'static str,
+    settings: &'static str,
     identity: &PreviewIdentity,
     now: SystemTime,
 ) -> Response<Body> {
-    match owner.admit(key, photo_id, stage, identity, now).await {
+    match owner
+        .admit(key, photo_id, stage, settings, identity, now)
+        .await
+    {
         RenderAdmission::Queued => admitted(stage, "queued"),
         RenderAdmission::Running => admitted(stage, "running"),
         RenderAdmission::Indeterminate => outcome_unknown(stage),
@@ -1594,24 +1690,34 @@ async fn admit_render(
 }
 
 /// The current identity facts of one Photo owner: the source revision and
-/// recipe facts of the serialized read, the observed bundle, the stage, the
-/// qualified preview geometry, and the pinned display-transform identity.
-fn current_facts(state: &HttpState, stage: &'static str, read: &EditRecipeRead) -> PreviewFacts {
+/// settings facts of the serialized read, the observed bundle, the stage, the
+/// qualified preview geometry, and the pinned display-transform identity. The
+/// baseline selector names the processing baseline itself — 0 EV against the
+/// documented baseline and as-shot white balance — so its facts do not depend
+/// on the saved recipe.
+fn current_facts(
+    state: &HttpState,
+    stage: &'static str,
+    settings: &'static str,
+    read: &EditRecipeRead,
+) -> PreviewFacts {
     let bundle_sha256 = state
         .processing
         .as_ref()
         .map(|config: &ProcessingConfig| config.bundle_sha256.clone())
         .unwrap_or_else(|| "disabled".to_owned());
     let (recipe_revision, exposure_milli_ev) = match read.recipe.as_ref() {
-        // No saved recipe is the processing baseline: 0 EV and as-shot.
-        None => (None, 0),
-        Some(recipe) => (
+        // The baseline selector and a Photo without a saved recipe both name
+        // the processing baseline: 0 EV and as-shot.
+        Some(recipe) if settings != SETTINGS_BASELINE => (
             Some(recipe.revision.clone()),
             milli_ev(recipe.settings.exposure_ev),
         ),
+        _ => (None, 0),
     };
     PreviewFacts {
         stage,
+        settings,
         long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
         display_transform: DISPLAY_TRANSFORM_VERSION,
         bundle_sha256,
@@ -1622,9 +1728,11 @@ fn current_facts(state: &HttpState, stage: &'static str, read: &EditRecipeRead) 
     }
 }
 
-/// `photoId`, `stage`, `contentType`, `width`, `height`, `byteLength`,
-/// `sha256`, `sourceRevision`, `recipeVersion`, `displayTransform`, and
-/// `expiresAt` travel as the response headers, and the stream follows them.
+/// `photoId`, `stage`, `settings`, `contentType`, `width`, `height`,
+/// `byteLength`, `sha256`, `sourceRevision`, `recipeVersion`,
+/// `displayTransform`, and `expiresAt` travel as the response headers, and the
+/// stream follows them. A baseline rendition reports the empty
+/// `recipeVersion`: no saved recipe produced it.
 fn rendition_response(photo_id: &str, rendition: &PublishedRendition) -> Response<Body> {
     let facts = &rendition.identity.facts;
     Response::builder()
@@ -1638,6 +1746,7 @@ fn rendition_response(photo_id: &str, rendition: &PublishedRendition) -> Respons
         .header("x-content-type-options", "nosniff")
         .header("slipstream-edit-preview-photo-id", photo_id)
         .header("slipstream-edit-preview-stage", facts.stage)
+        .header("slipstream-edit-preview-settings", facts.settings)
         .header("slipstream-edit-preview-width", rendition.width.to_string())
         .header(
             "slipstream-edit-preview-height",
@@ -1677,8 +1786,8 @@ fn admitted(stage: &'static str, state: &'static str) -> Response<Body> {
 // ---------------------------------------------------------------- refusals
 
 // The closed refusal set of the route: 404 `unknown_photo`, 422
-// `invalid_settings` for a stage outside the closed set, 422
-// `unsupported_photo`, 503 `processing_unavailable`, 503
+// `invalid_settings` for a stage or settings selector outside its closed set,
+// 422 `unsupported_photo`, 503 `processing_unavailable`, 503
 // `resource_unavailable`, and 500 `outcome_unknown`.
 
 fn unknown_photo(photo_id: &str) -> Response<Body> {
@@ -1699,6 +1808,19 @@ fn stage_outside_closed_set() -> Response<Body> {
             "argument": "stage",
             "reason": "stage-outside-closed-set",
             "closedSet": CLOSED_STAGES,
+        }),
+    )
+}
+
+fn settings_outside_closed_set() -> Response<Body> {
+    cli_error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_settings",
+        "The requested settings are outside the closed selector set.",
+        serde_json::json!({
+            "argument": "settings",
+            "reason": "settings-outside-closed-set",
+            "closedSet": CLOSED_SETTINGS,
         }),
     )
 }
@@ -1769,6 +1891,7 @@ mod tests {
     fn facts(exposure_milli_ev: i64) -> PreviewFacts {
         PreviewFacts {
             stage: "develop",
+            settings: SETTINGS_CURRENT,
             long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
             display_transform: DISPLAY_TRANSFORM_VERSION,
             bundle_sha256: "c".repeat(64),
@@ -1889,7 +2012,7 @@ mod tests {
     #[tokio::test]
     async fn owner_serves_only_the_current_full_identity() {
         let owner = EditPreviewOwner::production(None);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let first = identity(250);
         assert!(matches!(
             publish(&owner, &key, &first, Some(first.clone())).await,
@@ -1908,23 +2031,29 @@ mod tests {
         let gate = ScriptedGate::queued(2);
         let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let now = SystemTime::now();
         let first = identity(250);
         let second = identity(500);
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &first, now).await,
+            owner
+                .admit(&key, "photo", "develop", SETTINGS_CURRENT, &first, now)
+                .await,
             RenderAdmission::Queued
         );
         // The same full identity coalesces without a second admission.
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &first, now).await,
+            owner
+                .admit(&key, "photo", "develop", SETTINGS_CURRENT, &first, now)
+                .await,
             RenderAdmission::Running
         );
         // A changed identity supersedes the pending intent and cancels the
         // superseded derivation in flight.
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &second, now).await,
+            owner
+                .admit(&key, "photo", "develop", SETTINGS_CURRENT, &second, now)
+                .await,
             RenderAdmission::Queued
         );
         assert_eq!(
@@ -1945,11 +2074,13 @@ mod tests {
         let gate = ScriptedGate::queued(3);
         let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let identity = identity(250);
         let now = SystemTime::now();
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &identity, now).await,
+            owner
+                .admit(&key, "photo", "develop", SETTINGS_CURRENT, &identity, now)
+                .await,
             RenderAdmission::Queued
         );
         // An explicit failure settles the intent, and the next request is a
@@ -1964,7 +2095,9 @@ mod tests {
             )
             .await;
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &identity, now).await,
+            owner
+                .admit(&key, "photo", "develop", SETTINGS_CURRENT, &identity, now)
+                .await,
             RenderAdmission::Queued,
             "a failed render frees its identity for retry"
         );
@@ -1976,6 +2109,7 @@ mod tests {
                     &key,
                     "photo",
                     "develop",
+                    SETTINGS_CURRENT,
                     &identity,
                     now + PENDING_TTL - Duration::from_secs(1)
                 )
@@ -1989,6 +2123,7 @@ mod tests {
                     &key,
                     "photo",
                     "develop",
+                    SETTINGS_CURRENT,
                     &identity,
                     now + PENDING_TTL + Duration::from_secs(1)
                 )
@@ -2002,7 +2137,7 @@ mod tests {
     #[tokio::test]
     async fn publication_is_conditional_on_the_identity_current_at_publish_time() {
         let owner = EditPreviewOwner::production(None);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let derived = identity(250);
         let newer = identity(500);
         // The late completion of a superseded request never publishes: the
@@ -2028,7 +2163,7 @@ mod tests {
     #[tokio::test]
     async fn publication_is_confirmed_against_persistence_after_publishing() {
         let owner = EditPreviewOwner::production(None);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let published = identity(250);
         let newer = identity(500);
         assert!(matches!(
@@ -2074,18 +2209,25 @@ mod tests {
         let gate = ScriptedGate::queued(1);
         let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let admitted = identity(250);
         assert_eq!(
             owner
-                .admit(&key, "photo", "develop", &admitted, SystemTime::now())
+                .admit(
+                    &key,
+                    "photo",
+                    "develop",
+                    SETTINGS_CURRENT,
+                    &admitted,
+                    SystemTime::now()
+                )
                 .await,
             RenderAdmission::Queued
         );
         // Pressure the bound: the pending owner is the least recently
         // touched entry, so it is the eviction victim.
         for index in 0..MAXIMUM_OWNERS {
-            let filling_key = (format!("photo-{index}"), "develop");
+            let filling_key = (format!("photo-{index}"), "develop", SETTINGS_CURRENT);
             let filling_identity = scripted_identity(&format!("source-{index}"), 250);
             let current = filling_identity.clone();
             publish(&owner, &filling_key, &filling_identity, Some(current)).await;
@@ -2099,11 +2241,11 @@ mod tests {
     #[tokio::test]
     async fn owner_eviction_releases_the_derive_permit() {
         let owner = EditPreviewOwner::production(None);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let permit = owner.derive_permit(&key).await;
         assert_eq!(Arc::strong_count(&permit), 2, "entry and test hold it");
         for index in 0..(MAXIMUM_OWNERS + 10) {
-            let evicting_key = (format!("photo-{index}"), "develop");
+            let evicting_key = (format!("photo-{index}"), "develop", SETTINGS_CURRENT);
             let evicting_identity = scripted_identity(&format!("source-{index}"), 250);
             let current = evicting_identity.clone();
             publish(&owner, &evicting_key, &evicting_identity, Some(current)).await;
@@ -2133,7 +2275,7 @@ mod tests {
     async fn owners_are_bounded_and_evict_the_least_recently_touched() {
         let owner = EditPreviewOwner::production(None);
         for index in 0..(MAXIMUM_OWNERS + 100) {
-            let key = (format!("photo-{index}"), "develop");
+            let key = (format!("photo-{index}"), "develop", SETTINGS_CURRENT);
             let identity = scripted_identity(&format!("source-{index}"), 250);
             let current = identity.clone();
             publish(&owner, &key, &identity, Some(current)).await;
@@ -2143,10 +2285,14 @@ mod tests {
             "the retained owners never grow past the bound"
         );
         // The most recently touched owner survives; the earliest was evicted.
-        let latest = (format!("photo-{}", MAXIMUM_OWNERS + 99), "develop");
+        let latest = (
+            format!("photo-{}", MAXIMUM_OWNERS + 99),
+            "develop",
+            SETTINGS_CURRENT,
+        );
         let latest_identity = scripted_identity(&format!("source-{}", MAXIMUM_OWNERS + 99), 250);
         assert!(owner.current(&latest, &latest_identity).await.is_some());
-        let earliest = ("photo-0".to_owned(), "develop");
+        let earliest = ("photo-0".to_owned(), "develop", SETTINGS_CURRENT);
         let earliest_identity = scripted_identity("source-0", 250);
         assert!(owner.current(&earliest, &earliest_identity).await.is_none());
     }
@@ -2155,7 +2301,7 @@ mod tests {
     async fn a_superseded_derivation_is_cancelled_and_never_published() {
         let gate = ScriptedGate::queued(1);
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate);
-        let key = ("photo".to_owned(), "develop");
+        let key = ("photo".to_owned(), "develop", SETTINGS_CURRENT);
         let signal = owner.begin_derivation(&key).await;
         assert!(!signal.is_cancelled());
         // A newer identity supersedes the in-flight derivation.
@@ -2164,6 +2310,7 @@ mod tests {
                 &key,
                 "photo",
                 "develop",
+                SETTINGS_CURRENT,
                 &scripted_identity("newer", 500),
                 SystemTime::now(),
             )
