@@ -466,16 +466,16 @@ class DeploymentSnapshot:
         # The wire contract gives profiles one object per approved source
         # class: the exact closed qualified set, no duplicates, no subsets.
         qualified_profile_ids = {"sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"}
-        profile_ids = [
-            profile.get("profileId")
-            for profile in profiles
-            if isinstance(profile, dict)
-        ]
-        if (
-            len(profile_ids) != len(profiles)
-            or len(set(profile_ids)) != len(profile_ids)
-            or set(profile_ids) != qualified_profile_ids
-        ):
+        profile_ids = []
+        for profile in profiles:
+            if not isinstance(profile, dict) or not isinstance(
+                profile.get("profileId"), str
+            ):
+                return [
+                    Check("web-capability", False, "web-capability-response-invalid", "profiles")
+                ]
+            profile_ids.append(profile["profileId"])
+        if len(set(profile_ids)) != len(profile_ids) or set(profile_ids) != qualified_profile_ids:
             return [Check("web-capability", False, "web-capability-response-invalid", "profiles")]
         for profile in profiles:
             if (
