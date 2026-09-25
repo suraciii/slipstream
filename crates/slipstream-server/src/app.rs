@@ -1698,24 +1698,33 @@ impl Application {
             let Some(source) = source_guard.as_ref() else {
                 return Err(ServerError::NotPublished);
             };
-            ids.iter()
-                .filter_map(|id| source.photos_by_id.get(id).copied())
-                .filter_map(|position| source.snapshot.photos.get(position))
-                // A removed Photo leaves every normal Library source, and a
-                // window is a read of one: a Snapshot opened before the removal
-                // presents the Photo no more than the publication does.
-                .filter(|photo| !photo.removed)
-                .map(|photo| {
-                    let originals = [Some(&photo.original_id)]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|id| source.originals_by_id.get(id))
-                        .filter_map(|position| source.snapshot.originals.get(*position))
-                        .cloned()
-                        .collect();
-                    PreviewFacts::from_records(photo.clone(), originals)
-                })
-                .collect::<Vec<_>>()
+            // A page is complete for its position: a window that could not
+            // present every Photo it names is not answered with a shorter
+            // page. A Photo the publication no longer holds, or one whose
+            // removal marker is set, expires the Snapshot instead — the
+            // browser reopens the source and reads the state the Library now
+            // holds.
+            let mut facts = Vec::with_capacity(ids.len());
+            for id in &ids {
+                let Some(position) = source.photos_by_id.get(id).copied() else {
+                    return Err(ServerError::BrowseNotFound);
+                };
+                let Some(photo) = source.snapshot.photos.get(position) else {
+                    return Err(ServerError::BrowseNotFound);
+                };
+                if photo.removed {
+                    return Err(ServerError::BrowseNotFound);
+                }
+                let originals = [Some(&photo.original_id)]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| source.originals_by_id.get(id))
+                    .filter_map(|position| source.snapshot.originals.get(*position))
+                    .cloned()
+                    .collect();
+                facts.push(PreviewFacts::from_records(photo.clone(), originals));
+            }
+            facts
         };
         let mut photos = Vec::with_capacity(facts.len());
         for facts in facts {

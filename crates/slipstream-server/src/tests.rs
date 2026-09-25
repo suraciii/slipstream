@@ -7979,12 +7979,14 @@ async fn a_removed_photo_leaves_a_window_of_a_snapshot_opened_before_its_removal
     .await;
     assert_eq!(removed["counts"]["removed"], 2);
 
-    // The retained Snapshot keeps its frozen count, and no window of it
-    // presents a Photo the Library no longer holds.
-    let (_, window) = get_json(&router, &format!("/api/browse/{token}?start=0&limit=10")).await;
-    assert_eq!(window["start"], 0);
-    assert_eq!(window["total"], 2);
-    assert_eq!(window["photos"], serde_json::json!([]));
+    // No window of the retained Snapshot presents a Photo the Library no
+    // longer holds, and no window is answered with a page shorter than the
+    // position it names: the Snapshot is expired instead, so the browser
+    // reopens the source and reads the Library as it now is.
+    let (status, window) =
+        get_json(&router, &format!("/api/browse/{token}?start=0&limit=10")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(window["error"], "Browse source expired or not found");
 
     // A source opened after the removal excludes them too.
     let reopened = response_json(
