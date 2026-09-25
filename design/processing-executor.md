@@ -68,6 +68,22 @@ admission unavailable and require operator reconciliation. A supervisor restart
 policy may restart the executable, but it cannot bypass this ordering or turn a
 failed reconciliation into readiness.
 
+A recorded manager phase is resolved from observed attempt state, never from an
+assumed manager result. Reconciliation verifies the attempt slice's recorded
+InvocationID and cgroup inode, the attempt mount's recorded identity, and the
+container's recorded identity, and clears the phase only when those agree with
+the journal. A pending slice stop is the exception: whether the attempt boundary
+still exists decides what cleanup may remove, so it is cleared only with the
+confirmed stop return. Every later step still fails closed on the actual
+container state, so a worker that failed before its release-gate pause leaves a
+resolvable phase instead of an attempt that can never settle.
+
+If an owned container is observed paused while settlement must stop it, persist
+an Unpause phase before calling Docker, unpause it, clear the phase only after
+the command returns successfully, and then issue the kill. A launcher restart
+between these operations can resolve Unpause from the recorded container and
+attempt identities and repeat settlement without signaling a paused container.
+
 The socket parent and every ancestor are canonical, symlink-free, root-owned
 and not writable by the Web UID. The parent contains only the fixed socket and
 its root-only persistent owner-claim file. Give the Web UID search permission

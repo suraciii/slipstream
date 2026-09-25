@@ -33,6 +33,10 @@ pub(crate) struct TiffIdentity {
 const ICC_TAG: u16 = 34675;
 const ICC_BYTES_MAX: usize = 1024 * 1024;
 const IFD_ENTRIES_MAX: usize = 512;
+/// The qualified writer emits one strip per row, so the strip layout arrays
+/// are as long as the image is tall. The bound stays far above any qualified
+/// geometry while keeping the parsed arrays small.
+const STRIP_ENTRIES_MAX: usize = 65_536;
 const HEAD_MAX: u64 = 1024 * 1024;
 
 struct Reader {
@@ -159,7 +163,7 @@ fn entry(entries: &[Entry], kind: u16) -> Option<&Entry> {
 /// Any other element encoding is not the qualified writer's output.
 fn array_values(reader: &mut Reader, entry: &Entry) -> Result<Vec<u64>, ErrorCode> {
     let count = usize::try_from(entry.count).map_err(|_| ErrorCode::Uncertain)?;
-    if count == 0 || count > 4096 {
+    if count == 0 || count > STRIP_ENTRIES_MAX {
         return Err(ErrorCode::Uncertain);
     }
     let element = match entry.field_type {
@@ -305,7 +309,10 @@ fn validate_for_icc(
     // the consumer's gate.
     let strips = entry(&entries, 273).ok_or(ErrorCode::Uncertain)?;
     let counts = entry(&entries, 279).ok_or(ErrorCode::Uncertain)?;
-    if strips.count == 0 || strips.count != counts.count || strips.count > 4096 {
+    if strips.count == 0
+        || strips.count != counts.count
+        || strips.count as usize > STRIP_ENTRIES_MAX
+    {
         return Err(ErrorCode::Uncertain);
     }
     let offsets = array_values(&mut reader, strips)?;
@@ -658,6 +665,66 @@ mod tests {
         tags.push(layout(279, &counts));
         tags.sort_by_key(|tag| tag.kind);
         build(path, &tags, body);
+    }
+
+    #[test]
+    fn a_strip_layout_as_long_as_the_image_is_tall_is_validated() {
+        let dir = temp_dir("many_strips");
+        let synthetic_icc = format!("{:x}", Sha256::digest(vec![0u8; 588]));
+        let layout = |kind: u16, values: &[u32]| Tag {
+            kind,
+            field_type: 4,
+            count: values.len() as u32,
+            value: values[0],
+            extra: (values.len() > 1).then(|| {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect()
+            }),
+        };
+        let tall = |path: &Path, rows: u32, strip_bytes: u32| {
+            let mut tags: Vec<Tag> = valid_tags()
+                .into_iter()
+                .filter(|tag| !matches!(tag.kind, 257 | 273 | 278 | 279))
+                .collect();
+            tags.push(Tag {
+                kind: 257,
+                field_type: 4,
+                count: 1,
+                value: rows,
+                extra: None,
+            });
+            let base = strip_body_offset(rows as usize * 8, true);
+            let offsets: Vec<u32> = (0..rows).map(|index| base + index * strip_bytes).collect();
+            let counts: Vec<u32> = vec![strip_bytes; rows as usize];
+            tags.push(layout(273, &offsets));
+            tags.push(Tag {
+                kind: 278,
+                field_type: 4,
+                count: 1,
+                value: 1,
+                extra: None,
+            });
+            tags.push(layout(279, &counts));
+            tags.sort_by_key(|tag| tag.kind);
+            let body = vec![7u8; (rows * strip_bytes) as usize];
+            build(path, &tags, &body);
+        };
+        // The qualified writer emits one strip per row, so a real artifact
+        // carries a strip entry per row: 5000 rows must validate.
+        let path = dir.join("rows.tif");
+        tall(&path, 5_000, 48);
+        let identity = validate_for_icc(&path, 1 << 23, &synthetic_icc).unwrap();
+        assert_eq!((identity.width, identity.height), (4, 5_000));
+        // The parsed arrays stay bounded.
+        let path = dir.join("over.tif");
+        tall(&path, 65_537, 48);
+        assert_eq!(
+            validate_for_icc(&path, 1 << 23, &synthetic_icc).unwrap_err(),
+            ErrorCode::Uncertain
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

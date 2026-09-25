@@ -1090,12 +1090,21 @@ const RECONCILE_UNAVAILABLE: &str = "processing launcher is unavailable";
 /// start; admission stays fail-closed instead of guessing.
 const RECONCILE_TOLERANCE: u32 = 5;
 
+/// An attempt whose validated output waits for collection reports `settling`
+/// with no outcome: the launcher records the service's acknowledgement before
+/// it reports a terminal result, so waiting for `settled` here would deadlock
+/// against the acknowledgement this service sends after collecting the output.
+fn output_awaits_collection(receipt: &PhotoReceipt) -> bool {
+    receipt.state == "settling" && receipt.outcome.is_none()
+}
+
 fn is_completed_receipt(receipt: &PhotoReceipt) -> bool {
-    receipt.state == "settled" && receipt.outcome.as_deref() == Some("completed")
+    output_awaits_collection(receipt)
+        || (receipt.state == "settled" && receipt.outcome.as_deref() == Some("completed"))
 }
 
 fn is_terminal_receipt(receipt: &PhotoReceipt) -> bool {
-    matches!(receipt.state.as_str(), "settled" | "blocked")
+    output_awaits_collection(receipt) || matches!(receipt.state.as_str(), "settled" | "blocked")
 }
 
 fn bounded_outcome(outcome: &str) -> String {
@@ -1288,7 +1297,11 @@ pub(crate) fn validate_development_tiff(path: &Path) -> Result<DevelopmentTiffFa
             1 | 2 | 6 | 7 => 1, // BYTE | ASCII | SBYTE | UNDEFINED
             3 | 8 => 2,         // SHORT | SSHORT
             4 | 9 => 4,         // LONG | SLONG
-            _ => return Err(invalid!()),
+            // An engine artifact carries resolution, EXIF, and XMP entries
+            // whose types this walk does not constrain. The contract is
+            // defined by the tags read below, so an unread entry is skipped
+            // rather than refusing a decodable image.
+            _ => continue,
         };
         let total = count.checked_mul(type_size).ok_or(ExportError::Validation(
             "Output is not a valid Development TIFF",
@@ -1435,9 +1448,9 @@ pub(crate) mod development_tiff_decode {
     pub(crate) fn write_development_tiff(path: &Path, payload: &[u8]) {
         let icc: &[u8] = include_bytes!("../../slipstream-core/assets/prophoto-linear-g10.icc");
         let mut bytes = b"II\x2a\x00\x08\x00\x00\x00".to_vec();
-        bytes.extend_from_slice(&11_u16.to_le_bytes());
+        bytes.extend_from_slice(&13_u16.to_le_bytes());
         let mut externals: Vec<u8> = Vec::new();
-        let base: usize = 8 + 2 + 11 * 12 + 4;
+        let base: usize = 8 + 2 + 13 * 12 + 4;
         let mut at = base as u32;
         let entry = |tag: u16,
                      kind: u16,
@@ -1498,6 +1511,30 @@ pub(crate) mod development_tiff_decode {
             3,
             0,
             Some(&three_shorts(3, 3, 3)),
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        // Resolution entries are RATIONAL, a type this walk does not read but
+        // a real engine artifact always carries. A walk that refuses an unread
+        // type refuses every development artifact.
+        let resolution = [0x2c_u8, 0x01, 0, 0, 1, 0, 0, 0];
+        entry(
+            282,
+            5,
+            1,
+            0,
+            Some(&resolution),
+            &mut bytes,
+            &mut externals,
+            &mut at,
+        );
+        entry(
+            283,
+            5,
+            1,
+            0,
+            Some(&resolution),
             &mut bytes,
             &mut externals,
             &mut at,
