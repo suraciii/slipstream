@@ -47,6 +47,22 @@ _Avoid_: Rebase, relink, root migration
 A Photographer-defined, explicitly ordered virtual group of Photos. One Photo may belong to multiple Albums. Album membership does not change an Original File or Original Location.
 _Avoid_: Photo Set, Collection, Favorites
 
+**Removed Photo**:
+A Photo whose removal marker is set: it keeps its row, identity, Original Location, Rating, Album membership, and Selection State, and it leaves every normal Library source. Removing a Photo never modifies or deletes its Original File.
+_Avoid_: deleted Photo, trashed Photo, purged Photo
+
+**Removal Operation**:
+One confirmed removal of one reviewed `Rejected` result, named by a browser-supplied operation id so a retried request repeats one operation instead of creating a second. The operation owns the group of Photos that Undo restores in one transaction.
+_Avoid_: batch delete, purge, cleanup job
+
+**Restore**:
+The removal action that clears removal markers through a compare-and-set, returning Photos to every normal Library source with the facts they never lost. Restore never rescans, renames, moves, or rewrites an Original File, and it is not Location Recovery.
+_Avoid_: undelete, relink, reimport
+
+**Removed Photos listing**:
+The bounded, newest-removal-first listing of Removed Photos, and the only ordinary surface a Removed Photo has. It offers per-Photo Restore and the operation-level Undo of the last removal.
+_Avoid_: Trash, Recycle Bin, Recovery Area
+
 ## Metadata
 
 **XMP Sidecar**:
