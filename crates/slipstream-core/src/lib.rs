@@ -37,8 +37,9 @@ pub use capture::{
 };
 pub use confinement::{LibraryRoot, OriginalCapability, ScanLimits};
 pub use derivative::{
-    DISPLAY_TRANSFORM_VERSION, Derivative, DerivativeError, DerivativeProfile, DerivativeTarget,
-    process_development_tiff, process_jpeg,
+    DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, Derivative, DerivativeError,
+    DerivativeProfile, DerivativeTarget, development_tiff_fixture, process_development_tiff,
+    process_jpeg,
 };
 pub use domain::{
     ALBUM_MEMBERSHIP_BATCH_MAX, AlbumBrowseMember, AlbumBrowseTarget, AlbumCreationResult,

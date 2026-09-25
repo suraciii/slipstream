@@ -104,7 +104,7 @@ struct SourceFacts<'a> {
 /// metadata read deliberately returns defaults when inspection is saturated,
 /// the source changed mid-read, or it cannot be opened, so an unobservable
 /// identity means the class is unavailable to observe rather than unlisted.
-fn derive_support(
+pub(crate) fn derive_support(
     facts: SourceFacts<'_>,
     source_available: bool,
     original_available: bool,
@@ -420,7 +420,7 @@ fn conflict_response(
 /// One serialized read of the recipe facts, Photo facts, and the bounded
 /// capture metadata. The recipe read owns the combined source availability
 /// and the unknown-Photo refusal.
-async fn load_facts(
+pub(crate) async fn load_facts(
     state: &HttpState,
     photo_id: &str,
 ) -> Result<(PhotoRead, CaptureReviewMetadata, EditRecipeRead), Response<Body>> {
@@ -442,7 +442,7 @@ async fn load_facts(
     Ok((photo, metadata, read))
 }
 
-fn source_facts<'a>(photo: &'a PhotoRead, metadata: &'a CaptureReviewMetadata) -> SourceFacts<'a> {
+pub(crate) fn source_facts<'a>(photo: &'a PhotoRead, metadata: &'a CaptureReviewMetadata) -> SourceFacts<'a> {
     SourceFacts {
         kind: photo.original_kind,
         filename: &photo.filename,

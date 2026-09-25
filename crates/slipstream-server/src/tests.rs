@@ -462,6 +462,7 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
@@ -521,6 +522,7 @@ async fn installation_resources_revalidate_and_never_fall_back_to_html() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
     });
     for (path, content_type, expected) in [
         (
@@ -2382,6 +2384,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
             application: Arc::clone(&application),
             web_root: Arc::new(open_web_root(missing_web)),
             processing: None,
+            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,
@@ -4450,7 +4453,7 @@ async fn cancelled_raw_metadata_requests_retain_admission_until_native_work_fini
     }
     // A failed assertion must also release native workers before Tokio teardown.
     let _release = ReleaseGate(Arc::clone(&gate));
-    let hook_gate = Arc::clone(&gate);
+    let hook_gate = gate.clone();
     let _hook = crate::app::install_metadata_inspection_test_hook(move |path| {
         if !path.as_str().starts_with("cancel-") {
             return;
@@ -12734,4 +12737,550 @@ mod export_routes {
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
+}
+
+// ---------------------------------------------------------------- Edit Preview
+
+/// The generated Development Result edge used by the preview fixtures. The
+/// route derives at the qualified 1224-pixel preview geometry; a smaller
+/// artifact resamples at its own size, which keeps the fixture bounded.
+const PREVIEW_FIXTURE_EDGE: u32 = 64;
+
+/// A retention seam whose record a test swaps while the route runs.
+struct ScriptedRetention {
+    record: Mutex<Option<crate::edit_preview::RetainedDevelopmentResult>>,
+}
+
+impl crate::edit_preview::DevelopmentResultRetention for ScriptedRetention {
+    fn resolve(&self, _photo_id: &str) -> Option<crate::edit_preview::RetainedDevelopmentResult> {
+        self.record.lock().unwrap().clone()
+    }
+}
+
+/// A render gate whose admissions a test scripts in order.
+struct ScriptedGate {
+    admissions: Mutex<std::collections::VecDeque<crate::edit_preview::RenderAdmission>>,
+    calls: AtomicUsize,
+}
+
+impl crate::edit_preview::PreviewRenderGate for ScriptedGate {
+    fn admit(
+        &self,
+        _request: crate::edit_preview::PreviewRenderRequest<'_>,
+    ) -> crate::edit_preview::RenderAdmission {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.admissions.lock().unwrap().pop_front().unwrap_or(
+            crate::edit_preview::RenderAdmission::Unavailable("script-exhausted"),
+        )
+    }
+}
+
+fn scripted_retention(
+    record: Option<crate::edit_preview::RetainedDevelopmentResult>,
+) -> Arc<ScriptedRetention> {
+    Arc::new(ScriptedRetention {
+        record: Mutex::new(record),
+    })
+}
+
+fn scripted_gate(
+    admissions: std::collections::VecDeque<crate::edit_preview::RenderAdmission>,
+) -> Arc<ScriptedGate> {
+    Arc::new(ScriptedGate {
+        admissions: Mutex::new(admissions),
+        calls: AtomicUsize::new(0),
+    })
+}
+
+fn preview_router(
+    application: &Arc<Application>,
+    web_root: impl Into<PathBuf>,
+    retention: Arc<dyn crate::edit_preview::DevelopmentResultRetention>,
+    gate: Arc<dyn crate::edit_preview::PreviewRenderGate>,
+) -> Router {
+    application.access.seed_test_token();
+    let owner = Arc::new(crate::edit_preview::EditPreviewOwner::new(retention, gate));
+    crate::http::create_router_with_preview(
+        Arc::clone(application),
+        crate::http::open_web_root(web_root.into()),
+        Some(ProcessingConfig {
+            instance: "f".repeat(32),
+            policy_sha256: "b".repeat(64),
+            bundle_sha256: "c".repeat(64),
+        }),
+        owner,
+    )
+}
+
+/// Writes one generated float32 Development TIFF and returns its path and the
+/// content evidence a retained record must carry.
+fn development_result_fixture(path: &Path, value: f32) -> (PathBuf, String, u64) {
+    let samples = vec![value; (PREVIEW_FIXTURE_EDGE * PREVIEW_FIXTURE_EDGE * 3) as usize];
+    let bytes = slipstream_core::development_tiff_fixture(
+        &samples,
+        PREVIEW_FIXTURE_EDGE,
+        PREVIEW_FIXTURE_EDGE,
+    );
+    fs::write(path, &bytes).unwrap();
+    use sha2::{Digest, Sha256};
+    let sha256 = crate::queries::hex_encode(Sha256::digest(&bytes).as_slice());
+    let length = bytes.len() as u64;
+    (path.to_path_buf(), sha256, length)
+}
+
+fn retained_result(
+    path: PathBuf,
+    sha256: String,
+    byte_length: u64,
+    recipe_revision: Option<String>,
+    exposure_milli_ev: i64,
+    source_revision: String,
+) -> crate::edit_preview::RetainedDevelopmentResult {
+    crate::edit_preview::RetainedDevelopmentResult {
+        sha256,
+        byte_length,
+        recipe_revision,
+        exposure_milli_ev,
+        white_balance: "as-shot",
+        source_revision,
+        bundle_sha256: "c".repeat(64),
+        path,
+    }
+}
+
+async fn get_preview_response(router: &Router, path: &str) -> Response<Body> {
+    send(
+        router,
+        authenticated_request()
+            .uri(format!("http://camera.local{path}"))
+            .header("Slipstream-CLI-Contract", "1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+}
+
+fn preview_uri(photo_id: &str, stage: &str) -> String {
+    format!("/api/photos/{photo_id}/edit-preview/{stage}")
+}
+
+fn header_value(response: &Response<Body>, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .expect("preview metadata header")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn body_bytes(response: Response<Body>) -> Vec<u8> {
+    axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+/// One approved Photo with a saved recipe, plus the retained Development
+/// Result of that identity. The application stays open; callers shut it down.
+async fn approved_photo_with_recipe_and_result(
+    request_id: &str,
+    exposure_ev: f64,
+) -> (
+    PathBuf,
+    Config,
+    Arc<Application>,
+    String,
+    String,
+    crate::edit_preview::RetainedDevelopmentResult,
+) {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("approved.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.access.seed_test_token();
+    let bootstrap = crate::http::create_router_with_processing(
+        Arc::clone(&application),
+        crate::http::open_web_root(config.web_root()),
+        Some(ProcessingConfig {
+            instance: "f".repeat(32),
+            policy_sha256: "b".repeat(64),
+            bundle_sha256: "c".repeat(64),
+        }),
+    );
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let (_, read) = get_edit_recipe(&bootstrap, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+    let (_, saved) = save_recipe(
+        &bootstrap,
+        &photo_id,
+        save_body(request_id, None, &source_revision, exposure_ev),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+    let recipe_revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
+    let (path, sha256, byte_length) =
+        development_result_fixture(&base.join("development-result.tif"), 0.18);
+    let record = retained_result(
+        path,
+        sha256,
+        byte_length,
+        Some(recipe_revision.clone()),
+        (exposure_ev * 1000.0) as i64,
+        source_revision,
+    );
+    (base, config, application, photo_id, recipe_revision, record)
+}
+
+/// The current rendition streams behind the closed typed metadata: response
+/// headers carry every contract field and the JPEG stream follows them.
+#[tokio::test]
+async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
+    use sha2::{Digest, Sha256};
+    let (base, config, application, photo_id, recipe_revision, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let router = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record.clone())),
+        scripted_gate(std::collections::VecDeque::new()),
+    );
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "content-type"), "image/jpeg");
+    assert_eq!(header_value(&response, "cache-control"), "no-store");
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-photo-id"),
+        photo_id
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-stage"),
+        "develop"
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-width"),
+        "64"
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-height"),
+        "64"
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-recipe-version"),
+        recipe_revision
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-source-revision"),
+        crate::queries::hex_encode(source_revision.as_bytes())
+    );
+    assert_eq!(
+        header_value(&response, "slipstream-edit-preview-display-transform"),
+        "display-transform-v1"
+    );
+    let expires_at = header_value(&response, "slipstream-edit-preview-expires-at");
+    assert!(expires_at.contains('T') && expires_at.ends_with('Z'));
+    let sha256 = header_value(&response, "slipstream-edit-preview-sha256");
+    let content_length = header_value(&response, "content-length");
+    let bytes = body_bytes(response).await;
+    assert_eq!(content_length, bytes.len().to_string());
+    assert_eq!(
+        crate::queries::hex_encode(Sha256::digest(&bytes).as_slice()),
+        sha256,
+        "the stream body is exactly the rendition the sha256 header names"
+    );
+    assert_eq!(
+        [&bytes[..2], &bytes[bytes.len() - 2..]],
+        [&[0xFF, 0xD8][..], &[0xFF, 0xD9][..]],
+        "the stream is a complete JPEG"
+    );
+    // A second request is served by the rendition owner without a new
+    // admission and with the same identity facts.
+    let second = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        header_value(&second, "slipstream-edit-preview-sha256"),
+        sha256
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// Every closed refusal of the route carries its exact status and code, and
+/// admitted work reports the 202 queued and running states.
+#[tokio::test]
+async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
+    let (base, config, application, photo_id, first_revision, _) =
+        approved_photo_with_recipe_and_result("preview-save", 0.25).await;
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+        crate::edit_preview::RenderAdmission::Indeterminate,
+    ]));
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
+    let router = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        gate_dyn,
+    );
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    // 404 unknown_photo: an unknown Photo and a malformed Photo ID.
+    for path in [
+        preview_uri("00000000-0000-4000-8000-000000000000", "develop"),
+        preview_uri("short", "develop"),
+    ] {
+        let response = get_preview_response(&router, &path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error_code(&response_json(response).await), "unknown_photo");
+    }
+
+    // 422 invalid_settings: a stage outside the closed set.
+    for stage in ["film", "grain"] {
+        let response = get_preview_response(&router, &preview_uri(&photo_id, stage)).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = response_json(response).await;
+        assert_eq!(error_code(&body), "invalid_settings");
+        assert_eq!(body["error"]["details"]["argument"], "stage");
+    }
+
+    // 202 queued: the render is admitted. The second request coalesces into
+    // the running state without a second admission.
+    let queued = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(queued.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(queued).await,
+        serde_json::json!({"state": "queued", "stage": "develop"})
+    );
+    let running = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(running.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(running).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+    assert_eq!(
+        gate.calls.load(Ordering::Relaxed),
+        1,
+        "equal identities coalesce onto one admission"
+    );
+
+    // A changed identity supersedes the pending intent. With no usable
+    // retained result and an unknowable admission outcome, the route reports
+    // 500 outcome_unknown.
+    let (_, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "preview-save-2",
+            Some(&first_revision),
+            &source_revision,
+            0.75,
+        ),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+    let unknown = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error_code(&response_json(unknown).await), "outcome_unknown");
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A source class without an approved profile refuses with 422
+/// `unsupported_photo`; an unobservable class refuses with 503
+/// `resource_unavailable` naming the reason.
+#[tokio::test]
+async fn edit_preview_refuses_unsupported_and_unobservable_source_classes() {
+    let (base, config) = prepare_fixture();
+    unapproved_raw_fixture(&config.library_root.join("unapproved.ARW"));
+    generated_non_tiff_raw_fixture(&config.library_root.join("opaque.ARW"));
+    let application = Arc::new(Application::open(&config).await.unwrap());
+    wait_for_scan_settled(&application).await;
+    let router = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(None),
+        scripted_gate(std::collections::VecDeque::new()),
+    );
+    let mut unsupported_refused = false;
+    let mut unobservable_refused = false;
+    for photo_id in browse_photo_ids(&application, BrowseSourceRequest::Library).await {
+        let (_, read) = get_edit_recipe(&router, &photo_id).await;
+        let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+        if read["support"]["state"] == "unsupported" {
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(
+                error_code(&response_json(response).await),
+                "unsupported_photo"
+            );
+            unsupported_refused = true;
+        } else if read["support"]["reason"] == "camera-identity-unavailable" {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = response_json(response).await;
+            assert_eq!(error_code(&body), "resource_unavailable");
+            assert_eq!(
+                body["error"]["details"]["reason"],
+                "camera-identity-unavailable"
+            );
+            unobservable_refused = true;
+        }
+    }
+    assert!(unsupported_refused, "the unapproved class was classified");
+    assert!(
+        unobservable_refused,
+        "the unobservable class was classified"
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A rendition of a superseded identity is not served: after a recipe change
+/// the retained result of the old identity is stale, and the changed identity
+/// owns the Photo and stage.
+#[tokio::test]
+async fn edit_preview_does_not_serve_a_superseded_identity() {
+    let (base, config, application, photo_id, first_revision, first_record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let retention = scripted_retention(Some(first_record));
+    let gate = scripted_gate(std::collections::VecDeque::from([
+        crate::edit_preview::RenderAdmission::Queued,
+    ]));
+    let retention_dyn: Arc<dyn crate::edit_preview::DevelopmentResultRetention> = retention.clone();
+    let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
+    let router = preview_router(&application, config.web_root(), retention_dyn, gate_dyn);
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    // The current identity streams.
+    let current = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(current.status(), StatusCode::OK);
+    let current_sha = header_value(&current, "slipstream-edit-preview-sha256");
+
+    // A recipe change supersedes the identity: the stale retained result is
+    // not served, and the changed identity is admitted as preview work.
+    let (_, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "preview-save-2",
+            Some(&first_revision),
+            &source_revision,
+            0.75,
+        ),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+    let second_revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
+    let superseded = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(superseded.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(superseded).await,
+        serde_json::json!({"state": "queued", "stage": "develop"})
+    );
+
+    // Completion of the changed identity republishes only while it is still
+    // current: the retained result of the new identity streams.
+    let (path, second_sha, second_length) =
+        development_result_fixture(&base.join("development-result-2.tif"), 0.9);
+    *retention.record.lock().unwrap() = Some(retained_result(
+        path,
+        second_sha.clone(),
+        second_length,
+        Some(second_revision.clone()),
+        750,
+        source_revision,
+    ));
+    let republished = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(republished.status(), StatusCode::OK);
+    assert_eq!(
+        header_value(&republished, "slipstream-edit-preview-recipe-version"),
+        second_revision,
+        "the republished rendition carries the changed identity"
+    );
+    let republished_sha = header_value(&republished, "slipstream-edit-preview-sha256");
+    let republished_bytes = body_bytes(republished).await;
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        crate::queries::hex_encode(Sha256::digest(&republished_bytes).as_slice()),
+        republished_sha,
+    );
+    assert_ne!(
+        current_sha, republished_sha,
+        "the superseded rendition is never the current rendition"
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// Concurrent requests with the same full identity coalesce onto one
+/// derivation and both receive the current rendition.
+#[tokio::test]
+async fn edit_preview_coalesces_concurrent_derivations() {
+    use sha2::{Digest, Sha256};
+    let (base, config, application, photo_id, _, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let router = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record.clone())),
+        scripted_gate(std::collections::VecDeque::new()),
+    );
+    let path = preview_uri(&photo_id, "develop");
+    let (first, second) = tokio::join!(
+        get_preview_response(&router, &path),
+        get_preview_response(&router, &path),
+    );
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        header_value(&first, "slipstream-edit-preview-sha256"),
+        header_value(&second, "slipstream-edit-preview-sha256")
+    );
+    let first_bytes = body_bytes(first).await;
+    let second_bytes = body_bytes(second).await;
+    assert_eq!(first_bytes, second_bytes);
+    assert_eq!(
+        crate::queries::hex_encode(Sha256::digest(&first_bytes).as_slice()),
+        crate::queries::hex_encode(Sha256::digest(&second_bytes).as_slice())
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// Without a configured processing deployment the develop stage cannot
+/// execute, and the route reports `processing_unavailable`.
+#[tokio::test]
+async fn edit_preview_reports_a_disabled_deployment_as_processing_unavailable() {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("approved.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    application.access.seed_test_token();
+    let router = crate::http::create_router(Arc::clone(&application), config.web_root());
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        error_code(&response_json(response).await),
+        "processing_unavailable"
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
 }

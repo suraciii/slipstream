@@ -45,6 +45,7 @@ mod access;
 mod app;
 pub use access::administer_access;
 mod config;
+mod edit_preview;
 mod edit_recipe;
 mod export_manager;
 pub(crate) mod folders;
