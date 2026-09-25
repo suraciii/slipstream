@@ -12770,9 +12770,11 @@ impl crate::edit_preview::PreviewRenderGate for ScriptedGate {
         _request: crate::edit_preview::PreviewRenderRequest<'_>,
     ) -> crate::edit_preview::RenderAdmission {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.admissions.lock().unwrap().pop_front().unwrap_or(
-            crate::edit_preview::RenderAdmission::Unavailable("script-exhausted"),
-        )
+        self.admissions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("admission script exhausted")
     }
 
     fn settle(
@@ -13293,6 +13295,117 @@ async fn edit_preview_reports_a_disabled_deployment_as_processing_unavailable() 
     assert_eq!(
         error_code(&response_json(response).await),
         "processing_unavailable"
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A recipe save commits while a render is in flight: the in-flight request's
+/// publication is refused against the persisted identity, the stale rendition
+/// is never served, and the newer request reaches admission without waiting
+/// behind the in-flight derivation.
+#[tokio::test]
+async fn edit_preview_races_a_recipe_save_against_an_in_flight_render() {
+    let (base, config, application, photo_id, first_revision, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let (router, owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record)),
+        scripted_gate(std::collections::VecDeque::from([
+            crate::edit_preview::RenderAdmission::Queued,
+        ])),
+    );
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    // Park the first render deterministically: holding the instance-wide
+    // conversion permit stops it right before the native conversion, after
+    // it has read the recipe identity it intends to publish.
+    let parked = owner.try_derivation_permit().expect("parking permit");
+    let parked_router = router.clone();
+    let parked_uri = preview_uri(&photo_id, "develop");
+    let in_flight =
+        tokio::spawn(async move { get_preview_response(&parked_router, &parked_uri).await });
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    // The save commits while the render is in flight.
+    let (_, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "preview-save-2",
+            Some(&first_revision),
+            &source_revision,
+            0.75,
+        ),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+
+    // A newer request reaches admission immediately: it is not queued behind
+    // the in-flight derivation.
+    let newer = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(newer.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(newer).await,
+        serde_json::json!({"state": "queued", "stage": "develop"})
+    );
+
+    // Releasing the conversion permit lets the in-flight render finish. Its
+    // publication acceptance runs against persistence and refuses: the newer
+    // recipe is already committed, so no stale rendition is served.
+    drop(parked);
+    let stale = in_flight.await.unwrap();
+    assert_eq!(stale.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(stale).await;
+    assert_eq!(error_code(&body), "resource_unavailable");
+    assert_eq!(body["error"]["details"]["reason"], "preview-superseded");
+    assert_eq!(
+        owner.derivations_started(),
+        1,
+        "the parked request did start its derivation"
+    );
+
+    // The stale rendition was never published: the next request goes to
+    // admission for the newer identity again.
+    let again = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// With the render gate unavailable the route refuses fail-closed, naming the
+/// closed admission reason instead of any open-ended string.
+#[tokio::test]
+async fn edit_preview_refuses_render_admission_fail_closed() {
+    let (base, config) = prepare_fixture();
+    approved_raw_fixture(&config.library_root.join("approved.ARW"));
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
+        .await
+        .into_iter()
+        .next()
+        .unwrap();
+    let (router, _owner) = preview_router(
+        &application,
+        config.web_root(),
+        Arc::new(crate::edit_preview::UnlandedRetention),
+        Arc::new(crate::edit_preview::UnlandedRenderGate),
+    );
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(response).await;
+    assert_eq!(error_code(&body), "processing_unavailable");
+    assert_eq!(
+        body["error"]["details"]["reason"],
+        "preview-render-admission-unavailable"
     );
 
     application.shutdown().await.unwrap();
