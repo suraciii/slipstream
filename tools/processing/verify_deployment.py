@@ -30,6 +30,29 @@ MAX_WEB_BYTES = 1024 * 1024
 MAX_WEB_TOKEN_BYTES = 4096
 MAX_CGROUP_IO_BYTES = 4096
 
+# Unit properties that give the launcher a private mount namespace. The
+# launcher's attempt storage must stay visible to the engine container's bind
+# resolution, which resolves in the host mount namespace.
+MOUNT_NAMESPACE_PROPERTIES = (
+    "PrivateTmp",
+    "PrivateDevices",
+    "ProtectHome",
+    "ProtectProc",
+    "ExecPaths",
+    "NoExecPaths",
+    "PrivateMounts",
+    "ProtectSystem",
+    "ProtectKernelTunables",
+    "ProtectKernelModules",
+    "ProtectKernelLogs",
+    "ReadWritePaths",
+    "ReadOnlyPaths",
+    "InaccessiblePaths",
+    "BindPaths",
+    "BindReadOnlyPaths",
+    "TemporaryFileSystem",
+)
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -148,6 +171,7 @@ class DeploymentSnapshot:
             self._host_check(),
             self._launcher_check(),
             self._unit_check(),
+            self._mount_namespace_check(),
             self._config_check(),
             self._service_check(),
             self._runtime_check(),
@@ -204,6 +228,57 @@ class DeploymentSnapshot:
 
     def _unit_check(self) -> Check:
         return _regular_root_file("launcher-unit", self.paths.unit)
+
+    def _mount_namespace_check(self) -> Check:
+        """Require the running launcher to share the host mount namespace.
+
+        The launcher mounts the size- and inode-capped attempt tmpfs and the
+        engine's bind sources beneath its instance root. Docker resolves bind
+        sources in the host namespace. Unit properties diagnose known causes;
+        comparing the running process with PID 1 catches other namespace
+        options and a service still running under an older unit definition.
+        """
+        if not _lower_hex(self.instance, 32):
+            return Check("launcher-mount-namespace", False, "invalid-instance")
+        unit = f"slipstream-processing-launcher@{self.instance}.service"
+        properties = ",".join(MOUNT_NAMESPACE_PROPERTIES)
+        result = self.command(
+            ("systemctl", "--system", "show", f"--property={properties}", unit)
+        )
+        if result.returncode != 0:
+            return Check(
+                "launcher-mount-namespace", False, "launcher-unit-unavailable"
+            )
+        enabled: list[str] = []
+        for line in result.stdout.splitlines():
+            name, _, value = line.partition("=")
+            if name not in MOUNT_NAMESPACE_PROPERTIES:
+                continue
+            value = value.strip()
+            if not value or value in ("no", "false") or (name == "ProtectProc" and value == "default"):
+                continue
+            enabled.append(f"{name}={value[:60]}")
+        if enabled:
+            return Check(
+                "launcher-mount-namespace",
+                False,
+                "launcher-private-mount-namespace",
+                ", ".join(enabled),
+            )
+        pid_result = self.command(
+            ("systemctl", "--system", "show", "--property=MainPID", "--value", unit)
+        )
+        pid = pid_result.stdout.strip()
+        if pid_result.returncode != 0 or not pid.isascii() or not pid.isdigit() or int(pid) <= 1:
+            return Check("launcher-mount-namespace", False, "launcher-process-unavailable")
+        try:
+            host_mount = os.readlink("/proc/1/ns/mnt")
+            launcher_mount = os.readlink(f"/proc/{pid}/ns/mnt")
+        except OSError:
+            return Check("launcher-mount-namespace", False, "launcher-process-unavailable")
+        if host_mount != launcher_mount:
+            return Check("launcher-mount-namespace", False, "launcher-private-mount-namespace")
+        return Check("launcher-mount-namespace", True)
 
     def _config_check(self) -> Check:
         if not _lower_hex(self.instance, 32):
@@ -353,6 +428,7 @@ class DeploymentSnapshot:
             "host-topology",
             "launcher-installation",
             "launcher-unit",
+            "launcher-mount-namespace",
             "launcher-config",
             "launcher-service",
             "launcher-runtime",

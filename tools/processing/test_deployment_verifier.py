@@ -37,6 +37,14 @@ def fake_command(arguments):
         return deployment.CommandResult(0, "active\n", "")
     if arguments[:4] == ("systemctl", "--system", "show", "--property=SubState"):
         return deployment.CommandResult(0, "running\n", "")
+    if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+        "--property=PrivateTmp"
+    ):
+        properties = arguments[3].split("=", 1)[1].split(",")
+        body = "".join(f"{name}=\n" for name in properties)
+        return deployment.CommandResult(0, body + "ProtectProc=default\n", "")
+    if arguments[:4] == ("systemctl", "--system", "show", "--property=MainPID"):
+        return deployment.CommandResult(0, "4242\n", "")
     return deployment.CommandResult(1, "", "unknown command")
 
 
@@ -91,7 +99,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         required = [
             deployment.Check(name, True) for name in (
                 "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
-                "launcher-config", "launcher-service", "launcher-runtime",
+                "launcher-mount-namespace", "launcher-config", "launcher-service", "launcher-runtime",
             )
         ]
         required[-1] = deployment.Check("launcher-runtime", False, "launcher-socket-missing")
@@ -104,7 +112,7 @@ class DeploymentVerifierTests(unittest.TestCase):
         required = [
             deployment.Check(name, True) for name in (
                 "deployment-identities", "host-topology", "launcher-installation", "launcher-unit",
-                "launcher-config", "launcher-service", "launcher-runtime",
+                "launcher-mount-namespace", "launcher-config", "launcher-service", "launcher-runtime",
             )
         ]
         observed = []
@@ -148,6 +156,82 @@ class DeploymentVerifierTests(unittest.TestCase):
             self.assertEqual(launcher["reason"], "launcher-installation-missing")
             self.assertEqual(snapshot["status"], "read-only-checks-failed")
             self.assertFalse(snapshot["production_ready"])
+
+    def test_installed_unit_keeps_attempt_storage_visible_to_the_engine(self):
+        with patch.object(deployment.os, "readlink", side_effect=lambda _: "mnt:[111]") as readlink:
+            self.assertEqual(
+                deployment.DeploymentSnapshot(
+                    instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=fake_command
+                )._mount_namespace_check(),
+                deployment.Check("launcher-mount-namespace", True),
+            )
+        self.assertEqual(
+            [call.args[0] for call in readlink.call_args_list],
+            ["/proc/1/ns/mnt", "/proc/4242/ns/mnt"],
+        )
+
+    def test_installed_unit_with_private_mount_namespace_is_rejected(self):
+        def namespaced_command(arguments):
+            if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+                "--property=PrivateTmp"
+            ):
+                return deployment.CommandResult(
+                    0,
+                    "PrivateTmp=yes\nProtectSystem=strict\nProtectKernelTunables=yes\n"
+                    "ReadWritePaths=/run/slipstream-processing/x /var/lib/slipstream-processing\n"
+                    "RestrictAddressFamilies=AF_UNIX\n",
+                    "",
+                )
+            return fake_command(arguments)
+
+        result = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=namespaced_command
+        )._mount_namespace_check()
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "launcher-private-mount-namespace")
+        self.assertEqual(
+            result.detail,
+            "PrivateTmp=yes, ProtectSystem=strict, ProtectKernelTunables=yes, "
+            "ReadWritePaths=/run/slipstream-processing/x /var/lib/slipstream-processing",
+        )
+
+    def test_other_mount_namespacing_properties_are_rejected(self):
+        for name in ("ProtectHome", "PrivateDevices", "ProtectProc", "ExecPaths", "NoExecPaths"):
+            with self.subTest(name=name):
+                def command(arguments):
+                    if arguments[:3] == ("systemctl", "--system", "show") and arguments[3].startswith(
+                        "--property=PrivateTmp"
+                    ):
+                        return deployment.CommandResult(0, f"{name}=yes\n", "")
+                    return fake_command(arguments)
+
+                result = deployment.DeploymentSnapshot(
+                    instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=command
+                )._mount_namespace_check()
+                self.assertEqual(result.reason, "launcher-private-mount-namespace")
+                self.assertEqual(result.detail, f"{name}=yes")
+
+    def test_running_launcher_mount_namespace_must_match_pid_one(self):
+        checker = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=fake_command
+        )
+        with patch.object(deployment.os, "readlink", side_effect=["mnt:[111]", "mnt:[222]"]):
+            result = checker._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-private-mount-namespace")
+
+        with patch.object(deployment.os, "readlink", side_effect=OSError):
+            result = checker._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-process-unavailable")
+
+        def stopped_command(arguments):
+            if arguments[:4] == ("systemctl", "--system", "show", "--property=MainPID"):
+                return deployment.CommandResult(0, "0\n", "")
+            return fake_command(arguments)
+
+        result = deployment.DeploymentSnapshot(
+            instance=INSTANCE, policy=POLICY, bundle=BUNDLE, command=stopped_command
+        )._mount_namespace_check()
+        self.assertEqual(result.reason, "launcher-process-unavailable")
 
     def test_missing_socket_is_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
