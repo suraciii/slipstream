@@ -1103,37 +1103,6 @@ pub(crate) fn metadata_file<T: DeserializeOwned>(
 mod tests {
     use super::*;
     #[test]
-    fn local_plans_are_checked_and_preserve_rows() {
-        assert_eq!(
-            local_plan("cam16ucs-srgb-f64-v1", 1, 1, GAMUT_ALLOWANCE)
-                .unwrap()
-                .scratch_bytes,
-            67_110_912
-        );
-        assert_eq!(
-            local_plan("srgb-cctf-f64-v1", 262145, 1, GAMUT_ALLOWANCE)
-                .unwrap()
-                .batch_pixels,
-            262144
-        );
-        assert_eq!(
-            local_plan("jpeg-uint8-rows-v1", 9568 * 9568, 9568, JPEG_ALLOWANCE)
-                .unwrap()
-                .batch_pixels,
-            258336
-        );
-        for (n, w, a) in [
-            (0, 1, JPEG_ALLOWANCE),
-            (1, 0, JPEG_ALLOWANCE),
-            (300000, 300000, JPEG_ALLOWANCE),
-            (u64::MAX, 1, JPEG_ALLOWANCE),
-        ] {
-            assert!(local_plan("jpeg-uint8-rows-v1", n, w, a).is_err());
-        }
-        assert!(geometry(9569, 1).is_err());
-        assert!(geometry(u64::MAX, 2).is_err());
-    }
-    #[test]
     fn strict_requests_do_not_accept_numeric_or_object_shortcuts() {
         let good = format!(
             r#"{{"version":2,"op":"inspect","instance":"{}","incarnation":"{}","sequence":1}}"#,
@@ -1514,6 +1483,11 @@ mod contract_tests {
                 expected["destination_bytes"].as_u64().unwrap()
             );
         }
+        // Guard shapes the shared vectors cannot express: a zero-width row and
+        // the fixture geometry bounds.
+        assert!(local_plan("jpeg-uint8-rows-v1", 1, 0, JPEG_ALLOWANCE).is_err());
+        assert!(geometry(9569, 1).is_err());
+        assert!(geometry(u64::MAX, 2).is_err());
     }
     #[test]
     fn resource_model_accepts_reordered_stages_but_rejects_duplicates_or_omissions() {

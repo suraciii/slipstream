@@ -610,20 +610,16 @@ mod tests {
             Err(ExportError::InvalidWorkspace)
         ));
         assert!(!workspace.exists());
-        let _ = fs::remove_dir_all(root);
-    }
 
-    #[test]
-    fn missing_workspace_is_rejected_without_creating_it() {
-        let root = std::env::temp_dir().join(format!("slipstream-export-test-{}", unique_token()));
+        // A missing exports directory is likewise rejected, not created.
         let library = root.join("library");
-        let workspace = library.join("exports");
+        let missing = library.join("exports");
         fs::create_dir_all(&library).unwrap();
         assert!(matches!(
-            ExportWorkspace::open(&workspace, &library),
+            ExportWorkspace::open(&missing, &library),
             Err(ExportError::InvalidWorkspace)
         ));
-        assert!(!workspace.exists());
+        assert!(!missing.exists());
         let _ = fs::remove_dir_all(root);
     }
 }

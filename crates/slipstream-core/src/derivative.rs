@@ -750,6 +750,33 @@ mod tests {
         assert_eq!((result.width, result.height), (512, 320));
         assert_eq!(result.profile, DerivativeProfile::Srgb);
 
+        // The near-corner pixels of the downscaled `pattern` gradient are
+        // checked against the recorded values of the Lanczos normalization
+        // within a per-channel tolerance: the resampler's SIMD dispatch rounds
+        // differently across runner CPUs (CI measured up to 3 units on the same
+        // source), while a channel swap, a collapse toward black, or a
+        // mismatched sample point each moves a channel by far more.
+        const PIXEL_TOLERANCE: i32 = 12;
+        let decoded = DynamicImage::from_decoder(
+            JpegDecoder::new(std::io::Cursor::new(&result.jpeg)).unwrap(),
+        )
+        .unwrap()
+        .to_rgb8();
+        for (x, y, pixel) in [
+            (1, 1, [153, 144, 49]),
+            (decoded.width() - 2, 1, [144, 100, 235]),
+            (1, decoded.height() - 2, [127, 139, 41]),
+        ] {
+            let actual = decoded.get_pixel(x, y).0;
+            for (channel, (actual, expected)) in actual.iter().zip(pixel).enumerate() {
+                assert!(
+                    (i32::from(*actual) - expected).abs() <= PIXEL_TOLERANCE,
+                    "pixel ({x}, {y}) channel {channel}: {actual} is not within \
+                     {PIXEL_TOLERANCE} of {expected}"
+                );
+            }
+        }
+
         let mut profiled = Vec::new();
         let mut encoder = JpegEncoder::new_with_quality(&mut profiled, 100);
         encoder
@@ -776,21 +803,6 @@ mod tests {
             process_jpeg(&source[..source.len() - 7], DerivativeTarget::Thumbnail512),
             Err(DerivativeError::Malformed)
         );
-    }
-
-    #[test]
-    fn representative_pixels_are_stable_after_lanczos_normalization() {
-        let source = encode(3200, 2000);
-        let result = process_jpeg(&source, DerivativeTarget::Thumbnail512).unwrap();
-        let decoded = DynamicImage::from_decoder(
-            JpegDecoder::new(std::io::Cursor::new(&result.jpeg)).unwrap(),
-        )
-        .unwrap()
-        .to_rgb8();
-        for (x, y) in [(1, 1), (decoded.width() - 2, 1), (1, decoded.height() - 2)] {
-            let pixel = decoded.get_pixel(x, y);
-            assert!(pixel.0.iter().any(|channel| *channel > 0));
-        }
     }
 
     /// The inputs and expected bytes are the reference vectors recorded for

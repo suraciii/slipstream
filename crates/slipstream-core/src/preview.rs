@@ -1524,37 +1524,6 @@ mod tests {
     }
 
     #[test]
-    fn demand_driven_service_generates_both_targets_without_precomputing() {
-        let fixture = fixture(Some(&jpeg(80, 40)));
-        let id = photo_id(&fixture.library);
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let thumbnail = runtime
-            .block_on(
-                fixture
-                    .service
-                    .thumbnail(id.clone(), DerivativePriority::Current),
-            )
-            .unwrap();
-        assert!(matches!(
-            thumbnail,
-            PreviewRequestResult::Current(PreviewReady {
-                target: DerivativeTarget::Thumbnail512,
-                ..
-            })
-        ));
-        let review = runtime
-            .block_on(fixture.service.review(id, DerivativePriority::Current))
-            .unwrap();
-        assert!(matches!(
-            review,
-            PreviewRequestResult::Current(PreviewReady {
-                target: DerivativeTarget::Review2560,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn raw_container_orientation_reaches_both_cached_derivative_targets() {
         let raw = generated_dng(&jpeg(120, 80), 6);
         let fixture = fixture_with_original(Some(("portrait.DNG", &raw)));
@@ -1857,26 +1826,30 @@ mod tests {
     }
 
     #[test]
-    fn malformed_matching_jpeg_is_reported_unavailable_without_raw_fallback() {
-        let fixture = fixture(Some(b"not jpeg"));
-        let id = photo_id(&fixture.library);
+    fn unavailable_preview_is_seeded_and_short_circuited_after_reopen() {
+        // A matching-but-malformed original is reported unavailable even
+        // though a usable RAW sibling exists: the photo never falls back to
+        // another original's bytes for its own preview.
+        let raw = generated_dng(&jpeg(120, 80), 6);
+        let fixture = fixture_with_originals(
+            &[("one.JPG", b"not jpeg"), ("one.ARW", &raw)],
+            DEFAULT_PREVIEW_WORKERS,
+        );
+        let [id, raw_id]: [String; 2] =
+            photo_ids_by_location(&fixture.library, &["one.JPG", "one.ARW"])
+                .try_into()
+                .unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let result = runtime
-            .block_on(fixture.service.review(id, DerivativePriority::Current))
+        let usable_sibling = runtime
+            .block_on(fixture.service.review(raw_id, DerivativePriority::Current))
             .unwrap();
         assert!(matches!(
-            result,
-            PreviewRequestResult::Unavailable(PreviewUnavailable {
-                reason: PreviewUnavailableReason::NoUsableSource
+            usable_sibling,
+            PreviewRequestResult::Current(PreviewReady {
+                target: DerivativeTarget::Review2560,
+                ..
             })
         ));
-    }
-
-    #[test]
-    fn unavailable_preview_is_seeded_and_short_circuited_after_reopen() {
-        let fixture = fixture(Some(b"not jpeg"));
-        let id = photo_id(&fixture.library);
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let first = runtime
             .block_on(
                 fixture

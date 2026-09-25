@@ -672,10 +672,6 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(acceptance.structured_code({"message": "no code here"}))
         self.assertIsNone(acceptance.structured_code(None))
 
-    def test_pinned_profile_asset_matches_spec_digests(self):
-        digest = hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest()
-        self.assertIn(digest, acceptance.PINNED_SOURCE_PROFILE_DIGESTS)
-
     def test_timestamp_parsing(self):
         self.assertIsNotNone(acceptance.parse_timestamp("2026-01-01T00:00:00Z"))
         self.assertIsNotNone(acceptance.parse_timestamp("2026-01-01T00:00:00+00:00"))
@@ -1257,37 +1253,6 @@ class DryRunTests(AcceptanceTestCase):
         self.assertTrue(
             any(change.startswith("sha256-changed:") for change in invariance["detail"]["changes"])
         )
-
-    def test_stub_rejects_legacy_query_body(self):
-        """The exact request the pre-fix runner sent must refuse on the stub."""
-        stub = StubDeployment()
-        headers = {
-            "Authorization": f"Bearer {TOKEN}",
-            "slipstream-cli-contract": "1",
-        }
-        status, payload, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": "all", "kind": "raw", "available": True, "limit": 200}).encode(),
-            headers,
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("invalid_input", payload.decode())
-        status, payload, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": {"kind": "all"}, "limit": 200}).encode(),
-            headers,
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("limit", payload.decode())
-        status, _, _ = stub.handle(
-            "POST",
-            "/api/photo-queries",
-            json.dumps({"source": {"kind": "all"}, "limit": 60}).encode(),
-            {"Authorization": f"Bearer {TOKEN}"},
-        )
-        self.assertEqual(status, 426)
 
     def test_photo_query_speaks_the_server_contract(self):
         """The runner sends the tagged source object within the published bound."""

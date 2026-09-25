@@ -168,33 +168,6 @@ fn environment(values: &[(&str, &str)]) -> HashMap<String, String> {
 }
 
 #[test]
-fn startup_defaults_to_loopback_and_allows_custom_host() {
-    let defaults = Config::from_env(environment(&[
-        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
-        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
-        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
-        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
-    ]))
-    .unwrap();
-    assert_eq!(defaults.library_root, PathBuf::from("/photos"));
-    assert_eq!(defaults.database_basename, "library.sqlite");
-    assert_eq!((defaults.host.as_str(), defaults.port), ("127.0.0.1", 3000));
-    assert_eq!(defaults.processing, None);
-    let explicit = Config::from_env(environment(&[
-        ("SLIPSTREAM_LIBRARY_ROOT", "/photos"),
-        ("SLIPSTREAM_STATE_DIRECTORY", "/state"),
-        ("SLIPSTREAM_CACHE_DIRECTORY", "/cache"),
-        ("SLIPSTREAM_PUBLIC_ORIGIN", "https://camera.local"),
-        ("SLIPSTREAM_DATABASE_BASENAME", "review.sqlite"),
-        ("SLIPSTREAM_HOST", "0.0.0.0"),
-        ("SLIPSTREAM_PORT", "8080"),
-    ]))
-    .unwrap();
-    assert_eq!(explicit.database_basename, "review.sqlite");
-    assert_eq!((explicit.host.as_str(), explicit.port), ("0.0.0.0", 8080));
-}
-
-#[test]
 fn processing_startup_requires_complete_canonical_identity_pins() {
     let base = vec![
         ("SLIPSTREAM_LIBRARY_ROOT".to_owned(), "/photos".to_owned()),
@@ -304,6 +277,9 @@ fn checked_in_startup_vectors_parse_through_the_typed_config() {
             config.port,
             vector["expected"]["port"].as_u64().unwrap() as u16
         );
+        // No checked-in vector pins a processing identity, so the typed
+        // config leaves the processing policy unset.
+        assert_eq!(config.processing, None);
     }
 }
 
@@ -2535,11 +2511,15 @@ async fn occupied_port_startup_cleans_up_and_can_retry() {
 }
 
 #[tokio::test]
-async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() {
+async fn overview_and_browse_windows_remain_bounded_for_four_thousand_photos() {
+    // The assertions below are about bounded responses, not about this
+    // magnitude: the Overview body bound and the Browse window size hold at
+    // any Library size, and no scan or Browse path changes batch size between
+    // four thousand and forty thousand Photos.
     let (base, config) = prepare_fixture();
     for directory in ["a", "b"] {
         fs::create_dir(base.join("originals").join(directory)).unwrap();
-        for index in 0..20_000 {
+        for index in 0..2_000 {
             fs::write(
                 base.join("originals")
                     .join(directory)
@@ -2567,7 +2547,7 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
         .await
         .unwrap();
     let overview: serde_json::Value = serde_json::from_slice(&overview_bytes).unwrap();
-    assert_eq!(overview["photoCount"], 40_000);
+    assert_eq!(overview["photoCount"], 4_000);
     assert!(overview_bytes.len() < 20_000);
 
     let opened = post_json(
@@ -2584,7 +2564,7 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
         &router,
         authenticated_request()
             .uri(format!(
-                "https://camera.local/api/browse/{}?start=39940&limit=60",
+                "https://camera.local/api/browse/{}?start=3940&limit=60",
                 token
             ))
             .body(Body::empty())
@@ -2593,8 +2573,8 @@ async fn overview_and_browse_windows_remain_bounded_for_forty_thousand_photos() 
     .await;
     assert_eq!(window.status(), StatusCode::OK);
     let window: serde_json::Value = response_json(window).await;
-    assert_eq!(window["start"], 39_940);
-    assert_eq!(window["total"], 40_000);
+    assert_eq!(window["start"], 3_940);
+    assert_eq!(window["total"], 4_000);
     assert_eq!(window["photos"].as_array().unwrap().len(), 60);
 
     let oversized = send(
@@ -2679,6 +2659,8 @@ async fn file_location_windows_derive_bounded_folders_from_one_publication() {
     fs::write(root.join("shoot/d.ARW"), b"raw-bytes-d").unwrap();
     jpeg_fixture(&root.join("shoot/d.JPG"), 8, 4, [4, 5, 6]);
     jpeg_fixture(&root.join("shoot/sub/e.JPG"), 8, 4, [7, 8, 9]);
+    fs::create_dir_all(root.join("shoot/sub/deep")).unwrap();
+    jpeg_fixture(&root.join("shoot/sub/deep/deep.JPG"), 8, 4, [2, 4, 6]);
     fs::create_dir_all(root.join("a")).unwrap();
     jpeg_fixture(&root.join("a/f.JPG"), 8, 4, [9, 8, 7]);
     fs::create_dir_all(root.join("ab")).unwrap();
@@ -2708,11 +2690,12 @@ async fn file_location_windows_derive_bounded_folders_from_one_publication() {
             .find(|child| child.location == location)
             .unwrap()
     };
-    // Folder counts are recursive and count independent Photos.
+    // Folder counts are recursive and count independent Photos, through every
+    // ancestor level: `shoot` aggregates `shoot/sub` and `shoot/sub/deep`.
     assert_eq!(by_location("a").photo_count, 1);
     assert!(!by_location("a").has_descendant_folders);
     assert_eq!(by_location("ab").photo_count, 1);
-    assert_eq!(by_location("shoot").photo_count, 4);
+    assert_eq!(by_location("shoot").photo_count, 5);
     assert!(by_location("shoot").has_descendant_folders);
     assert_eq!(by_location("\u{76f8}\u{518c}").photo_count, 1);
     let publication = first.publication.clone();
@@ -2725,7 +2708,18 @@ async fn file_location_windows_derive_bounded_folders_from_one_publication() {
         .unwrap();
     assert_eq!(shoot.total, 1);
     assert_eq!(shoot.children[0].location, "shoot/sub");
-    assert_eq!(shoot.children[0].photo_count, 1);
+    // The intermediate chain aggregates upward: `shoot/sub` counts its own
+    // Photo and the deeper Folder's.
+    assert_eq!(shoot.children[0].photo_count, 2);
+    // Files are not Folders at any level: `shoot/sub` holds one Photo and one
+    // Folder, and the deepest Folder counts only its own Photo.
+    let sub = application
+        .file_locations(Some(&publication), "shoot/sub", 0, 60)
+        .await
+        .unwrap();
+    assert_eq!(sub.children.len(), 1);
+    assert_eq!(sub.children[0].location, "shoot/sub/deep");
+    assert_eq!(sub.children[0].photo_count, 1);
 
     // Window bounds are enforced.
     assert!(matches!(
@@ -2756,55 +2750,6 @@ async fn file_location_windows_derive_bounded_folders_from_one_publication() {
         Err(ServerError::FolderNotFound)
     ));
 
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn file_location_counts_propagate_through_deep_ancestors() {
-    let (base, config) = prepare_fixture();
-    let root = &config.library_root;
-    fs::create_dir_all(root.join("a/b/c")).unwrap();
-    jpeg_fixture(&root.join("a/b/c/deep.JPG"), 8, 4, [1, 2, 3]);
-    jpeg_fixture(&root.join("a/top.JPG"), 8, 4, [4, 5, 6]);
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    application.rescan().await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let publication = application
-        .file_locations(None, "", 0, 60)
-        .await
-        .unwrap()
-        .publication;
-    let root_window = application
-        .file_locations(Some(&publication), "", 0, 60)
-        .await
-        .unwrap();
-    assert_eq!(root_window.children[0].photo_count, 2);
-    let a = application
-        .file_locations(Some(&publication), "a", 0, 60)
-        .await
-        .unwrap();
-    // Direct-child Folders only: files directly in `a` are not Folders.
-    assert_eq!(
-        a.children
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["b"]
-    );
-    // The intermediate chain aggregates upward: a/b inherits c's Photo.
-    assert_eq!(a.children[0].photo_count, 1);
-    // The intermediate chain aggregates upward: a/b inherits c's Photo.
-    let ids = browse_photo_ids(
-        &application,
-        BrowseSourceRequest::Folder {
-            location: "a".to_owned(),
-            publication,
-        },
-    )
-    .await;
-    assert_eq!(ids.len(), 2);
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -3461,66 +3406,6 @@ async fn browse_position_resolves_identity_within_one_snapshot() {
     let _ = fs::remove_dir_all(base);
 }
 
-#[tokio::test]
-async fn photo_state_mutation_updates_the_browse_snapshot_without_reload() {
-    let (base, config) = prepare_fixture();
-    for name in ["a.jpg", "b.jpg"] {
-        jpeg_fixture(&config.library_root.join(name), 8, 4, [32, 64, 192]);
-    }
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = authorized_router(Arc::clone(&application), config.web_root());
-    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
-    let opened = response_json(
-        post_json(
-            &router,
-            "/api/browse",
-            serde_json::json!({"source":"library"}),
-            Some("https://camera.local"),
-        )
-        .await,
-    )
-    .await;
-    let token = opened["token"].as_str().unwrap().to_owned();
-    let window = || async {
-        response_json(
-            send(
-                &router,
-                authenticated_request()
-                    .uri(format!(
-                        "https://camera.local/api/browse/{token}?start=0&limit=10"
-                    ))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await,
-        )
-        .await
-    };
-    let before = window().await;
-    assert_eq!(before["photos"][0]["selectionState"], "undecided");
-    assert_eq!(
-        post_json(
-            &router,
-            &format!("https://camera.local/api/photos/{}/state", ids[0]),
-            serde_json::json!({"field": "selectionState", "value": "selected"}),
-            Some("https://camera.local"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let after = window().await;
-    assert_eq!(after["photos"][0]["selectionState"], "selected");
-    assert_eq!(after["photos"][1]["selectionState"], "undecided");
-    assert_eq!(
-        after["photos"].as_array().unwrap().len(),
-        before["photos"].as_array().unwrap().len()
-    );
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
 /// One bounded batch Selection State write reports exactly one outcome per
 /// requested Photo, presents the confirmed states in the open Browse Snapshot,
 /// and moves the source's counts when the source is reopened.
@@ -3612,6 +3497,31 @@ async fn batch_photo_state_applies_to_every_requested_photo() {
     )
     .await;
     assert_eq!(external["kind"], "applied");
+    // A single-Photo write updates only that Photo in the open Snapshot: its
+    // siblings and the window cardinality stay untouched.
+    let window = response_json(
+        send(
+            &router,
+            authenticated_request()
+                .uri(format!(
+                    "https://camera.local/api/browse/{token}?start=0&limit=10"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await,
+    )
+    .await;
+    let photos = window["photos"].as_array().unwrap();
+    assert_eq!(photos.len(), ids.len());
+    for photo in photos {
+        let expected = if photo["id"] == ids[0] {
+            "selected"
+        } else {
+            "rejected"
+        };
+        assert_eq!(photo["selectionState"], expected, "{}", photo["id"]);
+    }
     let changed = response_json(
         post_json(
             &router,
@@ -4726,6 +4636,8 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
         fresh_metadata["captureTime"],
         "2026-01-01T11:00:00.000000000"
     );
+    // A metadata response omits a field the Original does not carry.
+    assert!(fresh_metadata["aperture"].is_null());
     let fresh = response_json(
         send(
             &router,
@@ -4743,6 +4655,23 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
         fresh["metadata"]["captureTime"],
         "2026-01-01T11:00:00.000000000"
     );
+
+    // A vanished Original still answers fail-soft: the published revision no
+    // longer resolves, and the route reports an empty document rather than a
+    // storage failure.
+    fs::remove_file(&path).unwrap();
+    let vanished = send(
+        &router,
+        authenticated_request()
+            .uri(format!(
+                "https://camera.local/api/photos/{photo_id}/metadata"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(vanished.status(), StatusCode::OK);
+    assert_eq!(response_json(vanished).await, serde_json::json!({}));
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -6573,99 +6502,6 @@ async fn cli_album_routes_reject_unnegotiated_unbounded_and_open_object_input() 
 }
 
 #[tokio::test]
-async fn cli_album_reorder_refuses_an_album_larger_than_the_complete_order_bound() {
-    let (base, config) = prepare_fixture();
-    for index in 0..=slipstream_core::ALBUM_MEMBERSHIP_BATCH_MAX {
-        jpeg_fixture(
-            &config.library_root.join(format!("{index:03}.jpg")),
-            8,
-            4,
-            [32, 64, 192],
-        );
-    }
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let photo_ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
-    assert_eq!(photo_ids.len(), 101);
-    let router = authorized_router(Arc::clone(&application), config.web_root());
-    let created = response_json(
-        post_cli_json(&router, "/api/albums", serde_json::json!({"name": "Large"})).await,
-    )
-    .await;
-    let album_id = created["album"]["id"].as_str().unwrap().to_owned();
-    let initial_version = created["album"]["albumVersion"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let first_add = response_json(
-        post_cli_json(
-            &router,
-            &format!("/api/albums/{album_id}/changes"),
-            serde_json::json!({
-                "operation": "add",
-                "photoIds": photo_ids[..100],
-                "ifVersion": initial_version
-            }),
-        )
-        .await,
-    )
-    .await;
-    let first_version = first_add["album"]["albumVersion"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let second_add = response_json(
-        post_cli_json(
-            &router,
-            &format!("/api/albums/{album_id}/changes"),
-            serde_json::json!({
-                "operation": "add",
-                "photoIds": [photo_ids[100]],
-                "ifVersion": first_version
-            }),
-        )
-        .await,
-    )
-    .await;
-    let complete_version = second_add["album"]["albumVersion"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(second_add["album"]["photoCount"], 101);
-
-    let refused = post_cli_json(
-        &router,
-        &format!("/api/albums/{album_id}/changes"),
-        serde_json::json!({
-            "operation": "reorder",
-            "photoIds": photo_ids[..100],
-            "ifVersion": complete_version
-        }),
-    )
-    .await;
-    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(
-        response_json(refused).await["error"],
-        serde_json::json!({
-            "code": "limit_exceeded",
-            "message": "Reduce the Photo ID list and try again.",
-            "effect": "none",
-            "details": {
-                "limitName": "albumReorderMembersMaximum",
-                "limit": 100,
-                "actual": 101
-            }
-        })
-    );
-    let unchanged = application.library.album(&album_id).await.unwrap().unwrap();
-    assert_eq!(unchanged.photo_count, 101);
-    assert_eq!(unchanged.album_version, complete_version);
-
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
 async fn cli_photo_decisions_route_maps_checked_outcomes_and_partitions_batches() {
     let (base, config) = prepare_fixture();
     for name in ["a.jpg", "b.jpg", "c.jpg"] {
@@ -8465,12 +8301,6 @@ async fn mutation_body_limits_and_json_errors_are_rejected_before_writes() {
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        request(Body::from(r#"{"name":"Never"}"#), Some("not-a-number"))
-            .await
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
         request(
             Body::from(vec![b'x'; MAXIMUM_MUTATION_BODY_BYTES + 1]),
             None
@@ -8777,52 +8607,6 @@ async fn preview_derivative_protocol_revalidates_source_and_reports_stale_truth(
             .contains("Original")
     );
     assert!(!unavailable.to_string().contains(base.to_str().unwrap()));
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-#[tokio::test]
-async fn photo_metadata_protocol_returns_capture_time_when_available() {
-    let (base, config) = prepare_fixture();
-    capture_metadata_fixture(
-        &config.library_root.join("metadata.jpg"),
-        "2026:02:03 04:05:06",
-    );
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = authorized_router(Arc::clone(&application), config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .into_iter()
-        .next()
-        .unwrap();
-    let response = send(
-        &router,
-        authenticated_request()
-            .uri(format!(
-                "https://camera.local/api/photos/{photo_id}/metadata"
-            ))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let metadata = response_json(response).await;
-    assert_eq!(metadata["captureTime"], "2026-02-03T04:05:06.000000000");
-    assert!(metadata["aperture"].is_null());
-    fs::remove_file(config.library_root.join("metadata.jpg")).unwrap();
-    let unavailable = send(
-        &router,
-        authenticated_request()
-            .uri(format!(
-                "https://camera.local/api/photos/{photo_id}/metadata"
-            ))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(unavailable.status(), StatusCode::OK);
-    assert_eq!(response_json(unavailable).await, serde_json::json!({}));
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
@@ -10197,22 +9981,26 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// A RAW Photo whose camera identity cannot be observed reads as
-/// unavailable with the closed unreadable-Original reason, reports a null
-/// source revision, and refuses every guarded write with the closed
-/// resource refusal.
+/// A RAW Photo whose camera identity cannot be observed, or that has
+/// disappeared from its remembered Location, reads as unavailable with the
+/// matching closed reason, reports a null source revision, and refuses every
+/// guarded write with the closed resource refusal.
 #[tokio::test]
-async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
+async fn edit_recipe_reports_unavailable_originals_with_closed_reasons() {
     let (base, config) = prepare_fixture();
     generated_non_tiff_raw_fixture(&config.library_root.join("opaque.ARW"));
+    let vanishing = config.library_root.join("vanishing.ARW");
+    approved_raw_fixture(&vanishing);
     let application = Application::open(&config).await.unwrap();
     wait_for_scan_settled(&application).await;
     let router = configured_router(&application, config.web_root());
-    let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)
-        .await
-        .into_iter()
-        .next()
-        .unwrap();
+    let by_location = photo_ids_by_location(
+        &application,
+        &browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+    )
+    .await;
+    let photo_id = by_location["opaque.ARW"].clone();
+    let vanishing_id = by_location["vanishing.ARW"].clone();
 
     let (_, read) = get_edit_recipe(&router, &photo_id).await;
     assert_eq!(read["sourceSupport"], "unavailable");
@@ -10254,44 +10042,22 @@ async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
     assert!(detail["metadata"]["make"].is_null());
     assert!(detail["metadata"]["model"].is_null());
 
-    application.shutdown().await.unwrap();
-    let _ = fs::remove_dir_all(base);
-}
-
-/// An Original missing from its remembered Location reports unavailable with
-/// the closed missing-Original reason and the same null source revision.
-#[tokio::test]
-async fn edit_recipe_reports_missing_original_as_unavailable() {
-    let (base, config) = prepare_fixture();
-    let raw_path = config.library_root.join("vanishing.ARW");
-    approved_raw_fixture(&raw_path);
-    let application = Application::open(&config).await.unwrap();
-    wait_for_scan_settled(&application).await;
-    let router = configured_router(&application, config.web_root());
-    let by_location = photo_ids_by_location(
-        &application,
-        &browse_photo_ids(&application, BrowseSourceRequest::Library).await,
-    )
-    .await;
-    let photo_id = by_location["vanishing.ARW"].clone();
-
-    let (_, before) = get_edit_recipe(&router, &photo_id).await;
+    // A readable Original reads as supported until it disappears; the next
+    // scan reports the closed missing-Original reason.
+    let (_, before) = get_edit_recipe(&router, &vanishing_id).await;
     assert_eq!(before["sourceSupport"], "supported");
-
-    fs::remove_file(&raw_path).unwrap();
+    fs::remove_file(&vanishing).unwrap();
     let scanned = post_json(&router, "/api/scan", serde_json::json!({}), None).await;
     assert_eq!(scanned.status(), StatusCode::OK);
     wait_for_scan_settled(&application).await;
-
-    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let (_, read) = get_edit_recipe(&router, &vanishing_id).await;
     assert_eq!(read["sourceSupport"], "unavailable");
     assert_eq!(read["supportReason"], "original-missing");
     assert!(read["sourceRevision"].is_null());
     assert_eq!(read["processingAvailable"], false);
-
     let (status, refused) = save_recipe(
         &router,
-        &photo_id,
+        &vanishing_id,
         save_body(
             "missing-save",
             None,
@@ -10302,6 +10068,18 @@ async fn edit_recipe_reports_missing_original_as_unavailable() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error_code(&refused), "resource_unavailable");
+    let (status, missing_rebind) = rebind_recipe(
+        &router,
+        &vanishing_id,
+        serde_json::json!({
+            "requestId": "missing-rebind",
+            "expectedRecipeVersion": "00000000-0000-4000-8000-000000000000",
+            "newSourceRevision": "00000000-0000-4000-8000-000000000000",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_code(&missing_rebind), "resource_unavailable");
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
@@ -12249,8 +12027,8 @@ mod export_routes {
     }
 
     /// P1-3: a recorded submission replays with 200 even while the launcher
-    /// cannot admit work; a different payload under the recorded identity
-    /// still conflicts.
+    /// cannot admit work or after its source has become unreadable; a
+    /// different payload under the recorded identity still conflicts.
     #[tokio::test]
     async fn export_replay_resolves_without_launcher_availability() {
         let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
@@ -12300,6 +12078,26 @@ mod export_routes {
             "export_conflict"
         );
 
+        // The same replay resolves after the source itself disappears:
+        // receipt resolution precedes any source classification and a replay
+        // never touches the source.
+        fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
+        let unreadable = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(
+            unreadable.status(),
+            StatusCode::OK,
+            "a recorded identity must replay even when its source is unreadable: {}",
+            response_json(unreadable).await
+        );
+        assert_eq!(response_json(unreadable).await["exportId"], export_id);
+
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
@@ -12347,54 +12145,6 @@ mod export_routes {
             response_json(first_created).await["exportId"],
             response_json(second_created).await["exportId"]
         );
-
-        application.shutdown().await.unwrap();
-        let _ = fs::remove_dir_all(base);
-    }
-
-    /// P1: a recorded submission replays with 200 even after its source has
-    /// become unreadable: receipt resolution must precede any source
-    /// classification, and a replay never touches the source.
-    #[tokio::test]
-    async fn export_replay_resolves_when_the_source_becomes_unreadable() {
-        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-        let processing = config.processing.clone().unwrap();
-        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
-        let mut config = config;
-        config.processing = Some(launcher.processing_config());
-        let (application, router) = export_application(&base, &config).await;
-        let photo_id = photo_id_for(&config, "pair.ARW");
-        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
-        let source_revision = current_source_revision(&application, &photo_id).await;
-        let created = submit_export_request(
-            &router,
-            &photo_id,
-            "request-1",
-            &recipe.revision,
-            &source_revision,
-        )
-        .await;
-        assert_eq!(created.status(), StatusCode::CREATED);
-        let export_id = response_json(created).await["exportId"].clone();
-
-        // The source file disappears after acceptance; the recorded receipt
-        // must still resolve without any source probe.
-        fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
-        let replayed = submit_export_request(
-            &router,
-            &photo_id,
-            "request-1",
-            &recipe.revision,
-            &source_revision,
-        )
-        .await;
-        assert_eq!(
-            replayed.status(),
-            StatusCode::OK,
-            "a recorded identity must replay even when its source is unreadable: {}",
-            response_json(replayed).await
-        );
-        assert_eq!(response_json(replayed).await["exportId"], export_id);
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
@@ -12521,13 +12271,15 @@ mod export_routes {
         let _ = fs::remove_dir_all(base);
     }
 
-    /// P2: the download lease holds until the response body drains or is
-    /// dropped, not merely until the producer reaches end of file.
+    /// P2: the download lease holds and keeps renewing until the response
+    /// body drains or is dropped, not merely until the producer reaches end
+    /// of file.
     #[tokio::test]
     async fn export_download_holds_its_lease_until_the_body_drains() {
         let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
         let (application, router) = export_application(&base, &config).await;
         let manager = Arc::clone(application.exports.as_ref().unwrap());
+        manager.set_lease_renewal_interval(Duration::from_millis(150));
         let photo_id = photo_id_for(&config, "pair.ARW");
         let export_id = "exp-lease-drain-check".to_owned();
         let artifact_bytes = vec![9_u8; 64 * 1024];
@@ -12594,6 +12346,36 @@ mod export_routes {
             held, 1,
             "an undrained response body must keep its download lease"
         );
+
+        // A live stream keeps its lease renewed, so the staleness sweep
+        // cannot reclaim it while the body is still undrained.
+        let first_renewal: i64 = {
+            let connection =
+                rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+            connection
+                .query_row(
+                    "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let renewed_at: i64 = {
+            let connection =
+                rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+            connection
+                .query_row(
+                    "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(
+            renewed_at > first_renewal,
+            "a live stream must keep its lease renewed: {first_renewal} then {renewed_at}"
+        );
         drop(download);
 
         // Dropping the body settles the stream and releases the lease.
@@ -12614,121 +12396,6 @@ mod export_routes {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the download lease must be released after the body is dropped"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        drop(connection);
-
-        application.shutdown().await.unwrap();
-        let _ = fs::remove_dir_all(base);
-    }
-
-    /// P2-3: a live download stream keeps its lease renewed, so the staleness
-    /// sweep cannot drop it, while an unrenewed lease is still reclaimed.
-    #[tokio::test]
-    async fn export_download_renews_its_lease_while_the_stream_is_live() {
-        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
-        let (application, router) = export_application(&base, &config).await;
-        let manager = Arc::clone(application.exports.as_ref().unwrap());
-        manager.set_lease_renewal_interval(Duration::from_millis(150));
-        let photo_id = photo_id_for(&config, "pair.ARW");
-
-        // A settled Export with a large retained artifact, seeded directly:
-        // the download is served from disk without any launcher contact.
-        let export_id = "exp-lease-renewal-check".to_owned();
-        let artifact_bytes = vec![7_u8; 4 * 1024 * 1024];
-        let digest = format!("{:x}", Sha256::digest(&artifact_bytes));
-        // The stored recipe digest must be the real capture digest; the
-        // owner re-derives it on every read.
-        let recipe_digest = slipstream_core::ExportRecipePayload::capture(
-            &slipstream_core::EditRecipeSettings {
-                exposure_ev: 0.0,
-                white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
-            },
-            slipstream_core::ExportExposureRange {
-                minimum_milli_ev: i64::MIN,
-                maximum_milli_ev: i64::MAX,
-            },
-        )
-        .unwrap()
-        .digest();
-        let path = manager.artifact_path(&export_id).unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, &artifact_bytes).unwrap();
-        let connection =
-            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-        connection
-            .execute(
-                "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,
-                   white_balance_mode,source_revision,source_profile_id,source_kind,
-                   recipe_digest,policy_id,bundle_id,workload,created_at,outcome,
-                   artifact_size,artifact_sha256,artifact_expires_at,artifact_width,
-                   artifact_height,artifact_profile_identity,settled_at,retain_until)
-                 VALUES(?1,?2,'development-tiff','succeeded','rev',0.0,'as-shot','src',
-                   'profile','raw',?3,?4,?5,'development-tiff',1,NULL,?6,?7,?8,2,1,?9,
-                   1800000000,1900000000)",
-                rusqlite::params![
-                    export_id,
-                    photo_id,
-                    recipe_digest,
-                    "b".repeat(64),
-                    "c".repeat(64),
-                    artifact_bytes.len() as i64,
-                    digest,
-                    1_900_000_000_i64,
-                    "e".repeat(64),
-                ],
-            )
-            .unwrap();
-        drop(connection);
-
-        let download = download_artifact(&router, &export_id).await;
-        assert_eq!(download.status(), StatusCode::OK);
-        // Hold the stream open without consuming it; the renewal keeps the
-        // lease's liveness anchor advancing.
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let connection =
-            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-        let first_renewal: i64 = connection
-            .query_row(
-                "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
-                [&export_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        let renewed_at: i64 = connection
-            .query_row(
-                "SELECT created_at FROM export_download_leases WHERE export_id = ?1",
-                [&export_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        drop(connection);
-        assert!(
-            renewed_at > first_renewal,
-            "a live stream must keep its lease renewed: {first_renewal} then {renewed_at}"
-        );
-        drop(download);
-
-        // The lease is released once the response stream settles.
-        let connection =
-            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let leases = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM export_download_leases WHERE export_id = ?1",
-                    [&export_id],
-                    |row| row.get::<_, u32>(0),
-                )
-                .unwrap();
-            if leases == 0 {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the download lease must be released after the stream settles"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

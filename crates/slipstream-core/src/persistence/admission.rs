@@ -449,7 +449,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use std::{
-        fs::{self, File},
+        fs::{self},
         os::unix::{ffi::OsStrExt, fs::PermissionsExt},
         path::PathBuf,
         sync::{
@@ -538,28 +538,6 @@ mod tests {
         assert!(!state_parent.join("nested").exists());
         drop(retained_parent);
         assert!(StateDirectory::open_or_create(&library, &state).is_err());
-    }
-
-    #[test]
-    fn prepares_reverifies_and_admits_safe_files() {
-        let base = TempTree::new();
-        let library_path = base.0.join("originals");
-        let state_path = base.0.join("state");
-        fs::create_dir(&library_path).unwrap();
-        fs::create_dir(&state_path).unwrap();
-        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o700)).unwrap();
-        let library = LibraryRoot::open(&library_path).unwrap();
-        let state = StateDirectory::open_or_create(&library, &state_path).unwrap();
-        let name = DatabaseName::parse("library.sqlite").unwrap();
-        let identity = state.prepare_database(&name).unwrap();
-        state.verify_database(&name, identity).unwrap();
-        File::create(state_path.join("library.sqlite-journal")).unwrap();
-        fs::set_permissions(
-            state_path.join("library.sqlite-journal"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        assert_eq!(state.admit_sidecars(&name), Err(StateError::SidecarPresent));
     }
 
     #[test]

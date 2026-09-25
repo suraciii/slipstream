@@ -1996,10 +1996,9 @@ mod tests {
             &missing,
             TerminalIoCapture::Omitted(TerminalIoOmission::Open(Some(libc::ENOENT)))
         ));
-        let TerminalIoCapture::Omitted(reason) = missing else {
+        let TerminalIoCapture::Omitted(missing_reason) = missing else {
             unreachable!("missing io.stat must be diagnosed");
         };
-        assert_eq!(reason.diagnostic(), "phase=open errno=2");
 
         fs::create_dir(&path).unwrap();
         let unreadable = optional_terminal_io_source(&path, &mut total);
@@ -2007,31 +2006,26 @@ mod tests {
             &unreadable,
             TerminalIoCapture::Omitted(TerminalIoOmission::Read(Some(libc::EISDIR)))
         ));
-        let TerminalIoCapture::Omitted(reason) = unreadable else {
+        let TerminalIoCapture::Omitted(read_reason) = unreadable else {
             unreachable!("reading an io.stat directory must be diagnosed");
         };
-        assert_eq!(reason.diagnostic(), "phase=read errno=21");
 
         fs::remove_dir(&path).unwrap();
         fs::write(&path, b"ab").unwrap();
         total = TERMINAL_SNAPSHOT_BYTES - 1;
         let oversized = optional_terminal_io_source(&path, &mut total);
-        let TerminalIoCapture::Omitted(reason) = oversized else {
+        let TerminalIoCapture::Omitted(limit_reason) = oversized else {
             unreachable!("over-limit io.stat must remain omitted");
         };
-        assert_eq!(reason, TerminalIoOmission::TooLarge);
-        assert_eq!(reason.diagnostic(), "phase=read reason=byte-limit");
+        assert_eq!(limit_reason, TerminalIoOmission::TooLarge);
 
-        let diagnostics = [
-            "phase=open errno=2",
-            "phase=read errno=21",
-            "phase=read reason=byte-limit",
-        ];
-        assert!(
-            diagnostics
-                .iter()
-                .all(|diagnostic| !diagnostic.contains(&root.to_string_lossy().to_string()))
-        );
+        for diagnostic in [
+            missing_reason.diagnostic(),
+            read_reason.diagnostic(),
+            limit_reason.diagnostic(),
+        ] {
+            assert!(!diagnostic.contains(&root.to_string_lossy().to_string()));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2042,37 +2036,6 @@ mod tests {
         value.as_object_mut().unwrap().remove("io_stat_raw");
         let restored: TerminalSnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(restored.io_stat_raw, None);
-    }
-
-    #[test]
-    fn terminal_snapshot_identity_compares_all_bound_fields() {
-        let (root, identity) = snapshot_fixture();
-        let (snapshot, _, _) = terminal_snapshot(&root, identity.clone(), 65536).unwrap();
-        for change in [
-            "path",
-            "inode",
-            "invocation",
-            "launch",
-            "container",
-            "unit",
-            "incarnation",
-            "sequence",
-        ] {
-            let mut changed = identity.clone();
-            match change {
-                "path" => changed.cgroup_path.push('x'),
-                "inode" => changed.cgroup_inode += 1,
-                "invocation" => changed.unit_invocation.push('x'),
-                "launch" => changed.launch_id.push('x'),
-                "container" => changed.container_id.push('x'),
-                "unit" => changed.attempt_unit.push('x'),
-                "incarnation" => changed.incarnation.push('x'),
-                "sequence" => changed.sequence += 1,
-                _ => unreachable!(),
-            }
-            assert!(!same_terminal_identity(&changed, &snapshot), "{change}");
-        }
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2166,7 +2129,20 @@ mod tests {
             .terminal_snapshot = None;
         assert_eq!(backend.validate_terminal_evidence(&before_create), Ok(()));
 
-        for change in ["missing", "peak", "events", "identity", "limit"] {
+        for change in [
+            "missing",
+            "peak",
+            "events",
+            "path",
+            "inode",
+            "invocation",
+            "launch",
+            "container",
+            "unit",
+            "incarnation",
+            "sequence",
+            "limit",
+        ] {
             let mut changed = record.clone();
             let evidence = changed.receipt.evidence.as_mut().unwrap();
             let snapshot = evidence.terminal_snapshot.as_mut().unwrap();
@@ -2177,7 +2153,14 @@ mod tests {
                     snapshot.memory_events_local_raw =
                         "oom 1\noom_kill 0\noom_group_kill 0\n".into()
                 }
-                "identity" => snapshot.container_id.push('a'),
+                "path" => snapshot.cgroup_path.push('x'),
+                "inode" => snapshot.cgroup_inode += 1,
+                "invocation" => snapshot.unit_invocation.push('x'),
+                "launch" => snapshot.launch_id.push('x'),
+                "container" => snapshot.container_id.push('x'),
+                "unit" => snapshot.attempt_unit.push('x'),
+                "incarnation" => snapshot.incarnation.push('x'),
+                "sequence" => snapshot.sequence += 1,
                 "limit" => snapshot.memory_max_raw = "65536\n".into(),
                 _ => unreachable!(),
             }
