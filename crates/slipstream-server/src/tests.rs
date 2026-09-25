@@ -5441,7 +5441,7 @@ async fn shutdown_returns_only_after_live_scan_waiters_receive_terminal_status()
 }
 
 #[tokio::test]
-async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_rescan_completes() {
+async fn persisted_forty_thousand_photo_library_serves_bounded_overview_before_rescan_completes() {
     let (base, config) = prepare_fixture();
     fs::create_dir(config.state_directory.clone()).unwrap();
     #[cfg(unix)]
@@ -5465,7 +5465,7 @@ async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_re
         )
         .unwrap();
     database.execute("BEGIN", []).unwrap();
-    for index in 0..4_000_u32 {
+    for index in 0..40_000_u32 {
         let padded = format!("{index:06}");
         let original_id = format!("{:08x}", index).repeat(8);
         let photo_id = format!("{:08x}", 1_000_000 + index).repeat(8);
@@ -5509,7 +5509,7 @@ async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_re
     assert!(overview_bytes.len() < 20_000);
     let overview: serde_json::Value = serde_json::from_slice(&overview_bytes).unwrap();
     assert_eq!(overview["published"], true);
-    assert_eq!(overview["photoCount"], 4_000);
+    assert_eq!(overview["photoCount"], 40_000);
 
     let opened = post_json(
         &router,
@@ -5526,7 +5526,7 @@ async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_re
             &router,
             authenticated_request()
                 .uri(format!(
-                    "https://camera.local/api/browse/{token}?start=3940&limit=60"
+                    "https://camera.local/api/browse/{token}?start=39940&limit=60"
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -5534,8 +5534,8 @@ async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_re
         .await,
     )
     .await;
-    assert_eq!(window["start"], 3_940);
-    assert_eq!(window["total"], 4_000);
+    assert_eq!(window["start"], 39_940);
+    assert_eq!(window["total"], 40_000);
     assert_eq!(window["photos"].as_array().unwrap().len(), 60);
 
     drop(gate_sender);
@@ -5551,7 +5551,7 @@ async fn persisted_four_thousand_photo_library_serves_bounded_overview_before_re
         .await,
     )
     .await;
-    assert_eq!(overview["photoCount"], 4_000);
+    assert_eq!(overview["photoCount"], 40_000);
     assert_eq!(overview["scan"]["state"], "idle");
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
