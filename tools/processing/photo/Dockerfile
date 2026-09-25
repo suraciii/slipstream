@@ -29,8 +29,11 @@ RUN sha256sum /opt/slipstream-photo/icc/LargeRGB-elle-V2-g10.icc /opt/slipstream
         | sed 's#  /#  #g' | sha256sum | cut -d' ' -f1 > /opt/slipstream-photo/bundle \
     && cat /opt/slipstream-photo/bundle
 # The deploy pipeline pins the numerical bundle recorded by the build:
-#   PHOTO_BUNDLE=$(docker build ... --target bundle -q && docker run --rm \
-#     <image> cat /opt/slipstream-photo/bundle)
+#   docker build -f tools/processing/photo/Dockerfile -t slipstream:processing-photo .
+#   PHOTO_BUNDLE=$(docker run --rm --entrypoint cat slipstream:processing-photo \
+#     /opt/slipstream-photo/bundle)
+# --entrypoint cat is required: the image entrypoint is the worker, so a plain
+# `docker run <image> cat ...` passes the path to the worker and prints nothing.
 ARG PHOTO_BUNDLE=unpinned
 LABEL slipstream.processing.photo.bundle="${PHOTO_BUNDLE}"
 USER 1000:1000
