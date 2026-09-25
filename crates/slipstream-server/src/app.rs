@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{MAX_BROWSE_WINDOW, NEXT_BROWSE_NAMESPACE};
+use crate::config::{MAX_BROWSE_WINDOW, MAX_REMOVED_WINDOW, NEXT_BROWSE_NAMESPACE};
 use crate::http::{is_hex_key, valid_id};
 use crate::queries::{CursorSigner, QueryRegistry, RetainedKind};
 use crate::wire::CliDerivativeFacts;
@@ -17,9 +17,9 @@ pub(crate) struct Published {
     /// against this publication.
     pub(crate) photo_query_projection: Arc<slipstream_core::PhotoQueryProjection>,
     /// Folder index derived lazily from this immutable publication. Fact
-    /// patches never change Original Locations, so the cache stays valid for
-    /// the lifetime of this Published snapshot.
-    folder_index: std::sync::OnceLock<crate::folders::FolderIndex>,
+    /// patches never change Original Locations, so the cache stays valid until
+    /// a removal fact changes which Photos a Folder projects.
+    folder_index: std::sync::RwLock<Option<Arc<crate::folders::FolderIndex>>>,
 }
 
 #[derive(Clone)]
@@ -165,6 +165,7 @@ impl Published {
         let candidates = snapshot
             .photos
             .iter()
+            .filter(|photo| !photo.removed)
             .map(|photo| {
                 let original = &snapshot.originals[originals_by_id[&photo.original_id]];
                 slipstream_core::PhotoQueryCandidate {
@@ -206,19 +207,39 @@ impl Published {
             publication: publication_generation(),
             evaluated_at: SystemTime::now(),
             photo_query_projection,
-            folder_index: std::sync::OnceLock::new(),
+            folder_index: std::sync::RwLock::new(None),
         }
     }
 
-    /// The derived Folder index for this publication, computed once.
-    pub(crate) fn folder_index(&self) -> &crate::folders::FolderIndex {
-        self.folder_index.get_or_init(|| {
-            crate::folders::FolderIndex::derive(
-                &self.snapshot.photos,
-                &self.originals_by_id,
-                &self.snapshot.originals,
-            )
-        })
+    /// The derived Folder index for this publication, computed once per
+    /// removal generation.
+    pub(crate) fn folder_index(&self) -> Arc<crate::folders::FolderIndex> {
+        if let Some(index) = self
+            .folder_index
+            .read()
+            .expect("folder index poisoned")
+            .as_ref()
+        {
+            return Arc::clone(index);
+        }
+        let derived = Arc::new(crate::folders::FolderIndex::derive(
+            &self.snapshot.photos,
+            &self.originals_by_id,
+            &self.snapshot.originals,
+        ));
+        Arc::clone(
+            self.folder_index
+                .write()
+                .expect("folder index poisoned")
+                .get_or_insert_with(|| Arc::clone(&derived)),
+        )
+    }
+
+    /// Drops the derived Folder index. Called from the same critical section
+    /// that patches removal facts, so no reader can keep a Folder projection
+    /// built from the previous removal generation.
+    fn invalidate_folder_index(&self) {
+        *self.folder_index.write().expect("folder index poisoned") = None;
     }
 
     pub(crate) fn publication_value(&self) -> String {
@@ -446,6 +467,9 @@ fn album_resume_member(
     index.map(|index| members[index].photo_id.clone())
 }
 
+/// The complete Library source order. Removed Photos are excluded: removal
+/// hides a Photo from Library Views without deleting its Original File, so the
+/// complete source a Browse Snapshot opens never contains one.
 fn ordered_library_ids(published: &Published, order: BrowseViewOrder) -> Vec<String> {
     order_ids_by_capture_time(
         published,
@@ -453,6 +477,7 @@ fn ordered_library_ids(published: &Published, order: BrowseViewOrder) -> Vec<Str
             .snapshot
             .photos
             .iter()
+            .filter(|photo| !photo.removed)
             .map(|photo| photo.id.clone())
             .collect(),
         order,
@@ -553,6 +578,28 @@ impl SharedLibrary {
             return;
         };
         apply(photo);
+    }
+
+    /// Patches the removed fact of many Photos in one critical section and
+    /// drops the derived Folder index with them, so a removal is either wholly
+    /// visible to a reader or not visible at all. Called only after the owning
+    /// SQLite write committed, under `publication`.
+    async fn patch_photo_removals(&self, photo_ids: &[String], removed: bool) {
+        let _publication = self.publication.lock().await;
+        let mut guard = self.snapshot.write().expect("published Library poisoned");
+        let Some(published) = guard.as_mut() else {
+            return;
+        };
+        for photo_id in photo_ids {
+            let Some(position) = published.photos_by_id.get(photo_id).copied() else {
+                continue;
+            };
+            let Some(photo) = published.snapshot.photos.get_mut(position) else {
+                continue;
+            };
+            photo.removed = removed;
+        }
+        published.invalidate_folder_index();
     }
 
     /// Patches Preview facts only while the source bundle that produced them is
@@ -1425,7 +1472,12 @@ impl Application {
             guard.as_ref().map_or((None, 0), |published| {
                 (
                     Some(published.publication_value()),
-                    published.snapshot.photos.len(),
+                    published
+                        .snapshot
+                        .photos
+                        .iter()
+                        .filter(|photo| !photo.removed)
+                        .count(),
                 )
             })
         };
@@ -1573,6 +1625,7 @@ impl Application {
             .insert(
                 token.clone(),
                 RetainedKind::Browse,
+                Some(selection),
                 photo_ids,
                 Instant::now(),
                 SystemTime::now(),
@@ -1635,36 +1688,7 @@ impl Application {
         };
         let mut photos = Vec::with_capacity(facts.len());
         for facts in facts {
-            let preview_url = if facts.photo.preview_state != PreviewState::Unavailable {
-                self.preview
-                    .lookup_current_key(&facts, DerivativeTarget::Review2560)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|cache_key| {
-                        format!(
-                            "/api/private/derivatives/{}/review/{}.jpg",
-                            facts.photo.id, cache_key
-                        )
-                    })
-            } else {
-                None
-            };
-            let thumbnail_url = if facts.photo.preview_state != PreviewState::Unavailable {
-                self.preview
-                    .lookup_current_key(&facts, DerivativeTarget::Thumbnail512)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|cache_key| {
-                        format!(
-                            "/api/private/derivatives/{}/thumbnail/{}.jpg",
-                            facts.photo.id, cache_key
-                        )
-                    })
-            } else {
-                None
-            };
+            let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
             let originals_by_id = facts
                 .originals
                 .iter()
@@ -1681,6 +1705,175 @@ impl Application {
         }
         Ok(BrowseWindowResponse {
             start,
+            total,
+            photos,
+        })
+    }
+
+    /// The current derivative URLs one Photo's summary may reference. A Photo
+    /// without a current Review Preview has neither URL.
+    async fn derivative_urls(&self, facts: &PreviewFacts) -> (Option<String>, Option<String>) {
+        if facts.photo.preview_state == PreviewState::Unavailable {
+            return (None, None);
+        }
+        let preview_url = self
+            .preview
+            .lookup_current_key(facts, DerivativeTarget::Review2560)
+            .await
+            .ok()
+            .flatten()
+            .map(|cache_key| {
+                format!(
+                    "/api/private/derivatives/{}/review/{}.jpg",
+                    facts.photo.id, cache_key
+                )
+            });
+        let thumbnail_url = self
+            .preview
+            .lookup_current_key(facts, DerivativeTarget::Thumbnail512)
+            .await
+            .ok()
+            .flatten()
+            .map(|cache_key| {
+                format!(
+                    "/api/private/derivatives/{}/thumbnail/{}.jpg",
+                    facts.photo.id, cache_key
+                )
+            });
+        (preview_url, thumbnail_url)
+    }
+
+    /// Confirms the removal of one reviewed rejected result.
+    ///
+    /// The Browse Snapshot supplies the complete reviewed result and the
+    /// Selection State filter it was reviewed under, so removal can only ever
+    /// hide Photos the browser actually showed as Rejected. The browser
+    /// supplies the operation id, so a retried request repeats one operation
+    /// instead of creating a second one, and Undo names the group by that id
+    /// rather than by a transferred Photo list.
+    pub async fn remove_photos(
+        &self,
+        token: &str,
+        operation_id: &str,
+    ) -> Result<PhotoRemovalResponse, ServerError> {
+        let (photo_ids, filter) = self
+            .retained_queries
+            .lock()
+            .expect("retained queries poisoned")
+            .browse_snapshot(token, Instant::now())
+            .ok_or(ServerError::BrowseNotFound)?;
+        if filter != Some(BrowseSelectionFilter::Rejected) {
+            return Err(ServerError::RemovalFilter);
+        }
+        let result = self
+            .library
+            .remove_photos(slipstream_core::PhotoRemovalMutation {
+                photo_ids,
+                operation_id: operation_id.to_owned(),
+            })
+            .await?;
+        self.shared
+            .patch_photo_removals(&result.removed, true)
+            .await;
+        Ok(PhotoRemovalResponse {
+            operation_id: result.operation_id,
+            counts: PhotoRemovalCountsWire {
+                removed: result.counts.removed,
+                changed_elsewhere: result.counts.changed_elsewhere,
+                missing: result.counts.missing,
+                already_removed: result.counts.already_removed,
+            },
+            changed_elsewhere: result.changed_elsewhere,
+            missing: result.missing,
+            already_removed: result.already_removed,
+        })
+    }
+
+    /// Restores every Photo one operation still owns, or one explicit bounded
+    /// set, and patches the removed fact back into the published Library.
+    pub async fn restore_photos(
+        &self,
+        restoration: slipstream_core::PhotoRestoration,
+    ) -> Result<PhotoRestorationResponse, ServerError> {
+        let result = self.library.restore_photos(restoration).await?;
+        self.shared
+            .patch_photo_removals(&result.restored, false)
+            .await;
+        Ok(PhotoRestorationResponse {
+            counts: PhotoRestorationCountsWire {
+                restored: result.counts.restored,
+                changed_elsewhere: result.counts.changed_elsewhere,
+                missing: result.counts.missing,
+            },
+            changed_elsewhere: result.changed_elsewhere,
+            missing: result.missing,
+        })
+    }
+
+    /// One bounded page of removed Photos, newest removal first. The persisted
+    /// removal order is authoritative; the published Library supplies the same
+    /// Grid facts and current derivative URLs Grid View renders, so a removed
+    /// Photo is recognizable without leaving the removal view.
+    pub async fn removed_photos(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Result<RemovedPhotosResponse, ServerError> {
+        if limit == 0 || limit > MAX_REMOVED_WINDOW {
+            return Err(ServerError::RemovedWindow);
+        }
+        let (records, total) = self.library.removed_photos(start, limit).await?;
+        let facts = {
+            let guard = self
+                .shared
+                .snapshot
+                .read()
+                .expect("published Library poisoned");
+            let Some(published) = guard.as_ref() else {
+                return Err(ServerError::NotPublished);
+            };
+            records
+                .into_iter()
+                .filter_map(|record| {
+                    let position = published.photos_by_id.get(&record.photo_id).copied()?;
+                    let photo = published.snapshot.photos.get(position)?;
+                    let originals = [Some(&photo.original_id)]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| published.originals_by_id.get(id))
+                        .filter_map(|position| published.snapshot.originals.get(*position))
+                        .cloned()
+                        .collect();
+                    Some((
+                        record.removed_at_ms,
+                        PreviewFacts::from_records(photo.clone(), originals),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut photos = Vec::with_capacity(facts.len());
+        for (removed_at_ms, facts) in facts {
+            let (preview_url, thumbnail_url) = self.derivative_urls(&facts).await;
+            let originals_by_id = facts
+                .originals
+                .iter()
+                .enumerate()
+                .map(|(position, original)| (original.id.clone(), position))
+                .collect::<std::collections::HashMap<_, _>>();
+            photos.push(RemovedPhotoWire {
+                removed_at: crate::queries::format_unix_millis(removed_at_ms),
+                photo: photo_summary_indexed_with_url(
+                    &facts.photo,
+                    &facts.originals,
+                    &originals_by_id,
+                    preview_url,
+                    thumbnail_url,
+                ),
+            });
+        }
+        Ok(RemovedPhotosResponse {
+            start,
+            limit,
             total,
             photos,
         })

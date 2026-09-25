@@ -6,8 +6,9 @@ use crate::{
     ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
     ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
     OriginalCapability, PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection,
-    PhotoRead, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
-    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
+    PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult,
+    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
+    PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord,
     RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
@@ -1106,6 +1107,57 @@ impl Library {
         receive
             .await
             .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Removes one reviewed result's Photos from the Library in one
+    /// transaction. Each requested Photo reports exactly one outcome, and the
+    /// operation id groups what Undo restores.
+    pub async fn remove_photos(
+        &self,
+        mutation: PhotoRemovalMutation,
+    ) -> Result<PhotoRemovalResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.remove_photos_receiver(mutation)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// Restores every Photo one operation still owns, or an explicit set,
+    /// through the same compare-and-set rule.
+    pub async fn restore_photos(
+        &self,
+        restoration: PhotoRestoration,
+    ) -> Result<PhotoRestorationResult, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.restore_photos_receiver(restoration)
+        }
+        .map_err(LibraryError::from)?;
+        receive
+            .await
+            .unwrap_or(Err(MutationError::Persistence))
+            .map_err(Into::into)
+    }
+
+    /// One bounded page of removed Photos, newest removal first.
+    pub async fn removed_photos(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Result<(Vec<RemovedPhotoRecord>, usize), LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence.removed_photos_receiver(start, limit)?
+        };
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
             .map_err(Into::into)
     }
 
@@ -2381,7 +2433,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            8
+            9
         );
         assert_eq!(
             connection

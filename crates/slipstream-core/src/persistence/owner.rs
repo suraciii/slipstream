@@ -18,12 +18,14 @@ use crate::{
     OriginalFingerprint, OriginalKind, OriginalRecord, OriginalScanError, PhotoAlbumMembership,
     PhotoDecisionFacts, PhotoDecisionSnapshot, PhotoQuery, PhotoQueryCandidate, PhotoQueryError,
     PhotoQueryOrder, PhotoQueryProjection, PhotoQuerySource, PhotoRead, PhotoRecord,
-    PhotoStateBatchApplied, PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
-    PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
-    PreviewState, RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RequestedRelocation,
-    SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState, UnavailablePhotoRecord,
-    WhiteBalanceIntent,
+    PhotoRemovalCounts, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationCounts, PhotoRestorationResult, PhotoStateBatchApplied,
+    PhotoStateBatchChangedElsewhere, PhotoStateBatchMissing, PhotoStateBatchMutation,
+    PhotoStateBatchResult, PhotoStateField, PhotoStateMutation, PhotoStateMutationResult,
+    PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult, PreviewState,
+    RebindEditRecipe, RecoverySurvey, RelativeOriginalPath, RemovedPhotoRecord,
+    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanSnapshot, SelectionState,
+    UnavailablePhotoRecord, WhiteBalanceIntent,
     identity::classify_name,
     reconcile::{preview_should_preserve, reconcile, selected_source},
 };
@@ -633,6 +635,10 @@ type PhotoReadWindow = Result<Vec<Option<PhotoRead>>, PersistenceError>;
 type PhotoReadWindowReceiver = oneshot::Receiver<PhotoReadWindow>;
 type PhotoExports = Result<Option<Vec<ExportRecord>>, PersistenceError>;
 type PhotoExportsReceiver = oneshot::Receiver<PhotoExports>;
+/// One bounded page of removed Photos with the complete removed count.
+type RemovedPhotoPage = (Vec<RemovedPhotoRecord>, usize);
+type RemovedPhotoPageResult = Result<RemovedPhotoPage, PersistenceError>;
+type RemovedPhotoPageReceiver = oneshot::Receiver<RemovedPhotoPageResult>;
 
 enum Command {
     Probe(Reply<u64>),
@@ -729,6 +735,19 @@ enum Command {
         PhotoStateBatchMutation,
         oneshot::Sender<Result<PhotoStateBatchResult, MutationError>>,
     ),
+    RemovePhotos(
+        PhotoRemovalMutation,
+        oneshot::Sender<Result<PhotoRemovalResult, MutationError>>,
+    ),
+    RestorePhotos(
+        PhotoRestoration,
+        oneshot::Sender<Result<PhotoRestorationResult, MutationError>>,
+    ),
+    RemovedPhotos {
+        start: usize,
+        limit: usize,
+        reply: Reply<RemovedPhotoPage>,
+    },
     WriteProbe(Reply<()>),
     SubmitExport(ExportSubmission, Reply<ExportSubmitOutcome>),
     ReadExport {
@@ -1648,6 +1667,49 @@ impl Persistence {
         Ok(receive)
     }
 
+    pub(crate) fn remove_photos_receiver(
+        &self,
+        mutation: PhotoRemovalMutation,
+    ) -> Result<oneshot::Receiver<Result<PhotoRemovalResult, MutationError>>, MutationError> {
+        if mutation.photo_ids.is_empty() || mutation.operation_id.is_empty() {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RemovePhotos(mutation, send))
+            .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn restore_photos_receiver(
+        &self,
+        restoration: PhotoRestoration,
+    ) -> Result<oneshot::Receiver<Result<PhotoRestorationResult, MutationError>>, MutationError>
+    {
+        if let PhotoRestoration::Photos(photo_ids) = &restoration
+            && photo_ids.is_empty()
+        {
+            return Err(MutationError::Invalid);
+        }
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RestorePhotos(restoration, send))
+            .map_err(mutation_error_from_persistence)?;
+        Ok(receive)
+    }
+
+    pub(crate) fn removed_photos_receiver(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Result<RemovedPhotoPageReceiver, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::RemovedPhotos {
+            start,
+            limit,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
     pub async fn write_probe(&self) -> Result<(), PersistenceError> {
         let (send, receive) = oneshot::channel();
         self.submit(Command::WriteProbe(send))?;
@@ -1959,6 +2021,21 @@ fn owner_main(
                 }
                 let _ = reply.send(result);
             }
+            Command::RemovePhotos(mutation, reply) => {
+                let result = remove_photos(&state, &database_name, &mut connection, mutation);
+                let _ = reply.send(result);
+            }
+            Command::RestorePhotos(restoration, reply) => {
+                let result = restore_photos(&state, &database_name, &mut connection, restoration);
+                let _ = reply.send(result);
+            }
+            Command::RemovedPhotos {
+                start,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(removed_photos(&connection, start, limit));
+            }
             Command::WriteProbe(reply) => {
                 let result = write_transaction(&state, &database_name, &mut connection, |_| Ok(()));
                 let _ = reply.send(result);
@@ -2158,7 +2235,7 @@ fn open_connection(
 }
 
 fn preflight_schema(connection: &Connection, canonical_root: &str) -> Result<(), PersistenceError> {
-    preflight_schema_for_max_version(connection, canonical_root, 8)
+    preflight_schema_for_max_version(connection, canonical_root, 9)
 }
 
 fn preflight_schema_for_max_version(
@@ -2191,6 +2268,8 @@ fn preflight_schema_for_max_version(
         7 => validate_canonical_schema(connection, SchemaVersion::V7)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         8 => validate_canonical_schema(connection, SchemaVersion::V8)
+            .map_err(|_| PersistenceError::UnsupportedSchema),
+        9 => validate_canonical_schema(connection, SchemaVersion::V9)
             .map_err(|_| PersistenceError::UnsupportedSchema),
         _ => unreachable!(),
     }
@@ -2228,7 +2307,7 @@ fn startup_schema(
     let version: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|_| PersistenceError::Storage)?;
-    if version > 8 {
+    if version > 9 {
         return Err(PersistenceError::NewerSchema);
     }
     validate_root_binding(connection, canonical_root)?;
@@ -2277,6 +2356,8 @@ fn startup_schema(
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
         8 => validate_canonical_schema(&transaction, SchemaVersion::V8)
             .map_err(|_| PersistenceError::UnsupportedSchema)?,
+        9 => validate_canonical_schema(&transaction, SchemaVersion::V9)
+            .map_err(|_| PersistenceError::UnsupportedSchema)?,
         _ => unreachable!(),
     }
     if version < 6 {
@@ -2287,6 +2368,9 @@ fn startup_schema(
     }
     if version < 8 {
         migrate_v7(&transaction)?;
+    }
+    if version < 9 {
+        migrate_v8(&transaction)?;
     }
     let stored: Option<String> = transaction
         .query_row(
@@ -2305,7 +2389,7 @@ fn startup_schema(
             .map_err(|_| PersistenceError::Storage)?;
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V8)
+    validate_canonical_schema(&transaction, SchemaVersion::V9)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -2755,6 +2839,25 @@ fn migrate_v7(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::UnsupportedSchema)
 }
 
+/// Issue #416: a removed Photo keeps its row and every retained fact. The
+/// removal marker is application-owned Library state, so it is added to the
+/// Photo row instead of a separate recovery record.
+fn migrate_v8(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
+    validate_canonical_schema(transaction, SchemaVersion::V8)
+        .map_err(|_| PersistenceError::UnsupportedSchema)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE photos ADD COLUMN removed_at_ms INTEGER
+               CHECK(removed_at_ms IS NULL OR removed_at_ms >= 0);
+             ALTER TABLE photos ADD COLUMN removed_operation TEXT
+               CHECK((removed_at_ms IS NULL) = (removed_operation IS NULL));
+             PRAGMA user_version = 9;",
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    validate_canonical_schema(transaction, SchemaVersion::V9)
+        .map_err(|_| PersistenceError::UnsupportedSchema)
+}
+
 struct LegacyPhotoRow {
     id: String,
     raw_original_id: Option<String>,
@@ -2991,7 +3094,7 @@ fn recovery_survey(connection: &Connection) -> Result<RecoverySurvey, Persistenc
                  FROM photos p
                  JOIN original_files o ON o.id=p.original_id
                  LEFT JOIN original_fingerprints f ON f.original_id=o.id
-                 WHERE p.available=0
+                 WHERE p.available=0 AND p.removed_at_ms IS NULL
                  ORDER BY o.relative_path COLLATE BINARY",
             )
             .map_err(|_| PersistenceError::Storage)?;
@@ -3409,7 +3512,7 @@ pub(crate) fn expand_library_binding(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| PersistenceError::Storage)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V8)
+    validate_canonical_schema(&transaction, SchemaVersion::V9)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     if required_root_binding(&transaction)? != stored_root
         || expansion_projection(&transaction)? != preserved
@@ -3459,7 +3562,7 @@ pub(crate) fn expand_library_binding(
         return Err(PersistenceError::InvalidExpansion);
     }
     validate_database(&transaction)?;
-    validate_canonical_schema(&transaction, SchemaVersion::V8)
+    validate_canonical_schema(&transaction, SchemaVersion::V9)
         .map_err(|_| PersistenceError::UnsupportedSchema)?;
     transaction.commit().map_err(|_| PersistenceError::Storage)
 }
@@ -3649,7 +3752,8 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
             "SELECT p.id,p.original_id,p.available,p.preview_state,
                     p.preview_source_revision,p.preview_width,p.preview_height,p.cache_revision,
                     p.sort_path,p.selection_state,p.rating,
-                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id)
+                    EXISTS(SELECT 1 FROM edit_recipes e WHERE e.photo_id=p.id),
+                    p.removed_at_ms
              FROM photos p
              LEFT JOIN original_files o ON o.id=p.original_id
              ORDER BY CASE WHEN o.capture_order_key IS NULL THEN 1 ELSE 0 END,
@@ -3674,6 +3778,7 @@ fn snapshot(connection: &Connection) -> Result<ScanSnapshot, PersistenceError> {
                     .try_into()
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 has_saved_edits: row.get::<_, i64>(11)? != 0,
+                removed: row.get::<_, Option<i64>>(12)?.is_some(),
             })
         })
         .map_err(|_| PersistenceError::Storage)?
@@ -5780,7 +5885,7 @@ fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceE
             .prepare(
                 "SELECT m.photo_id,m.position,p.available,p.selection_state,p.rating
                  FROM album_members m JOIN photos p ON p.id=m.photo_id
-                 WHERE m.album_id=? ORDER BY m.position",
+                 WHERE m.album_id=? AND p.removed_at_ms IS NULL ORDER BY m.position",
             )
             .map_err(|_| PersistenceError::Storage)?
             .query_map([id.as_str()], |row| {
@@ -5826,7 +5931,9 @@ fn list_album_summaries(
     let rows = connection
         .prepare(
             "SELECT a.id, a.name,
-                    (SELECT count(*) FROM album_members m WHERE m.album_id = a.id),
+                    (SELECT count(*) FROM album_members m
+                       JOIN photos p ON p.id = m.photo_id
+                      WHERE m.album_id = a.id AND p.removed_at_ms IS NULL),
                     EXISTS(SELECT 1 FROM album_progress p WHERE p.album_id = a.id)
              FROM albums a ORDER BY a.created_at, a.id",
         )
@@ -6168,7 +6275,7 @@ fn create_photo_query(
             .prepare(
                 "SELECT m.photo_id,p.selection_state,p.rating
                  FROM album_members m JOIN photos p ON p.id=m.photo_id
-                 WHERE m.album_id=? ORDER BY m.position",
+                 WHERE m.album_id=? AND p.removed_at_ms IS NULL ORDER BY m.position",
             )
             .map_err(|_| PhotoQueryError::Storage)?;
         let mut rows = statement
@@ -6202,9 +6309,9 @@ fn create_photo_query(
         .prepare(if album_id.is_some() {
             "SELECT p.selection_state,p.rating FROM photos p
              JOIN album_members m ON m.photo_id=p.id
-             WHERE p.id=?1 AND m.album_id=?2"
+             WHERE p.id=?1 AND m.album_id=?2 AND p.removed_at_ms IS NULL"
         } else {
-            "SELECT selection_state,rating FROM photos WHERE id=?1"
+            "SELECT selection_state,rating FROM photos WHERE id=?1 AND removed_at_ms IS NULL"
         })
         .map_err(|_| PhotoQueryError::Storage)?;
     let candidates: Box<dyn Iterator<Item = &PhotoQueryCandidate>> = match query.order {
@@ -6289,7 +6396,7 @@ fn album_browse_target(
         .prepare(
             "SELECT m.photo_id, p.available
              FROM album_members m JOIN photos p ON p.id=m.photo_id
-             WHERE m.album_id=? ORDER BY m.position",
+             WHERE m.album_id=? AND p.removed_at_ms IS NULL ORDER BY m.position",
         )
         .map_err(|_| PersistenceError::Storage)?
         .query_map([album_id], |row| {
@@ -7274,6 +7381,208 @@ fn mutate_photo_state_batch(
     })
 }
 
+/// The largest number of Photo identities one removal or restore statement
+/// addresses at once. Outcomes are still reported per requested Photo in
+/// request order; the bound only keeps one SQLite statement small.
+const PHOTO_REMOVAL_CHUNK: usize = 500;
+
+/// One confirmed removal of a reviewed rejected result. Every requested Photo
+/// is resolved inside one transaction and reports exactly one outcome, so a
+/// Photo that changed elsewhere stays in the Library instead of being removed
+/// silently.
+fn remove_photos(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    mutation: PhotoRemovalMutation,
+) -> Result<PhotoRemovalResult, MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let removed_at_ms = unix_millis();
+        let mut result = PhotoRemovalResult {
+            operation_id: mutation.operation_id.clone(),
+            counts: PhotoRemovalCounts::default(),
+            removed: Vec::new(),
+            changed_elsewhere: Vec::new(),
+            missing: Vec::new(),
+            already_removed: Vec::new(),
+        };
+        for chunk in mutation.photo_ids.chunks(PHOTO_REMOVAL_CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = transaction
+                .prepare(&format!(
+                    "SELECT id,selection_state,removed_at_ms,removed_operation
+                     FROM photos WHERE id IN ({placeholders})"
+                ))
+                .map_err(mutation_error_from_sqlite)?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .map_err(mutation_error_from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mutation_error_from_sqlite)?;
+            let mut facts = std::collections::HashMap::with_capacity(rows.len());
+            for (photo_id, selection_state, removed_at, removed_operation) in rows {
+                facts.insert(photo_id, (selection_state, removed_at, removed_operation));
+            }
+            for photo_id in chunk {
+                let Some((selection_state, removed_at, removed_operation)) = facts.get(photo_id)
+                else {
+                    result.missing.push(photo_id.clone());
+                    continue;
+                };
+                if removed_at.is_some() {
+                    // A retried request repeats its own operation, so what
+                    // this operation already removed is still its own result.
+                    if removed_operation.as_deref() == Some(result.operation_id.as_str()) {
+                        result.removed.push(photo_id.clone());
+                    } else {
+                        result.already_removed.push(photo_id.clone());
+                    }
+                    continue;
+                }
+                if parse_selection_state(selection_state).map_err(|_| MutationError::Persistence)?
+                    != SelectionState::Rejected
+                {
+                    result.changed_elsewhere.push(photo_id.clone());
+                    continue;
+                }
+                transaction
+                    .execute(
+                        "UPDATE photos SET removed_at_ms=?,removed_operation=? WHERE id=?",
+                        params![removed_at_ms, result.operation_id, photo_id],
+                    )
+                    .map_err(mutation_error_from_sqlite)?;
+                result.removed.push(photo_id.clone());
+            }
+        }
+        // One outcome per requested Photo: the counts are the lists, so a
+        // request can never report a total its identities contradict.
+        result.counts = PhotoRemovalCounts {
+            removed: result.removed.len(),
+            changed_elsewhere: result.changed_elsewhere.len(),
+            missing: result.missing.len(),
+            already_removed: result.already_removed.len(),
+        };
+        Ok(result)
+    })
+}
+
+/// One restore request: every Photo one operation still owns, or an explicit
+/// set. Each requested Photo is compared and set inside one transaction.
+fn restore_photos(
+    state: &StateDirectory,
+    database_name: &DatabaseName,
+    connection: &mut Connection,
+    restoration: PhotoRestoration,
+) -> Result<PhotoRestorationResult, MutationError> {
+    mutation_transaction(state, database_name, connection, |transaction| {
+        let mut result = PhotoRestorationResult {
+            restored: Vec::new(),
+            counts: PhotoRestorationCounts::default(),
+            changed_elsewhere: Vec::new(),
+            missing: Vec::new(),
+        };
+        let photo_ids = match restoration {
+            PhotoRestoration::Operation(operation_id) => transaction
+                .prepare(
+                    "SELECT id FROM photos
+                     WHERE removed_operation=? AND removed_at_ms IS NOT NULL
+                     ORDER BY removed_at_ms, id",
+                )
+                .map_err(mutation_error_from_sqlite)?
+                .query_map([operation_id.as_str()], |row| row.get::<_, String>(0))
+                .map_err(mutation_error_from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mutation_error_from_sqlite)?,
+            PhotoRestoration::Photos(photo_ids) => photo_ids,
+        };
+        for chunk in photo_ids.chunks(PHOTO_REMOVAL_CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = transaction
+                .prepare(&format!(
+                    "SELECT id,removed_at_ms FROM photos WHERE id IN ({placeholders})"
+                ))
+                .map_err(mutation_error_from_sqlite)?;
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                })
+                .map_err(mutation_error_from_sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(mutation_error_from_sqlite)?;
+            let mut removed = std::collections::HashSet::with_capacity(rows.len());
+            for (photo_id, removed_at) in rows {
+                if removed_at.is_some() {
+                    removed.insert(photo_id);
+                }
+            }
+            for photo_id in chunk {
+                if removed.contains(photo_id) {
+                    transaction
+                        .execute(
+                            "UPDATE photos SET removed_at_ms=NULL,removed_operation=NULL WHERE id=?",
+                            [photo_id],
+                        )
+                        .map_err(mutation_error_from_sqlite)?;
+                    result.restored.push(photo_id.clone());
+                } else if transaction
+                    .query_row("SELECT 1 FROM photos WHERE id=?", [photo_id], |_| Ok(()))
+                    .optional()
+                    .map_err(mutation_error_from_sqlite)?
+                    .is_some()
+                {
+                    result.changed_elsewhere.push(photo_id.clone());
+                } else {
+                    result.missing.push(photo_id.clone());
+                }
+            }
+        }
+        result.counts = PhotoRestorationCounts {
+            restored: result.restored.len(),
+            changed_elsewhere: result.changed_elsewhere.len(),
+            missing: result.missing.len(),
+        };
+        Ok(result)
+    })
+}
+
+/// One bounded page of removed Photos, newest removal first.
+fn removed_photos(connection: &Connection, start: usize, limit: usize) -> RemovedPhotoPageResult {
+    let total: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM photos WHERE removed_at_ms IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    let records = connection
+        .prepare(
+            "SELECT id,removed_at_ms FROM photos WHERE removed_at_ms IS NOT NULL
+             ORDER BY removed_at_ms DESC, id LIMIT ? OFFSET ?",
+        )
+        .map_err(|_| PersistenceError::Storage)?
+        .query_map(params![limit as i64, start as i64], |row| {
+            Ok(RemovedPhotoRecord {
+                photo_id: row.get(0)?,
+                removed_at_ms: row.get(1)?,
+            })
+        })
+        .map_err(|_| PersistenceError::Storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok((records, usize::try_from(total).unwrap_or(usize::MAX)))
+}
+
 fn selection_state_value(value: SelectionState) -> &'static str {
     match value {
         SelectionState::Undecided => "undecided",
@@ -7629,7 +7938,7 @@ mod tests {
         );
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
     }
 
     #[tokio::test]
@@ -7710,12 +8019,12 @@ mod tests {
         persistence.shutdown().unwrap();
 
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
         assert_eq!(
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            8
+            9
         );
         assert_eq!(
             connection
@@ -8418,9 +8727,9 @@ mod tests {
             connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            8
+            9
         );
-        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
         // The legacy photo-set tables are gone rather than left as aliases.
         for legacy in ["photo_sets", "photo_set_members", "review_progress"] {
             assert!(!table_exists(&connection, legacy).unwrap(), "{legacy}");
@@ -8429,7 +8738,7 @@ mod tests {
     // album-language-legacy:end v4-migration-test
 
     #[test]
-    fn newer_v9_database_is_rejected_without_changes() {
+    fn newer_v10_database_is_rejected_without_changes() {
         let (_base, library, state, name, path) = fixture();
         seed(
             &path,
@@ -8437,7 +8746,7 @@ mod tests {
         );
         Connection::open(&path)
             .unwrap()
-            .pragma_update(None, "user_version", 9)
+            .pragma_update(None, "user_version", 10)
             .unwrap();
         let before = fs::read(&path).unwrap();
         assert!(matches!(
@@ -8521,7 +8830,7 @@ mod tests {
             .unwrap();
             persistence.shutdown().unwrap();
             let connection = Connection::open(path).unwrap();
-            validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
+            validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
         }
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -8692,7 +9001,7 @@ mod tests {
         assert_eq!(album.last_reviewed_photo_id.as_deref(), Some(photo_id));
         persistence.shutdown().unwrap();
         let connection = Connection::open(path).unwrap();
-        validate_canonical_schema(&connection, SchemaVersion::V8).unwrap();
+        validate_canonical_schema(&connection, SchemaVersion::V9).unwrap();
     }
     // album-language-legacy:end v3-migration-test
 
@@ -12251,6 +12560,387 @@ mod tests {
         ));
     }
 
+    /// The v8 fixture carries the Photos, decisions, and Album membership the
+    /// migration must preserve, and the new removal marker starts empty.
+    #[tokio::test]
+    async fn v8_to_v9_migration_preserves_photos_and_starts_unremoved() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "raw-original",
+                photo_id: "raw-photo",
+                relative_path: "shoot/one.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='rejected',rating=4 WHERE id='raw-photo'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name.clone(),
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let snapshot = persistence
+            .snapshot_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.photos.len(), 1);
+        assert_eq!(snapshot.photos[0].selection_state, SelectionState::Rejected);
+        assert_eq!(snapshot.photos[0].rating, 4);
+        assert!(!snapshot.photos[0].removed);
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT removed_at_ms,removed_operation FROM photos WHERE id='raw-photo'",
+                    [],
+                    |row| Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    )),
+                )
+                .unwrap(),
+            (None, None)
+        );
+        drop(connection);
+        persistence.shutdown().unwrap();
+    }
+
+    /// One removal reports exactly one outcome per requested Photo, a retried
+    /// request adopts what its own operation already removed, and restore
+    /// compares against the current marker instead of overwriting it.
+    #[tokio::test]
+    async fn removal_outcomes_operation_identity_and_restore_are_exact() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        for (index, state_value) in [(1, "rejected"), (2, "undecided"), (3, "rejected")] {
+            add_recipe_test_photo(
+                &connection,
+                RecipeTestPhoto {
+                    original_id: &format!("original-{index}"),
+                    photo_id: &format!("photo-{index}"),
+                    relative_path: &format!("shoot/one-{index}.ARW"),
+                    kind: "raw",
+                    available: true,
+                    size: 17,
+                    mtime_ms: 1_000.0,
+                },
+            );
+            connection
+                .execute(
+                    "UPDATE photos SET selection_state=? WHERE id=?",
+                    params![state_value, format!("photo-{index}")],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let remove = |photo_ids: Vec<&str>, operation_id: &str| {
+            persistence
+                .remove_photos_receiver(PhotoRemovalMutation {
+                    photo_ids: photo_ids.into_iter().map(str::to_owned).collect(),
+                    operation_id: operation_id.to_owned(),
+                })
+                .unwrap()
+        };
+        let result = remove(vec!["photo-1", "photo-2", "photo-missing"], "operation-one")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.removed, vec!["photo-1".to_owned()]);
+        assert_eq!(result.changed_elsewhere, vec!["photo-2".to_owned()]);
+        assert_eq!(result.missing, vec!["photo-missing".to_owned()]);
+        assert!(result.already_removed.is_empty());
+        // One outcome per requested Photo: the counts are the lists.
+        assert_eq!(
+            result.counts,
+            PhotoRemovalCounts {
+                removed: 1,
+                changed_elsewhere: 1,
+                missing: 1,
+                already_removed: 0,
+            }
+        );
+
+        // A retried request repeats its own operation instead of reporting a
+        // second outcome set.
+        let retried = remove(vec!["photo-1", "photo-3"], "operation-one")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.counts.removed, 2);
+        assert_eq!(
+            retried.removed,
+            vec!["photo-1".to_owned(), "photo-3".to_owned()]
+        );
+        assert!(retried.already_removed.is_empty());
+
+        let other = remove(vec!["photo-1"], "operation-two")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(other.counts.removed, 0);
+        assert_eq!(other.counts.already_removed, 1);
+        assert_eq!(other.already_removed, vec!["photo-1".to_owned()]);
+
+        let (records, total) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| record.removed_at_ms >= 0));
+
+        // Restore by operation returns the group that operation still owns.
+        let restored = persistence
+            .restore_photos_receiver(PhotoRestoration::Operation("operation-one".to_owned()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.counts.restored, 2);
+        assert_eq!(restored.counts.missing, 0);
+        assert_eq!(
+            restored.restored.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from(["photo-1".to_owned(), "photo-3".to_owned()])
+        );
+        let second = persistence
+            .restore_photos_receiver(PhotoRestoration::Operation("operation-one".to_owned()))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.counts.restored, 0);
+
+        // Named restores compare against the current marker.
+        let named = persistence
+            .restore_photos_receiver(PhotoRestoration::Photos(vec![
+                "photo-1".to_owned(),
+                "photo-missing".to_owned(),
+            ]))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(named.changed_elsewhere, vec!["photo-1".to_owned()]);
+        assert_eq!(named.missing, vec!["photo-missing".to_owned()]);
+
+        // Removal is Library state only: decisions and identity are untouched.
+        let snapshot = persistence
+            .snapshot_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let photo = snapshot
+            .photos
+            .iter()
+            .find(|photo| photo.id == "photo-1")
+            .unwrap();
+        assert_eq!(photo.selection_state, SelectionState::Rejected);
+        assert!(!photo.removed);
+        assert_eq!(photo.original_id, "original-1");
+        persistence.shutdown().unwrap();
+    }
+
+    /// A removed Photo leaves every normal source and Album count while its
+    /// membership rows stay intact for restore.
+    #[tokio::test]
+    async fn removed_photos_leave_normal_sources_and_album_counts() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        for index in 1..=2 {
+            add_recipe_test_photo(
+                &connection,
+                RecipeTestPhoto {
+                    original_id: &format!("original-{index}"),
+                    photo_id: &format!("photo-{index}"),
+                    relative_path: &format!("shoot/one-{index}.ARW"),
+                    kind: "raw",
+                    available: true,
+                    size: 17,
+                    mtime_ms: 1_000.0,
+                },
+            );
+            connection
+                .execute(
+                    "UPDATE photos SET selection_state='rejected' WHERE id=?",
+                    [format!("photo-{index}")],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let album = persistence
+            .mutate_album_receiver(AlbumMutation::Create {
+                name: "Keepers".to_owned(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        persistence
+            .mutate_album_receiver(AlbumMutation::AddMembers {
+                album_id: album.album_id.clone(),
+                photo_ids: vec!["photo-1".to_owned(), "photo-2".to_owned()],
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        persistence
+            .remove_photos_receiver(PhotoRemovalMutation {
+                photo_ids: vec!["photo-1".to_owned()],
+                operation_id: "operation-one".to_owned(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        let summaries = persistence
+            .list_album_summaries_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].photo_count, 1);
+        let target = persistence
+            .album_browse_target_receiver(&album.album_id)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            target
+                .members
+                .iter()
+                .map(|member| member.photo_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["photo-2".to_owned()]
+        );
+        let albums = persistence
+            .list_albums_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(albums[0].members.len(), 1);
+
+        // The membership row survives for restore.
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM album_members WHERE album_id=?",
+                    [&album.album_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        drop(connection);
+
+        let snapshot = persistence
+            .snapshot_receiver()
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let projection = query_projection(&snapshot);
+        let ids = persistence
+            .create_photo_query_receiver(
+                PhotoQuery {
+                    source: PhotoQuerySource::AllPhotos,
+                    selection_state: None,
+                    rating_minimum: None,
+                    rating_maximum: None,
+                    original_kind: None,
+                    original_available: None,
+                    captured_from: None,
+                    captured_before: None,
+                    order: PhotoQueryOrder::CaptureTimeAscending,
+                },
+                projection,
+                100,
+            )
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ids, vec!["photo-2".to_owned()]);
+        persistence.shutdown().unwrap();
+    }
+
+    /// Builds the scan-owned query projection one Published Library would
+    /// share, from the same persisted snapshot the server publishes.
     #[tokio::test]
     async fn saturation_and_shutdown_drain_are_explicit() {
         let (_base, library, state, name, _path) = fixture();

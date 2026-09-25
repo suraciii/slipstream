@@ -7633,6 +7633,7 @@ async fn cli_read_routes_execute_exact_query_and_continuation_shapes() {
         .insert(
             missing_token.to_owned(),
             crate::queries::RetainedKind::Photo,
+            None,
             vec![missing_id.to_owned()],
             Instant::now(),
             evaluated_at,
@@ -7758,6 +7759,478 @@ async fn cli_folder_cursor_maps_publication_replacement_and_query_expiry() {
         response_json(expired_query).await["error"]["details"],
         serde_json::json!({"cursorKind": "photo", "reason": "idle_or_evicted"})
     );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn rejected_result_removal_hides_photos_and_undo_restores_them_exactly() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(ids.len(), 3);
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    let rejected_one = by_location["a.jpg"].clone();
+    let rejected_two = by_location["b.jpg"].clone();
+    let kept = by_location["c.jpg"].clone();
+    for photo_id in [&rejected_one, &rejected_two] {
+        let response = post_json(
+            &router,
+            &format!("/api/photos/{photo_id}/state"),
+            serde_json::json!({"field": "selectionState", "value": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let bytes_before = fs::read(root.join("a.jpg")).unwrap();
+
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(opened["total"], 2);
+    let token = opened["token"].as_str().unwrap().to_owned();
+
+    let operation_id = "00000000-0000-4000-8000-000000000001";
+    let removed = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({"token": token, "operationId": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed["operationId"], operation_id);
+    assert_eq!(removed["counts"]["removed"], 2);
+    assert_eq!(removed["counts"]["changedElsewhere"], 0);
+    assert_eq!(removed["counts"]["missing"], 0);
+    assert_eq!(removed["counts"]["alreadyRemoved"], 0);
+    assert_eq!(removed["changedElsewhere"], serde_json::json!([]));
+    assert_eq!(removed["missing"], serde_json::json!([]));
+    assert_eq!(removed["alreadyRemoved"], serde_json::json!([]));
+
+    // Every normal Library source drops the removed Photos.
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Library).await,
+        vec![kept.clone()]
+    );
+    let (_, overview) = get_json(&router, "/api/overview").await;
+    assert_eq!(overview["photoCount"], 1);
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["total"], 0);
+
+    // Removal never touches the Original File.
+    assert_eq!(fs::read(root.join("a.jpg")).unwrap(), bytes_before);
+
+    // The Removed Photos listing is the recoverable surface.
+    let (status, listing) = get_json(&router, "/api/photos/removed?start=0&limit=60").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listing["total"], 2);
+    assert_eq!(listing["start"], 0);
+    assert_eq!(listing["limit"], 60);
+    let listed = listing["photos"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+    let listed_ids = listed
+        .iter()
+        .map(|item| item["photo"]["id"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        listed_ids,
+        BTreeSet::from([rejected_one.clone(), rejected_two.clone()])
+    );
+    assert!(listed.iter().all(|item| {
+        item["removedAt"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z'))
+    }));
+    assert!(
+        listed
+            .iter()
+            .all(|item| item["photo"]["selectionState"] == "rejected")
+    );
+
+    // Undo restores the whole operation, and the restored Photos keep the
+    // decisions they had before the removal.
+    let restored = response_json(
+        post_json(
+            &router,
+            "/api/photos/restore",
+            serde_json::json!({"operation": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restored["counts"]["restored"], 2);
+    assert_eq!(restored["changedElsewhere"], serde_json::json!([]));
+    assert_eq!(restored["missing"], serde_json::json!([]));
+    let (_, overview) = get_json(&router, "/api/overview").await;
+    assert_eq!(overview["photoCount"], 3);
+    let (_, listing) = get_json(&router, "/api/photos/removed?start=0&limit=60").await;
+    assert_eq!(listing["total"], 0);
+    assert_eq!(listing["photos"], serde_json::json!([]));
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["total"], 2);
+    assert_eq!(reopened["selectionCounts"]["rejected"], 2);
+
+    // Undo is a compare-and-set: a second Undo of the same operation restores
+    // nothing and overwrites nothing.
+    let repeated = response_json(
+        post_json(
+            &router,
+            "/api/photos/restore",
+            serde_json::json!({"operation": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(repeated["counts"]["restored"], 0);
+    assert_eq!(repeated["changedElsewhere"], serde_json::json!([]));
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    let changed = by_location["a.jpg"].clone();
+    let removed_id = by_location["b.jpg"].clone();
+    for photo_id in [&changed, &removed_id] {
+        let response = post_json(
+            &router,
+            &format!("/api/photos/{photo_id}/state"),
+            serde_json::json!({"field": "selectionState", "value": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let operation_id = "00000000-0000-4000-8000-000000000002";
+
+    // An unfiltered Snapshot is refused before any state changes.
+    let unfiltered = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    let refused = post_json(
+        &router,
+        "/api/photos/remove",
+        serde_json::json!({"token": unfiltered["token"], "operationId": operation_id}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json(refused).await["error"],
+        "Removal requires a Browse Snapshot filtered to Rejected"
+    );
+    assert_eq!(
+        browse_photo_ids(&application, BrowseSourceRequest::Library)
+            .await
+            .len(),
+        3
+    );
+
+    // An unknown or expired Snapshot is refused as not found.
+    let unknown = post_json(
+        &router,
+        "/api/photos/remove",
+        serde_json::json!({
+            "token": "00000000-0000-4000-8000-0000000000ff",
+            "operationId": operation_id,
+        }),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    // A malformed removal body is refused without a Snapshot lookup.
+    let malformed = post_json(
+        &router,
+        "/api/photos/remove",
+        serde_json::json!({"token": unfiltered["token"]}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    // The reviewed result is frozen: a decision changed after the review is
+    // reported instead of being removed.
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(opened["total"], 2);
+    let token = opened["token"].as_str().unwrap().to_owned();
+    let decision = post_json(
+        &router,
+        &format!("/api/photos/{changed}/state"),
+        serde_json::json!({"field": "selectionState", "value": "selected"}),
+        Some("https://camera.local"),
+    )
+    .await;
+    assert_eq!(decision.status(), StatusCode::OK);
+
+    let removed = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({"token": token, "operationId": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed["counts"]["removed"], 1);
+    assert_eq!(removed["counts"]["changedElsewhere"], 1);
+    assert_eq!(removed["counts"]["missing"], 0);
+    assert_eq!(removed["counts"]["alreadyRemoved"], 0);
+    assert_eq!(removed["changedElsewhere"], serde_json::json!([changed]));
+
+    // A retried request adopts what this operation already removed instead of
+    // inventing a second outcome set.
+    let retried = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({"token": token, "operationId": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(retried["counts"]["removed"], 1);
+    assert_eq!(retried["counts"]["alreadyRemoved"], 0);
+    assert_eq!(retried["counts"]["changedElsewhere"], 1);
+    assert_eq!(retried["alreadyRemoved"], serde_json::json!([]));
+
+    // Only the reviewed rejected Photo left the Library.
+    let remaining = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.contains(&changed));
+    let (_, overview) = get_json(&router, "/api/overview").await;
+    assert_eq!(overview["photoCount"], 2);
+
+    // A restore body that names two different sets, or none, is refused.
+    for body in [
+        serde_json::json!({"operation": operation_id, "photoIds": [removed_id]}),
+        serde_json::json!({"photoIds": []}),
+        serde_json::json!({"unknown": operation_id}),
+    ] {
+        let response = post_json(
+            &router,
+            "/api/photos/restore",
+            body,
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Undo restores exactly this operation's Photo.
+    let restored = response_json(
+        post_json(
+            &router,
+            "/api/photos/restore",
+            serde_json::json!({"operation": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(restored["counts"]["restored"], 1);
+    let (_, overview) = get_json(&router, "/api/overview").await;
+    assert_eq!(overview["photoCount"], 3);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
+async fn removed_photos_leave_folder_counts_and_cli_queries_but_stay_recoverable() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    fs::create_dir_all(root.join("shoot")).unwrap();
+    fs::create_dir_all(root.join("other")).unwrap();
+    jpeg_fixture(&root.join("shoot/a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("shoot/b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("other/c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    assert_eq!(ids.len(), 3);
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    for name in ["shoot/a.jpg", "shoot/b.jpg"] {
+        let response = post_json(
+            &router,
+            &format!("/api/photos/{}/state", by_location[name]),
+            serde_json::json!({"field": "selectionState", "value": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(opened["total"], 2);
+    let removed = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({
+                "token": opened["token"],
+                "operationId": "00000000-0000-4000-8000-000000000003",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed["counts"]["removed"], 2);
+
+    // The Original Folder the removed Photos projected through now counts and
+    // opens without them.
+    let (_, overview) = get_json(&router, "/api/overview").await;
+    let publication = overview["publication"].as_str().unwrap().to_owned();
+    let (status, folders) = get_json(
+        &router,
+        &format!("/api/file-locations?publication={publication}&parent=shoot&start=0&limit=60"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(folders["total"], 0);
+    let (_, root_folders) = get_json(
+        &router,
+        &format!("/api/file-locations?publication={publication}&start=0&limit=60"),
+    )
+    .await;
+    let counts = root_folders["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|child| {
+            (
+                child["name"].as_str().unwrap().to_owned(),
+                child["photoCount"].as_u64().unwrap(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(counts["shoot"], 0);
+    assert_eq!(counts["other"], 1);
+    let folder_snapshot = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({
+                "source": "folder",
+                "folderPath": "shoot",
+                "publication": publication,
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(folder_snapshot["total"], 0);
+
+    // The CLI Photo query is a normal source too.
+    let query = response_json(
+        post_cli_json(
+            &router,
+            "/api/photo-queries",
+            serde_json::json!({"limit": 10}),
+        )
+        .await,
+    )
+    .await;
+    let items = query["items"].as_array().unwrap();
+    assert_eq!(query["total"], 1);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], by_location["other/c.jpg"]);
+
+    // The Removed Photos listing is bounded and ordered newest removal first.
+    let (_, bounded) = get_json(&router, "/api/photos/removed?start=0&limit=0").await;
+    assert_eq!(bounded["error"], "Removed Photos window is invalid");
+    let (_, bounded) = get_json(&router, "/api/photos/removed?start=0&limit=61").await;
+    assert_eq!(bounded["error"], "Removed Photos window is invalid");
+    let (_, first_page) = get_json(&router, "/api/photos/removed?start=0&limit=1").await;
+    assert_eq!(first_page["total"], 2);
+    assert_eq!(first_page["photos"].as_array().unwrap().len(), 1);
+    let (_, second_page) = get_json(&router, "/api/photos/removed?start=1&limit=1").await;
+    assert_eq!(second_page["total"], 2);
+    assert_eq!(second_page["photos"].as_array().unwrap().len(), 1);
+    let first = first_page["photos"][0]["photo"]["id"].as_str().unwrap();
+    let second = second_page["photos"][0]["photo"]["id"].as_str().unwrap();
+    assert_ne!(first, second);
+    let at_first = first_page["photos"][0]["removedAt"].as_str().unwrap();
+    let at_second = second_page["photos"][0]["removedAt"].as_str().unwrap();
+    assert!(at_first >= at_second);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);

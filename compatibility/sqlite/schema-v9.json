@@ -1,0 +1,474 @@
+{
+  "objects": [
+    {
+      "name": "album_members_photo",
+      "sql": "createindexalbum_members_photoonalbum_members(photo_id)",
+      "type": "index"
+    },
+    {
+      "name": "original_fingerprints_digest",
+      "sql": "createindexoriginal_fingerprints_digestonoriginal_fingerprints(digest)",
+      "type": "index"
+    },
+    {
+      "name": "photos_original",
+      "sql": "createindexphotos_originalonphotos(original_id)",
+      "type": "index"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "album_id",
+          "notNull": true,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "photo_id",
+          "notNull": true,
+          "primaryKey": 2,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "position",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "from": "photo_id",
+          "onDelete": "RESTRICT",
+          "onUpdate": "NO ACTION",
+          "table": "photos",
+          "to": "id"
+        },
+        {
+          "from": "album_id",
+          "onDelete": "CASCADE",
+          "onUpdate": "NO ACTION",
+          "table": "albums",
+          "to": "id"
+        }
+      ],
+      "name": "album_members",
+      "sql": "createtablealbum_members(album_idtextnotnullreferencesalbums(id)ondeletecascade,photo_idtextnotnullreferencesphotos(id)ondeleterestrict,positionintegernotnullcheck(position>=0),primarykey(album_id,photo_id),unique(album_id,position))",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "album_id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "photo_id",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "from": "album_id",
+          "onDelete": "CASCADE",
+          "onUpdate": "NO ACTION",
+          "table": "album_members",
+          "to": "album_id"
+        },
+        {
+          "from": "photo_id",
+          "onDelete": "CASCADE",
+          "onUpdate": "NO ACTION",
+          "table": "album_members",
+          "to": "photo_id"
+        },
+        {
+          "from": "album_id",
+          "onDelete": "CASCADE",
+          "onUpdate": "NO ACTION",
+          "table": "albums",
+          "to": "id"
+        }
+      ],
+      "name": "album_progress",
+      "sql": "createtablealbum_progress(album_idtextprimarykeyreferencesalbums(id)ondeletecascade,photo_idtextnotnull,foreignkey(album_id,photo_id)referencesalbum_members(album_id,photo_id)ondeletecascade)",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreignKeys": [],
+      "name": "albums",
+      "sql": "createtablealbums(idtextprimarykey,nametextnotnulluniquecollatenocasecheck(length(name)between1and120),created_atintegernotnull)",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "photo_id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "revision",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_revision",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "exposure_ev",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "REAL"
+        },
+        {
+          "default": null,
+          "name": "white_balance_mode",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "temperature_kelvin",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "tint_milli",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "from": "photo_id",
+          "onDelete": "RESTRICT",
+          "onUpdate": "NO ACTION",
+          "table": "photos",
+          "to": "id"
+        }
+      ],
+      "name": "edit_recipes",
+      "sql": "createtableedit_recipes(photo_idtextprimarykeyreferencesphotos(id)ondeleterestrict,revisiontextnotnullcheck(length(revision)>0),source_revisiontextnotnullcheck(length(source_revision)>0),exposure_evrealnotnullcheck(exposure_evbetween-1.7976931348623157e308and1.7976931348623157e308),white_balance_modetextnotnullcheck(white_balance_modein('as-shot','temperature-tint')),temperature_kelvinintegercheck(temperature_kelvinisnullortemperature_kelvinbetween1000and40000),tint_milliintegercheck(tint_milliisnullortint_millibetween-150000and150000))",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "key",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "value",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreignKeys": [],
+      "name": "library_metadata",
+      "sql": "createtablelibrary_metadata(keytextprimarykey,valuetextnotnull)",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "relative_path",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "size",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "mtime_ms",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "REAL"
+        },
+        {
+          "default": null,
+          "name": "available",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "error_category",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "error_message",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'pending'",
+          "name": "capture_metadata_state",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "capture_order_key",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "capture_time_field",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "capture_offset_minutes",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "capture_source_revision",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreignKeys": [],
+      "name": "original_files",
+      "sql": "createtableoriginal_files(idtextprimarykey,relative_pathtextnotnullunique,kindtextnotnullcheck(kindin('raw','jpeg')),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0),availableintegernotnullcheck(availablein(0,1)),error_categorytextcheck(error_categoryisnullorerror_categoryin('unreadable','changed')),error_messagetextcheck(error_messageisnullorlength(error_message)<=120),capture_metadata_statetextnotnulldefault'pending'check(capture_metadata_statein('pending','known','missing','invalid','failed')),capture_order_keytextcheck(capture_order_keyisnullor(length(capture_order_key)=29andsubstr(capture_order_key,5,1)='-'andsubstr(capture_order_key,8,1)='-'andsubstr(capture_order_key,11,1)='t'andsubstr(capture_order_key,14,1)=':'andsubstr(capture_order_key,17,1)=':'andsubstr(capture_order_key,20,1)='.'andreplace(replace(replace(replace(capture_order_key,'-',''),':',''),'t',''),'.','')notglob'*^0-9*')),capture_time_fieldtextcheck(capture_time_fieldisnullorcapture_time_fieldin('date-time-original','date-time-digitized')),capture_offset_minutesintegercheck(capture_offset_minutesisnullorcapture_offset_minutesbetween-840and840),capture_source_revisiontext)",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "original_id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "digest",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "size",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "mtime_ms",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "REAL"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "from": "original_id",
+          "onDelete": "CASCADE",
+          "onUpdate": "NO ACTION",
+          "table": "original_files",
+          "to": "id"
+        }
+      ],
+      "name": "original_fingerprints",
+      "sql": "createtableoriginal_fingerprints(original_idtextprimarykeyreferencesoriginal_files(id)ondeletecascade,digesttextnotnullcheck(length(digest)=64),sizeintegernotnullcheck(size>=0),mtime_msrealnotnullcheck(mtime_ms>=0))",
+      "type": "table"
+    },
+    {
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "notNull": false,
+          "primaryKey": 1,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "original_id",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "available",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "preview_state",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "preview_source_revision",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "preview_width",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "preview_height",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "cache_revision",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "sort_path",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "'undecided'",
+          "name": "selection_state",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": "0",
+          "name": "rating",
+          "notNull": true,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "removed_at_ms",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "removed_operation",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        }
+      ],
+      "foreignKeys": [
+        {
+          "from": "original_id",
+          "onDelete": "RESTRICT",
+          "onUpdate": "NO ACTION",
+          "table": "original_files",
+          "to": "id"
+        }
+      ],
+      "name": "photos",
+      "sql": "createtablephotos(idtextprimarykey,original_idtextnotnulluniquereferencesoriginal_files(id)ondeleterestrict,availableintegernotnullcheck(availablein(0,1)),preview_statetextnotnullcheck(preview_statein('inspection-pending','ready','failed','unavailable')),preview_source_revisiontext,preview_widthintegercheck(preview_widthisnullorpreview_width>0),preview_heightintegercheck(preview_heightisnullorpreview_height>0),cache_revisiontext,sort_pathtextnotnull,selection_statetextnotnulldefault'undecided'check(selection_statein('undecided','selected','rejected')),ratingintegernotnulldefault0check(ratingbetween0and5),removed_at_msintegercheck(removed_at_msisnullorremoved_at_ms>=0),removed_operationtextcheck((removed_at_msisnull)=(removed_operationisnull)))",
+      "type": "table"
+    }
+  ],
+  "userVersion": 9
+}
