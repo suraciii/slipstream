@@ -856,6 +856,17 @@ class HelperTests(unittest.TestCase):
             build_development_tiff(4, 3, profile, samples=1), 4, 3
         )
         self.assertIn("tiff-samples-per-pixel-not-3", problems)
+        # The qualified writer's strip padding stays the qualified shape; a
+        # larger unaccounted tail is refused.
+        padded = build_development_tiff(4, 3, profile) + b"\x00"
+        _, problems = acceptance.validate_development_tiff(padded, 4, 3)
+        self.assertEqual(problems, [])
+        over = (
+            build_development_tiff(4, 3, profile)
+            + b"\x00" * (acceptance.STRIP_PADDING_MAXIMUM + 1)
+        )
+        _, problems = acceptance.validate_development_tiff(over, 4, 3)
+        self.assertIn("tiff-unaccounted-trailing-payload", problems)
 
     def test_development_tiff_rejects_invalid_deflate_stream(self):
         profile = PROFILE_ASSET.read_bytes()

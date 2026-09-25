@@ -314,12 +314,17 @@ SHA-256; no filesystem path or multi-gigabyte control response is used.
 
 Before it offers any output, the launcher validates its own engine artifact
 against the closed Development TIFF contract: IEEE float32 RGB samples, Deflate
-strip ranges that account for the declared full geometry with no unaccounted
-trailing payload, no hidden orientation, and the exact pinned embedded profile
-bytes. The strip layout is the qualified writer's shape, one entry per declared
-row block, so the launcher bounds the parsed arrays by the qualified geometry
-instead of a fixed small count. An artifact outside that shape settles as
-`refused-output-validation` and is never offered.
+strip ranges that account for the declared full geometry, only the qualified
+writer's bounded strip padding after the last declared strip, no hidden
+orientation, and the exact pinned embedded profile bytes. The qualified writer
+writes each compressed strip through its own buffer, so a strip can extend one
+byte past its declared count and the artifact can end a few bytes past the last
+declared strip; that padding is not payload, and the service's decode of the
+transferred artifact is what proves the compressed strips inflate to the
+declared geometry. The strip layout is the qualified writer's shape, one entry
+per declared row block, so the launcher bounds the parsed arrays by the
+qualified geometry instead of a fixed small count. An artifact outside that
+shape settles as `refused-output-validation` and is never offered.
 
 The service hashes and validates the received file as the captured
 `development-tiff` target, including dimensions, sample type, color profile,
