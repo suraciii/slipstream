@@ -85,7 +85,7 @@ pub(crate) fn approved_exposure_range() -> ExposureRangeWire {
 
 /// The source facts one support derivation needs beside the availability.
 #[derive(Clone, Copy)]
-struct SourceFacts<'a> {
+pub(crate) struct SourceFacts<'a> {
     kind: OriginalKind,
     filename: &'a str,
     make: Option<&'a str>,
@@ -442,7 +442,10 @@ pub(crate) async fn load_facts(
     Ok((photo, metadata, read))
 }
 
-pub(crate) fn source_facts<'a>(photo: &'a PhotoRead, metadata: &'a CaptureReviewMetadata) -> SourceFacts<'a> {
+pub(crate) fn source_facts<'a>(
+    photo: &'a PhotoRead,
+    metadata: &'a CaptureReviewMetadata,
+) -> SourceFacts<'a> {
     SourceFacts {
         kind: photo.original_kind,
         filename: &photo.filename,

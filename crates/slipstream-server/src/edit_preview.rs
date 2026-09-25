@@ -613,33 +613,19 @@ impl EditPreviewOwner {
 
 // ---------------------------------------------------------------- handler
 
-/// One source-class support classification for the preview gates. This is the
-/// single adaptation point over the Edit Recipe surface's support derivation.
-struct SupportClassification {
-    state: &'static str,
-    reason: Option<&'static str>,
-}
-
+/// Classifies one Photo's source class through the Edit Recipe surface's
+/// support derivation: the closed contract states (`supported`,
+/// `unavailable`, `unsupported`) with one closed `supportReason`.
 fn classify_support(
-    state: &HttpState,
     photo: &slipstream_core::PhotoRead,
     metadata: &slipstream_core::CaptureReviewMetadata,
-    source_available: bool,
-) -> SupportClassification {
-    let support = crate::edit_recipe::derive_support(
-        crate::edit_recipe::source_facts(photo, metadata, state),
-        source_available,
-    );
-    SupportClassification {
-        // The Edit Recipe support state names an approved class `ready`; the
-        // Photo read contract names it `supported`.
-        state: if support.state == "ready" {
-            "supported"
-        } else {
-            support.state
-        },
-        reason: support.reason,
-    }
+    read: &EditRecipeRead,
+) -> crate::edit_recipe::SupportClassification {
+    crate::edit_recipe::derive_support(
+        crate::edit_recipe::source_facts(photo, metadata),
+        read.source_available,
+        photo.original_available,
+    )
 }
 
 /// `GET /api/photos/{id}/edit-preview/{stage}`
@@ -668,7 +654,7 @@ pub(crate) async fn get_edit_preview(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if let Some(response) = support_refusal(&state, &photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
         return response;
     }
     if let Err(response) = develop_executable(&state, stage, &read) {
@@ -678,39 +664,23 @@ pub(crate) async fn get_edit_preview(
 }
 
 /// The support refusal of one Photo, if its class or facts refuse the route.
+/// The deployment's processing enablement is the capability boundary and is
+/// checked separately by `develop_executable`.
 fn support_refusal(
-    state: &HttpState,
     photo: &slipstream_core::PhotoRead,
     metadata: &slipstream_core::CaptureReviewMetadata,
     read: &EditRecipeRead,
     stage: &'static str,
 ) -> Option<Response<Body>> {
-    let support = classify_support(state, photo, metadata, read.source_available);
+    let support = classify_support(photo, metadata, read);
     match support.state {
-        "unsupported" => Some(unsupported_photo_support(state, photo, stage)),
-        "unavailable" => {
-            // An operator-disabled deployment is a capability failure of the
-            // stage, not missing source facts.
-            if support.reason == Some("operator-disabled") {
-                Some(processing_unavailable(stage, "operator-disabled"))
-            } else {
-                Some(resource_unavailable(
-                    stage,
-                    support.reason.unwrap_or("source-unavailable"),
-                ))
-            }
-        }
+        "unsupported" => Some(unsupported_photo(&photo.id)),
+        "unavailable" => Some(resource_unavailable(
+            stage,
+            support.reason.unwrap_or("original-missing"),
+        )),
         _ => None,
     }
-}
-
-fn unsupported_photo_support(
-    state: &HttpState,
-    photo: &slipstream_core::PhotoRead,
-    stage: &'static str,
-) -> Response<Body> {
-    let _ = (state, stage);
-    unsupported_photo(&photo.id)
 }
 
 /// The closed stage set of the route.
@@ -868,7 +838,7 @@ async fn fresh_identity(
         Ok(facts) => facts,
         Err(response) => return Err(response),
     };
-    if let Some(response) = support_refusal(state, &photo, &metadata, &read, stage) {
+    if let Some(response) = support_refusal(&photo, &metadata, &read, stage) {
         return Err(response);
     }
     develop_executable(state, stage, &read).map_err(|response| *response)?;

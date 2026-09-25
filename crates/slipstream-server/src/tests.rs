@@ -12933,7 +12933,7 @@ async fn approved_photo_with_recipe_and_result(
     )
     .await;
     assert_eq!(saved["outcome"], "saved");
-    let recipe_revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
+    let recipe_revision = saved["recipeVersion"].as_str().unwrap().to_owned();
     let (path, sha256, byte_length) =
         development_result_fixture(&base.join("development-result.tif"), 0.18);
     let record = retained_result(
@@ -13127,21 +13127,18 @@ async fn edit_preview_refuses_unsupported_and_unobservable_source_classes() {
     for photo_id in browse_photo_ids(&application, BrowseSourceRequest::Library).await {
         let (_, read) = get_edit_recipe(&router, &photo_id).await;
         let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
-        if read["support"]["state"] == "unsupported" {
+        if read["sourceSupport"] == "unsupported" {
             assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(
                 error_code(&response_json(response).await),
                 "unsupported_photo"
             );
             unsupported_refused = true;
-        } else if read["support"]["reason"] == "camera-identity-unavailable" {
+        } else if read["supportReason"] == "original-unreadable" {
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             let body = response_json(response).await;
             assert_eq!(error_code(&body), "resource_unavailable");
-            assert_eq!(
-                body["error"]["details"]["reason"],
-                "camera-identity-unavailable"
-            );
+            assert_eq!(body["error"]["details"]["reason"], "original-unreadable");
             unobservable_refused = true;
         }
     }
@@ -13192,7 +13189,7 @@ async fn edit_preview_does_not_serve_a_superseded_identity() {
     )
     .await;
     assert_eq!(saved["outcome"], "saved");
-    let second_revision = saved["recipe"]["revision"].as_str().unwrap().to_owned();
+    let second_revision = saved["recipeVersion"].as_str().unwrap().to_owned();
     let superseded = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
     assert_eq!(superseded.status(), StatusCode::ACCEPTED);
     assert_eq!(
