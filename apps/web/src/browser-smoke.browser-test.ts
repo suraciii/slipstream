@@ -6,6 +6,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   rm,
   stat,
@@ -30,6 +31,10 @@ import {
 } from "./browser-server.js";
 
 const sample = process.env.SLIPSTREAM_RAW_SAMPLE;
+/// The launcher instance of the deployment under test. The scenario below
+/// needs a host with an admitted launcher socket, so it stays skipped
+/// everywhere else, exactly as the RAW sample does.
+const processingInstance = process.env.SLIPSTREAM_PROCESSING_INSTANCE?.trim();
 const temporary: string[] = [];
 const servers: BrowserServer[] = [];
 const externals: Server[] = [];
@@ -1191,6 +1196,122 @@ test("the Edit surface explains a deployment without processing and attempts no 
     page.locator("[data-photo-editor-export-submit]"),
   ).toBeDisabled();
   expect(processing).toEqual([]);
+});
+
+/// The opt-in counterpart of the refusal above: a deployment with an admitted
+/// launcher carries one RAW Original through a real Photo Edit Recipe. The
+/// Photographer's own surface proves the saved exposure, the reopened recipe,
+/// the baseline comparison, and the downloaded Development TIFF, and the
+/// Original Files stay untouched.
+test("real-processing: autosaves an exposure, reopens it, compares the baseline, and downloads the Development TIFF", async ({
+  page,
+}) => {
+  test.skip(
+    !sample || !processingInstance,
+    "Set SLIPSTREAM_RAW_SAMPLE and SLIPSTREAM_PROCESSING_INSTANCE for the RAW processing smoke",
+  );
+  // A cold development of a 61 MP Original takes about a minute, and the
+  // scenario renders twice: once as the comparison and once as the Export.
+  test.setTimeout(900_000);
+  const cameraSample = sample!;
+  const sourceBefore = await originalSnapshot(cameraSample);
+  const { base, root } = await fixture();
+  const raw = join(root, `camera${extname(cameraSample)}`);
+  await copyFile(cameraSample, raw);
+  const copiedBefore = await originalSnapshot(raw);
+  const running = await server(base, root);
+  await startReview(page, running.url, "All Photos");
+  await openPhotoToolsView(page, "edit");
+  // The deployment admits this Photo: the capability is the launcher's, and
+  // the RAW Original is a supported source class.
+  await expect(page.locator("[data-photo-editor-processing]")).toHaveText(
+    "Available",
+    { timeout: 60_000 },
+  );
+  await expect(page.locator("[data-photo-editor-support]")).toHaveText(
+    "supported",
+  );
+  const exposure = page.locator("[data-photo-editor-exposure]");
+  await expect(exposure).toBeEnabled();
+  // One committed adjustment is one autosave. The value and its events are one
+  // gesture, so a render between them cannot clear the draft the change
+  // commits, and the service's own acknowledgement is the evidence.
+  const saved = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname.endsWith("/edit-recipe"),
+  );
+  await exposure.evaluate((element: HTMLInputElement) => {
+    element.value = "0.5";
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect((await saved).status()).toBe(200);
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.500 EV",
+  );
+  // Reopening the Photo presents the saved recipe rather than a fresh one: the
+  // service's acknowledgement above is what the reopened recipe reflects.
+  await page.reload();
+  await openPhotoToolsView(page, "edit");
+  await expect(page.locator("[data-photo-editor-exposure-value]")).toHaveText(
+    "0.500 EV",
+  );
+  // The baseline comparison develops the same Original without the saved
+  // exposure, so its own rendition is what the note and the image present. The
+  // workspace's own preview follow-up is a short bounded window, and a real
+  // 61 MP development outlives it: reopening the Edit workspace asks for the
+  // same baseline identity again, so the retained rendition is presented once
+  // that development has settled.
+  const previewNote = page.locator("[data-photo-editor-preview-note]");
+  const baseline =
+    /Develop baseline comparison \d+×\d+: the as-shot\/baseline development of this stage\./;
+  const compare = page.locator("[data-photo-editor-compare]");
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (baseline.test((await previewNote.textContent()) ?? "")) break;
+    if ((await compare.getAttribute("aria-pressed")) !== "true") {
+      await compare.click();
+      await expect(compare).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.waitForTimeout(20_000);
+    if (baseline.test((await previewNote.textContent()) ?? "")) break;
+    await page.reload();
+    await openPhotoToolsView(page, "edit");
+  }
+  await expect(previewNote).toContainText(baseline);
+  await expect(compare).toHaveAttribute("aria-pressed", "true");
+  // The Export is the deployment's bounded work: the submission settles, and
+  // the retained artifact downloads as a TIFF.
+  await page.locator("[data-photo-editor-export-submit]").click();
+  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
+    /Development TIFF ready: [\d.]+ (?:B|KiB|MiB|GiB), \d+×\d+, downloadable until /,
+    { timeout: 300_000 },
+  );
+  const pending = page.waitForEvent("download");
+  await page.locator("[data-photo-editor-export-download]").click();
+  const artifact = await pending;
+  const artifactPath = await artifact.path();
+  expect(artifactPath).not.toBeNull();
+  const handle = await open(artifactPath, "r");
+  try {
+    const header = Buffer.alloc(4);
+    await handle.read(header, 0, header.byteLength, 0);
+    // Either byte order of the TIFF signature: `II*\0` or `MM\0*`.
+    expect([
+      header.equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])),
+      header.equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a])),
+    ]).toContain(true);
+    const size = (await handle.stat()).size;
+    expect(size).toBeGreaterThan(1_000_000);
+  } finally {
+    await handle.close();
+  }
+  await expect(page.locator("[data-photo-editor-export-state]")).toContainText(
+    "Downloaded",
+  );
+  // Both Original Files are unchanged: neither the sample nor its copy moved.
+  expect(await originalSnapshot(cameraSample)).toEqual(sourceBefore);
+  expect(await originalSnapshot(raw)).toEqual(copiedBefore);
 });
 
 test("Photo View shows review capture metadata and explicit missing values", async ({
