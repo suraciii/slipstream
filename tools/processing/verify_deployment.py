@@ -30,6 +30,24 @@ MAX_WEB_BYTES = 1024 * 1024
 MAX_WEB_TOKEN_BYTES = 4096
 MAX_CGROUP_IO_BYTES = 4096
 
+# Unit properties that give the launcher a private mount namespace. The
+# launcher's attempt storage must stay visible to the engine container's bind
+# resolution, which resolves in the host mount namespace.
+MOUNT_NAMESPACE_PROPERTIES = (
+    "PrivateTmp",
+    "PrivateMounts",
+    "ProtectSystem",
+    "ProtectKernelTunables",
+    "ProtectKernelModules",
+    "ProtectKernelLogs",
+    "ReadWritePaths",
+    "ReadOnlyPaths",
+    "InaccessiblePaths",
+    "BindPaths",
+    "BindReadOnlyPaths",
+    "TemporaryFileSystem",
+)
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -148,6 +166,7 @@ class DeploymentSnapshot:
             self._host_check(),
             self._launcher_check(),
             self._unit_check(),
+            self._mount_namespace_check(),
             self._config_check(),
             self._service_check(),
             self._runtime_check(),
@@ -204,6 +223,46 @@ class DeploymentSnapshot:
 
     def _unit_check(self) -> Check:
         return _regular_root_file("launcher-unit", self.paths.unit)
+
+    def _mount_namespace_check(self) -> Check:
+        """The installed unit must not isolate the launcher's mount namespace.
+
+        The launcher mounts the size- and inode-capped attempt tmpfs and the
+        engine's bind sources beneath its instance root. The engine container
+        resolves those bind sources in the host mount namespace, so a unit
+        directive that gives the service a private mount namespace makes the
+        container bind the empty placeholder directory instead of the mounted
+        storage; the fixed UID-1000 worker then cannot write its bounded result
+        and exits before any engine work.
+        """
+        if not _lower_hex(self.instance, 32):
+            return Check("launcher-mount-namespace", False, "invalid-instance")
+        unit = f"slipstream-processing-launcher@{self.instance}.service"
+        properties = ",".join(MOUNT_NAMESPACE_PROPERTIES)
+        result = self.command(
+            ("systemctl", "--system", "show", f"--property={properties}", unit)
+        )
+        if result.returncode != 0:
+            return Check(
+                "launcher-mount-namespace", False, "launcher-unit-unavailable"
+            )
+        enabled: list[str] = []
+        for line in result.stdout.splitlines():
+            name, _, value = line.partition("=")
+            if name not in MOUNT_NAMESPACE_PROPERTIES:
+                continue
+            value = value.strip()
+            if not value or value in ("no", "false"):
+                continue
+            enabled.append(f"{name}={value[:60]}")
+        if enabled:
+            return Check(
+                "launcher-mount-namespace",
+                False,
+                "launcher-private-mount-namespace",
+                ", ".join(enabled),
+            )
+        return Check("launcher-mount-namespace", True)
 
     def _config_check(self) -> Check:
         if not _lower_hex(self.instance, 32):
@@ -353,6 +412,7 @@ class DeploymentSnapshot:
             "host-topology",
             "launcher-installation",
             "launcher-unit",
+            "launcher-mount-namespace",
             "launcher-config",
             "launcher-service",
             "launcher-runtime",

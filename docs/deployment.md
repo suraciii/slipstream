@@ -57,6 +57,18 @@ install the exact candidate's launcher binary at
 `/var/lib/slipstream-processing/INSTANCE`. Replace `INSTANCE` with the same 32
 lowercase hexadecimal identifier in the service name and configuration.
 
+Keep the installed unit's mount behavior. The launcher's attempt storage must
+resolve for the engine container's bind sources, which resolve in the host mount
+namespace ([processing-executor.md](../design/processing-executor.md#restricted-launch-authority)),
+so the installed unit must not enable a directive that gives the service a
+private mount namespace: `PrivateTmp`, `PrivateMounts`, `ProtectSystem`,
+`ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
+`ReadWritePaths`, or an explicit bind/temporary path. With one of those enabled,
+the container binds the empty placeholder directory instead of the mounted
+storage, and the fixed UID-1000 worker fails to write its result and exits
+before any engine work. `verify-deployment.py` checks the installed unit for
+this.
+
 Build the worker image in two passes so the image records its own bundle
 identity. The first build produces the engine payload and the derived bundle
 digest in `/opt/slipstream-photo/bundle`. The second build pins that digest as
