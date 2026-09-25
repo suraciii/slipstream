@@ -4,6 +4,7 @@ services:
       SLIPSTREAM_PROCESSING_INSTANCE: ${SLIPSTREAM_PROCESSING_INSTANCE:?processing-up requires a launcher instance}
       SLIPSTREAM_PROCESSING_POLICY_SHA256: ${SLIPSTREAM_PROCESSING_POLICY_SHA256:?processing-up requires an approved policy digest}
       SLIPSTREAM_PROCESSING_BUNDLE_SHA256: ${SLIPSTREAM_PROCESSING_BUNDLE_SHA256:?processing-up requires an approved bundle digest}
+      SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: ${SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES:?processing-up requires a finite Development TIFF retained-output allowance}
     volumes:
       - type: bind
         source: /run/slipstream-processing/${SLIPSTREAM_PROCESSING_INSTANCE}

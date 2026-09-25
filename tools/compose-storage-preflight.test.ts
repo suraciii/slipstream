@@ -142,6 +142,7 @@ test("processing Compose overlay exposes only the fixed read-only launcher direc
         `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
         `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
         `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
         "",
       ].join("\n"),
     );
@@ -181,7 +182,11 @@ test("processing Compose overlay exposes only the fixed read-only launcher direc
       SLIPSTREAM_PROCESSING_INSTANCE: instance,
       SLIPSTREAM_PROCESSING_POLICY_SHA256: "b".repeat(64),
       SLIPSTREAM_PROCESSING_BUNDLE_SHA256: "c".repeat(64),
+      SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES: "8589934592",
     });
+    expect(baseService.environment).not.toHaveProperty(
+      "SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES",
+    );
   } finally {
     await removeFixture(target);
   }
@@ -221,6 +226,7 @@ test("processing-up rejects a Web UID operator before host preflight", async () 
         `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
         `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
         `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
         "",
       ].join("\n"),
     );
@@ -259,6 +265,7 @@ test("processing-up requires root or refuses an unavailable launcher before invo
         `SLIPSTREAM_PROCESSING_INSTANCE=${instance}`,
         `SLIPSTREAM_PROCESSING_POLICY_SHA256=${"b".repeat(64)}`,
         `SLIPSTREAM_PROCESSING_BUNDLE_SHA256=${"c".repeat(64)}`,
+        `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES=${8589934592}`,
         "",
       ].join("\n"),
     );

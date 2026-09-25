@@ -124,8 +124,12 @@ For this command, the environment file must contain exactly one literal value
 for each of `SLIPSTREAM_PROCESSING_INSTANCE` (32 lowercase hexadecimal
 characters), `SLIPSTREAM_PROCESSING_POLICY_SHA256` and
 `SLIPSTREAM_PROCESSING_BUNDLE_SHA256` (64 lowercase hexadecimal characters
-each). These values pin the approved deployment identities. The processing
-overlay passes the three pins to Web; they are identity data, not secrets or
+each). These values pin the approved deployment identities. The environment
+file must also carry one literal `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
+value: the finite retained-output allowance in bytes that bounds published
+Development TIFF artifacts, so that exhausting it refuses export admission with
+`resource_unavailable` instead of filling the state volume. The processing
+overlay passes these values to Web; they are identity data, not secrets or
 launcher configuration. The wrapper ignores ambient processing values and
 checks the fixed runtime path, root ownership, symlink-free ancestors,
 directory contents, and root-only owner claim before
