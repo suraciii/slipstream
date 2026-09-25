@@ -13207,9 +13207,8 @@ mod export_routes {
 
     /// The Edit Preview derives the `develop` rendition from the retained
     /// Development TIFF of a succeeded Export while that Export's captured
-    /// identity is the current one, and refuses once a later recipe makes the
-    /// retained result stale: preview-class render admission has not landed,
-    /// so there is nothing that could render the new identity.
+    /// identity is the current one, then admits a preview-class render after a
+    /// later recipe makes the retained result stale.
     #[tokio::test]
     async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() {
         let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
@@ -13272,8 +13271,8 @@ mod export_routes {
         );
 
         // A later recipe is another identity. The retained Development TIFF is
-        // no longer current and must not be served as one; without
-        // preview-class render admission the route refuses.
+        // no longer current, so the service admits a preview-class render
+        // through the same processing workload instead of refusing.
         let second = save_recipe(
             &application,
             &photo_id,
@@ -13283,6 +13282,91 @@ mod export_routes {
         )
         .await;
         assert_ne!(second.revision, recipe.revision);
+        // Make the background attempt settle promptly after the route has
+        // observed its admission; the wire response is independent of the
+        // eventual launcher outcome.
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        let payload = response_json(admitted).await;
+        assert!(
+            payload["state"] == "queued" || payload["state"] == "running",
+            "preview admission state is queued or running: {payload}"
+        );
+        assert_eq!(payload["stage"], "develop");
+        let repeated = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated_payload = response_json(repeated).await;
+        assert_eq!(repeated_payload["state"], "running");
+        launcher.with_script(|s| s.settle_attempt(2, "completed"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = edit_preview_request(&router, &photo_id).await;
+            if response.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "preview-class render did not become a rendition"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        assert_eq!(starts, 2, "one Export and one coalesced preview attempt");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A stored white-balance mode the closed execution payload cannot
+    /// represent is retained intent, not render work: the route refuses it
+    /// before admitting an attempt that could never produce a result, so a
+    /// polling client is told the stage is unavailable instead of being handed
+    /// queued work that fails and is re-admitted forever.
+    #[tokio::test]
+    async fn edit_preview_refuses_a_recipe_the_closed_payload_cannot_execute() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let outcome = application
+            .library
+            .save_edit_recipe(slipstream_core::SaveEditRecipe {
+                photo_id: photo_id.clone(),
+                request_id: "save-temperature-tint".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: source_revision,
+                settings: slipstream_core::EditRecipeSettings {
+                    exposure_ev: 0.25,
+                    white_balance: slipstream_core::WhiteBalanceIntent::TemperatureTint {
+                        temperature_kelvin: 6_500,
+                        tint_milli: -12,
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                slipstream_core::EditRecipeWriteOutcome::Saved(_)
+                    | slipstream_core::EditRecipeWriteOutcome::Unchanged(_)
+            ),
+            "an adjustable white balance is accepted as editing intent: {outcome:?}"
+        );
+
         let refused = edit_preview_request(&router, &photo_id).await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         let payload = response_json(refused).await;
@@ -13290,11 +13374,144 @@ mod export_routes {
         assert_eq!(payload["error"]["details"]["stage"], "develop");
         assert_eq!(
             payload["error"]["details"]["reason"],
-            "preview-render-admission-unavailable"
+            "recipe-not-representable"
         );
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        assert_eq!(starts, 0, "a refused identity starts no processing attempt");
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
+    }
+
+    /// A preview-class attempt that fails is released, not remembered: the
+    /// next request admits a new attempt instead of reporting `running` for
+    /// work that no longer exists, and the failed attempt's ephemeral output
+    /// is never served as a rendition.
+    #[tokio::test]
+    async fn edit_preview_re_admits_after_a_failed_render() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.4).await;
+        // The launcher settles the attempt as failed and transfers no output.
+        launcher.with_script(|s| s.settle_attempt(1, "failed"));
+
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+        assert_eq!(response_json(admitted).await["state"], "queued");
+
+        // The route keeps answering the admission while the attempt is live,
+        // and once it has failed the next request admits a new one.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = edit_preview_request(&router, &photo_id).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            if response_json(response).await["state"] == "queued" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a failed render must be released for a new attempt"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let starts = launcher.with_script(|s| {
+            s.ops
+                .iter()
+                .filter(|operation| operation.as_str() == "start")
+                .count()
+        });
+        // The new attempt's Start reaches the launcher from a background task,
+        // so the count is observed rather than assumed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut starts = starts;
+        while starts < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the re-admitted attempt must reach the launcher"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            starts = launcher.with_script(|s| {
+                s.ops
+                    .iter()
+                    .filter(|operation| operation.as_str() == "start")
+                    .count()
+            });
+        }
+        assert_eq!(starts, 2, "the failed attempt is re-admitted as new work");
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// A newer intent supersedes a live render: the launcher attempt is
+    /// cancelled, so the stale attempt neither occupies the serialized
+    /// processing slot nor publishes, and the new identity is admitted as
+    /// its own launcher attempt.
+    #[tokio::test]
+    async fn edit_preview_supersedes_a_live_render_with_the_newer_intent() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let first = save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        // The first attempt is live on the launcher before the newer intent
+        // arrives, so the newer intent has to release it.
+        wait_for_launcher_op(&launcher, "start", 1).await;
+
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(first.revision.clone()),
+            0.6,
+        )
+        .await;
+        assert_ne!(second.revision, first.revision);
+        let superseded = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(superseded.status(), StatusCode::ACCEPTED);
+        assert_eq!(response_json(superseded).await["state"], "queued");
+
+        // The superseded attempt is cancelled, and the freed slot admits the
+        // newer identity as a second launcher attempt.
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+        wait_for_launcher_op(&launcher, "start", 2).await;
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// Waits until the launcher recorded `count` operations named `op`.
+    async fn wait_for_launcher_op(launcher: &FakeLauncher, op: &str, count: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let observed =
+                launcher.with_script(|s| s.ops.iter().filter(|entry| entry.as_str() == op).count());
+            if observed >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the launcher must record {count} {op} operations: {:?}",
+                launcher.with_script(|s| s.ops.clone())
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 

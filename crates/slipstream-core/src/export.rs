@@ -1,6 +1,6 @@
-//! Private source staging and durable Development TIFF publication.
+//! Private source staging and Development TIFF publication/preview staging.
 //!
-//! This module only owns the filesystem boundary for a future Export caller.
+//! This module owns the filesystem boundary for Export and preview callers.
 //! It does not start an image engine, persist Export state, or enable a
 //! processing capability. Callers resolve an [`OriginalCapability`] through
 //! the Library first, then use this workspace for one bounded attempt.
@@ -84,6 +84,7 @@ struct WorkspaceInner {
     root: PathBuf,
     staging: PathBuf,
     artifacts: PathBuf,
+    previews: PathBuf,
     work: PathBuf,
 }
 
@@ -182,12 +183,14 @@ impl ExportWorkspace {
         set_private_directory(&root)?;
         let staging = create_private_child(&root, "staging")?;
         let artifacts = create_private_child(&root, "artifacts")?;
+        let previews = create_private_child(&root, "previews")?;
         let work = create_private_child(&root, "work")?;
         Ok(Self {
             inner: Arc::new(WorkspaceInner {
                 root,
                 staging,
                 artifacts,
+                previews,
                 work,
             }),
         })
@@ -252,6 +255,46 @@ impl ExportWorkspace {
             target: ExportTarget::DevelopmentTiff,
             committed: false,
         })
+    }
+
+    /// Starts a private ephemeral preview output. The caller writes through
+    /// the returned path, validates the engine output, then calls `publish`.
+    /// Preview outputs are kept below their own directory and never enter the
+    /// retained Export artifact namespace.
+    pub fn begin_preview_tiff(&self, attempt_key: &str) -> Result<ArtifactWriter, ExportError> {
+        if !valid_export_id(attempt_key) {
+            return Err(ExportError::InvalidExportId);
+        }
+        let token = unique_token();
+        let temporary_path = self.inner.work.join(format!("{token}.tiff"));
+        let final_path = self.inner.previews.join(format!("{attempt_key}.tiff"));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600)
+            .open(&temporary_path)?;
+        drop(file);
+        Ok(ArtifactWriter {
+            temporary_path,
+            final_path,
+            target: ExportTarget::DevelopmentTiff,
+            committed: false,
+        })
+    }
+
+    /// Deletes one ephemeral preview output. Expiry and supersession are
+    /// idempotent: an already-removed output is no longer retained.
+    pub fn delete_preview_tiff(&self, attempt_key: &str) -> Result<(), ExportError> {
+        if !valid_export_id(attempt_key) {
+            return Err(ExportError::InvalidExportId);
+        }
+        let path = self.inner.previews.join(format!("{attempt_key}.tiff"));
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -580,6 +623,23 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn preview_output_is_private_and_deletable() {
+        let (root, _library, workspace) = fixture();
+        let writer = workspace.begin_preview_tiff("prev-test-1").unwrap();
+        fs::write(writer.temporary_path(), b"preview").unwrap();
+        let published = writer.publish(|_| Ok(())).unwrap();
+        assert!(
+            published
+                .path
+                .starts_with(workspace.root().join("previews"))
+        );
+        assert!(!workspace.root().join("artifacts/prev-test-1.tiff").exists());
+        assert!(published.path.exists());
+        workspace.delete_preview_tiff("prev-test-1").unwrap();
+        assert!(!published.path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn publication_does_not_replace_an_existing_export_identity() {
         let (root, _library, workspace) = fixture();

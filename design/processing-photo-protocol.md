@@ -92,16 +92,16 @@ The server retains the complete record; only the smaller `LauncherStart`
 projection crosses the private socket. The service record has these semantic
 fields:
 
-| Field              | Meaning                                                                                                                                                                                     |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `protocol_version` | The production Photo IPC version. Unknown versions are refused.                                                                                                                             |
-| `export_id`        | The service-owned attempt identity and idempotency key. Preview-class work carries a preview attempt identity instead of an Export identity, and the launcher treats either as an opaque correlation key.                                                                                                                    |
-| `photo_id`         | The opaque Library Photo identity. It is never resolved by the launcher.                                                                                                                    |
-| `source`           | A `PhotoSourceBinding` containing `kind=raw`, an approved `profile_id`, the current opaque Library `source_revision`, the staged byte length, and the staged SHA-256.                       |
-| `recipe`           | A `RecipeSnapshot` containing the guarded recipe revision and the semantic exposure and white-balance settings captured by the Export. It contains no darktable options or executable data. |
-| `policy_id`        | The exact finite resource policy selected by the server capability read.                                                                                                                    |
-| `bundle_id`        | The exact approved processing bundle digest selected by the server capability read.                                                                                                         |
-| `workload`         | The closed value `development-tiff`. It is not a caller-provided stage plan.                                                                                                                |
+| Field              | Meaning                                                                                                                                                                                                   |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `protocol_version` | The production Photo IPC version. Unknown versions are refused.                                                                                                                                           |
+| `export_id`        | The service-owned attempt identity and idempotency key. Preview-class work carries a preview attempt identity instead of an Export identity, and the launcher treats either as an opaque correlation key. |
+| `photo_id`         | The opaque Library Photo identity. It is never resolved by the launcher.                                                                                                                                  |
+| `source`           | A `PhotoSourceBinding` containing `kind=raw`, an approved `profile_id`, the current opaque Library `source_revision`, the staged byte length, and the staged SHA-256.                                     |
+| `recipe`           | A `RecipeSnapshot` containing the guarded recipe revision and the semantic exposure and white-balance settings captured by the Export. It contains no darktable options or executable data.               |
+| `policy_id`        | The exact finite resource policy selected by the server capability read.                                                                                                                                  |
+| `bundle_id`        | The exact approved processing bundle digest selected by the server capability read.                                                                                                                       |
+| `workload`         | The closed value `development-tiff`. It is not a caller-provided stage plan.                                                                                                                              |
 
 `RecipeSnapshot` is closed for this first workload. The execution payload is
 `exposure_milli_ev`, a signed 64-bit integer in thousandths of an EV, and

@@ -414,8 +414,8 @@ preview-class attempt runs the same workload, policy, and bundle as an Export
 and shares the service's serialized heavy-work admission with Export attempts:
 the two queue behind one another instead of preempting each other, a
 preview-class attempt never cancels or supersedes Export work, and an Export
-submission never cancels an admitted render. At most one render is
-admitted per Photo and stage.
+submission never cancels an admitted render. At most one render is admitted per
+Photo and stage.
 
 A preview-class attempt is not an Export: it creates no Export record, holds no
 downloadable artifact, and its attempt identity is not an Export identity. Its

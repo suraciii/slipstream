@@ -7,17 +7,26 @@
 //! publishes an unvalidated artifact.
 
 use super::*;
-use crate::config::ProcessingConfig;
+use crate::{config::ProcessingConfig, edit_preview::PreviewFacts};
 use slipstream_core::{
-    ExportAttempt, ExportError, ExportRecipePayload, ExportRecord, ExportSettlement,
-    ExportSnapshot, ExportSourceEvidence, ExportState, ExportWorkspace, LibraryRoot,
-    OriginalCapability, RelativeOriginalPath, StagedOriginal,
+    DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, ExportAttempt, ExportError,
+    ExportExposureRange, ExportRecipePayload, ExportRecord, ExportSettlement, ExportSnapshot,
+    ExportSourceEvidence, ExportState, ExportWorkspace, LibraryRoot, OriginalCapability,
+    OriginalKind, RelativeOriginalPath, StagedOriginal,
 };
 use slipstream_processing::{
     photo::{self, PhotoReceipt, Recipe, Request, ResultBody, Source},
+    photo_profile::{self, APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN},
     protocol::{Availability, PHOTO_MODE, PHOTO_PROTOCOL_VERSION, PHOTO_WORKLOAD},
 };
-use std::io::{Read, Seek, SeekFrom};
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Resolves the published Library Location of one Photo. The closure keeps
 /// ExportManager decoupled from the Application's published snapshot.
@@ -29,6 +38,54 @@ pub(crate) type SourceLocationResolver =
 /// actionable reason. A live launcher-owned attempt cannot outlast this
 /// window of silence.
 const LAUNCHER_FAILURE_TOLERANCE: u32 = 120;
+
+/// A cooperative cancellation marker for one preview-class launcher attempt.
+/// The gate flips it when a newer intent supersedes the attempt; the runner
+/// checks it between blocking exchanges and settles the launcher receipt
+/// before discarding any private output.
+#[derive(Clone, Default)]
+pub(crate) struct PreviewCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl PreviewCancellation {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+/// The validated result of one preview-class render. The TIFF remains in the
+/// preview-private workspace until the gate's ephemeral retention expires or
+/// a newer intent deletes it.
+pub(crate) struct PreviewRenderResult {
+    pub(crate) attempt_key: String,
+    pub(crate) path: PathBuf,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+    pub(crate) facts: crate::edit_preview::PreviewFacts,
+    pub(crate) output_facts: DevelopmentTiffFacts,
+}
+
+/// A service-minted preview attempt identity is opaque to the launcher and
+/// uses only its closed lower-case identifier alphabet.
+static PREVIEW_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn preview_attempt_key() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = PREVIEW_ATTEMPT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("prev-{}-{nanos}-{sequence}", std::process::id())
+}
 
 /// Server-side launcher identities plus the filesystem seams one attempt owns.
 pub(crate) struct ExportManager {
@@ -111,6 +168,11 @@ impl ExportManager {
         })
     }
 
+    /// Deletes one ephemeral preview output after failure, cancellation,
+    /// supersession, or retention expiry.
+    pub(crate) fn delete_preview_output(&self, attempt_key: &str) {
+        let _ = self.workspace.delete_preview_tiff(attempt_key);
+    }
     /// The retained Development TIFF of one Photo whose captured snapshot
     /// matches the current Edit identity and whose retention has not expired,
     /// or `None` when no matching artifact is retained.
@@ -129,6 +191,359 @@ impl ExportManager {
         retained_development_tiff_of(&records, identity, unix_seconds(), |export_id| {
             self.artifact_path(export_id)
         })
+    }
+
+    /// Runs one preview-class attempt through the same closed
+    /// `development-tiff` workload as an Export. No persistence row,
+    /// retained-output reservation, or artifact publication is touched.
+    pub(crate) async fn render_preview(
+        &self,
+        photo_id: &str,
+        stage: &'static str,
+        cancellation: PreviewCancellation,
+    ) -> Result<PreviewRenderResult, String> {
+        let _slot = self.admission.lock().await;
+        if cancellation.is_cancelled() {
+            return Err("preview render cancelled".to_owned());
+        }
+        self.ensure_admissible().await?;
+        if cancellation.is_cancelled() {
+            return Err("preview render cancelled".to_owned());
+        }
+        let (incarnation, sequence) = self.reconcile_slot().await?;
+        if cancellation.is_cancelled() {
+            return Err("preview render cancelled".to_owned());
+        }
+
+        let photo = self
+            .library
+            .photo(photo_id)
+            .await
+            .map_err(|_| "Photo facts could not be read".to_owned())?
+            .ok_or_else(|| "Photo disappeared before preview admission".to_owned())?;
+        let read = self
+            .library
+            .edit_recipe(photo_id)
+            .await
+            .map_err(|_| "Edit recipe could not be read".to_owned())?
+            .ok_or_else(|| "Edit recipe facts disappeared before preview admission".to_owned())?;
+        if !read.source_available || !photo.original_available {
+            return Err("the Original is unavailable".to_owned());
+        }
+        let recipe = match read.recipe.as_ref() {
+            Some(recipe) => ExportRecipePayload::capture(
+                &recipe.settings,
+                ExportExposureRange {
+                    minimum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MIN,
+                    maximum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MAX,
+                },
+            )
+            .map_err(|_| "captured recipe is not representable by the execution payload")?,
+            None => ExportRecipePayload {
+                exposure_milli_ev: 0,
+                white_balance_mode: "as-shot",
+            },
+        };
+        let facts = PreviewFacts {
+            stage,
+            long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
+            display_transform: DISPLAY_TRANSFORM_VERSION,
+            bundle_sha256: self.processing.bundle_sha256.clone(),
+            source_revision: read.current_source_revision.clone(),
+            recipe_revision: read.recipe.as_ref().map(|recipe| recipe.revision.clone()),
+            exposure_milli_ev: recipe.exposure_milli_ev,
+            white_balance: "as-shot",
+        };
+        let (staged, source_profile_id) = self
+            .stage_preview_original(
+                photo_id,
+                &facts.source_revision,
+                photo.original_kind,
+                &photo.filename,
+            )
+            .await?;
+        if cancellation.is_cancelled() {
+            drop(staged);
+            return Err("preview render cancelled".to_owned());
+        }
+        let staged_facts = staged.facts();
+        let source = ExportSourceEvidence {
+            size: staged_facts.source_facts.size,
+            sha256: staged_facts.sha256,
+        };
+        let attempt_key = preview_attempt_key();
+        let manifest_sha256 = manifest_digest_parts(
+            &self.processing.policy_sha256,
+            &self.processing.bundle_sha256,
+            &source_profile_id,
+            &source,
+            &recipe,
+            PHOTO_WORKLOAD,
+            PHOTO_WORKLOAD,
+        );
+
+        // Keep the staged descriptor open until Start returns, exactly like
+        // the Export path. The launcher copies and hashes the source before
+        // releasing its worker.
+        let staged_path = staged.path().to_path_buf();
+        let socket = self.processing.socket_path();
+        let instance = self.processing.instance.clone();
+        let start_attempt_key = attempt_key.clone();
+        let start_incarnation = incarnation.clone();
+        let start_policy = self.processing.policy_sha256.clone();
+        let start_bundle = self.processing.bundle_sha256.clone();
+        let start_source = source.clone();
+        let start_recipe = recipe;
+        let start_manifest = manifest_sha256;
+        let start_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let file = open_read_only(&staged_path)
+                .map_err(|_| "staged source could not be opened".to_owned())?;
+            let request = Request::Start {
+                mode: PHOTO_MODE.to_owned(),
+                version: PHOTO_PROTOCOL_VERSION,
+                instance,
+                export_id: start_attempt_key,
+                incarnation: start_incarnation,
+                sequence,
+                policy: start_policy,
+                bundle: start_bundle,
+                workload: PHOTO_WORKLOAD.to_owned(),
+                source: Source {
+                    kind: "raw".to_owned(),
+                    profile_id: source_profile_id,
+                    size: start_source.size,
+                    sha256: start_source.sha256,
+                },
+                recipe: Recipe {
+                    exposure_milli_ev: start_recipe.exposure_milli_ev,
+                    white_balance_mode: start_recipe.white_balance_mode.to_owned(),
+                },
+                recipe_digest: start_recipe.digest(),
+                manifest_sha256: start_manifest,
+            };
+            photo::request_with_descriptor(&socket, &request, file.as_raw_fd())
+                .map(|_| ())
+                .map_err(|_| "launcher refused the preview start".to_owned())
+        })
+        .await;
+        let start_result = match start_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                drop(staged);
+                return Err(format!("preview launcher task failed: {error}"));
+            }
+        };
+        if let Err(error) = start_result {
+            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                .await;
+            drop(staged);
+            return Err(error);
+        }
+        drop(staged);
+
+        let receipt = match self
+            .follow_preview_attempt(&attempt_key, &incarnation, sequence, &cancellation)
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(error);
+            }
+        };
+        if !is_completed_receipt(&receipt) {
+            return Err(format!(
+                "preview processing attempt did not complete: {}",
+                receipt.outcome.unwrap_or_else(|| "unknown".to_owned())
+            ));
+        }
+        if cancellation.is_cancelled() {
+            self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                .await;
+            return Err("preview render cancelled".to_owned());
+        }
+
+        let writer = match self.workspace.begin_preview_tiff(&attempt_key) {
+            Ok(writer) => writer,
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(format!("preview output staging failed: {error}"));
+            }
+        };
+        let output_path = writer.temporary_path().to_path_buf();
+        let output_file = match open_writable(&output_path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(format!("preview output could not be opened: {error}"));
+            }
+        };
+        let socket = self.processing.socket_path();
+        let instance = self.processing.instance.clone();
+        let output_attempt_key = attempt_key.clone();
+        let output_incarnation = incarnation.clone();
+        let output_receipt_result = tokio::task::spawn_blocking(
+            move || -> Result<slipstream_processing::photo::OutputReceipt, String> {
+                let request = Request::Output {
+                    mode: PHOTO_MODE.to_owned(),
+                    version: PHOTO_PROTOCOL_VERSION,
+                    instance,
+                    export_id: output_attempt_key,
+                    incarnation: output_incarnation,
+                    sequence,
+                    target: PHOTO_WORKLOAD.to_owned(),
+                };
+                let response =
+                    photo::request_with_descriptor(&socket, &request, output_file.as_raw_fd())
+                        .map_err(|_| "launcher could not transfer the preview output".to_owned())?;
+                match response {
+                    slipstream_processing::photo::Response::Result { result, .. } => {
+                        match *result {
+                            ResultBody::Output { receipt } => Ok(receipt),
+                            _ => {
+                                Err("launcher answered the preview output unexpectedly".to_owned())
+                            }
+                        }
+                    }
+                    slipstream_processing::photo::Response::Error { .. } => {
+                        Err("launcher refused the preview output transfer".to_owned())
+                    }
+                }
+            },
+        )
+        .await;
+        let output_receipt = match output_receipt_result {
+            Ok(Ok(receipt)) => receipt,
+            Ok(Err(error)) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(error);
+            }
+            Err(error) => {
+                self.abandon_preview_attempt(&attempt_key, &incarnation, sequence)
+                    .await;
+                return Err(format!("preview output task failed: {error}"));
+            }
+        };
+        let validation_path = output_path.clone();
+        let validation_receipt = output_receipt.clone();
+        let validation_result = tokio::task::spawn_blocking(move || {
+            verify_received_output(&validation_path, &validation_receipt)
+        })
+        .await;
+        let output_facts = match validation_result {
+            Ok(Ok(facts)) => facts,
+            Ok(Err(_)) => {
+                let _ = self
+                    .acknowledge_output(
+                        &attempt_key,
+                        &incarnation,
+                        sequence,
+                        false,
+                        1,
+                        &"0".repeat(64),
+                    )
+                    .await;
+                return Err(OUTPUT_VALIDATION_FAILED.to_owned());
+            }
+            Err(error) => {
+                let _ = self
+                    .acknowledge_output(
+                        &attempt_key,
+                        &incarnation,
+                        sequence,
+                        false,
+                        1,
+                        &"0".repeat(64),
+                    )
+                    .await;
+                return Err(format!("preview validation task failed: {error}"));
+            }
+        };
+        let published = match writer.publish(|path| validate_development_tiff(path).map(|_| ())) {
+            Ok(published) => published,
+            Err(error) => {
+                let _ = self
+                    .acknowledge_output(
+                        &attempt_key,
+                        &incarnation,
+                        sequence,
+                        false,
+                        1,
+                        &"0".repeat(64),
+                    )
+                    .await;
+                return Err(format!("preview output publication failed: {error}"));
+            }
+        };
+        if cancellation.is_cancelled() {
+            let _ = self
+                .acknowledge_output(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    false,
+                    output_receipt.size,
+                    &output_receipt.sha256,
+                )
+                .await;
+            self.delete_preview_output(&attempt_key);
+            return Err("preview render cancelled".to_owned());
+        }
+        if !self
+            .acknowledge_output(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                true,
+                output_receipt.size,
+                &output_receipt.sha256,
+            )
+            .await
+        {
+            let _ = self
+                .acknowledge_output(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    false,
+                    output_receipt.size,
+                    &output_receipt.sha256,
+                )
+                .await;
+            self.delete_preview_output(&attempt_key);
+            return Err("preview output acknowledgement failed".to_owned());
+        }
+        Ok(PreviewRenderResult {
+            attempt_key,
+            path: published.path,
+            size: published.size,
+            sha256: published.sha256,
+            facts,
+            output_facts,
+        })
+    }
+
+    async fn abandon_preview_attempt(&self, export_id: &str, incarnation: &str, sequence: u64) {
+        let attempt = ExportAttempt {
+            incarnation: incarnation.to_owned(),
+            sequence,
+        };
+        if matches!(
+            self.cancel_attempt(export_id, &attempt).await,
+            AttemptCancel::Completed
+        ) {
+            // A completion that raced cancellation may be waiting in the
+            // launcher's settling phase for an output acknowledgement.
+            let _ = self
+                .acknowledge_output(export_id, incarnation, sequence, false, 1, &"0".repeat(64))
+                .await;
+        }
     }
 
     /// Verifies one launcher capability against this deployment's configured
@@ -631,9 +1046,52 @@ impl ExportManager {
     /// Resolves, copies, and verifies the Original. A changed source revision
     /// refuses the attempt before any launcher contact.
     async fn stage_original(&self, snapshot: &ExportSnapshot) -> Result<StagedOriginal, String> {
+        self.stage_original_for(&snapshot.photo_id, &snapshot.source_revision)
+            .await
+    }
+
+    /// The common staging seam used by durable Exports and preview-class
+    /// attempts. The expected source revision is supplied directly so the
+    /// ephemeral path never needs an Export snapshot or persistence row.
+    async fn stage_original_for(
+        &self,
+        photo_id: &str,
+        source_revision: &str,
+    ) -> Result<StagedOriginal, String> {
+        let (staged, _) = self
+            .stage_original_details(photo_id, source_revision, None)
+            .await?;
+        Ok(staged)
+    }
+
+    /// Stages one preview Original and classifies its approved processing
+    /// profile from the same confined bytes. The profile is launcher input,
+    /// not part of the Edit identity facts.
+    async fn stage_preview_original(
+        &self,
+        photo_id: &str,
+        source_revision: &str,
+        kind: OriginalKind,
+        filename: &str,
+    ) -> Result<(StagedOriginal, String), String> {
+        self.stage_original_details(photo_id, source_revision, Some((kind, filename.to_owned())))
+            .await
+            .and_then(|(staged, profile)| {
+                profile
+                    .ok_or_else(|| "source class has no approved profile".to_owned())
+                    .map(|profile| (staged, profile))
+            })
+    }
+
+    async fn stage_original_details(
+        &self,
+        photo_id: &str,
+        source_revision: &str,
+        profile: Option<(OriginalKind, String)>,
+    ) -> Result<(StagedOriginal, Option<String>), String> {
         let library_root = self.library_root.clone();
-        let source_revision = snapshot.source_revision.clone();
-        let relative_path = (self.resolver)(&snapshot.photo_id)
+        let source_revision = source_revision.to_owned();
+        let relative_path = (self.resolver)(photo_id)
             .ok_or("published Library has no source Location for the Photo")?;
         let staged_location = relative_path.as_str().to_owned();
         let workspace = self.workspace.clone();
@@ -660,7 +1118,21 @@ impl ExportManager {
             if observed != source_revision {
                 return Err("source changed after acceptance".to_owned());
             }
-            Ok(staged)
+            let profile_id = profile.map(|(kind, filename)| {
+                let metadata =
+                    slipstream_core::inspect_review_metadata(&capability, kind, facts.source_facts)
+                        .map_err(|_| "source metadata could not be inspected".to_owned())?;
+                let container = photo_profile::container_of_filename(&filename)
+                    .ok_or("source has no RAW container".to_owned())?;
+                let (Some(make), Some(model)) = (metadata.make, metadata.model) else {
+                    return Err("source camera identity could not be inspected".to_owned());
+                };
+                photo_profile::classify(&make, &model, &container)
+                    .map(|profile| profile.profile_id.to_owned())
+                    .ok_or("source class has no approved profile".to_owned())
+            });
+            let profile_id = profile_id.transpose()?;
+            Ok((staged, profile_id))
         })
         .await
         .map_err(|error| format!("staging worker failed: {error}"))?
@@ -990,6 +1462,49 @@ impl ExportManager {
         Ok(())
     }
 
+    /// Polls one preview attempt while honoring supersession cancellation.
+    /// A cancellation is resolved against the launcher receipt before the
+    /// caller discards the private output.
+    async fn follow_preview_attempt(
+        &self,
+        export_id: &str,
+        incarnation: &str,
+        sequence: u64,
+        cancellation: &PreviewCancellation,
+    ) -> Result<PhotoReceipt, String> {
+        let attempt = ExportAttempt {
+            incarnation: incarnation.to_owned(),
+            sequence,
+        };
+        let mut failures = 0_u32;
+        loop {
+            if cancellation.is_cancelled() {
+                self.abandon_preview_attempt(export_id, incarnation, sequence)
+                    .await;
+                return Err("preview render cancelled".to_owned());
+            }
+            match self.launcher_inspect(export_id, &attempt).await {
+                Ok(receipt) => {
+                    if is_terminal_receipt(&receipt) {
+                        return Ok(receipt);
+                    }
+                    failures = 0;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(_) => {
+                    failures += 1;
+                    if failures >= LAUNCHER_FAILURE_TOLERANCE {
+                        return Err(
+                            "processing launcher became unreachable while the preview ran"
+                                .to_owned(),
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
     /// Polls the launcher until the attempt reaches terminal settlement.
     async fn follow_attempt(
         &self,
@@ -1247,18 +1762,38 @@ fn manifest_digest(
     source: &ExportSourceEvidence,
     recipe: &ExportRecipePayload,
 ) -> String {
+    manifest_digest_parts(
+        &snapshot.policy_id,
+        &snapshot.bundle_id,
+        &snapshot.source_profile_id,
+        source,
+        recipe,
+        &snapshot.workload,
+        &snapshot.workload,
+    )
+}
+
+fn manifest_digest_parts(
+    policy_id: &str,
+    bundle_id: &str,
+    source_profile_id: &str,
+    source: &ExportSourceEvidence,
+    recipe: &ExportRecipePayload,
+    target: &str,
+    workload: &str,
+) -> String {
     use sha2::{Digest, Sha256};
     let manifest = format!(
         "{{\"bundle\":\"{}\",\"policy\":\"{}\",\"recipe\":[{},\"{}\"],\"source\":{{\"kind\":\"raw\",\"profile_id\":\"{}\",\"sha256\":\"{}\",\"size\":{}}},\"target\":\"{}\",\"workload\":\"{}\"}}",
-        snapshot.bundle_id,
-        snapshot.policy_id,
+        bundle_id,
+        policy_id,
         recipe.exposure_milli_ev,
         recipe.white_balance_mode,
-        snapshot.source_profile_id,
+        source_profile_id,
         source.sha256,
         source.size,
-        snapshot.workload,
-        snapshot.workload,
+        target,
+        workload,
     );
     format!("{:x}", Sha256::digest(manifest.as_bytes()))
 }
