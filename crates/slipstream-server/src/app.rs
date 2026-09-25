@@ -602,10 +602,12 @@ impl SharedLibrary {
     /// Patches the removed fact of many Photos in one critical section and
     /// drops the derived Folder index and CLI projection with them, so a
     /// removal is either wholly visible to a reader or not visible at all.
-    /// Called only after the owning SQLite write committed, under
-    /// `publication`.
-    async fn patch_photo_removals(&self, photo_ids: &[String], removed: bool) {
-        let _publication = self.publication.lock().await;
+    ///
+    /// The caller holds `publication` from before the owning SQLite write
+    /// until this patch returns, so every reader that serializes on that lock
+    /// sees either the whole state before the commit or the whole state after
+    /// its effect, never a commit whose effect is missing.
+    fn patch_photo_removals(&self, photo_ids: &[String], removed: bool) {
         let mut guard = self.snapshot.write().expect("published Library poisoned");
         let Some(published) = guard.as_mut() else {
             return;
@@ -1699,6 +1701,10 @@ impl Application {
             ids.iter()
                 .filter_map(|id| source.photos_by_id.get(id).copied())
                 .filter_map(|position| source.snapshot.photos.get(position))
+                // A removed Photo leaves every normal Library source, and a
+                // window is a read of one: a Snapshot opened before the removal
+                // presents the Photo no more than the publication does.
+                .filter(|photo| !photo.removed)
                 .map(|photo| {
                     let originals = [Some(&photo.original_id)]
                         .into_iter()
@@ -1790,6 +1796,10 @@ impl Application {
         if filter != Some(BrowseSelectionFilter::Rejected) {
             return Err(ServerError::RemovalFilter);
         }
+        // The write and the publication patch are one critical section: a
+        // reader that serializes on `publication` cannot acquire it between
+        // the commit and the patch and observe the Photos as still present.
+        let _publication = self.shared.publication.lock().await;
         let result = self
             .library
             .remove_photos(slipstream_core::PhotoRemovalMutation {
@@ -1797,9 +1807,7 @@ impl Application {
                 operation_id: operation_id.to_owned(),
             })
             .await?;
-        self.shared
-            .patch_photo_removals(&result.removed, true)
-            .await;
+        self.shared.patch_photo_removals(&result.removed, true);
         Ok(PhotoRemovalResponse {
             operation_id: result.operation_id,
             counts: PhotoRemovalCountsWire {
@@ -1820,10 +1828,12 @@ impl Application {
         &self,
         restoration: slipstream_core::PhotoRestoration,
     ) -> Result<PhotoRestorationResponse, ServerError> {
+        // As for a removal, the write and its published effect are one
+        // critical section: a restored Photo cannot be missing from a source
+        // opened after the restore committed.
+        let _publication = self.shared.publication.lock().await;
         let result = self.library.restore_photos(restoration).await?;
-        self.shared
-            .patch_photo_removals(&result.restored, false)
-            .await;
+        self.shared.patch_photo_removals(&result.restored, false);
         Ok(PhotoRestorationResponse {
             counts: PhotoRestorationCountsWire {
                 restored: result.counts.restored,
@@ -1855,11 +1865,11 @@ impl Application {
         if limit == 0 || limit > MAX_REMOVED_WINDOW {
             return Err(ServerError::RemovedWindow);
         }
-        let (records, total) = self.library.removed_photos(start, limit).await?;
         // The persisted page and the published facts are read as one
         // publication, so a removal or restore committed between them cannot
         // present a row whose removal the Library no longer holds.
         let _publication = self.shared.publication.lock().await;
+        let (records, total) = self.library.removed_photos(start, limit).await?;
         let facts = {
             let guard = self
                 .shared

@@ -65,13 +65,15 @@ Undo restores every Photo of one operation that is still removed, in one transac
 
 The durable Restore action restores named Photos through the same compare-and-set, and reports one outcome per requested Photo: `restored`, `changedElsewhere`, or `missing`. Each named Photo carries the removal marker the listing presented, and the compare-and-set is against that marker: a Photo removed again since the listing was read is reported as `changedElsewhere` instead of being restored past its newer removal, and a marker that does not match the current removal is refused before any state changes. A request naming neither one operation nor a bounded non-empty list of markers is refused.
 
+A removal marker is never reused. Every marker is strictly greater than every marker the Library assigned before it, so the compare-and-set holds even when a Photo is restored and removed again inside one clock millisecond: the listing read under the first removal can never name the marker of the second.
+
 The response also reports what each operation it touched still owns. An operation with nothing left is reported with a zero count, and an operation the restore did not touch is absent, so the browser withdraws Undo exactly when the operation emptied and keeps the remaining count when a restore took part of it.
 
 Restoring clears the removal marker. It never rescans, renames, moves, or rewrites an Original File, and it never changes Selection State, Rating, or Album membership.
 
 ### In-Memory Publication
 
-The running server serves browsing from one in-memory published Library. A confirmed removal or restore patches that publication in place — the removal marker and the derived Original Folder index — so a source opened immediately afterwards already excludes or re-admits the Photo. A rescan publishes a replacement that carries the persisted markers unchanged.
+The running server serves browsing from one in-memory published Library. A confirmed removal or restore patches that publication in place — the removal marker and the derived Original Folder index — so a source opened immediately afterwards already excludes or re-admits the Photo. The owning SQLite write and this patch are one critical section: a reader that serializes on the publication lock sees either the whole state before the commit or the whole state after its effect, never the commit without it. A window of a Snapshot that was opened before the removal presents the removed Photo no more than a newly opened source does, and the Snapshot keeps its frozen count. A rescan publishes a replacement that carries the persisted markers unchanged.
 
 The derived projection a machine client queries moves with the same commit. A retained query keeps its ordered identities and reports a Photo removed after the query was created as `{"id":"…","state":"missing"}` in its original position, and re-admits it after a restore, without waiting for a rescan. Only a committed removal or restore may move that projection: a refused or rolled-back request leaves it exactly as it was.
 

@@ -52,7 +52,7 @@ A Photo whose removal marker is set: it keeps its row, identity, Original Locati
 _Avoid_: deleted Photo, trashed Photo, purged Photo
 
 **Removal marker**:
-The millisecond a removal was confirmed, stored on the Photo row beside the operation that set it. It is what makes Restore a compare-and-set: a restore names the marker it was listed under, so it clears exactly that removal and never a newer one.
+The millisecond a removal was confirmed, stored on the Photo row beside the operation that set it and never reused: every marker is strictly greater than every marker the Library assigned before it. It is what makes Restore a compare-and-set: a restore names the marker it was listed under, so it clears exactly that removal and never a newer one.
 _Avoid_: deleted flag, timestamp field, tombstone
 
 **Removal Operation**:

@@ -7927,6 +7927,91 @@ async fn rejected_result_removal_hides_photos_and_undo_restores_them_exactly() {
 }
 
 #[tokio::test]
+async fn a_removed_photo_leaves_a_window_of_a_snapshot_opened_before_its_removal() {
+    let (base, config) = prepare_fixture();
+    let root = &config.library_root;
+    jpeg_fixture(&root.join("a.jpg"), 8, 4, [1, 2, 3]);
+    jpeg_fixture(&root.join("b.jpg"), 8, 4, [4, 5, 6]);
+    jpeg_fixture(&root.join("c.jpg"), 8, 4, [7, 8, 9]);
+    let application = Application::open(&config).await.unwrap();
+    wait_for_scan_settled(&application).await;
+    let router = authorized_router(Arc::clone(&application), config.web_root());
+    let ids = browse_photo_ids(&application, BrowseSourceRequest::Library).await;
+    let by_location = photo_ids_by_location(&application, &ids).await;
+    for name in ["a.jpg", "b.jpg"] {
+        let response = post_json(
+            &router,
+            &format!("/api/photos/{}/state", by_location[name]),
+            serde_json::json!({"field": "selectionState", "value": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // A Snapshot opened before the removal retains the reviewed result, and
+    // every window of it is a read of a normal Library source.
+    let opened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(opened["total"], 2);
+    let token = opened["token"].as_str().unwrap().to_owned();
+
+    let removed = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({
+                "token": token,
+                "operationId": "00000000-0000-4000-8000-000000000009",
+            }),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(removed["counts"]["removed"], 2);
+
+    // The retained Snapshot keeps its frozen count, and no window of it
+    // presents a Photo the Library no longer holds.
+    let (_, window) = get_json(&router, &format!("/api/browse/{token}?start=0&limit=10")).await;
+    assert_eq!(window["start"], 0);
+    assert_eq!(window["total"], 2);
+    assert_eq!(window["photos"], serde_json::json!([]));
+
+    // A source opened after the removal excludes them too.
+    let reopened = response_json(
+        post_json(
+            &router,
+            "/api/browse",
+            serde_json::json!({"source": "library", "selection": "rejected"}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(reopened["total"], 0);
+    let reopened_token = reopened["token"].as_str().unwrap().to_owned();
+    let (_, reopened_window) = get_json(
+        &router,
+        &format!("/api/browse/{reopened_token}?start=0&limit=10"),
+    )
+    .await;
+    assert_eq!(reopened_window["total"], 0);
+    assert_eq!(reopened_window["photos"], serde_json::json!([]));
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+#[tokio::test]
 async fn removal_requires_a_rejected_snapshot_and_reports_concurrent_changes() {
     let (base, config) = prepare_fixture();
     let root = &config.library_root;

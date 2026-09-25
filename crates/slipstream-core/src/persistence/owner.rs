@@ -5869,6 +5869,41 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// The key the Library keeps its removal-marker high water mark under.
+const REMOVAL_MARKER_HIGH_WATER: &str = "removal_marker_high_water";
+
+/// The next removal marker: the clock reading, and strictly greater than every
+/// marker this Library assigned before.
+///
+/// A restore is a compare-and-set against the marker it read, so two removals
+/// of one Photo must never carry the same marker — a clock reading alone can
+/// repeat when a Photo is restored and removed again inside one millisecond,
+/// which would let a stale listing clear the newer removal. The high water
+/// mark is durable, so it also holds across restarts and rescan deletions that
+/// leave no removed row behind to read a maximum from.
+fn next_removal_marker(transaction: &Transaction<'_>) -> Result<i64, MutationError> {
+    let stored: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [REMOVAL_MARKER_HIGH_WATER],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(mutation_error_from_sqlite)?;
+    let high_water = stored
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let marker = unix_millis().max(high_water.saturating_add(1));
+    transaction
+        .execute(
+            "INSERT INTO library_metadata(key,value) VALUES(?,?)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![REMOVAL_MARKER_HIGH_WATER, marker.to_string()],
+        )
+        .map_err(mutation_error_from_sqlite)?;
+    Ok(marker)
+}
+
 fn list_albums(connection: &Connection) -> Result<Vec<AlbumRecord>, PersistenceError> {
     let albums = connection
         .prepare("SELECT id,name FROM albums ORDER BY created_at,id")
@@ -7397,7 +7432,9 @@ fn remove_photos(
     mutation: PhotoRemovalMutation,
 ) -> Result<PhotoRemovalResult, MutationError> {
     mutation_transaction(state, database_name, connection, |transaction| {
-        let removed_at_ms = unix_millis();
+        // The marker is assigned on the first Photo this request removes, so a
+        // request that removes nothing leaves the Library exactly as it was.
+        let mut marker: Option<i64> = None;
         let mut result = PhotoRemovalResult {
             operation_id: mutation.operation_id.clone(),
             counts: PhotoRemovalCounts::default(),
@@ -7454,6 +7491,14 @@ fn remove_photos(
                     result.changed_elsewhere.push(photo_id.clone());
                     continue;
                 }
+                let removed_at_ms = match marker {
+                    Some(marker) => marker,
+                    None => {
+                        let assigned = next_removal_marker(transaction)?;
+                        marker = Some(assigned);
+                        assigned
+                    }
+                };
                 transaction
                     .execute(
                         "UPDATE photos SET removed_at_ms=?,removed_operation=? WHERE id=?",
@@ -12724,6 +12769,121 @@ mod tests {
     /// request adopts what its own operation already removed, and restore
     /// compares against the current marker instead of overwriting it.
     #[tokio::test]
+    async fn removal_markers_never_repeat_even_when_the_clock_does_not_advance() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v8.sql"),
+        );
+        // The high water mark is seeded far ahead of the clock, so a marker
+        // derived from the clock alone would repeat the marker already stored
+        // for the Photo and this test would see a stale listing clear a newer
+        // removal.
+        let ahead = unix_millis() + 60_000;
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('removal_marker_high_water',?)",
+                [ahead.to_string()],
+            )
+            .unwrap();
+        add_recipe_test_photo(
+            &connection,
+            RecipeTestPhoto {
+                original_id: "original-1",
+                photo_id: "photo-1",
+                relative_path: "shoot/one-1.ARW",
+                kind: "raw",
+                available: true,
+                size: 17,
+                mtime_ms: 1_000.0,
+            },
+        );
+        connection
+            .execute(
+                "UPDATE photos SET selection_state='rejected' WHERE id='photo-1'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let remove = |operation_id: &str| {
+            persistence
+                .remove_photos_receiver(PhotoRemovalMutation {
+                    photo_ids: vec!["photo-1".to_owned()],
+                    operation_id: operation_id.to_owned(),
+                })
+                .unwrap()
+        };
+        let restore = |marker: i64| {
+            persistence
+                .restore_photos_receiver(PhotoRestoration::Photos(vec![PhotoRemovalMarker {
+                    photo_id: "photo-1".to_owned(),
+                    removed_at_ms: marker,
+                }]))
+                .unwrap()
+        };
+        let marker_of = async |persistence: &Persistence| -> Option<i64> {
+            let (records, _) = persistence
+                .removed_photos_receiver(0, 10)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            records
+                .iter()
+                .find(|record| record.photo_id == "photo-1")
+                .map(|record| record.removed_at_ms)
+        };
+
+        assert_eq!(
+            remove("operation-one")
+                .await
+                .unwrap()
+                .unwrap()
+                .counts
+                .removed,
+            1
+        );
+        let first = marker_of(&persistence).await.unwrap();
+        assert!(first > ahead);
+        assert_eq!(restore(first).await.unwrap().unwrap().counts.restored, 1);
+
+        assert_eq!(
+            remove("operation-two")
+                .await
+                .unwrap()
+                .unwrap()
+                .counts
+                .removed,
+            1
+        );
+        let second = marker_of(&persistence).await.unwrap();
+        assert!(second > first);
+
+        // The listing read under the first removal names a marker the Library
+        // no longer assigns to this Photo, so it restores nothing.
+        let superseded = restore(first).await.unwrap().unwrap();
+        assert_eq!(superseded.counts.restored, 0);
+        assert_eq!(superseded.changed_elsewhere, vec!["photo-1".to_owned()]);
+        assert_eq!(marker_of(&persistence).await, Some(second));
+        assert_eq!(restore(second).await.unwrap().unwrap().counts.restored, 1);
+        assert_eq!(marker_of(&persistence).await, None);
+    }
+
+    #[tokio::test]
     async fn removal_outcomes_operation_identity_and_restore_are_exact() {
         let (_base, library, state, name, path) = fixture();
         seed(
@@ -12943,6 +13103,47 @@ mod tests {
             .unwrap();
         assert_eq!(total, 0);
         assert!(records.is_empty());
+
+        // A marker is never reused. A Photo restored and removed again carries
+        // a strictly greater marker, so the listing read under the first
+        // removal can never clear the second one — even when both removals
+        // fall inside the same clock millisecond.
+        let re_removed = remove(vec!["photo-2"], "operation-three")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(re_removed.counts.removed, 1);
+        let (records, _) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let second_marker = records
+            .iter()
+            .find(|record| record.photo_id == "photo-2")
+            .unwrap()
+            .removed_at_ms;
+        assert!(second_marker > stale_marker);
+        let superseded = persistence
+            .restore_photos_receiver(PhotoRestoration::Photos(vec![PhotoRemovalMarker {
+                photo_id: "photo-2".to_owned(),
+                removed_at_ms: stale_marker,
+            }]))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(superseded.counts.restored, 0);
+        assert_eq!(superseded.changed_elsewhere, vec!["photo-2".to_owned()]);
+        let (records, total) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(records[0].removed_at_ms, second_marker);
 
         // Removal is Library state only: decisions and identity are untouched.
         let snapshot = persistence
