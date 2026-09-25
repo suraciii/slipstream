@@ -54,6 +54,77 @@ settlement, failure/recovery behavior, or the RAW,
 TIFF, Film, and Export workflow. Those checks remain open in #375 and its
 independent dependencies.
 
+## Workflow acceptance runner
+
+`acceptance.py` drives a deployed instance through the real Photo development
+HTTP surface of the merged wire contract
+(`design/photo-development.md`, Service Surface): capability read, resolution
+of the Photo for an approved-profile RAW fixture, Edit Recipe read, a guarded
+exposure save and its guarded reversal (fresh request identities, expected
+recipe revision and source revision), the `develop` Edit Preview with its
+typed response-header metadata, a `development-tiff` Export through terminal
+settlement, and artifact download. It validates the download against the
+bytes: digest, byte length, geometry, content type, the embedded float32
+linear ProPhoto RGB framing, and the pinned source-profile identity. It hashes
+the fixture Original and any external XMP sidecar before and after the run and
+fails if bytes, size, mode, or modification time changed; it never opens them
+for writing. The only files it creates are downloaded artifacts inside the
+explicit output directory.
+
+The runner must never target an operator's live library. It refuses to start
+without an explicit acknowledgement flag, and it is meant for a dedicated
+acceptance deployment (for example the supported Compose deployment brought up
+with `scripts/compose processing-up`, per `docs/deployment.md`):
+
+```sh
+python3 tools/processing/acceptance.py \
+  --base-url https://acceptance.example.com \
+  --token-file /run/secrets/slipstream-cli-token \
+  --fixture /absolute/private/fixtures/approved-camera.raw \
+  --output-dir /absolute/private/acceptance-downloads \
+  --i-acknowledge-this-is-an-acceptance-instance \
+  --expected-instance 0123456789abcdef0123456789abcdef \
+  --expected-policy POLICY_SHA256 \
+  --expected-bundle-sha256 BUNDLE_SHA256
+```
+
+`--base-url` must be HTTPS (plain HTTP is accepted only for loopback hosts),
+`--token-file` holds the bearer token and must not be group- or other-writable,
+and the fixture path is the operator's own copy of the approved-profile RAW
+file; the tool reads it read-only. `--expected-*` identities are recorded in
+the report; the bundle identity is additionally checked against the
+capability report's `bundleId`. A JSON report goes to standard output with a
+per-step pass/fail/skipped record, the exact requests, identities, digests,
+dimensions, counters, and timings; a human-readable summary goes to standard
+error. Exit codes: `0` when every step that ran passed, `1` when any step
+failed, and `2` when the run was blocked because steps could not run, or the
+invocation was refused.
+
+The runner reports honestly what it could not run. The Film (`finished-jpeg`)
+stage is skipped as not implemented until Issue #332 lands, and a route of the
+merged wire contract that the deployment does not serve yet (a 404 without the
+contract's structured error code) makes dependent steps skipped with
+`route-not-deployed` instead of failing the workflow. Contract-conformant
+refusals (`processing_unavailable`, `unsupported_photo`, conflicts, and so on)
+are failures with the status and code recorded.
+
+The logic is tested without a deployment: `test_acceptance.py` in this
+directory contains an in-process stub deployment implementing the merged wire
+contract and dry-runs the complete workflow, a failed Export, a blocked
+capability, and missing routes through `main()`:
+
+```sh
+python3 -m unittest discover -s tools/processing -p 'test_*.py' -v
+```
+
+Today the runner covers the capability read, Photo resolution, Edit Recipe
+read and guarded writes, the `develop` Edit Preview, and the
+`development-tiff` Export lifecycle through validated download. Once
+#408/#409/#331 land, the same invocation exercises the real service routes
+without tool changes; once #332 lands, the Film stage will need new runner
+coverage before the complete RAW -> TIFF -> Film -> JPEG scenario of Issue
+#334 can be claimed.
+
 ## Build
 
 Build on the repository's Rust toolchain. A separate worker image has a fixed
