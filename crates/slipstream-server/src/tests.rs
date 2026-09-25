@@ -11837,6 +11837,10 @@ mod export_routes {
         .await;
         let entries = listed["exports"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
+        // Retention order is newest first, so the Export just submitted heads
+        // the list even when both share a whole-second creation time.
+        assert_eq!(entries[0]["exportId"], fresh_record["exportId"]);
+        assert_eq!(entries[1]["exportId"], created["exportId"]);
         for entry in entries {
             assert!(entry["exportId"].is_string());
             assert!(entry["state"].is_string());

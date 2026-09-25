@@ -33,6 +33,7 @@ const fact = (id: string): PhotoSummary => ({
   original: { kind: "jpeg", available: true },
   selectionState: "undecided",
   rating: 0,
+  hasSavedEdits: false,
   preview: { state: "inspection-pending" },
 });
 
