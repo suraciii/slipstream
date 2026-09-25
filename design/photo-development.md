@@ -403,14 +403,18 @@ identity pinned by
 A retained rendition generated under a different display transform, or without
 content evidence for its source, is not current and must not be served. The
 first version derives the `develop`
-rendition from the retained Development Result of the current identity. When
-that result is not retained, the service admits one render through the same
-closed production workload as an Export, marked as preview-class work. Preview
-work is ephemeral and latest-intent-wins within its Photo and stage owner; a
-superseded request never publishes, and a completed request republishes only
-while its full identity is still current. A display-only change reuses a
-retained result; an exposure or white-balance change invalidates both stage
-renditions.
+rendition from the retained Development Result of the current identity. The
+retained Development Result is the published Development TIFF of a succeeded
+Development TIFF Export whose captured snapshot is that identity and whose
+artifact retention has not expired; an artifact of any other identity is not
+retained for the derivation, and the derivation never publishes an Export.
+When that result is not retained, the service admits one render through the
+same closed production workload as an Export, marked as preview-class work.
+Preview work is ephemeral and latest-intent-wins within its Photo and stage
+owner; a superseded request never publishes, and a completed request
+republishes only while its full identity is still current. A display-only
+change reuses a retained result; an exposure or white-balance change
+invalidates both stage renditions.
 
 The rendition response is either the current rendition, an admission result
 identifying queued or running work, or a refusal naming the unavailable stage

@@ -438,7 +438,7 @@ async fn static_files_have_revalidation_and_head_without_a_body() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     let response = tower::ServiceExt::oneshot(
         app.clone(),
@@ -498,7 +498,7 @@ async fn installation_resources_revalidate_and_never_fall_back_to_html() {
         application: Arc::clone(&application),
         web_root: Arc::new(open_web_root(root.clone())),
         processing: None,
-        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+        edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
     });
     for (path, content_type, expected) in [
         (
@@ -2360,7 +2360,7 @@ async fn healthz_is_exact_json_and_head_api_has_no_body() {
             application: Arc::clone(&application),
             web_root: Arc::new(open_web_root(missing_web)),
             processing: None,
-            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production()),
+            edit_preview: Arc::new(crate::edit_preview::EditPreviewOwner::production(None)),
         });
     let response = tower::ServiceExt::oneshot(
         missing_router,
@@ -13190,6 +13190,311 @@ mod export_routes {
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);
     }
+
+    async fn edit_preview_request(router: &Router, photo_id: &str) -> Response<Body> {
+        send(
+            router,
+            authenticated_request()
+                .uri(format!(
+                    "http://camera.local/api/photos/{photo_id}/edit-preview/develop"
+                ))
+                .header("slipstream-cli-contract", "1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// The Edit Preview derives the `develop` rendition from the retained
+    /// Development TIFF of a succeeded Export while that Export's captured
+    /// identity is the current one, and refuses once a later recipe makes the
+    /// retained result stale: preview-class render admission has not landed,
+    /// so there is nothing that could render the new identity.
+    #[tokio::test]
+    async fn edit_preview_derives_from_the_retained_development_tiff_of_an_export() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let artifact_bytes = valid_development_tiff();
+        launcher.with_script(|s| {
+            s.output = Some(artifact_bytes.clone());
+            s.settle_attempt(1, "completed");
+        });
+        wait_for_state(&router, &export_id, "succeeded").await;
+
+        // The published Development TIFF is the retained Development Result of
+        // exactly this identity, so the develop rendition derives from it.
+        let preview = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let headers = preview.headers();
+        assert_eq!(headers["slipstream-edit-preview-stage"], "develop");
+        assert_eq!(
+            headers["slipstream-edit-preview-recipe-version"],
+            recipe.revision
+        );
+        assert_eq!(
+            headers["slipstream-edit-preview-source-revision"],
+            crate::queries::hex_encode(source_revision.as_bytes())
+        );
+        assert_eq!(headers["slipstream-edit-preview-width"], "2");
+        assert_eq!(headers["slipstream-edit-preview-height"], "1");
+        assert_eq!(headers["content-type"], "image/jpeg");
+        let declared_sha256 = headers["slipstream-edit-preview-sha256"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body = axum::body::to_bytes(preview.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..2], &[0xff, 0xd8], "the rendition is a JPEG");
+        assert_eq!(
+            declared_sha256,
+            format!("{:x}", Sha256::digest(&body)),
+            "the rendition's content digest is the one it declares"
+        );
+
+        // A later recipe is another identity. The retained Development TIFF is
+        // no longer current and must not be served as one; without
+        // preview-class render admission the route refuses.
+        let second = save_recipe(
+            &application,
+            &photo_id,
+            "save-2",
+            Some(recipe.revision.clone()),
+            0.25,
+        )
+        .await;
+        assert_ne!(second.revision, recipe.revision);
+        let refused = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let payload = response_json(refused).await;
+        assert_eq!(payload["error"]["code"], "processing_unavailable");
+        assert_eq!(payload["error"]["details"]["stage"], "develop");
+        assert_eq!(
+            payload["error"]["details"]["reason"],
+            "preview-render-admission-unavailable"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+}
+
+// ------------------------------------ Retained Development Result matching
+
+/// The retained Development TIFF of an Export record: which records are the
+/// retained Development Result of a current identity, and which are not.
+mod retained_development_result {
+    use super::*;
+    use crate::export_manager::{
+        RetainedDevelopmentIdentity, RetainedDevelopmentTiff, retained_development_tiff,
+    };
+    use slipstream_core::{
+        EditRecipeSettings, ExportArtifactFacts, ExportRecord, ExportSnapshot, ExportState,
+        OriginalKind, WhiteBalanceIntent,
+    };
+
+    const BUNDLE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const REVISION: &str = "recipe-revision";
+    const SOURCE_REVISION: &str = "source-revision";
+    const EXPOSURE_MILLI_EV: i64 = 500;
+    const ARTIFACT_SHA256: &str =
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    fn identity<'a>(exposure_milli_ev: i64) -> RetainedDevelopmentIdentity<'a> {
+        RetainedDevelopmentIdentity {
+            recipe_revision: Some(REVISION),
+            exposure_milli_ev,
+            source_revision: SOURCE_REVISION,
+            bundle_sha256: BUNDLE,
+        }
+    }
+
+    fn record(
+        state: ExportState,
+        white_balance: WhiteBalanceIntent,
+        artifact: Option<ExportArtifactFacts>,
+    ) -> ExportRecord {
+        ExportRecord {
+            id: "export-1".to_owned(),
+            snapshot: ExportSnapshot {
+                photo_id: "photo-1".to_owned(),
+                recipe_revision: REVISION.to_owned(),
+                settings: EditRecipeSettings {
+                    exposure_ev: EXPOSURE_MILLI_EV as f64 / 1_000.0,
+                    white_balance,
+                },
+                source_revision: SOURCE_REVISION.to_owned(),
+                source_kind: OriginalKind::Raw,
+                source_profile_id: "profile".to_owned(),
+                policy_id: "policy".to_owned(),
+                bundle_id: BUNDLE.to_owned(),
+                workload: "development-tiff".to_owned(),
+                recipe_digest: "digest".to_owned(),
+            },
+            source: None,
+            state,
+            outcome: None,
+            attempt: None,
+            artifact,
+            created_at: 0,
+            settled_at: None,
+            retain_until: None,
+        }
+    }
+
+    fn artifact(expires_at: u64) -> ExportArtifactFacts {
+        ExportArtifactFacts {
+            size: 4096,
+            sha256: ARTIFACT_SHA256.to_owned(),
+            expires_at,
+            width: 2,
+            height: 1,
+            profile_identity: "profile-identity".to_owned(),
+        }
+    }
+
+    fn resolve(
+        record: &ExportRecord,
+        identity: &RetainedDevelopmentIdentity<'_>,
+        now: u64,
+    ) -> Option<RetainedDevelopmentTiff> {
+        retained_development_tiff(record, identity, now, |export_id| {
+            Some(PathBuf::from(format!("/artifacts/{export_id}.tiff")))
+        })
+    }
+
+    #[test]
+    fn a_succeeded_export_retains_the_development_tiff_of_its_identity() {
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let retained = resolve(&record, &identity(EXPOSURE_MILLI_EV), 1_000)
+            .expect("the retained Development TIFF of the current identity");
+        assert_eq!(
+            retained.path,
+            PathBuf::from("/artifacts/export-1.tiff"),
+            "the retained artifact is the published Export artifact"
+        );
+        assert_eq!(retained.sha256, ARTIFACT_SHA256);
+        assert_eq!(retained.byte_length, 4096);
+        assert_eq!(retained.recipe_revision, REVISION);
+        assert_eq!(retained.exposure_milli_ev, EXPOSURE_MILLI_EV);
+        assert_eq!(retained.source_revision, SOURCE_REVISION);
+        assert_eq!(retained.bundle_id, BUNDLE);
+    }
+
+    #[test]
+    fn a_result_of_another_identity_is_never_retained_as_current() {
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        // Another recipe revision, exposure, source revision, or bundle is a
+        // different identity, and a Photo without a saved recipe can never
+        // match a snapshot that captured one.
+        let other_exposure = resolve(&record, &identity(EXPOSURE_MILLI_EV + 1), 1_000);
+        assert!(
+            other_exposure.is_none(),
+            "a different exposure is not current"
+        );
+        let no_recipe = RetainedDevelopmentIdentity {
+            recipe_revision: None,
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &no_recipe, 1_000).is_none(),
+            "the processing baseline is not the captured recipe"
+        );
+        let other_source = RetainedDevelopmentIdentity {
+            source_revision: "another-source",
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &other_source, 1_000).is_none(),
+            "a changed source is not current"
+        );
+        let other_bundle = RetainedDevelopmentIdentity {
+            bundle_sha256: "another-bundle",
+            ..identity(EXPOSURE_MILLI_EV)
+        };
+        assert!(
+            resolve(&record, &other_bundle, 1_000).is_none(),
+            "a different bundle is not current"
+        );
+    }
+
+    #[test]
+    fn only_a_succeeded_export_with_a_live_artifact_is_retained() {
+        let now = 1_000;
+        for state in [
+            ExportState::Queued,
+            ExportState::Running,
+            ExportState::Failed,
+            ExportState::Cancelled,
+        ] {
+            let record = record(state, WhiteBalanceIntent::AsShot, Some(artifact(2_000)));
+            assert!(
+                resolve(&record, &identity(EXPOSURE_MILLI_EV), now).is_none(),
+                "{state:?} retains no Development Result"
+            );
+        }
+        let unsettled = record(ExportState::Succeeded, WhiteBalanceIntent::AsShot, None);
+        assert!(
+            resolve(&unsettled, &identity(EXPOSURE_MILLI_EV), now).is_none(),
+            "a succeeded Export without a published artifact retains no result"
+        );
+        // The artifact's disclosed expiry is the retention: an expired
+        // artifact is not retained, and the boundary itself is expired.
+        let expired = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(now)),
+        );
+        assert!(resolve(&expired, &identity(EXPOSURE_MILLI_EV), now).is_none());
+        let live = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(now + 1)),
+        );
+        assert!(resolve(&live, &identity(EXPOSURE_MILLI_EV), now).is_some());
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_execute_retains_no_result() {
+        // A temperature-tint snapshot can never produce an execution payload,
+        // so it never ran and cannot be the retained Development Result.
+        let record = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::TemperatureTint {
+                temperature_kelvin: 5_000,
+                tint_milli: 0,
+            },
+            Some(artifact(2_000)),
+        );
+        assert!(resolve(&record, &identity(EXPOSURE_MILLI_EV), 1_000).is_none());
+    }
 }
 
 // ---------------------------------------------------------------- Edit Preview
@@ -13205,8 +13510,16 @@ struct ScriptedRetention {
 }
 
 impl crate::edit_preview::DevelopmentResultRetention for ScriptedRetention {
-    fn resolve(&self, _photo_id: &str) -> Option<crate::edit_preview::RetainedDevelopmentResult> {
-        self.record.lock().unwrap().clone()
+    fn resolve<'a>(
+        &'a self,
+        _photo_id: &'a str,
+        _facts: &'a crate::edit_preview::PreviewFacts,
+    ) -> std::pin::Pin<
+        Box<
+            dyn Future<Output = Option<crate::edit_preview::RetainedDevelopmentResult>> + Send + 'a,
+        >,
+    > {
+        Box::pin(async { self.record.lock().unwrap().clone() })
     }
 }
 
