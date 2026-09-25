@@ -9740,6 +9740,7 @@ fn configured_router(application: &Arc<Application>, web_root: impl Into<PathBuf
             instance: "f".repeat(32),
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
+            socket_override: None,
         }),
     )
 }
@@ -10477,6 +10478,7 @@ async fn edit_recipe_validates_settings_before_the_write() {
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
+}
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Export routes
@@ -11010,7 +11012,7 @@ mod export_routes {
         application: &Application,
         photo_id: &str,
         request_id: &str,
-        expected_recipe_revision: Option<String>,
+        expected_recipe_version: Option<String>,
         exposure_ev: f64,
     ) -> slipstream_core::EditRecipe {
         let expected_source_revision = current_source_revision(application, photo_id).await;
@@ -11019,7 +11021,7 @@ mod export_routes {
             .save_edit_recipe(slipstream_core::SaveEditRecipe {
                 photo_id: photo_id.to_owned(),
                 request_id: request_id.to_owned(),
-                expected_recipe_revision,
+                expected_recipe_version,
                 expected_source_revision,
                 settings: slipstream_core::EditRecipeSettings {
                     exposure_ev,

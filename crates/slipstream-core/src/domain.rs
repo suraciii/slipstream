@@ -1007,6 +1007,12 @@ impl ExportSnapshot {
     pub fn recipe_payload(&self) -> Result<ExportRecipePayload, ExportSettingsError> {
         let white_balance = match self.settings.white_balance {
             WhiteBalanceIntent::AsShot => EXPORT_AS_SHOT_WHITE_BALANCE,
+            // A temperature-tint value is retained editing intent that no
+            // capability admits for execution; a snapshot carrying one can
+            // never produce an execution payload.
+            WhiteBalanceIntent::TemperatureTint { .. } => {
+                return Err(ExportSettingsError);
+            }
         };
         if !self.settings.exposure_ev.is_finite() {
             return Err(ExportSettingsError);
