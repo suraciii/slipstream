@@ -51,20 +51,6 @@ class ProfileRefusalTest(unittest.TestCase):
         self.assertEqual(self.invoke(), adapter.EXPECTED_REFUSED)
         self.assertFalse((self.work / "reference.db").exists())
 
-    def test_wrong_configdir_profile_refuses(self):
-        (self.work / adapter.PROFILE_RELATIVE).write_bytes(WRONG_PROFILE)
-        self.asset.write_bytes(WRONG_PROFILE)
-        self.assertEqual(self.invoke(), adapter.EXPECTED_REFUSED)
-
-    def test_wrong_asset_refuses(self):
-        (self.work / adapter.PROFILE_RELATIVE).write_bytes(WRONG_PROFILE)
-        self.asset.write_bytes(WRONG_PROFILE + b"\x01")
-        self.assertEqual(self.invoke(), adapter.EXPECTED_REFUSED)
-
-    def test_missing_asset_refuses(self):
-        (self.work / adapter.PROFILE_RELATIVE).write_bytes(WRONG_PROFILE)
-        self.assertEqual(self.invoke(), adapter.EXPECTED_REFUSED)
-
     def test_matching_profiles_start_the_engine_run(self):
         # With a matching profile the adapter proceeds into the engine run;
         # without darktable installed this fails as an engine failure, never

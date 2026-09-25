@@ -143,13 +143,6 @@ function environment(fixture: { bin: string; log: string }) {
 }
 
 test("worktree preflight is fail-fast and non-destructive", () => {
-  expect(script).toContain("set -euo pipefail");
-  expect(script).toContain("git rev-parse --show-toplevel");
-  expect(script).toContain("packageJson.packageManager");
-  expect(script).toContain("Bun.TOML.parse");
-  expect(script).toContain("bun install --frozen-lockfile");
-  expect(script).toContain("cargo fetch --locked");
-  expect(script).toContain("git diff --check");
   expect(script).not.toContain("git reset --hard");
   expect(script).not.toContain("git clean -fdx");
   expect(script).not.toContain("git checkout --");

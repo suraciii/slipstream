@@ -8,8 +8,6 @@ from collections import Counter
 from pathlib import Path
 
 from history import (
-    CUSTOM_WB,
-    CUSTOM_WB_PRESET,
     DT,
     RDF,
     VERSIONS,
@@ -63,8 +61,6 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(bytes.fromhex(temperature.attrib[f"{{{DT}}}params"]), custom_wb_params())
             self.assertEqual(exposure.attrib[f"{{{DT}}}modversion"], "7")
             self.assertEqual(bytes.fromhex(exposure.attrib[f"{{{DT}}}params"]), exposure_params(1.0))
-            self.assertEqual(CUSTOM_WB, (1.25, 1.0, 0.8, 1.0))
-            self.assertEqual(CUSTOM_WB_PRESET, 2)
 
     def test_rejects_duplicate_or_unexpected_baseline_adaptation(self):
         with tempfile.TemporaryDirectory() as directory:

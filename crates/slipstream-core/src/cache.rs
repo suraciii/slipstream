@@ -2388,6 +2388,9 @@ mod tests {
             if bytes.first() == Some(&1) {
                 entered_for_process.wait();
                 release_for_process.wait();
+                // The superseded process fails, and the failure must be
+                // discarded: supersession wins over reporting the error.
+                return Err(DerivativeError::Malformed);
             }
             let (width, height) = if bytes.first() == Some(&2) {
                 (16, 8)
@@ -2437,73 +2440,12 @@ mod tests {
         wait_for_waiter_count(&scheduler, 2);
 
         release.wait();
+        // The old process failed with Malformed, so this also proves a
+        // superseded in-flight failure is discarded rather than reported.
         assert_eq!(old.join().unwrap(), Err(CacheError::Invalidated));
         assert_eq!(duplicate.join().unwrap(), Err(CacheError::Invalidated));
         assert!(!scheduler.cache().derivative_path(&old_key).exists());
         assert_eq!(read_manifest(&manifest_path).unwrap().key, new_key);
-        assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
-        scheduler.shutdown().unwrap();
-        let _ = fs::remove_dir_all(cache_path.parent().unwrap());
-    }
-
-    #[test]
-    fn superseded_in_flight_failure_returns_invalidated() {
-        let entered = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let processed = Arc::new(Mutex::new(Vec::new()));
-        let entered_for_process = Arc::clone(&entered);
-        let release_for_process = Arc::clone(&release);
-        let processed_for_process = Arc::clone(&processed);
-        let process: Arc<DerivativeProcess> = Arc::new(move |bytes, _, _| {
-            processed_for_process
-                .lock()
-                .unwrap()
-                .push(bytes.first().copied().unwrap_or_default());
-            if bytes.first() == Some(&1) {
-                entered_for_process.wait();
-                release_for_process.wait();
-                return Err(DerivativeError::Malformed);
-            }
-            Ok(Derivative {
-                width: 16,
-                height: 8,
-                profile: DerivativeProfile::Srgb,
-                jpeg: jpeg(16, 8),
-            })
-        });
-        let (scheduler, cache_path) = scheduler_with_workers(Some(process), 2);
-        let old_identity = identity(16.0);
-        let new_identity = identity(17.0);
-        let old_key = derivative_cache_key(&old_identity).unwrap();
-        let new_key = derivative_cache_key(&new_identity).unwrap();
-        let old_scheduler = scheduler.clone();
-        let old = thread::spawn(move || {
-            old_scheduler.generate(old_identity, vec![1], DerivativePriority::Current)
-        });
-        entered.wait();
-
-        let new_scheduler = scheduler.clone();
-        let new_value = new_identity.clone();
-        let new = thread::spawn(move || {
-            new_scheduler.generate(new_value, vec![2], DerivativePriority::Current)
-        });
-        let new_result = new.join().unwrap().unwrap();
-        let DerivativeResult::Ready(new_ready) = new_result else {
-            panic!("new identity should publish a current derivative")
-        };
-        assert!(new_ready.generated && !new_ready.stale);
-        assert_eq!(new_ready.cache_key, new_key);
-        assert!(scheduler.cache().derivative_path(&new_key).exists());
-
-        release.wait();
-        assert_eq!(old.join().unwrap(), Err(CacheError::Invalidated));
-        assert!(!scheduler.cache().derivative_path(&old_key).exists());
-        assert_eq!(
-            read_manifest(&scheduler.cache().manifest_path(&new_identity).unwrap())
-                .unwrap()
-                .key,
-            new_key
-        );
         assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
         scheduler.shutdown().unwrap();
         let _ = fs::remove_dir_all(cache_path.parent().unwrap());

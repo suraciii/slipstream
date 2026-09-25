@@ -397,22 +397,6 @@ async fn client_rejects_folder_album_and_photo_pages_over_the_requested_limit() 
 }
 
 #[test]
-fn executable_network_timeout_publishes_an_envelope_when_stdout_is_writable() {
-    let (server, stalled) = common::stalled_tls_service();
-    let output = common::cli_command()
-        .args(["--token-file"])
-        .arg(common::credential_file())
-        .args(["--server", &server, "--timeout", "1", "status"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(6));
-    assert!(output.stderr.is_empty());
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(envelope["error"]["code"], "transport_failed");
-    stalled.join().unwrap();
-}
-
-#[test]
 fn executable_output_deadline_and_interrupt_do_not_wait_for_blocked_pipes() {
     let version = "v".repeat(256 * 1024);
     let status = serde_json::json!({
@@ -497,6 +481,7 @@ async fn whole_command_deadline_covers_capability_negotiation() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(6));
+    assert!(output.stderr.is_empty());
     assert!(started.elapsed() < Duration::from_secs(3));
     let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "transport_failed");
