@@ -1,8 +1,8 @@
 /// The page UI's shared native-modal lifecycle for supporting surfaces.
 ///
-/// Sources, View options, Rating, Photo tools, Album forms, and recovery review
-/// are one kind of surface: exactly one is active at a time, opening it moves
-/// focus into it,
+/// Sources, View options, Rating, Photo tools, Album forms, the recovery
+/// review, the removal review, and the Removed Photos listing are one kind of
+/// surface: exactly one is active at a time, opening it moves focus into it,
 /// Tab and Shift+Tab stay inside it, the background receives no pointer
 /// input, focus, or shortcuts, and closing it returns focus to the invoker
 /// that opened it. Native `dialog.showModal()` supplies that lifecycle, so
@@ -19,7 +19,9 @@ export type ModalSurfaceKind =
   | "rating"
   | "photo-tools"
   | "album-form"
-  | "recovery";
+  | "recovery"
+  | "removal-review"
+  | "removed-panel";
 
 /// The controls one modal surface cycles through. A hidden or disabled
 /// control takes no focus, so the cycle never stops on it.

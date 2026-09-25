@@ -55,7 +55,9 @@ const validOptional = (
   predicate: (candidate: unknown) => boolean,
 ): boolean => value === undefined || predicate(value);
 
-const validPhotoSummary = (value: unknown): value is PhotoSummary => {
+/// One Grid Photo summary as the server presents it. Shared with the removal
+/// client, whose Removed Photos listing carries the same facts.
+export const validPhotoSummary = (value: unknown): value is PhotoSummary => {
   if (!isRecord(value) || !isRecord(value.preview)) return false;
   const preview = value.preview;
   if (
