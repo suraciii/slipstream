@@ -61,6 +61,10 @@ export type PhotoSummary = Readonly<{
   originalFilename?: string;
   selectionState: SelectionState;
   rating: number;
+  /// Whether a saved Edit Recipe exists. It stays true when the recipe matches
+  /// the processing baseline or the Original File is unavailable, and it does
+  /// not imply that processing is currently available.
+  hasSavedEdits: boolean;
   preview: Readonly<{
     state: "inspection-pending" | "ready" | "failed" | "unavailable";
     source?: PreviewSource;

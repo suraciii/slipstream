@@ -5352,8 +5352,11 @@ fn list_photo_exports(
     }
     let rows = connection
         .prepare(&format!(
+            // `created_at` has one-second resolution, so the implicit rowid
+            // breaks a tie by insertion order: the head of the list is the
+            // Export submitted last.
             "SELECT {EXPORT_ROW_COLUMNS} FROM exports WHERE photo_id=?
-             ORDER BY created_at DESC, id DESC LIMIT {EXPORT_LIST_LIMIT}"
+             ORDER BY created_at DESC, rowid DESC LIMIT {EXPORT_LIST_LIMIT}"
         ))
         .map_err(|_| PersistenceError::Storage)?
         .query_map([photo_id], |row| export_row(connection, row))

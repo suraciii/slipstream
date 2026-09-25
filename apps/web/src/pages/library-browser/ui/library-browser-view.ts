@@ -7,6 +7,30 @@ import {
 } from "../model/browser-navigation.js";
 import { formatCaptureTime } from "./capture-time.js";
 import { formatPhotoCount } from "./photo-count.js";
+import type {
+  EditorWhiteBalance,
+  EditorWhiteBalancePresentation,
+} from "../model/photo-editor.js";
+
+/// One white-balance intent in the workspace's words. A stored mode the
+/// deployment does not admit still reads as retained intent, never as as-shot.
+const describeWhiteBalance = (intent: EditorWhiteBalance): string =>
+  intent.mode === "as-shot"
+    ? "As shot"
+    : `Temperature ${intent.temperatureKelvin} K, tint ${intent.tintMilli}`;
+
+/// The white-balance presentation before any facts arrive: as-shot intent, no
+/// admitted adjustable mode, and controls that take no input.
+const loadingWhiteBalance = (): EditorWhiteBalancePresentation =>
+  Object.freeze({
+    intent: Object.freeze({ mode: "as-shot" }),
+    modes: Object.freeze(["as-shot"]),
+    adjustable: false,
+    note: "",
+    temperatureKelvin: null,
+    tintMilli: null,
+    resettable: false,
+  });
 
 type ViewSelectionState = "undecided" | "selected" | "rejected";
 type ViewPreviewSource = "jpeg-original" | "raw-embedded-jpeg";
@@ -121,7 +145,107 @@ export type GridProgressViewModel = Readonly<{
   undecided: number;
 }>;
 
+/// The closed editing stages. Camera shows the camera-produced Preview,
+/// Develop the Edit Preview of the Development Result, and Film the Edit
+/// Preview of the Film Result once that capability is enabled.
+export type EditorStage = "camera" | "develop" | "film";
+
+export type EditorExportViewModel = Readonly<{
+  state:
+    | "idle"
+    | "submitting"
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  note: string;
+  artifact: Readonly<{
+    byteLength: number;
+    width: number;
+    height: number;
+    expiresAt: string;
+  }> | null;
+  canSubmit: boolean;
+  canCancel: boolean;
+  canRetry: boolean;
+  canDownload: boolean;
+}>;
+
+export type EditorViewModel = Readonly<{
+  photoId: string;
+  loading: boolean;
+  stage: EditorStage;
+  /// What the presented image actually is, in provenance language.
+  stageNote: string;
+  /// Why the Film stage cannot be presented, when it cannot.
+  filmReason: string;
+  sourceSupport: "supported" | "unsupported" | "unavailable" | "unknown";
+  processingAvailable: boolean;
+  /// Why the deployment cannot execute development work, when it cannot. An
+  /// unavailable deployment is explained instead of attempted.
+  capabilityNote: string;
+  exposureEv: number;
+  savedExposureEv: number;
+  baselineExposureEv: number;
+  exposureMinimumEv: number;
+  exposureMaximumEv: number;
+  exposureStepEv: number;
+  /// The white-balance intent in force, the modes a Photographer may select,
+  /// and why an adjustable mode is not offered.
+  whiteBalance: EditorWhiteBalancePresentation;
+  canEdit: boolean;
+  canPreview: boolean;
+  previewing: boolean;
+  /// What the presented Edit Preview is, or why none is presented.
+  previewNote: string;
+  /// True while the retained image is older than the current settings.
+  previewStale: boolean;
+  saving: boolean;
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  comparing: boolean;
+  conflict: Readonly<{ message: string }> | null;
+  draftNote: string;
+  export: EditorExportViewModel;
+  status: string;
+}>;
+
 export type LibraryBrowserIntent =
+  | Readonly<{ kind: "editor-open" | "editor-refresh"; photoId: string }>
+  | Readonly<{ kind: "editor-exposure"; photoId: string; exposureEv: number }>
+  | Readonly<{
+      kind: "editor-white-balance-mode";
+      photoId: string;
+      mode: string;
+    }>
+  | Readonly<{
+      kind: "editor-temperature";
+      photoId: string;
+      temperatureKelvin: number;
+    }>
+  | Readonly<{ kind: "editor-tint"; photoId: string; tintMilli: number }>
+  | Readonly<{ kind: "editor-stage"; photoId: string; stage: EditorStage }>
+  | Readonly<{ kind: "editor-compare"; photoId: string; pressed: boolean }>
+  | Readonly<{
+      kind:
+        | "editor-undo"
+        | "editor-redo"
+        | "editor-reset"
+        | "editor-reset-exposure"
+        | "editor-reset-white-balance"
+        | "editor-preview"
+        | "editor-rebind"
+        | "editor-use-saved"
+        | "editor-reapply"
+        | "editor-discard-draft"
+        | "editor-export-submit"
+        | "editor-export-cancel"
+        | "editor-export-retry"
+        | "editor-export-download";
+      photoId: string;
+    }>
   | Readonly<{ kind: "summary-action"; presentationId: number }>
   | Readonly<{ kind: "sign-out" }>
   /// Commits the View options draft once. A size-only change never reaches the
@@ -319,6 +443,7 @@ type GridPhotoViewModel = Readonly<{
   originalFilename?: string;
   selectionState: ViewSelectionState;
   rating: number;
+  hasSavedEdits: boolean;
   preview: Readonly<{
     state: "inspection-pending" | "ready" | "unavailable" | "failed";
     thumbnailUrl?: string;
@@ -630,11 +755,18 @@ export interface LibraryBrowserView {
   renderPhotoShell(
     model: PhotoShellViewModel,
   ): ReviewImagePresentation | undefined;
+  editorVisible(): boolean;
+  renderEditor(model: EditorViewModel): void;
+  presentEditorPreview(url: string): void;
+  clearEditorPreview(): void;
   presentReviewImage(
     url: string,
     index: number,
     total: number,
   ): ReviewImagePresentation | undefined;
+  /// The URL of the camera Preview the stage currently presents, so the
+  /// camera reference can be named without a second request.
+  reviewImageUrl(): string | undefined;
   reviewImageMatches(url: string): boolean;
   showPreviewUnavailable(text: string): void;
   setPreviewFacts(
@@ -746,7 +878,35 @@ export function createLibraryBrowserView(
               <div class="photo-tools-body">
                 <div class="photo-tools-view" data-photo-tools-view="tools">
                   <div class="photo-tools-actions" aria-label="Photo actions"><button type="button" class="quiet" data-photo-tools-clear>Clear</button><button type="button" class="quiet" data-photo-tools-undo disabled>Undo</button></div>
-                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button></div>
+                  <div class="photo-tools-entries" data-photo-tools-entries role="group" aria-label="Photo tools"><button type="button" data-photo-tools-entry="edit">Edit</button><button type="button" data-photo-tools-entry="albums">Albums</button><button type="button" data-photo-tools-entry="details">Details</button><button type="button" data-photo-tools-entry="zoom">Preview Zoom</button><button type="button" data-photo-tools-entry="nearby">Nearby Photos</button><button type="button" data-photo-tools-entry="sources">Sources</button></div>
+                </div>
+                <div class="photo-tools-view" id="photo-tools-view-edit" data-photo-tools-view="edit" hidden>
+                  <header class="photo-tools-view-header"><h3>Edit</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
+                  <div class="photo-editor-controls" aria-label="Photo edit recipe">
+                    <div class="photo-editor-stages" role="group" aria-label="Editing stage"><button type="button" data-photo-editor-stage="camera" aria-pressed="false">Camera</button><button type="button" data-photo-editor-stage="develop" aria-pressed="true">Develop</button><button type="button" data-photo-editor-stage="film" aria-pressed="false">Film</button></div>
+                    <p class="photo-editor-stage-note" id="photo-editor-stage-note" data-photo-editor-stage-note role="status"></p>
+                    <p class="photo-editor-provenance" data-photo-editor-provenance role="status"></p>
+                    <img class="photo-editor-preview-image" data-photo-editor-preview-image alt="Current stage Edit Preview" hidden>
+                    <p class="photo-editor-preview-note" data-photo-editor-preview-note hidden></p>
+                    <div class="photo-editor-field"><label for="photo-editor-exposure">Exposure</label><output data-photo-editor-exposure-value for="photo-editor-exposure">0.000 EV</output><input id="photo-editor-exposure" data-photo-editor-exposure type="range" min="0" max="1" step="0.001" value="0" aria-label="Exposure" disabled><button type="button" class="quiet" data-photo-editor-reset-exposure disabled>Reset exposure</button></div>
+                    <div class="photo-editor-field photo-editor-white-balance">
+                      <label for="photo-editor-white-balance-mode">White balance</label>
+                      <select id="photo-editor-white-balance-mode" data-photo-editor-white-balance-mode disabled><option value="as-shot">As shot</option><option value="temperature-tint" disabled>Temperature &amp; tint</option></select>
+                      <p class="photo-editor-note" data-photo-editor-white-balance-note hidden></p>
+                      <div class="photo-editor-field"><label for="photo-editor-temperature">Temperature</label><output data-photo-editor-temperature-value for="photo-editor-temperature">—</output><input id="photo-editor-temperature" data-photo-editor-temperature type="range" min="1000" max="40000" step="1" value="6500" aria-label="Temperature in Kelvin" disabled></div>
+                      <div class="photo-editor-field"><label for="photo-editor-tint">Tint</label><output data-photo-editor-tint-value for="photo-editor-tint">—</output><input id="photo-editor-tint" data-photo-editor-tint type="range" min="-150000" max="150000" step="1" value="0" aria-label="Tint" disabled></div>
+                      <button type="button" class="quiet" data-photo-editor-reset-white-balance disabled>Reset white balance</button>
+                    </div>
+                    <div class="photo-editor-actions"><button type="button" class="quiet" data-photo-editor-undo disabled>Undo</button><button type="button" class="quiet" data-photo-editor-redo disabled>Redo</button><button type="button" class="quiet" data-photo-editor-reset disabled>Reset all</button><button type="button" class="quiet" data-photo-editor-compare aria-pressed="false" disabled>Camera reference</button><button type="button" data-photo-editor-preview disabled>Refresh preview</button><button type="button" class="quiet" data-photo-editor-rebind hidden disabled>Rebind source</button><button type="button" class="quiet" data-photo-editor-refresh>Reload recipe</button></div>
+                    <p class="photo-editor-fact"><span>White balance</span><span data-photo-editor-white-balance>As shot</span></p>
+                    <p class="photo-editor-fact"><span>Source support</span><span data-photo-editor-support>Checking…</span></p>
+                    <p class="photo-editor-fact"><span>Processing</span><span data-photo-editor-processing>Checking…</span></p>
+                    <p class="photo-editor-note" data-photo-editor-capability hidden></p>
+                    <p class="photo-editor-draft" data-photo-editor-draft hidden role="status"></p>
+                    <div class="photo-editor-conflict" data-photo-editor-conflict hidden><p data-photo-editor-conflict-message role="alert"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-use-saved>Use saved recipe</button><button type="button" class="quiet" data-photo-editor-reapply>Reapply my settings</button><button type="button" class="quiet" data-photo-editor-discard-draft>Discard draft</button></div></div>
+                    <div class="photo-editor-export" aria-label="Export"><p class="photo-editor-export-heading">Export <span>Development TIFF</span></p><p class="photo-editor-export-state" data-photo-editor-export-state role="status"></p><div class="photo-editor-actions"><button type="button" data-photo-editor-export-submit>Export TIFF</button><button type="button" class="quiet" data-photo-editor-export-cancel hidden>Cancel</button><button type="button" class="quiet" data-photo-editor-export-retry hidden>Retry</button><button type="button" class="quiet" data-photo-editor-export-download hidden>Download</button></div></div>
+                    <p class="photo-editor-status" data-photo-editor-status role="status" aria-live="polite"></p>
+                  </div>
                 </div>
                 <div class="photo-tools-view" id="photo-tools-view-albums" data-photo-tools-view="albums" hidden>
                   <header class="photo-tools-view-header"><h3>Albums</h3><button type="button" class="quiet" data-photo-tools-return>Photo tools</button></header>
@@ -1268,6 +1428,149 @@ export function createLibraryBrowserView(
   const photoToolsReturnButtons = Array.from(
     root.querySelectorAll<HTMLButtonElement>("[data-photo-tools-return]"),
   );
+  const editorExposure = required<HTMLInputElement>(
+    root,
+    "[data-photo-editor-exposure]",
+  );
+  const editorExposureValue = required<HTMLOutputElement>(
+    root,
+    "[data-photo-editor-exposure-value]",
+  );
+  const editorWhiteBalance = required<HTMLElement>(
+    root,
+    "[data-photo-editor-white-balance]",
+  );
+  const editorWhiteBalanceMode = required<HTMLSelectElement>(
+    root,
+    "[data-photo-editor-white-balance-mode]",
+  );
+  const editorWhiteBalanceNote = required<HTMLElement>(
+    root,
+    "[data-photo-editor-white-balance-note]",
+  );
+  const editorTemperature = required<HTMLInputElement>(
+    root,
+    "[data-photo-editor-temperature]",
+  );
+  const editorTemperatureValue = required<HTMLOutputElement>(
+    root,
+    "[data-photo-editor-temperature-value]",
+  );
+  const editorTint = required<HTMLInputElement>(
+    root,
+    "[data-photo-editor-tint]",
+  );
+  const editorTintValue = required<HTMLOutputElement>(
+    root,
+    "[data-photo-editor-tint-value]",
+  );
+  const editorResetExposure = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-reset-exposure]",
+  );
+  const editorResetWhiteBalance = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-reset-white-balance]",
+  );
+  const editorStageNote = required<HTMLElement>(
+    root,
+    "[data-photo-editor-stage-note]",
+  );
+  const editorSupport = required<HTMLElement>(
+    root,
+    "[data-photo-editor-support]",
+  );
+  const editorProcessing = required<HTMLElement>(
+    root,
+    "[data-photo-editor-processing]",
+  );
+  const editorCapabilityNote = required<HTMLElement>(
+    root,
+    "[data-photo-editor-capability]",
+  );
+  const editorStages = Array.from(
+    root.querySelectorAll<HTMLButtonElement>("[data-photo-editor-stage]"),
+  );
+  const editorProvenance = required<HTMLElement>(
+    root,
+    "[data-photo-editor-provenance]",
+  );
+  const editorPreview = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-preview]",
+  );
+  const editorReset = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-reset]",
+  );
+  const editorUndo = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-undo]",
+  );
+  const editorRedo = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-redo]",
+  );
+  const editorCompare = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-compare]",
+  );
+  const editorPreviewImage = required<HTMLImageElement>(
+    root,
+    "[data-photo-editor-preview-image]",
+  );
+  const editorPreviewNote = required<HTMLElement>(
+    root,
+    "[data-photo-editor-preview-note]",
+  );
+  const editorDraftNote = required<HTMLElement>(
+    root,
+    "[data-photo-editor-draft]",
+  );
+  const editorConflict = required<HTMLElement>(
+    root,
+    "[data-photo-editor-conflict]",
+  );
+  const editorConflictMessage = required<HTMLElement>(
+    root,
+    "[data-photo-editor-conflict-message]",
+  );
+  const editorUseSaved = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-use-saved]",
+  );
+  const editorReapply = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-reapply]",
+  );
+  const editorDiscardDraft = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-discard-draft]",
+  );
+  const editorExportState = required<HTMLElement>(
+    root,
+    "[data-photo-editor-export-state]",
+  );
+  const editorExportSubmit = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-submit]",
+  );
+  const editorExportCancel = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-cancel]",
+  );
+  const editorExportRetry = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-retry]",
+  );
+  const editorExportDownload = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-export-download]",
+  );
+  const editorStatus = required<HTMLElement>(
+    root,
+    "[data-photo-editor-status]",
+  );
   const ratingDialog = required<HTMLDialogElement>(
     root,
     "[data-rating-choices]",
@@ -1275,6 +1578,14 @@ export function createLibraryBrowserView(
   const ratingChoicesClose = required<HTMLButtonElement>(
     root,
     "[data-rating-choices-close]",
+  );
+  const editorRebind = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-rebind]",
+  );
+  const editorRefresh = required<HTMLButtonElement>(
+    root,
+    "[data-photo-editor-refresh]",
   );
   const ratings = required<HTMLElement>(root, "[data-ratings]");
   const selectFeedback = required<HTMLElement>(root, "[data-select-feedback]");
@@ -1568,14 +1879,33 @@ export function createLibraryBrowserView(
   /// Which Photo tools content the modal presents. Every subview replaces the
   /// tools list and carries its own local return, so moving between them adds
   /// no browser history entry and never opens a second modal.
-  type PhotoToolsView = "tools" | "albums" | "details" | "zoom" | "nearby";
+  type PhotoToolsView =
+    | "tools"
+    | "edit"
+    | "albums"
+    | "details"
+    | "zoom"
+    | "nearby";
   let photoToolsView: PhotoToolsView = "tools";
   /// The last neighbor facts the page model reported. A disclosure rebuilds
   /// the strip from them, so a closed strip holds no image demand at all.
   let filmstripModel: FilmstripViewModel | undefined;
+  let editorPhotoId: string | undefined;
+  let editorModel: EditorViewModel | undefined;
+  /// The exposure a live gesture is showing, and the model value it is drawn
+  /// over. The draft covers the window between a pointer drag and the write
+  /// that follows it, and it is dropped as soon as the model reaches it or
+  /// moves anywhere else: an undo, reset, or conflict adoption renders the
+  /// settings it actually restored.
+  let editorDraft: number | undefined;
+  let editorDraftBase: number | undefined;
   const applyPhotoToolsView = () => {
     for (const view of photoToolsViews)
       view.hidden = view.dataset.photoToolsView !== photoToolsView;
+    // A wide layout docks the Edit surface beside the image instead of
+    // centring it over the Preview, so the controls and the image they change
+    // are both visible.
+    photoToolsDialog.dataset.photoToolsSurface = photoToolsView;
     photoToolsTitle.textContent =
       photoToolsView === "tools"
         ? "Photo tools"
@@ -1585,7 +1915,215 @@ export function createLibraryBrowserView(
             ? "Preview Zoom"
             : photoToolsView === "albums"
               ? "Albums"
-              : "Details";
+              : photoToolsView === "details"
+                ? "Details"
+                : "Edit";
+  };
+  const openEditor = (photoId: string) => {
+    if (!photoId || photoView.hidden) return;
+    editorPhotoId = photoId;
+    editorDraft = undefined;
+    editorDraftBase = undefined;
+    editorModel = undefined;
+    renderEditor({
+      photoId,
+      loading: true,
+      stage: "develop",
+      stageNote: "Develop: loading this Photo's edit facts.",
+      filmReason: "",
+      sourceSupport: "unknown",
+      processingAvailable: false,
+      capabilityNote: "",
+      exposureEv: 0,
+      savedExposureEv: 0,
+      baselineExposureEv: 0,
+      exposureMinimumEv: 0,
+      exposureMaximumEv: 1,
+      exposureStepEv: 0.001,
+      whiteBalance: loadingWhiteBalance(),
+      canEdit: false,
+      canPreview: false,
+      previewing: false,
+      previewNote: "",
+      previewStale: false,
+      saving: false,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      comparing: false,
+      conflict: null,
+      draftNote: "",
+      export: {
+        state: "idle",
+        note: "",
+        artifact: null,
+        canSubmit: false,
+        canCancel: false,
+        canRetry: false,
+        canDownload: false,
+      },
+      status: "Loading edit recipe…",
+    });
+    send({ kind: "editor-open", photoId });
+    openPhotoTools("edit");
+  };
+  const editorVisible = () =>
+    alive &&
+    !photoView.hidden &&
+    surfaces.isActive("photo-tools") &&
+    photoToolsView === "edit";
+  const renderEditor = (model: EditorViewModel) => {
+    if (
+      !alive ||
+      (editorPhotoId !== undefined && editorPhotoId !== model.photoId)
+    )
+      return;
+    editorPhotoId = model.photoId;
+    editorModel = model;
+    const minimum = Number.isFinite(model.exposureMinimumEv)
+      ? model.exposureMinimumEv
+      : 0;
+    const maximum = Number.isFinite(model.exposureMaximumEv)
+      ? model.exposureMaximumEv
+      : 1;
+    const step =
+      Number.isFinite(model.exposureStepEv) && model.exposureStepEv > 0
+        ? model.exposureStepEv
+        : 0.001;
+    if (
+      editorDraft !== undefined &&
+      (model.exposureEv === editorDraft || model.exposureEv !== editorDraftBase)
+    ) {
+      editorDraft = undefined;
+      editorDraftBase = undefined;
+    }
+    const exposure = editorDraft ?? model.exposureEv;
+    editorExposure.min = String(minimum);
+    editorExposure.max = String(maximum);
+    editorExposure.step = String(step);
+    editorExposure.value = String(exposure);
+    const label = `${exposure.toFixed(3)} EV`;
+    editorExposureValue.value = label;
+    editorExposureValue.textContent = label;
+    editorExposure.disabled = model.loading || !model.canEdit;
+    editorWhiteBalance.textContent = describeWhiteBalance(
+      model.whiteBalance.intent,
+    );
+    const whiteBalance = model.whiteBalance;
+    const adjustableOption =
+      editorWhiteBalanceMode.querySelector<HTMLOptionElement>(
+        'option[value="temperature-tint"]',
+      );
+    if (adjustableOption) adjustableOption.disabled = !whiteBalance.adjustable;
+    editorWhiteBalanceMode.value = whiteBalance.intent.mode;
+    editorWhiteBalanceMode.disabled =
+      model.loading || !model.canEdit || !whiteBalance.adjustable;
+    editorWhiteBalanceNote.textContent = whiteBalance.note;
+    editorWhiteBalanceNote.hidden = !whiteBalance.note;
+    const temperature = whiteBalance.temperatureKelvin;
+    if (temperature) {
+      editorTemperature.min = String(temperature.minimum);
+      editorTemperature.max = String(temperature.maximum);
+      editorTemperature.value = String(temperature.value);
+      editorTemperature.disabled = model.loading || !temperature.enabled;
+      const label = `${temperature.value} K`;
+      editorTemperatureValue.value = label;
+      editorTemperatureValue.textContent = label;
+    } else {
+      editorTemperature.disabled = true;
+      editorTemperatureValue.value = "—";
+      editorTemperatureValue.textContent = "—";
+    }
+    const tint = whiteBalance.tintMilli;
+    if (tint) {
+      editorTint.min = String(tint.minimum);
+      editorTint.max = String(tint.maximum);
+      editorTint.value = String(tint.value);
+      editorTint.disabled = model.loading || !tint.enabled;
+      const label = `${tint.value}`;
+      editorTintValue.value = label;
+      editorTintValue.textContent = label;
+    } else {
+      editorTint.disabled = true;
+      editorTintValue.value = "—";
+      editorTintValue.textContent = "—";
+    }
+    editorResetExposure.disabled =
+      model.loading ||
+      !model.canEdit ||
+      Math.abs(exposure - model.baselineExposureEv) < step / 2;
+    editorResetWhiteBalance.disabled =
+      model.loading || !model.canEdit || !whiteBalance.resettable;
+    editorSupport.textContent = model.sourceSupport;
+    editorProcessing.textContent = model.loading
+      ? "Checking…"
+      : model.processingAvailable
+        ? "Available"
+        : "Unavailable";
+    editorCapabilityNote.textContent = model.capabilityNote;
+    editorCapabilityNote.hidden = !model.capabilityNote;
+    for (const button of editorStages) {
+      const stage = button.dataset.photoEditorStage as EditorStage | undefined;
+      button.setAttribute("aria-pressed", String(stage === model.stage));
+      button.disabled = stage === "film" && Boolean(model.filmReason);
+      if (stage === "film") {
+        button.title = model.filmReason;
+        if (model.filmReason)
+          button.setAttribute("aria-describedby", editorStageNote.id);
+        else button.removeAttribute("aria-describedby");
+      }
+    }
+    editorStageNote.textContent = model.filmReason;
+    editorStageNote.hidden = !model.filmReason;
+    editorProvenance.textContent = model.stageNote;
+    // Reset all restores the processing baseline of both controls, so it is
+    // enabled exactly while the settings are away from that baseline. Local
+    // changes are discarded by Undo, never by a disabled Reset all.
+    const atBaseline =
+      Math.abs(exposure - model.baselineExposureEv) < step / 2 &&
+      !model.whiteBalance.resettable;
+    editorUndo.disabled = model.loading || !model.canUndo;
+    editorRedo.disabled = model.loading || !model.canRedo;
+    editorReset.disabled = model.loading || model.saving || atBaseline;
+    editorCompare.disabled = model.loading || !model.canPreview;
+    editorCompare.setAttribute("aria-pressed", String(model.comparing));
+    editorPreview.disabled =
+      model.loading || model.previewing || !model.canPreview;
+    editorRebind.hidden = !model.conflict;
+    editorRebind.disabled = model.loading || model.saving || !model.conflict;
+    editorRefresh.disabled = model.loading || model.saving;
+    editorDraftNote.textContent = model.draftNote;
+    editorDraftNote.hidden = !model.draftNote;
+    editorConflict.hidden = !model.conflict;
+    editorConflictMessage.textContent = model.conflict?.message ?? "";
+    editorUseSaved.disabled = model.saving;
+    editorReapply.disabled = model.saving;
+    editorDiscardDraft.disabled = model.saving;
+    const exported = model.export;
+    editorExportState.textContent = exported.note;
+    editorExportSubmit.disabled =
+      model.loading || !model.canEdit || !exported.canSubmit;
+    editorExportCancel.hidden = !exported.canCancel;
+    editorExportRetry.hidden = !exported.canRetry;
+    editorExportDownload.hidden = !exported.canDownload;
+    // The Edit Preview note describes the Develop or Film rendition. The
+    // Camera stage presents the camera Preview, which is not an Edit Preview.
+    const editPreviewStage = model.stage !== "camera";
+    editorPreviewNote.textContent = editPreviewStage ? model.previewNote : "";
+    editorPreviewNote.hidden = !editPreviewStage || !model.previewNote;
+    editorPreviewNote.dataset.tone = model.previewStale ? "stale" : "";
+    editorStatus.textContent = model.status;
+    editorStatus.dataset.tone = model.status ? "notice" : "";
+  };
+  const presentEditorPreview = (url: string): void => {
+    if (!alive || !editorVisible() || !editorPhotoId) return;
+    editorPreviewImage.src = new URL(url, window.location.href).href;
+    editorPreviewImage.hidden = false;
+  };
+  const clearEditorPreview = (): void => {
+    if (!alive) return;
+    editorPreviewImage.hidden = true;
+    editorPreviewImage.removeAttribute("src");
   };
   /// True while the Nearby Photos subview is the presented content of Photo
   /// tools. The one strip node then lives inside that disclosure; otherwise it
@@ -4207,13 +4745,136 @@ export function createLibraryBrowserView(
       "[data-photo-tools-entry]",
     );
     if (!button) return;
-    // Sources is its own supporting surface: Photo tools closes for it, and
-    // closing Sources returns focus to the entry that opened it.
+    const photoId = currentPhotoId;
+    if (!photoId) return;
     if (button.dataset.photoToolsEntry === "sources") {
       openSources();
       return;
     }
+    if (button.dataset.photoToolsEntry === "edit") {
+      openEditor(photoId);
+      return;
+    }
     openPhotoTools(button.dataset.photoToolsEntry as PhotoToolsView);
+  });
+  // A pointer drag reports every intermediate position, and only the settled
+  // gesture is one edit action, so the label follows `input` while the save
+  // follows `change`.
+  editorExposure.addEventListener("input", () => {
+    if (!editorPhotoId || !editorModel || editorExposure.disabled) return;
+    editorDraftBase ??= editorModel.exposureEv;
+    editorDraft = Number(editorExposure.value);
+    renderEditor(editorModel);
+  });
+  editorExposure.addEventListener("change", () => {
+    if (!editorPhotoId || !editorModel || editorExposure.disabled) return;
+    const value = Number(editorExposure.value);
+    editorDraftBase ??= editorModel.exposureEv;
+    editorDraft = value;
+    renderEditor(editorModel);
+    send({
+      kind: "editor-exposure",
+      photoId: editorPhotoId,
+      exposureEv: value,
+    });
+  });
+  // The white-balance mode is one committed choice, so it saves on `change`.
+  editorWhiteBalanceMode.addEventListener("change", () => {
+    if (!editorPhotoId || !editorModel || editorWhiteBalanceMode.disabled)
+      return;
+    send({
+      kind: "editor-white-balance-mode",
+      photoId: editorPhotoId,
+      mode: editorWhiteBalanceMode.value,
+    });
+  });
+  editorTemperature.addEventListener("change", () => {
+    if (!editorPhotoId || !editorModel || editorTemperature.disabled) return;
+    send({
+      kind: "editor-temperature",
+      photoId: editorPhotoId,
+      temperatureKelvin: Number(editorTemperature.value),
+    });
+  });
+  editorTint.addEventListener("change", () => {
+    if (!editorPhotoId || !editorModel || editorTint.disabled) return;
+    send({
+      kind: "editor-tint",
+      photoId: editorPhotoId,
+      tintMilli: Number(editorTint.value),
+    });
+  });
+  editorResetExposure.addEventListener("click", () => {
+    if (!editorPhotoId || !editorModel) return;
+    send({ kind: "editor-reset-exposure", photoId: editorPhotoId });
+  });
+  editorResetWhiteBalance.addEventListener("click", () => {
+    if (!editorPhotoId || !editorModel) return;
+    send({ kind: "editor-reset-white-balance", photoId: editorPhotoId });
+  });
+  editorPreview.addEventListener("click", () => {
+    if (editorPhotoId) send({ kind: "editor-preview", photoId: editorPhotoId });
+  });
+  editorUndo.addEventListener("click", () => {
+    if (editorPhotoId) send({ kind: "editor-undo", photoId: editorPhotoId });
+  });
+  editorRedo.addEventListener("click", () => {
+    if (editorPhotoId) send({ kind: "editor-redo", photoId: editorPhotoId });
+  });
+  editorCompare.addEventListener("click", () => {
+    if (!editorPhotoId || !editorModel) return;
+    send({
+      kind: "editor-compare",
+      photoId: editorPhotoId,
+      pressed: !editorModel.comparing,
+    });
+  });
+  editorReset.addEventListener("click", () => {
+    if (!editorPhotoId || !editorModel) return;
+    send({ kind: "editor-reset", photoId: editorPhotoId });
+  });
+  editorRefresh.addEventListener("click", () => {
+    if (editorPhotoId) send({ kind: "editor-refresh", photoId: editorPhotoId });
+  });
+  editorUseSaved.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-use-saved", photoId: editorPhotoId });
+  });
+  editorReapply.addEventListener("click", () => {
+    if (editorPhotoId) send({ kind: "editor-reapply", photoId: editorPhotoId });
+  });
+  editorDiscardDraft.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-discard-draft", photoId: editorPhotoId });
+  });
+  editorExportSubmit.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-export-submit", photoId: editorPhotoId });
+  });
+  editorExportCancel.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-export-cancel", photoId: editorPhotoId });
+  });
+  editorExportRetry.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-export-retry", photoId: editorPhotoId });
+  });
+  editorExportDownload.addEventListener("click", () => {
+    if (editorPhotoId)
+      send({ kind: "editor-export-download", photoId: editorPhotoId });
+  });
+  for (const button of editorStages)
+    button.addEventListener("click", () => {
+      if (!editorPhotoId || button.disabled) return;
+      send({
+        kind: "editor-stage",
+        photoId: editorPhotoId,
+        stage: button.dataset.photoEditorStage as EditorStage,
+      });
+    });
+  editorRebind.addEventListener("click", () => {
+    if (!editorPhotoId || editorRebind.disabled) return;
+    send({ kind: "editor-rebind", photoId: editorPhotoId });
   });
   for (const button of photoToolsReturnButtons)
     button.addEventListener("click", () => returnToPhotoTools());
@@ -4859,7 +5520,15 @@ export function createLibraryBrowserView(
     renderPhotoFacts,
     renderPhotoMetadata,
     renderPhotoShell,
+    editorVisible,
+    renderEditor,
+    presentEditorPreview,
+    clearEditorPreview,
     presentReviewImage,
+    reviewImageUrl() {
+      const image = stage.querySelector<HTMLImageElement>("img");
+      return image?.src || undefined;
+    },
     reviewImageMatches(url) {
       if (!alive) return false;
       const image = stage.querySelector<HTMLImageElement>("img");
@@ -5122,6 +5791,7 @@ function gridPhotoFacts(
   const facts: string[] = [];
   if (!photo.available) facts.push("Photo unavailable");
   if (photo.original.kind === "raw") facts.push("RAW");
+  if (photo.hasSavedEdits) facts.push("Edited");
   if (photo.preview.state === "unavailable") facts.push("Preview unavailable");
   if (photo.preview.state === "failed") facts.push("Preview failed");
   if (deliveryFailed) facts.push("Thumbnail delivery failed");
@@ -5143,6 +5813,7 @@ function gridCellSignature(
     photo.original.kind,
     photo.selectionState,
     String(photo.rating),
+    photo.hasSavedEdits ? "edited" : "unedited",
     photo.preview.state,
     photo.preview.thumbnailUrl ?? "",
     deliveryFailed ? "delivery-failed" : "delivered",
