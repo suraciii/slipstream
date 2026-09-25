@@ -114,6 +114,19 @@ describe("removal owner review", () => {
     expect(owner.isReviewCurrent(other!)).toBe(false);
   });
 
+  test("adopts and withdraws the operation returned by the durable listing", () => {
+    const { fetcher } = recordingFetch(() => json(removalBody("unused", {})));
+    const owner = createRemovalOwner(fetcher);
+
+    owner.rememberOperation({ operationId: "op-1", removed: 2 });
+    expect(owner.operation).toEqual({ operationId: "op-1", removed: 2 });
+    owner.rememberOperation(undefined);
+    expect(owner.operation).toBeUndefined();
+    owner.dispose();
+    owner.rememberOperation({ operationId: "op-2", removed: 1 });
+    expect(owner.operation).toBeUndefined();
+  });
+
   test("confirm is refused without a review and admits only one request per review", async () => {
     const held = deferred<Response>();
     const { fetcher, requests } = recordingFetch(() => held.promise);

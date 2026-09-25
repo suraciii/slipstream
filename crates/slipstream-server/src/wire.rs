@@ -644,6 +644,7 @@ pub struct RemovedPhotosResponse {
     pub start: usize,
     pub limit: usize,
     pub total: usize,
+    pub operation: Option<PhotoOperationRemainderWire>,
     pub photos: Vec<RemovedPhotoWire>,
 }
 

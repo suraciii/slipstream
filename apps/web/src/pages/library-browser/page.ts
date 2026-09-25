@@ -441,6 +441,9 @@ function mountPrivateLibraryBrowser(
     | Readonly<{
         start: number;
         total: number;
+        operation:
+          | Readonly<{ operationId: string; removed: number }>
+          | undefined;
         items: ReadonlyArray<RemovedPhotoItem>;
       }>
     | undefined;
@@ -4196,7 +4199,7 @@ function mountPrivateLibraryBrowser(
     ];
     if (counts.changedElsewhere > 0)
       parts.push(
-        `${photoCountText(counts.changedElsewhere)} already in the Library.`,
+        `${photoCountText(counts.changedElsewhere)} could not be restored because their removal state changed elsewhere.`,
       );
     if (counts.missing > 0)
       parts.push(`${photoCountText(counts.missing)} no longer in the Library.`);
@@ -4413,9 +4416,22 @@ function mountPrivateLibraryBrowser(
     removedAbort = undefined;
     removedPending = false;
     if (result.kind === "ok") {
+      const pageStart =
+        result.total === 0
+          ? 0
+          : result.start >= result.total
+            ? Math.floor((result.total - 1) / REMOVED_PAGE_LIMIT) *
+              REMOVED_PAGE_LIMIT
+            : result.start;
+      if (pageStart !== result.start) {
+        void loadRemovedPage(pageStart, successMessage);
+        return;
+      }
+      removal.rememberOperation(result.operation);
       removedPage = {
         start: result.start,
         total: result.total,
+        operation: result.operation,
         items: result.photos,
       };
       removedMessage = successMessage;

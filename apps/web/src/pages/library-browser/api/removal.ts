@@ -69,6 +69,7 @@ export type RemovedPhotosResult =
       start: number;
       limit: number;
       total: number;
+      operation: Readonly<{ operationId: string; removed: number }> | undefined;
       photos: ReadonlyArray<RemovedPhotoItem>;
     }>
   | Readonly<{ kind: "failed"; status?: number; malformed?: true }>;
@@ -291,6 +292,20 @@ async function restorationWrite(
 /// The operation ids a restore touched, each naming how many Photos it still
 /// owns. Ids are distinct and non-empty and every count is a non-negative
 /// integer: zero says the operation owns nothing and may be withdrawn.
+/// The newest removal operation that still owns at least one removed Photo.
+const validRemovedOperation = (
+  value: unknown,
+): value is Readonly<{ operationId: string; removed: number }> | null =>
+  value === null ||
+  (isRecord(value) &&
+    hasExactKeys(value, ["operationId", "removed"]) &&
+    typeof value.operationId === "string" &&
+    value.operationId.length > 0 &&
+    validCount(value.removed));
+
+/// The operation ids a restore touched, each naming how many Photos it still
+/// owns. Ids are distinct and non-empty and every count is a non-negative
+/// integer: zero says the operation owns nothing and may be withdrawn.
 const validRestoredOperations = (
   value: unknown,
 ): value is ReadonlyArray<
@@ -339,14 +354,23 @@ export async function fetchRemovedPhotos(
     const value: unknown = await response.json();
     if (
       !isRecord(value) ||
+      !hasExactKeys(value, [
+        "start",
+        "limit",
+        "total",
+        "operation",
+        "photos",
+      ]) ||
       value.start !== input.start ||
       value.limit !== input.limit ||
       !validCount(value.total) ||
+      !validRemovedOperation(value.operation) ||
       !Array.isArray(value.photos) ||
       // A page is complete for its position: a response that omits rows it
-      // claims to have cannot be presented as the whole page.
+      // claims to have cannot be presented as the whole page. A stale offset
+      // after a restore is a valid empty page, not a malformed response.
       value.photos.length !==
-        Math.min(input.limit, value.total - input.start) ||
+        Math.max(0, Math.min(input.limit, value.total - input.start)) ||
       !value.photos.every(validRemovedPhotoItem)
     )
       return Object.freeze({ kind: "failed", malformed: true });
@@ -358,6 +382,13 @@ export async function fetchRemovedPhotos(
       start: input.start,
       limit: input.limit,
       total: value.total,
+      operation:
+        value.operation === null
+          ? undefined
+          : Object.freeze({
+              operationId: value.operation.operationId,
+              removed: value.operation.removed,
+            }),
       photos: Object.freeze(
         photos.map((item) =>
           Object.freeze({ removedAtMs: item.removedAtMs, photo: item.photo }),

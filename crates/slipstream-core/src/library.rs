@@ -5,11 +5,11 @@ use crate::{
     EditRecipeRead, EditRecipeWriteOutcome, ExportAttempt, ExportLeaseOutcome, ExportRecord,
     ExportRetryOutcome, ExportSettlement, ExportSubmission, ExportSubmissionResolution,
     ExportSubmitOutcome, ExportSweepResult, LibraryRoot, NativeWorkBudget, NativeWorkPermit,
-    OriginalCapability, PhotoAlbumMembership, PhotoQuery, PhotoQueryError, PhotoQueryProjection,
-    PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration, PhotoRestorationResult,
-    PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation, PhotoStateMutationResult,
-    PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey, RemovedPhotoRecord,
-    RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
+    OriginalCapability, PhotoAlbumMembership, PhotoOperationRemainder, PhotoQuery, PhotoQueryError,
+    PhotoQueryProjection, PhotoRead, PhotoRemovalMutation, PhotoRemovalResult, PhotoRestoration,
+    PhotoRestorationResult, PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateMutation,
+    PhotoStateMutationResult, PreviewSeed, PreviewSeedResult, RebindEditRecipe, RecoverySurvey,
+    RemovedPhotoRecord, RequestedRelocation, SaveEditRecipe, ScanLimits, ScanResult, ScanSnapshot,
     capture::capture_source_revision,
     persistence::{
         AlbumWriteError, DatabaseName, MutationError, Persistence, PersistenceError,
@@ -1150,7 +1150,14 @@ impl Library {
         &self,
         start: usize,
         limit: usize,
-    ) -> Result<(Vec<RemovedPhotoRecord>, usize), LibraryError> {
+    ) -> Result<
+        (
+            Vec<RemovedPhotoRecord>,
+            usize,
+            Option<PhotoOperationRemainder>,
+        ),
+        LibraryError,
+    > {
         let receive = {
             let _admission = self.admit()?;
             self.persistence.removed_photos_receiver(start, limit)?

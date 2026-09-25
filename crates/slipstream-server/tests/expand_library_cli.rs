@@ -54,7 +54,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
     let database = state.join("library.sqlite");
     let connection = Connection::open(&database).unwrap();
     connection
-        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v8.sql"))
+        .execute_batch(include_str!("../../../compatibility/sqlite/schema-v9.sql"))
         .unwrap();
     connection
         .execute(
@@ -70,7 +70,7 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
         .unwrap();
     connection
         .execute(
-            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating) VALUES('legacy-photo','legacy-original',1,'inspection-pending','a.ARW','selected',4)",
+            "INSERT INTO photos(id,original_id,available,preview_state,sort_path,selection_state,rating,removed_at_ms,removed_operation) VALUES('legacy-photo','legacy-original',1,'inspection-pending','a.ARW','selected',4,123,'prior-operation')",
             [],
         )
         .unwrap();
@@ -126,12 +126,19 @@ fn expand_library_command_updates_binding_and_location_then_scans() {
     assert_eq!(
         connection
             .query_row(
-                "SELECT selection_state,rating FROM photos WHERE id='legacy-photo'",
+                "SELECT selection_state,rating,removed_at_ms,removed_operation FROM photos WHERE id='legacy-photo'",
                 [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u8>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u8>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .unwrap(),
-        ("selected".to_owned(), 4)
+        ("selected".to_owned(), 4, 123, "prior-operation".to_owned())
     );
     assert_eq!(
         connection

@@ -1816,7 +1816,8 @@ impl Application {
                 operation_id: operation_id.to_owned(),
             })
             .await?;
-        self.shared.patch_photo_removals(&result.removed, true);
+        self.shared
+            .patch_photo_removals(&result.newly_removed, true);
         Ok(PhotoRemovalResponse {
             operation_id: result.operation_id,
             counts: PhotoRemovalCountsWire {
@@ -1878,7 +1879,7 @@ impl Application {
         // publication, so a removal or restore committed between them cannot
         // present a row whose removal the Library no longer holds.
         let _publication = self.shared.publication.lock().await;
-        let (records, total) = self.library.removed_photos(start, limit).await?;
+        let (records, total, operation) = self.library.removed_photos(start, limit).await?;
         let facts = {
             let guard = self
                 .shared
@@ -1931,6 +1932,10 @@ impl Application {
             start,
             limit,
             total,
+            operation: operation.map(|operation| PhotoOperationRemainderWire {
+                operation_id: operation.operation_id,
+                removed: operation.removed,
+            }),
             photos,
         })
     }

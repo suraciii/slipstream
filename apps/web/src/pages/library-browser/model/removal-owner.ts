@@ -59,6 +59,9 @@ export interface RemovalOwner {
         settlement: Promise<RestorationOutcome>;
       }>
     | undefined;
+  rememberOperation(
+    operation: Readonly<{ operationId: string; removed: number }> | undefined,
+  ): void;
   forgetOperation(operationId: string): void;
   restorePhotos(
     markers: ReadonlyArray<RemovalMarker>,
@@ -219,6 +222,16 @@ export function createRemovalOwner(
         operationId: confirmed.operationId,
         settlement: admission.settlement,
       });
+    },
+    rememberOperation: (next) => {
+      if (closed) return;
+      operation =
+        next && next.removed > 0
+          ? Object.freeze({
+              operationId: next.operationId,
+              removed: next.removed,
+            })
+          : undefined;
     },
     forgetOperation: (operationId) => {
       if (operation?.operationId === operationId) operation = undefined;

@@ -1876,11 +1876,14 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
     page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
   ).toBeVisible();
 
-  // The Removed Photos listing is the durable recovery path, and it carries
-  // the operation-level Undo for the removal the Photographer just confirmed.
+  // The operation-level Undo is recovered from persisted removal state after
+  // the page owner is recreated by a reload.
+  await page.reload();
+  await expect(
+    page.getByRole("link", { name: /^All Photos 1 Photo$/ }),
+  ).toBeVisible();
   await page.locator("[data-removed-open]").click();
   const removed = page.locator("[data-removed-panel]");
-  await expect(removed).toBeVisible();
   await expect(page.locator("[data-removed-status]")).toHaveText(
     "2 Photos removed from the Library. Showing 1–2.",
   );
@@ -1952,6 +1955,37 @@ test("rejected Photos leave the Library, return from Undo, and are restored from
   await expect(
     page.locator("[data-removed-list] .removed-name"),
   ).not.toHaveText(restoredName);
+  // A stale listing marker is answered truthfully: the Photo remains removed
+  // and the Photographer is told that its removal state changed elsewhere.
+  await page.route("**/api/photos/restore", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}") as {
+      photos?: ReadonlyArray<{ id?: unknown }>;
+    };
+    const photoId = body.photos?.[0]?.id;
+    if (typeof photoId !== "string")
+      throw new Error("restore request did not name a Photo");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        counts: { restored: 0, changedElsewhere: 1, missing: 0 },
+        changedElsewhere: [photoId],
+        missing: [],
+        operations: [],
+      }),
+    });
+  });
+  await page
+    .locator("[data-removed-list] .removed-item")
+    .getByRole("button", { name: "Restore" })
+    .click();
+  await expect(page.locator("[data-removed-message]")).toHaveText(
+    "Nothing was restored. 1 Photo could not be restored because their removal state changed elsewhere.",
+  );
+  await expect(page.locator("[data-removed-list] .removed-item")).toHaveCount(
+    1,
+  );
+  await page.unroute("**/api/photos/restore");
 });
 
 test("EXIF-rotated thumbnails display the corrected orientation exactly once", async ({

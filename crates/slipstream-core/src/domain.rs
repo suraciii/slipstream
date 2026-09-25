@@ -814,13 +814,14 @@ pub struct PhotoRemovalCounts {
 
 /// One outcome per requested Photo, with the identities that were not newly
 /// removed. Removed Photos are reported by count on the wire because the
-/// operation id is what restores them; the server still patches the removed
-/// fact of exactly these Photos into its published Library.
+/// operation id is what restores them; the server patches only
+/// `newly_removed` into its published Library.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhotoRemovalResult {
     pub operation_id: String,
     pub counts: PhotoRemovalCounts,
     pub removed: Vec<String>,
+    pub newly_removed: Vec<String>,
     pub changed_elsewhere: Vec<String>,
     pub missing: Vec<String>,
     pub already_removed: Vec<String>,

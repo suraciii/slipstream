@@ -27,6 +27,10 @@ Both are null together or set together. A removed Photo keeps its row, so every 
 ### Removal Operation
 
 A Removal Operation is one confirmed removal of one reviewed result. Its identity is an opaque id supplied by the browser, so a retry after a lost response repeats the same operation instead of creating a second one. The operation owns the group of Photos that Undo restores.
+The operation outcome is also recorded durably as an idempotency receipt. The
+receipt keeps the reviewed Photo sequence and its immutable outcomes; it is not
+a second copy of Photo recovery state. A retry after the Photos have been
+restored returns the original outcome without applying a second removal.
 
 ### Removed Source Materialization
 
@@ -37,6 +41,9 @@ A removed Photo is not deleted state: reading it by identity still resolves, and
 ### Removed Photos Listing
 
 The Removed Photos listing is a bounded page over removed Photos in removal order. Each item carries the Photo facts Grid and Photo View already use, so the Photographer can recognize what is recoverable before restoring it. It is not a source and does not create a second browsing model.
+The listing response also reports the newest operation that still owns a
+Removed Photo and its remaining count. The browser uses that durable summary to
+restore operation-level Undo after a reload or restart.
 
 ## Semantics
 

@@ -7853,6 +7853,10 @@ async fn rejected_result_removal_hides_photos_and_undo_restores_them_exactly() {
     assert_eq!(listing["total"], 2);
     assert_eq!(listing["start"], 0);
     assert_eq!(listing["limit"], 60);
+    assert_eq!(
+        listing["operation"],
+        serde_json::json!({"operationId": operation_id, "removed": 2})
+    );
     let listed = listing["photos"].as_array().unwrap();
     assert_eq!(listed.len(), 2);
     let listed_ids = listed
@@ -7891,6 +7895,21 @@ async fn rejected_result_removal_hides_photos_and_undo_restores_them_exactly() {
     assert_eq!(restored["missing"], serde_json::json!([]));
     let (_, overview) = get_json(&router, "/api/overview").await;
     assert_eq!(overview["photoCount"], 3);
+    let (_, listing) = get_json(&router, "/api/photos/removed?start=0&limit=60").await;
+    assert_eq!(listing["total"], 0);
+    assert_eq!(listing["operation"], serde_json::Value::Null);
+    assert_eq!(listing["photos"], serde_json::json!([]));
+    let retried = response_json(
+        post_json(
+            &router,
+            "/api/photos/remove",
+            serde_json::json!({"token": token, "operationId": operation_id}),
+            Some("https://camera.local"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(retried["counts"]["removed"], 2);
     let (_, listing) = get_json(&router, "/api/photos/removed?start=0&limit=60").await;
     assert_eq!(listing["total"], 0);
     assert_eq!(listing["photos"], serde_json::json!([]));
