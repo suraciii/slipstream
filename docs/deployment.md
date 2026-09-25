@@ -77,12 +77,20 @@ the image by its `sha256:` identifier, not by tag.
 
 A refused start must not consume the instance. The launcher claims the
 instance identity before it verifies the image and host, and it makes the
-instance journal durable before any check that can refuse the start. A start
-that is refused after claiming removes the claim it created, so a later start
-with a corrected configuration starts normally. A claim whose instance root
-has no journal is never adopted: the launcher refuses the start and preserves
-the existing ownership evidence. Deleting claim files is never part of
-recovery.
+instance journal durable before any check that can refuse the start. A Photo
+start that is refused after claiming removes the claim it created, so a later
+start with a corrected configuration starts normally. The qualification,
+film, and qualified executors keep the claim of a refused start and preserve
+today's refusal behavior.
+
+Two failure points can still leave a claim without a journal: a failure
+inside claim creation before the claim is exclusively held, and a crash
+between claiming and the durable journal. Both leave the start refused
+instead of adopting a claim without a journal, so the instance stays
+unavailable and the state stays readable as evidence. The documented recovery
+for that state is to confirm no launcher is running, remove the stale claim,
+and start again; the next start initializes the instance root. Deleting the
+claim of a running launcher is never part of recovery.
 
 After an approved production configuration and its exact policy/bundle
 identities are installed, load the unit and start the instance:

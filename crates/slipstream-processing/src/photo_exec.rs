@@ -364,16 +364,12 @@ impl PhotoExecutor {
             memory_bytes: 128 * 1024 * 1024,
             receipt_retention_seconds: config.receipt_retention_seconds,
         };
-        let (instance_claim, fresh) = journal::claim_instance(&authority)?;
-        // The claim becomes removable the moment this process owns it: if any
-        // step below fails, a claim this process created is removed before the
-        // error returns, so a refused start never leaves a registry-less
-        // claim behind. The retained descriptor keeps the exclusive flock
-        // while the removal happens.
-        let claim = InstanceClaim {
-            removable_path: fresh.then(|| claim_path(&config.instance)),
-            file: Some(instance_claim),
-        };
+        // The claim comes back as a lease: a claim this process created is
+        // removed by the guard if any step below fails, so a refused start
+        // never leaves a registry-less claim behind. The acquisition itself
+        // arms the lease, so no call-site ordering can skip it; the retained
+        // descriptor keeps the exclusive flock while the file is unlinked.
+        let claim = journal::claim_instance(&authority)?;
         // The registry is made durable before any check that can refuse the
         // start. Every later failure leaves a claim with a durable registry,
         // which the next start loads instead of re-initializing.
@@ -2819,37 +2815,6 @@ fn restore_registry(root: &Path, config: &Config) -> Result<Registry, ErrorCode>
     }))
 }
 
-/// The host-wide claim path of one instance identity.
-fn claim_path(instance: &str) -> PathBuf {
-    Path::new("/var/lib/slipstream-processing/instances").join(format!("{instance}.claim"))
-}
-
-/// The instance claim this open holds. A claim this process created is
-/// removed if the open fails: the retained descriptor keeps the exclusive
-/// flock while the file is unlinked, so no other owner can take the claim in
-/// between, and a corrected configuration can start again instead of finding
-/// a registry-less claim quarantined. A claim created by an earlier owner is
-/// never removed here.
-struct InstanceClaim {
-    removable_path: Option<PathBuf>,
-    file: Option<File>,
-}
-
-impl InstanceClaim {
-    /// Disarm the guard and keep the claim for the executor's lifetime.
-    fn take(mut self) -> File {
-        self.file.take().expect("claim descriptor")
-    }
-}
-
-impl Drop for InstanceClaim {
-    fn drop(&mut self) {
-        if let (Some(path), Some(_)) = (self.removable_path.take(), self.file.as_ref()) {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4040,35 +4005,25 @@ mod tests {
         let root = temp_dir("fresh-claim");
         let path = root.join("instance.claim");
         let claim_root = root.display().to_string();
-        // A fresh claim is removed when the open fails after claiming.
-        let (file, fresh) = journal::hold_claim(&path, &root, &claim_root).unwrap();
-        assert!(fresh);
-        drop(InstanceClaim {
-            removable_path: Some(path.clone()),
-            file: Some(file),
-        });
+        // The acquisition itself arms the lease: a fresh claim is removed
+        // when the open fails after claiming.
+        let claim = journal::hold_claim(&path, &root, &claim_root).unwrap();
+        drop(claim);
         assert!(!path.try_exists().unwrap());
-        // A disarmed guard keeps the claim for the executor's lifetime.
-        let (file, fresh) = journal::hold_claim(&path, &root, &claim_root).unwrap();
-        assert!(fresh);
-        let claim = InstanceClaim {
-            removable_path: Some(path.clone()),
-            file: Some(file),
-        };
-        // take() consumes the guard and disarms it: the claim file stays and
-        // the released descriptor frees the flock.
-        drop(claim.take());
+        // Disarming by value keeps the claim for the executor's lifetime.
+        drop(
+            journal::hold_claim(&path, &root, &claim_root)
+                .unwrap()
+                .take(),
+        );
         assert!(path.try_exists().unwrap());
-        // A claim created by an earlier owner is never removable here; the
-        // quarantine in the shared claim path is what refuses a registry-less
-        // one.
+        // A claim created by an earlier owner is never a lease, so a failure
+        // here can never remove it; the quarantine in the shared claim path
+        // is what refuses a registry-less one.
         fs::File::create(root.join("registry.json")).unwrap();
-        let (file, fresh) = journal::hold_claim(&path, &root, &claim_root).unwrap();
-        assert!(!fresh);
-        drop(InstanceClaim {
-            removable_path: None,
-            file: Some(file),
-        });
+        // Dropping the non-lease keeps the file: a failure here can never
+        // remove a claim created by an earlier owner.
+        drop(journal::hold_claim(&path, &root, &claim_root).unwrap());
         assert!(path.try_exists().unwrap());
         fs::remove_dir_all(&root).unwrap();
     }

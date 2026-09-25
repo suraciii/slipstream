@@ -11,7 +11,7 @@ use std::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -174,7 +174,11 @@ impl Executor {
                 Ok::<_, ErrorCode>((c, documents, launcher))
             })
             .transpose()?;
-        let (instance_claim, _fresh) = claim_instance(&config)?;
+        // The qualification, film, and qualified executors keep the claim for
+        // their lifetime and ignore the lease: removing a refused start's
+        // claim is the photo executor's policy. Taking the guard here is
+        // infallible, so no fallible step can run while the lease is armed.
+        let _instance_claim = claim_instance(&config)?.take();
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -271,7 +275,7 @@ impl Executor {
             qualified,
             policy,
             _lock: lock,
-            _instance_claim: instance_claim,
+            _instance_claim,
         });
         Ok(executor)
     }
@@ -1641,19 +1645,49 @@ struct Claim {
     root: String,
 }
 
+/// One exclusively held instance claim. A claim this process created is a
+/// lease: if the holder fails before disarming, the drop removes the file, so
+/// a refused start never leaves a registry-less claim behind. The retained
+/// descriptor keeps the exclusive flock while the file is unlinked, so no
+/// other owner can take the claim in between. A claim created by an earlier
+/// owner is never a lease and is never removed here. Disarm by value with
+/// [`InstanceClaim::take`] once the start owns the claim for its lifetime.
+pub(crate) struct InstanceClaim {
+    lease: Option<PathBuf>,
+    file: Option<File>,
+}
+
+impl InstanceClaim {
+    /// Disarm the lease and keep the claim for the executor's lifetime.
+    pub(crate) fn take(mut self) -> File {
+        self.file.take().expect("claim descriptor")
+    }
+}
+
+impl Drop for InstanceClaim {
+    fn drop(&mut self) {
+        if let (Some(path), Some(_)) = (self.lease.take(), self.file.as_ref()) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Create or adopt the instance claim file at `path` and take its exclusive
-/// flock. Returns the retained descriptor and whether this process created
-/// the claim. The identity semantics are shared by every processing
-/// executor: version 1, an exact root match, one claim per instance, and a
-/// busy refusal while another owner holds the flock. An existing claim whose
-/// root has no registry stays quarantined: the flock proves exclusivity, not
+/// flock. The identity semantics are shared by every processing executor:
+/// version 1, an exact root match, one claim per instance, and a busy refusal
+/// while another owner holds the flock. An existing claim whose root has no
+/// registry stays quarantined: the flock proves exclusivity, not
 /// completeness, so a lost or never-written registry is never adopted and the
-/// previous ownership evidence survives.
+/// previous ownership evidence survives. A fresh claim whose write fails
+/// after the flock is taken is removed before the error returns, because the
+/// holder is then the only possible flock owner; a failure before the flock
+/// (including losing the create-to-flock race) leaves the file to the race
+/// winner or to the quarantine.
 pub(crate) fn hold_claim(
     path: &Path,
     namespace: &Path,
     root: &str,
-) -> Result<(File, bool), ErrorCode> {
+) -> Result<InstanceClaim, ErrorCode> {
     let (mut file, fresh) = match OpenOptions::new()
         .read(true)
         .write(true)
@@ -1690,20 +1724,30 @@ pub(crate) fn hold_claim(
         return Err(ErrorCode::Busy);
     }
     if fresh {
-        let bytes = serde_json::to_vec(&Claim {
-            version: 1,
-            root: root.to_owned(),
-        })
-        .map_err(|_| ErrorCode::Uncertain)?;
-        if bytes.len() > REQUEST_BYTES {
-            return Err(ErrorCode::Uncertain);
+        let write = (|| {
+            let bytes = serde_json::to_vec(&Claim {
+                version: 1,
+                root: root.to_owned(),
+            })
+            .map_err(|_| ErrorCode::Uncertain)?;
+            if bytes.len() > REQUEST_BYTES {
+                return Err(ErrorCode::Uncertain);
+            }
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| ErrorCode::Uncertain)?;
+            File::open(namespace)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| ErrorCode::Uncertain)?;
+            Ok(())
+        })();
+        if let Err(error) = write {
+            // This process holds the only flock on this inode, so removing
+            // the file cannot take the claim from another owner; a failed
+            // creation must not quarantine the instance.
+            let _ = fs::remove_file(path);
+            return Err(error);
         }
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|_| ErrorCode::Uncertain)?;
-        File::open(namespace)
-            .and_then(|file| file.sync_all())
-            .map_err(|_| ErrorCode::Uncertain)?;
     } else {
         let mut bytes = Vec::new();
         (&mut file)
@@ -1724,10 +1768,13 @@ pub(crate) fn hold_claim(
             return Err(ErrorCode::Uncertain);
         }
     }
-    Ok((file, fresh))
+    Ok(InstanceClaim {
+        lease: fresh.then(|| path.to_owned()),
+        file: Some(file),
+    })
 }
 
-pub(crate) fn claim_instance(config: &Config) -> Result<(File, bool), ErrorCode> {
+pub(crate) fn claim_instance(config: &Config) -> Result<InstanceClaim, ErrorCode> {
     let namespace = Path::new("/var/lib/slipstream-processing/instances");
     for path in [Path::new("/var/lib/slipstream-processing"), namespace] {
         if !path.try_exists().map_err(|_| ErrorCode::Uncertain)? {
@@ -1957,7 +2004,7 @@ pub(crate) mod tests {
     }
 
     /// Claims hold an exclusive descriptor, so assertions compare outcomes.
-    fn claim_error(claim: Result<(File, bool), ErrorCode>) -> ErrorCode {
+    fn claim_error(claim: Result<InstanceClaim, ErrorCode>) -> ErrorCode {
         claim.err().unwrap()
     }
 
@@ -1986,11 +2033,19 @@ pub(crate) mod tests {
         let dir = claim_dir("quarantine");
         let path = dir.join("instance.claim");
         let root = dir.display().to_string();
-        // A first start that was refused after claiming leaves exactly this
-        // state: a released claim file and no registry.json.
-        let (file, fresh) = hold_claim(&path, &dir, &root).unwrap();
-        assert!(fresh);
-        drop(file);
+        // Residue of a crash between claiming and the durable journal: a
+        // claim file with no live holder and no registry. The lease of a
+        // graceful failed start removes itself, so this state is written by
+        // hand the way the dead process left it.
+        write_claim_file(
+            &path,
+            &serde_json::to_vec(&Claim {
+                version: 1,
+                root: root.clone(),
+            })
+            .unwrap(),
+            0o600,
+        );
         assert!(!dir.join("registry.json").try_exists().unwrap());
         // The claim alone proves exclusivity, not completeness, so the
         // registry-less state is never adopted.
@@ -1998,10 +2053,10 @@ pub(crate) mod tests {
             claim_error(hold_claim(&path, &dir, &root)),
             ErrorCode::Uncertain
         );
-        // Once the root is initialized, the claim is adoptable again.
+        // Once the root is initialized, the same claim is adoptable as a
+        // non-lease that a failure here can never remove.
         fs::File::create(dir.join("registry.json")).unwrap();
-        let (adopted, fresh) = hold_claim(&path, &dir, &root).unwrap();
-        assert!(!fresh);
+        let adopted = hold_claim(&path, &dir, &root).unwrap();
         // Adoption keeps the recorded identity; it never rewrites the claim.
         let claim: Claim = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(claim.version, 1);
@@ -2015,10 +2070,13 @@ pub(crate) mod tests {
         let dir = claim_dir("busy");
         let path = dir.join("instance.claim");
         let held = hold_claim(&path, &dir, "/var/lib/slipstream-processing/a").unwrap();
+        // Losing the create-to-flock race is a Busy refusal that leaves the
+        // file to the live holder; it is never removed by the loser.
         assert_eq!(
             claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
             ErrorCode::Busy
         );
+        assert!(path.try_exists().unwrap());
         drop(held);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2028,7 +2086,15 @@ pub(crate) mod tests {
         let dir = claim_dir("foreign");
         let path = dir.join("instance.claim");
         // A claim written for a different root is never adoptable.
-        drop(hold_claim(&path, &dir, "/var/lib/slipstream-processing/other").unwrap());
+        write_claim_file(
+            &path,
+            &serde_json::to_vec(&Claim {
+                version: 1,
+                root: "/var/lib/slipstream-processing/other".to_owned(),
+            })
+            .unwrap(),
+            0o600,
+        );
         assert_eq!(
             claim_error(hold_claim(&path, &dir, "/var/lib/slipstream-processing/a")),
             ErrorCode::Uncertain
