@@ -1,3 +1,4 @@
+use crate::wire::BrowseSelectionFilter;
 use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
@@ -37,6 +38,10 @@ impl RetainedKind {
 pub(crate) struct RetainedQuery {
     pub(crate) kind: RetainedKind,
     pub(crate) ids: Vec<String>,
+    /// The Selection State filter one Browse Snapshot was created with.
+    /// Removal admission reads it, so a reviewed result can only be removed
+    /// from the view it was reviewed in.
+    pub(crate) filter: Option<BrowseSelectionFilter>,
     pub(crate) last_used: Instant,
     pub(crate) evaluated_at: SystemTime,
 }
@@ -64,6 +69,7 @@ impl QueryRegistry {
         &mut self,
         token: String,
         kind: RetainedKind,
+        filter: Option<BrowseSelectionFilter>,
         ids: Vec<String>,
         now: Instant,
         evaluated_at: SystemTime,
@@ -95,6 +101,7 @@ impl QueryRegistry {
             RetainedQuery {
                 kind,
                 ids,
+                filter,
                 last_used: now,
                 evaluated_at,
             },
@@ -138,6 +145,23 @@ impl QueryRegistry {
         }
         query.last_used = now;
         Some(query.ids.iter().position(|candidate| candidate == id))
+    }
+
+    /// The complete frozen sequence of one Browse Snapshot together with the
+    /// Selection State filter it was created with. Removal reads the whole
+    /// reviewed result, never one window of it.
+    pub(crate) fn browse_snapshot(
+        &mut self,
+        token: &str,
+        now: Instant,
+    ) -> Option<(Vec<String>, Option<BrowseSelectionFilter>)> {
+        self.prune(now);
+        let query = self.entries.get_mut(token)?;
+        if query.kind != RetainedKind::Browse {
+            return None;
+        }
+        query.last_used = now;
+        Some((query.ids.clone(), query.filter))
     }
 
     pub(crate) fn remove(&mut self, token: &str) {
@@ -389,6 +413,7 @@ mod tests {
             .insert(
                 "browse".to_owned(),
                 RetainedKind::Browse,
+                Some(BrowseSelectionFilter::Rejected),
                 vec!["1".to_owned(), "2".to_owned()],
                 start,
                 wall,
@@ -398,6 +423,7 @@ mod tests {
             .insert(
                 "album".to_owned(),
                 RetainedKind::Album,
+                None,
                 vec!["3".to_owned()],
                 start + Duration::from_secs(1),
                 wall,
@@ -407,6 +433,7 @@ mod tests {
             .insert(
                 "photo".to_owned(),
                 RetainedKind::Photo,
+                None,
                 vec!["4".to_owned(), "5".to_owned(), "6".to_owned()],
                 start + Duration::from_secs(2),
                 wall,
@@ -420,6 +447,7 @@ mod tests {
                 .insert(
                     "oversized".to_owned(),
                     RetainedKind::Photo,
+                    None,
                     vec!["x".to_owned(); 6],
                     start,
                     wall,

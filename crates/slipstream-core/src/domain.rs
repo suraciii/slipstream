@@ -167,6 +167,10 @@ pub struct PhotoRecord {
     pub selection_state: SelectionState,
     pub rating: u8,
     pub has_saved_edits: bool,
+    /// Whether the Photographer removed this Photo from the Library. A removed
+    /// Photo keeps its row and every retained fact; normal Library sources
+    /// exclude it until it is restored.
+    pub removed: bool,
 }
 
 /// One persisted content fingerprint for an Original File at one observed
@@ -788,6 +792,89 @@ pub struct PhotoStateBatchResult {
     pub applied: Vec<PhotoStateBatchApplied>,
     pub changed_elsewhere: Vec<PhotoStateBatchChangedElsewhere>,
     pub missing: Vec<PhotoStateBatchMissing>,
+}
+
+/// One confirmed removal of one reviewed rejected result. The operation id
+/// comes from the browser so a retried request repeats the same operation
+/// instead of creating a second one, and so Undo can name the whole group
+/// without transferring a Photo list.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRemovalMutation {
+    pub photo_ids: Vec<String>,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PhotoRemovalCounts {
+    pub removed: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+    pub already_removed: usize,
+}
+
+/// One outcome per requested Photo, with the identities that were not newly
+/// removed. Removed Photos are reported by count on the wire because the
+/// operation id is what restores them; the server patches only
+/// `newly_removed` into its published Library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRemovalResult {
+    pub operation_id: String,
+    pub counts: PhotoRemovalCounts,
+    pub removed: Vec<String>,
+    pub newly_removed: Vec<String>,
+    pub changed_elsewhere: Vec<String>,
+    pub missing: Vec<String>,
+    pub already_removed: Vec<String>,
+}
+
+/// What one restore request names: every Photo an operation still owns, or an
+/// explicit bounded set of Photos.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PhotoRestoration {
+    Operation(String),
+    Photos(Vec<PhotoRemovalMarker>),
+}
+
+/// One Photo an explicit restore names together with the removal marker the
+/// caller reviewed. The marker makes the restore a compare-and-set: a removal
+/// that changed after the caller read it is reported as changed elsewhere
+/// instead of being overwritten.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRemovalMarker {
+    pub photo_id: String,
+    pub removed_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PhotoRestorationCounts {
+    pub restored: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+}
+
+/// How many Photos one removal operation still owns. An operation with nothing
+/// left is reported with zero, so a surface that offers Undo for it can stop
+/// claiming a count the Library no longer holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoOperationRemainder {
+    pub operation_id: String,
+    pub removed: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhotoRestorationResult {
+    pub restored: Vec<String>,
+    pub counts: PhotoRestorationCounts,
+    pub changed_elsewhere: Vec<String>,
+    pub missing: Vec<String>,
+    pub operations: Vec<PhotoOperationRemainder>,
+}
+
+/// One removed Photo in removal order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovedPhotoRecord {
+    pub photo_id: String,
+    pub removed_at_ms: i64,
 }
 
 /// The largest Rating a Photo decision may carry.

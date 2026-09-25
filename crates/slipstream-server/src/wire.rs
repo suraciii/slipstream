@@ -587,6 +587,77 @@ pub struct BrowseWindowResponse {
     pub photos: Vec<PhotoSummary>,
 }
 
+/// One confirmed removal. Removed Photos are reported by count because the
+/// operation id — not a Photo list — is what Undo restores; every Photo that
+/// was not newly removed is named.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRemovalResponse {
+    pub operation_id: String,
+    pub counts: PhotoRemovalCountsWire,
+    pub changed_elsewhere: Vec<String>,
+    pub missing: Vec<String>,
+    pub already_removed: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRemovalCountsWire {
+    pub removed: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+    pub already_removed: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRestorationResponse {
+    pub counts: PhotoRestorationCountsWire,
+    pub changed_elsewhere: Vec<String>,
+    pub missing: Vec<String>,
+    pub operations: Vec<PhotoOperationRemainderWire>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoRestorationCountsWire {
+    pub restored: usize,
+    pub changed_elsewhere: usize,
+    pub missing: usize,
+}
+
+/// How many Photos one touched removal operation still owns. An operation with
+/// nothing left is reported with zero, so the surface offering its Undo stops
+/// claiming a count the Library no longer holds.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoOperationRemainderWire {
+    pub operation_id: String,
+    pub removed: usize,
+}
+
+/// One bounded page of removed Photos, newest removal first, with the same
+/// Photo facts Grid View uses to present one.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedPhotosResponse {
+    pub start: usize,
+    pub limit: usize,
+    pub total: usize,
+    pub operation: Option<PhotoOperationRemainderWire>,
+    pub photos: Vec<RemovedPhotoWire>,
+}
+
+/// One removed Photo with the exact removal marker the Photographer reviewed,
+/// so a restore can compare and set against it instead of clearing whatever
+/// removal the Photo carries now.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedPhotoWire {
+    pub removed_at_ms: i64,
+    pub photo: PhotoSummary,
+}
+
 #[derive(Clone, Debug)]
 pub enum BrowseSourceRequest {
     Library,
