@@ -1115,121 +1115,176 @@ pub struct RecoveryRejectionResponseWire {
     pub rejections: Vec<RecoveryRejectionWire>,
 }
 
-/// The immutable capture one accepted Export carries. Values are qualified
-/// facts only: no host path, engine-private setting, or executable value.
+/// The closed artifact metadata object. Its fields are exactly the download
+/// response headers, so a client validates a download field for field.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportSnapshotWire {
-    pub(crate) recipe_revision: String,
-    pub(crate) exposure_milli_ev: i64,
-    pub(crate) white_balance_mode: &'static str,
-    pub(crate) source_revision: String,
-    pub(crate) source_profile_id: String,
-    pub(crate) policy_id: String,
-    pub(crate) bundle_id: String,
-    pub(crate) workload: &'static str,
-}
-
-/// Verified staged-source evidence recorded between acceptance and launch.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportSourceWire {
-    pub(crate) size: u64,
-    pub(crate) sha256: String,
-}
-
-/// The launcher-owned executor attempt identity of the current or latest
-/// attempt.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportAttemptWire {
-    pub(crate) incarnation: String,
-    pub(crate) sequence: u64,
-}
-
-/// Facts of one validated published artifact, including its disclosed
-/// retention expiry.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportArtifactWire {
-    pub(crate) size: u64,
+pub(crate) struct ExportArtifactWire {
+    pub(crate) export_id: String,
+    pub(crate) target: &'static str,
+    pub(crate) stage: &'static str,
+    pub(crate) content_type: &'static str,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) profile_identity: String,
+    pub(crate) byte_length: u64,
     pub(crate) sha256: String,
     pub(crate) expires_at: String,
 }
 
-/// One Export's inspectable state: the closed state, terminal outcome,
-/// captured identity, and artifact metadata.
+/// The body of one accepted Export submission or replay.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportWire {
-    pub(crate) id: String,
-    pub(crate) photo_id: String,
-    pub(crate) target: &'static str,
+pub(crate) struct ExportSubmitWire {
+    pub(crate) export_id: String,
     pub(crate) state: &'static str,
-    pub(crate) outcome: Option<String>,
-    pub(crate) attempt: Option<CliExportAttemptWire>,
-    pub(crate) snapshot: CliExportSnapshotWire,
-    pub(crate) source: Option<CliExportSourceWire>,
-    pub(crate) artifact: Option<CliExportArtifactWire>,
-    pub(crate) created_at: String,
-    pub(crate) settled_at: Option<String>,
-    pub(crate) retain_until: Option<String>,
+    pub(crate) target: &'static str,
+    pub(crate) recipe_version: String,
+    pub(crate) source_revision: String,
+    pub(crate) receipt_expires_at: Option<String>,
+    pub(crate) artifact_expires_at: Option<String>,
+}
+
+/// One bounded list entry of a Photo's retained Exports.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportSummaryWire {
+    pub(crate) export_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) target: &'static str,
 }
 
 /// Bounded list of one Photo's retained Exports.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CliExportListWire {
-    pub(crate) exports: Vec<CliExportWire>,
+pub(crate) struct ExportListWire {
+    pub(crate) exports: Vec<ExportSummaryWire>,
 }
 
-pub(crate) fn export_record(record: slipstream_core::ExportRecord) -> CliExportWire {
-    use slipstream_core::{EXPORT_AS_SHOT_WHITE_BALANCE, ExportRecipePayload};
-    fn exposure_milli_ev(exposure_ev: f64) -> i64 {
-        if exposure_ev.is_finite() {
-            (exposure_ev * 1_000.0).round() as i64
-        } else {
-            0
-        }
+/// One Export's full inspectable state with the closed artifact object.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportInspectWire {
+    pub(crate) export_id: String,
+    pub(crate) photo_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) target: &'static str,
+    pub(crate) recipe_version: String,
+    pub(crate) source_revision: String,
+    pub(crate) bundle_id: String,
+    pub(crate) terminal_outcome: Option<&'static str>,
+    pub(crate) failure_reason: Option<String>,
+    pub(crate) receipt_expires_at: Option<String>,
+    pub(crate) artifact: Option<ExportArtifactWire>,
+}
+
+/// The settled Export one cancellation returns.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportCancelWire {
+    pub(crate) export_id: String,
+    pub(crate) state: &'static str,
+    pub(crate) terminal_outcome: Option<&'static str>,
+}
+
+/// The admitted retry attempt.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportRetryWire {
+    pub(crate) export_id: String,
+    pub(crate) state: &'static str,
+}
+
+fn export_time(seconds: u64) -> String {
+    crate::queries::format_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+}
+
+fn terminal_outcome(state: slipstream_core::ExportState) -> Option<&'static str> {
+    match state {
+        slipstream_core::ExportState::Succeeded => Some("succeeded"),
+        slipstream_core::ExportState::Failed => Some("failed"),
+        slipstream_core::ExportState::Cancelled => Some("cancelled"),
+        slipstream_core::ExportState::Queued | slipstream_core::ExportState::Running => None,
     }
-    fn rfc3339(seconds: u64) -> String {
-        crate::queries::format_time(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
-    }
-    let payload = ExportRecipePayload {
-        exposure_milli_ev: exposure_milli_ev(record.snapshot.settings.exposure_ev),
-        white_balance_mode: EXPORT_AS_SHOT_WHITE_BALANCE,
-    };
-    CliExportWire {
-        id: record.id,
-        photo_id: record.snapshot.photo_id,
+}
+
+/// The receipt expiry with the submit response meaning: `null` while the
+/// Export is active, terminal settlement plus the reconciliation period for
+/// every terminal state.
+fn receipt_expires_at(record: &slipstream_core::ExportRecord) -> Option<String> {
+    record.retain_until.map(export_time)
+}
+
+/// The closed artifact object, or `null` when no validated artifact is
+/// retained.
+pub(crate) fn export_artifact_object(
+    record: &slipstream_core::ExportRecord,
+) -> Option<ExportArtifactWire> {
+    let artifact = record.artifact.as_ref()?;
+    Some(ExportArtifactWire {
+        export_id: record.id.clone(),
         target: "development-tiff",
+        stage: "develop",
+        content_type: "image/tiff",
+        width: artifact.width,
+        height: artifact.height,
+        profile_identity: artifact.profile_identity.clone(),
+        byte_length: artifact.size,
+        sha256: artifact.sha256.clone(),
+        expires_at: export_time(artifact.expires_at),
+    })
+}
+
+pub(crate) fn export_submit(record: &slipstream_core::ExportRecord) -> ExportSubmitWire {
+    ExportSubmitWire {
+        export_id: record.id.clone(),
         state: record.state.name(),
-        outcome: record.outcome,
-        attempt: record.attempt.map(|attempt| CliExportAttemptWire {
-            incarnation: attempt.incarnation,
-            sequence: attempt.sequence,
-        }),
-        snapshot: CliExportSnapshotWire {
-            recipe_revision: record.snapshot.recipe_revision,
-            exposure_milli_ev: payload.exposure_milli_ev,
-            white_balance_mode: payload.white_balance_mode,
-            source_revision: record.snapshot.source_revision,
-            source_profile_id: record.snapshot.source_profile_id,
-            policy_id: record.snapshot.policy_id,
-            bundle_id: record.snapshot.bundle_id,
-            workload: "development-tiff",
-        },
-        source: record.source.map(|source| CliExportSourceWire {
-            size: source.size,
-            sha256: source.sha256,
-        }),
-        artifact: record.artifact.map(|artifact| CliExportArtifactWire {
-            size: artifact.size,
-            sha256: artifact.sha256,
-            expires_at: rfc3339(artifact.expires_at),
-        }),
-        created_at: rfc3339(record.created_at),
-        settled_at: record.settled_at.map(rfc3339),
-        retain_until: record.retain_until.map(rfc3339),
+        target: "development-tiff",
+        recipe_version: record.snapshot.recipe_revision.clone(),
+        source_revision: record.snapshot.source_revision.clone(),
+        receipt_expires_at: receipt_expires_at(record),
+        artifact_expires_at: record
+            .artifact
+            .as_ref()
+            .map(|artifact| export_time(artifact.expires_at)),
+    }
+}
+
+pub(crate) fn export_summary(record: &slipstream_core::ExportRecord) -> ExportSummaryWire {
+    ExportSummaryWire {
+        export_id: record.id.clone(),
+        state: record.state.name(),
+        target: "development-tiff",
+    }
+}
+
+pub(crate) fn export_inspect(record: &slipstream_core::ExportRecord) -> ExportInspectWire {
+    ExportInspectWire {
+        export_id: record.id.clone(),
+        photo_id: record.snapshot.photo_id.clone(),
+        state: record.state.name(),
+        target: "development-tiff",
+        recipe_version: record.snapshot.recipe_revision.clone(),
+        source_revision: record.snapshot.source_revision.clone(),
+        bundle_id: record.snapshot.bundle_id.clone(),
+        terminal_outcome: terminal_outcome(record.state),
+        failure_reason: record.outcome.clone(),
+        receipt_expires_at: receipt_expires_at(record),
+        artifact: export_artifact_object(record),
+    }
+}
+
+pub(crate) fn export_cancel(record: &slipstream_core::ExportRecord) -> ExportCancelWire {
+    ExportCancelWire {
+        export_id: record.id.clone(),
+        state: record.state.name(),
+        terminal_outcome: terminal_outcome(record.state),
+    }
+}
+
+pub(crate) fn export_retry(record: &slipstream_core::ExportRecord) -> ExportRetryWire {
+    ExportRetryWire {
+        export_id: record.id.clone(),
+        state: record.state.name(),
     }
 }

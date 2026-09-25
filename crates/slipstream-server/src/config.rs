@@ -33,10 +33,18 @@ pub struct ProcessingConfig {
     pub(crate) instance: String,
     pub(crate) policy_sha256: String,
     pub(crate) bundle_sha256: String,
+    /// Test-only launcher socket override; production always derives the
+    /// launcher socket from the instance identity.
+    #[cfg(test)]
+    pub(crate) socket_override: Option<std::path::PathBuf>,
 }
 
 impl ProcessingConfig {
     pub(crate) fn socket_path(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(path) = &self.socket_override {
+            return path.clone();
+        }
         PathBuf::from(format!(
             "/run/slipstream-processing/{}/launcher.sock",
             self.instance
@@ -129,6 +137,8 @@ impl Config {
                     instance,
                     policy_sha256: policy,
                     bundle_sha256: bundle,
+                    #[cfg(test)]
+                    socket_override: None,
                 })
             }
         };

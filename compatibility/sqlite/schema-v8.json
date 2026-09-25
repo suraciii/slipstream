@@ -397,6 +397,27 @@
         },
         {
           "default": null,
+          "name": "artifact_width",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "artifact_height",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "artifact_profile_identity",
+          "notNull": false,
+          "primaryKey": 0,
+          "type": "TEXT"
+        },
+        {
+          "default": null,
           "name": "created_at",
           "notNull": true,
           "primaryKey": 0,
@@ -427,7 +448,7 @@
         }
       ],
       "name": "exports",
-      "sql": "createtableexports(idtextprimarykey,photo_idtextnotnullreferencesphotos(id)ondeleterestrict,targettextnotnullcheck(target='development-tiff'),statetextnotnullcheck(statein('queued','running','succeeded','failed','cancelled')),outcometextcheck(outcomeisnullorlength(outcome)between1and200),recipe_revisiontextnotnullcheck(length(recipe_revision)>0),exposure_evrealnotnull,white_balance_modetextnotnullcheck(white_balance_mode='as-shot'),source_revisiontextnotnullcheck(length(source_revision)>0),source_profile_idtextnotnullcheck(length(source_profile_id)between1and64),source_kindtextnotnullcheck(source_kind='raw'),source_sizeintegercheck(source_sizeisnullorsource_size>0),source_sha256textcheck(source_sha256isnullorlength(source_sha256)=64),recipe_digesttextnotnullcheck(length(recipe_digest)=64),policy_idtextnotnullcheck(length(policy_id)=64),bundle_idtextnotnullcheck(length(bundle_id)=64),workloadtextnotnullcheck(workload='development-tiff'),attempt_incarnationtextcheck(attempt_incarnationisnullorlength(attempt_incarnation)=64),attempt_sequenceintegercheck(attempt_sequenceisnullorattempt_sequence>0),artifact_sizeintegercheck(artifact_sizeisnullorartifact_size>0),artifact_sha256textcheck(artifact_sha256isnullorlength(artifact_sha256)=64),artifact_expires_atintegercheck(artifact_expires_atisnullorartifact_expires_at>=0),created_atintegernotnullcheck(created_at>=0),settled_atintegercheck(settled_atisnullorsettled_at>=0),retain_untilintegercheck(retain_untilisnullorretain_until>=0))",
+      "sql": "createtableexports(idtextprimarykey,photo_idtextnotnullreferencesphotos(id)ondeleterestrict,targettextnotnullcheck(target='development-tiff'),statetextnotnullcheck(statein('queued','running','succeeded','failed','cancelled')),outcometextcheck(outcomeisnullorlength(outcome)between1and200),recipe_revisiontextnotnullcheck(length(recipe_revision)>0),exposure_evrealnotnull,white_balance_modetextnotnullcheck(white_balance_mode='as-shot'),source_revisiontextnotnullcheck(length(source_revision)>0),source_profile_idtextnotnullcheck(length(source_profile_id)between1and64),source_kindtextnotnullcheck(source_kind='raw'),source_sizeintegercheck(source_sizeisnullorsource_size>0),source_sha256textcheck(source_sha256isnullorlength(source_sha256)=64),recipe_digesttextnotnullcheck(length(recipe_digest)=64),policy_idtextnotnullcheck(length(policy_id)=64),bundle_idtextnotnullcheck(length(bundle_id)=64),workloadtextnotnullcheck(workload='development-tiff'),attempt_incarnationtextcheck(attempt_incarnationisnullorlength(attempt_incarnation)=32),attempt_sequenceintegercheck(attempt_sequenceisnullorattempt_sequence>0),artifact_sizeintegercheck(artifact_sizeisnullorartifact_size>0),artifact_sha256textcheck(artifact_sha256isnullorlength(artifact_sha256)=64),artifact_expires_atintegercheck(artifact_expires_atisnullorartifact_expires_at>=0),artifact_widthintegercheck(artifact_widthisnullorartifact_width>0),artifact_heightintegercheck(artifact_heightisnullorartifact_height>0),artifact_profile_identitytextcheck(artifact_profile_identityisnullorlength(artifact_profile_identity)=64),created_atintegernotnullcheck(created_at>=0),settled_atintegercheck(settled_atisnullorsettled_at>=0),retain_untilintegercheck(retain_untilisnullorretain_until>=0))",
       "type": "table"
     },
     {

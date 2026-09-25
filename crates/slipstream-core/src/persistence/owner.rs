@@ -761,6 +761,7 @@ enum Command {
     RetryExport {
         export_id: String,
         request_id: String,
+        expected_bundle_id: String,
         allowance: u64,
         reply: Reply<ExportRetryOutcome>,
     },
@@ -1299,6 +1300,7 @@ impl Persistence {
         &self,
         export_id: &str,
         request_id: &str,
+        expected_bundle_id: &str,
         allowance: u64,
     ) -> Result<oneshot::Receiver<Result<ExportRetryOutcome, PersistenceError>>, PersistenceError>
     {
@@ -1306,6 +1308,7 @@ impl Persistence {
         self.submit(Command::RetryExport {
             export_id: export_id.to_owned(),
             request_id: request_id.to_owned(),
+            expected_bundle_id: expected_bundle_id.to_owned(),
             allowance,
             reply: send,
         })?;
@@ -1931,6 +1934,7 @@ fn owner_main(
             Command::RetryExport {
                 export_id,
                 request_id,
+                expected_bundle_id,
                 allowance,
                 reply,
             } => {
@@ -1940,6 +1944,7 @@ fn owner_main(
                     &mut connection,
                     &export_id,
                     &request_id,
+                    &expected_bundle_id,
                     allowance,
                 );
                 let _ = reply.send(result);
@@ -2599,11 +2604,14 @@ fn migrate_v7(transaction: &Transaction<'_>) -> Result<(), PersistenceError> {
                policy_id TEXT NOT NULL CHECK(length(policy_id) = 64),
                bundle_id TEXT NOT NULL CHECK(length(bundle_id) = 64),
                workload TEXT NOT NULL CHECK(workload = 'development-tiff'),
-               attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 64),
+               attempt_incarnation TEXT CHECK(attempt_incarnation IS NULL OR length(attempt_incarnation) = 32),
                attempt_sequence INTEGER CHECK(attempt_sequence IS NULL OR attempt_sequence > 0),
                artifact_size INTEGER CHECK(artifact_size IS NULL OR artifact_size > 0),
                artifact_sha256 TEXT CHECK(artifact_sha256 IS NULL OR length(artifact_sha256) = 64),
                artifact_expires_at INTEGER CHECK(artifact_expires_at IS NULL OR artifact_expires_at >= 0),
+               artifact_width INTEGER CHECK(artifact_width IS NULL OR artifact_width > 0),
+               artifact_height INTEGER CHECK(artifact_height IS NULL OR artifact_height > 0),
+               artifact_profile_identity TEXT CHECK(artifact_profile_identity IS NULL OR length(artifact_profile_identity) = 64),
                created_at INTEGER NOT NULL CHECK(created_at >= 0),
                settled_at INTEGER CHECK(settled_at IS NULL OR settled_at >= 0),
                retain_until INTEGER CHECK(retain_until IS NULL OR retain_until >= 0)
@@ -4621,6 +4629,9 @@ struct ExportRow {
     artifact_size: Option<u64>,
     artifact_sha256: Option<String>,
     artifact_expires_at: Option<u64>,
+    artifact_width: Option<u32>,
+    artifact_height: Option<u32>,
+    artifact_profile_identity: Option<String>,
     created_at: u64,
     settled_at: Option<u64>,
     retain_until: Option<u64>,
@@ -4629,7 +4640,8 @@ struct ExportRow {
 const EXPORT_ROW_COLUMNS: &str = "id,photo_id,state,outcome,recipe_revision,exposure_ev,
     source_revision,source_profile_id,source_size,source_sha256,recipe_digest,policy_id,
     bundle_id,attempt_incarnation,attempt_sequence,artifact_size,artifact_sha256,
-    artifact_expires_at,created_at,settled_at,retain_until";
+    artifact_expires_at,artifact_width,artifact_height,artifact_profile_identity,
+    created_at,settled_at,retain_until";
 
 fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<ExportRow> {
     let state_name: String = row.get(2)?;
@@ -4646,13 +4658,25 @@ fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Re
         None => None,
         Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
     };
+    let artifact_width = match row.get::<_, Option<i64>>(18)? {
+        None => None,
+        Some(value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    };
+    let artifact_height = match row.get::<_, Option<i64>>(19)? {
+        None => None,
+        Some(value) => u32::try_from(value)
+            .map(Some)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    };
     let created_at =
-        u64::try_from(row.get::<_, i64>(18)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let settled_at = match row.get::<_, Option<i64>>(19)? {
+        u64::try_from(row.get::<_, i64>(21)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let settled_at = match row.get::<_, Option<i64>>(22)? {
         None => None,
         Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
     };
-    let retain_until = match row.get::<_, Option<i64>>(20)? {
+    let retain_until = match row.get::<_, Option<i64>>(23)? {
         None => None,
         Some(value) => Some(u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery)?),
     };
@@ -4678,6 +4702,9 @@ fn export_row(_connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Re
             .get::<_, Option<i64>>(17)?
             .map(|value| u64::try_from(value).map_err(|_| rusqlite::Error::InvalidQuery))
             .transpose()?,
+        artifact_width,
+        artifact_height,
+        artifact_profile_identity: row.get(20)?,
         created_at,
         settled_at,
         retain_until,
@@ -4701,13 +4728,27 @@ fn export_record_from_row(row: ExportRow) -> Result<ExportRecord, PersistenceErr
         row.artifact_size,
         row.artifact_sha256,
         row.artifact_expires_at,
+        row.artifact_width,
+        row.artifact_height,
+        &row.artifact_profile_identity,
     ) {
-        (Some(size), Some(sha256), Some(expires_at)) => Some(ExportArtifactFacts {
+        (
+            Some(size),
+            Some(sha256),
+            Some(expires_at),
+            Some(width),
+            Some(height),
+            Some(profile_identity),
+        ) => Some(ExportArtifactFacts {
             size,
             sha256,
             expires_at,
+            width,
+            height,
+            profile_identity: profile_identity.clone(),
         }),
-        (None, None, None) => None,
+        (None, None, None, None, None, None) => None,
+        // A partial artifact row can never be served as validated metadata.
         _ => return Err(PersistenceError::Storage),
     };
     let source = match (row.source_size, row.source_sha256) {
@@ -4845,14 +4886,18 @@ fn submit_export(
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(ExportSubmitOutcome::MissingRecipe);
         };
-        if recipe.revision != submission.expected_recipe_revision {
-            return Ok(ExportSubmitOutcome::RecipeConflict(current));
-        }
         if current.current_source_revision != submission.expected_source_revision {
             return Ok(ExportSubmitOutcome::SourceChanged(current));
         }
         if recipe.source_revision != submission.expected_source_revision {
-            return Ok(ExportSubmitOutcome::Unavailable);
+            // The stored recipe is bound to a source other than the current
+            // published revision; an Export must never execute a payload
+            // captured against the old binding. A stale binding outranks a
+            // stale expected recipe revision.
+            return Ok(ExportSubmitOutcome::RequiresRebind);
+        }
+        if recipe.revision != submission.expected_recipe_revision {
+            return Ok(ExportSubmitOutcome::RecipeConflict(current));
         }
         // A saved recipe outside the approved range is invalid input for the
         // Export, not a storage failure.
@@ -5009,17 +5054,24 @@ fn settle_export(
                 artifact_size,
                 artifact_sha256,
                 published_at,
+                artifact_width,
+                artifact_height,
+                artifact_profile_identity,
             } => {
                 let expiry = published_at.saturating_add(EXPORT_RETENTION_SECONDS);
                 transaction
                     .execute(
                         "UPDATE exports SET state='succeeded',outcome=NULL,
                            artifact_size=?,artifact_sha256=?,artifact_expires_at=?,
+                           artifact_width=?,artifact_height=?,artifact_profile_identity=?,
                            settled_at=?,retain_until=? WHERE id=?",
                         params![
                             artifact_size as i64,
                             artifact_sha256,
                             expiry as i64,
+                            artifact_width as i64,
+                            artifact_height as i64,
+                            artifact_profile_identity,
                             published_at as i64,
                             expiry as i64,
                             export_id
@@ -5088,7 +5140,15 @@ fn begin_export_attempt(
     export_id: &str,
     attempt: ExportAttempt,
 ) -> Result<Option<ExportRecord>, PersistenceError> {
-    if attempt.sequence == 0 || attempt.incarnation.len() != 64 {
+    // The launcher-owned incarnation is 32 lowercase hex characters, exactly
+    // as the production Photo protocol validates it.
+    if attempt.sequence == 0
+        || attempt.incarnation.len() != 32
+        || !attempt
+            .incarnation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(PersistenceError::Storage);
     }
     write_transaction(state, database_name, connection, |transaction| {
@@ -5109,28 +5169,38 @@ fn begin_export_attempt(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn retry_export(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
     export_id: &str,
     request_id: &str,
+    expected_bundle_id: &str,
     allowance: u64,
 ) -> Result<ExportRetryOutcome, PersistenceError> {
     if !validate_export_request_id(request_id) {
         return Err(PersistenceError::Storage);
     }
+    let retry_digest = format!(
+        "{:x}",
+        Sha256::digest(format!("retry\0{export_id}").as_bytes())
+    );
     write_transaction(state, database_name, connection, |transaction| {
-        if read_export_receipt(transaction, request_id)?.is_some() {
-            // A fresh retry identity is generated per attempt; a collision is
-            // refused instead of being reinterpreted as new work.
-            return Ok(ExportRetryOutcome::NotRetriable);
-        }
         let Some(current) = read_export_row(transaction, export_id)? else {
             return Ok(ExportRetryOutcome::Unknown);
         };
+        // An accepted retry identity resolves to its Export and starts no
+        // work; a different payload under that identity is a conflict.
+        if let Some(receipt) = read_export_receipt(transaction, request_id)? {
+            if receipt.export_id == export_id && receipt.payload_digest == retry_digest {
+                return Ok(ExportRetryOutcome::Replayed(Box::new(current)));
+            }
+            return Ok(ExportRetryOutcome::RequestConflict);
+        }
         // Only a settled failure or cancellation carries a retryable
-        // snapshot; a succeeded artifact is never silently re-rendered.
+        // snapshot; a succeeded artifact is never silently re-rendered and
+        // an active attempt is never replaced.
         if !matches!(current.state, ExportState::Failed | ExportState::Cancelled) {
             return Ok(ExportRetryOutcome::NotRetriable);
         }
@@ -5140,6 +5210,21 @@ fn retry_export(
         };
         if retain_until <= now {
             return Ok(ExportRetryOutcome::Expired);
+        }
+        // Availability is validated again against the retained snapshot: a
+        // swapped approved bundle or a changed/unreadable source means the
+        // captured work can never execute again.
+        if current.snapshot.bundle_id != expected_bundle_id {
+            return Ok(ExportRetryOutcome::OutputUnavailable);
+        }
+        let Some(recipe) = read_edit_recipe(transaction, &current.snapshot.photo_id)? else {
+            return Ok(ExportRetryOutcome::OutputUnavailable);
+        };
+        if !recipe.source_available {
+            return Ok(ExportRetryOutcome::ResourceUnavailable);
+        }
+        if recipe.current_source_revision != current.snapshot.source_revision {
+            return Ok(ExportRetryOutcome::OutputUnavailable);
         }
         if !reservable(transaction, now, allowance)? {
             return Ok(ExportRetryOutcome::RetainedOutputFull);
@@ -5151,12 +5236,11 @@ fn retry_export(
                 [export_id],
             )
             .map_err(|_| PersistenceError::Storage)?;
-        let digest_input = format!("retry\0{export_id}");
         write_export_receipt(
             transaction,
             request_id,
             &ExportReceipt {
-                payload_digest: format!("{:x}", Sha256::digest(digest_input.as_bytes())),
+                payload_digest: retry_digest,
                 export_id: export_id.to_owned(),
                 created_at: now,
                 settled_at: None,
@@ -12238,6 +12322,9 @@ mod tests {
                     artifact_size: 10,
                     artifact_sha256: "c".repeat(64),
                     published_at: export_unix_seconds(),
+                    artifact_width: 2,
+                    artifact_height: 1,
+                    artifact_profile_identity: "e".repeat(64),
                 },
             )
             .unwrap()
@@ -12263,7 +12350,7 @@ mod tests {
             .unwrap();
         assert_eq!(record.state, ExportState::Failed);
         let retried = persistence
-            .retry_export_receiver(&failed.id, "retry-1", allowance)
+            .retry_export_receiver(&failed.id, "retry-1", &"b".repeat(64), allowance)
             .unwrap()
             .await
             .unwrap()
@@ -12275,20 +12362,32 @@ mod tests {
         assert_eq!(record.outcome, None);
         assert_eq!(record.attempt, None);
         assert_eq!(record.snapshot.recipe_revision, "recipe-rev-1");
-        assert_eq!(
+        // The accepted retry identity replays to the current record without
+        // starting work.
+        assert!(matches!(
             persistence
-                .retry_export_receiver(&failed.id, "retry-1", allowance)
+                .retry_export_receiver(&failed.id, "retry-1", &"b".repeat(64), allowance)
                 .unwrap()
                 .await
                 .unwrap()
                 .unwrap(),
-            ExportRetryOutcome::NotRetriable
-        );
-
+            ExportRetryOutcome::Replayed(_)
+        ));
+        // The consumed retry identity against a different Export conflicts.
         let queued = submit_export!("request-queued");
         assert_eq!(
             persistence
-                .retry_export_receiver(&queued.id, "retry-2", allowance)
+                .retry_export_receiver(&queued.id, "retry-1", &"b".repeat(64), allowance)
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap(),
+            ExportRetryOutcome::RequestConflict
+        );
+        // An unfinished Export is never retried.
+        assert_eq!(
+            persistence
+                .retry_export_receiver(&queued.id, "retry-2", &"b".repeat(64), allowance)
                 .unwrap()
                 .await
                 .unwrap()
@@ -12350,6 +12449,9 @@ mod tests {
                     artifact_size: 4096,
                     artifact_sha256: "d".repeat(64),
                     published_at,
+                    artifact_width: 16,
+                    artifact_height: 9,
+                    artifact_profile_identity: "e".repeat(64),
                 },
             )
             .unwrap()
@@ -12362,6 +12464,9 @@ mod tests {
         assert_eq!(artifact.size, 4096);
         assert_eq!(artifact.sha256, "d".repeat(64));
         assert_eq!(artifact.expires_at, published_at + EXPORT_RETENTION_SECONDS);
+        assert_eq!(artifact.width, 16);
+        assert_eq!(artifact.height, 9);
+        assert_eq!(artifact.profile_identity, "e".repeat(64));
         assert_eq!(
             settled.retain_until,
             Some(published_at + EXPORT_RETENTION_SECONDS)

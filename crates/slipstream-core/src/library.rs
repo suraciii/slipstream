@@ -774,17 +774,25 @@ impl Library {
     }
 
     /// Re-arms a failed or cancelled Export against its retained snapshot
-    /// with a fresh attempt identity while its retention window remains open.
+    /// with the caller's new request identity while its retention window
+    /// remains open and the captured source and approved bundle remain
+    /// available. A repeated retry identity resolves to its Export and
+    /// starts no work.
     pub async fn retry_export(
         &self,
         export_id: &str,
         request_id: &str,
+        expected_bundle_id: &str,
         allowance: u64,
     ) -> Result<ExportRetryOutcome, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
-            self.persistence
-                .retry_export_receiver(export_id, request_id, allowance)
+            self.persistence.retry_export_receiver(
+                export_id,
+                request_id,
+                expected_bundle_id,
+                allowance,
+            )
         }?;
         receive
             .await

@@ -1069,12 +1069,20 @@ pub struct ExportAttempt {
 }
 
 /// Facts of one validated published artifact. They exist only on a
-/// `succeeded` Export and disclose the retention expiry.
+/// `succeeded` Export and disclose the retention expiry and the closed
+/// download metadata: geometry and the pinned embedded-profile identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExportArtifactFacts {
     pub size: u64,
     pub sha256: String,
     pub expires_at: u64,
+    /// Declared image width in pixels.
+    pub width: u32,
+    /// Declared image height in pixels.
+    pub height: u32,
+    /// SHA-256 of the embedded ICC profile bytes; the profile identity the
+    /// download headers and the inspect artifact object disclose.
+    pub profile_identity: String,
 }
 
 /// The launcher-facing staged-source evidence recorded after the confined
@@ -1139,6 +1147,9 @@ pub enum ExportSubmitOutcome {
     Existing(ExportRecord),
     /// The identity was already used with a different payload.
     RequestConflict,
+    /// The stored recipe is bound to a different source than the current
+    /// published revision; only an explicit rebind may adopt the new source.
+    RequiresRebind,
     /// The identity's receipt expired; it cannot start new work.
     Expired,
     UnknownPhoto,
@@ -1162,12 +1173,23 @@ pub enum ExportRetryOutcome {
     /// The Export was re-armed against its retained snapshot with a new
     /// attempt identity.
     Retried(Box<ExportRecord>),
+    /// An accepted retry identity was replayed; the current record is
+    /// returned and no work is started.
+    Replayed(Box<ExportRecord>),
     Unknown,
+    /// The retry request identity was already used with a different payload.
+    RequestConflict,
     /// The Export is unfinished or already succeeded; only a failed or
     /// cancelled Export within its retention window may be retried.
     NotRetriable,
     /// The retained snapshot's retention window has passed.
     Expired,
+    /// The captured source or the approved bundle is no longer available, so
+    /// the retained snapshot can never execute again.
+    OutputUnavailable,
+    /// Current source facts cannot be read, so availability cannot be
+    /// re-validated for the retained snapshot.
+    ResourceUnavailable,
     RetainedOutputFull,
 }
 
@@ -1179,6 +1201,11 @@ pub enum ExportSettlement {
         artifact_size: u64,
         artifact_sha256: String,
         published_at: u64,
+        /// Validated Development TIFF geometry disclosed with the artifact.
+        artifact_width: u32,
+        artifact_height: u32,
+        /// SHA-256 identity of the embedded ICC profile.
+        artifact_profile_identity: String,
     },
     Failed {
         outcome: String,
