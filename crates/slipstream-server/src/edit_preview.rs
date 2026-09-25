@@ -55,6 +55,11 @@ const CLOSED_STAGES: [&str; 1] = ["develop"];
 /// `expiresAt` response header on every delivery.
 const RENDITION_TTL: Duration = Duration::from_secs(300);
 
+/// How often an idle service sweeps expired preview staging. The disclosed
+/// retention window governs serving; this bounds how long the private output
+/// of an expired rendition outlives that window when no request touches it.
+const PREVIEW_SWEEP_PERIOD: Duration = Duration::from_secs(60);
+
 /// The bounded patience for one admitted render intent. A render whose
 /// completion, failure, or cancellation never settles the intent — a lost
 /// receipt — frees its identity again after this bound.
@@ -413,14 +418,37 @@ pub(crate) struct PreviewClassRenders {
 
 impl PreviewClassRenders {
     pub(crate) fn new(exports: Arc<ExportManager>) -> Self {
-        Self {
-            inner: Arc::new(PreviewClassRendersInner {
-                retained: RetainedExportDevelopmentResults::new(Arc::clone(&exports)),
-                exports,
-                entries: SyncMutex::new(HashMap::new()),
-                touches: AtomicU64::new(0),
-            }),
-        }
+        let inner = Arc::new(PreviewClassRendersInner {
+            retained: RetainedExportDevelopmentResults::new(Arc::clone(&exports)),
+            exports,
+            entries: SyncMutex::new(HashMap::new()),
+            touches: AtomicU64::new(0),
+        });
+        // Ephemeral staging is deleted when its retention window elapses, not
+        // only when a later request touches the entry: an idle service must
+        // not hold a rendition past the retention it discloses. Starting the
+        // sweep needs a Tokio runtime, like every other spawned service task.
+        let swept = Arc::clone(&inner);
+        tokio::spawn(async move {
+            let mut period = tokio::time::interval(PREVIEW_SWEEP_PERIOD);
+            period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                period.tick().await;
+                PreviewClassRenders::sweep_expired(&swept);
+            }
+        });
+        Self { inner }
+    }
+
+    /// Deletes the private output of every rendition whose retention window
+    /// has elapsed. Called on a later admission or resolve, and by the sweep
+    /// that bounds how long an idle service keeps expired staging.
+    fn sweep_expired(inner: &PreviewClassRendersInner) {
+        let mut entries = inner
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Self::purge_expired_locked(inner, &mut entries, SystemTime::now());
     }
 
     fn remove_output(inner: &PreviewClassRendersInner, entry: &PreviewRenderEntry) {
