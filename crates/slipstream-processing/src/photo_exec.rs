@@ -1596,7 +1596,7 @@ impl PhotoExecutor {
         }
         record.manager_pending = None;
         self.update(record)?;
-        backend::create_workspace_directory(&workspace)?;
+        backend::create_private_directory(&workspace)?;
         let control = workspace.join("control");
         let work = workspace.join("work");
         backend::create_control_directory(&control)?;
@@ -2297,10 +2297,16 @@ fn seal_source(
     record: &PhotoRecord,
     descriptor: &mut File,
 ) -> Result<photo::CopiedDescriptor, ErrorCode> {
-    let source_dir = record.workspace(root).join("source");
+    let workspace = record.workspace(root);
+    // The attempt workspace is mode 0700, as is the launcher-owned directory
+    // that holds the attempts. Both are created once and then derived again by
+    // provisioning, so both creations tolerate the other's.
+    let attempts = workspace.parent().ok_or(ErrorCode::Uncertain)?;
+    backend::create_private_directory(attempts)?;
+    backend::create_private_directory(&workspace)?;
+    let source_dir = workspace.join("source");
     fs::DirBuilder::new()
         .mode(0o700)
-        .recursive(true)
         .create(&source_dir)
         .map_err(|_| ErrorCode::Unavailable)?;
     let destination_path = source_dir.join("source");
@@ -3195,6 +3201,15 @@ mod tests {
         assert_eq!(
             planned.plan.as_ref().map(|plan| plan.steps.as_slice()),
             Some(&["develop".to_string()][..])
+        );
+        // Provisioning creates the same attempt workspace the seal already
+        // made. The two steps must compose: a second creation that failed
+        // would settle every attempt as interrupted before the engine
+        // container is ever created.
+        backend::create_private_directory(&record.workspace(&root)).unwrap();
+        assert_eq!(
+            fs::metadata(record.workspace(&root)).unwrap().mode() & 0o777,
+            0o700
         );
         fs::remove_dir_all(&root).unwrap();
     }

@@ -24,8 +24,23 @@ pub(crate) type Result<T> = std::result::Result<T, ErrorCode>;
 const CGROUP: &str = "/sys/fs/cgroup";
 const WORKER: &str = "/usr/local/bin/slipstream-processing-worker";
 
-pub(crate) fn create_workspace_directory(path: &Path) -> Result<()> {
-    fs::create_dir(path).map_err(|_| ErrorCode::Uncertain)?;
+/// Creates one launcher-private directory at mode `0700`. The attempt
+/// workspace is created once and then derived again: admission seals the source
+/// copy into the workspace before provisioning reaches the same path, and a
+/// recovered attempt may reach it a third time. A repeated creation is
+/// therefore admitted, but only for a real directory that is not a link, and
+/// the mode is enforced on every call.
+pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(|_| ErrorCode::Uncertain)?;
+            if !metadata.is_dir() {
+                return Err(ErrorCode::Uncertain);
+            }
+        }
+        Err(_) => return Err(ErrorCode::Uncertain),
+    }
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| ErrorCode::Unavailable)
 }
 
@@ -423,7 +438,7 @@ impl Backend {
         persist(record)?;
         crate::faults::at(&self.config, record, crate::faults::Phase::Slice)?;
         let workspace = self.workspace(record);
-        create_workspace_directory(&workspace)?;
+        create_private_directory(&workspace)?;
         let control = workspace.join("control");
         let work = workspace.join("work");
         create_control_directory(&control)?;
@@ -2211,6 +2226,37 @@ mod tests {
     }
 
     #[test]
+    fn workspace_creation_admits_the_sealed_attempt_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "slipstream-workspace-reuse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let workspace = root.join("attempt");
+
+        // The seal creates the attempt workspace first; provisioning derives
+        // the same path and must be admitted.
+        create_private_directory(&workspace).unwrap();
+        fs::set_permissions(&workspace, fs::Permissions::from_mode(0o777)).unwrap();
+        create_private_directory(&workspace).unwrap();
+        assert_eq!(fs::metadata(&workspace).unwrap().mode() & 0o777, 0o700);
+
+        // A link or a non-directory is never admitted.
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&workspace, &link).unwrap();
+        assert!(create_private_directory(&link).is_err());
+        let file = root.join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(create_private_directory(&file).is_err());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn workspace_control_and_native_gate_modes_ignore_restrictive_umask() {
         const CHILD: &str = "SLIPSTREAM_CONTROL_MODE_TEST_CHILD_7C2A";
         if std::env::var_os(CHILD).is_some() {
@@ -2223,7 +2269,7 @@ mod tests {
             ));
             fs::create_dir(&root).unwrap();
             let workspace = root.join("attempt");
-            create_workspace_directory(&workspace).unwrap();
+            create_private_directory(&workspace).unwrap();
             let control = workspace.join("control");
             create_control_directory(&control).unwrap();
             let gate = create_native_gate(&control.join("gate")).unwrap();
