@@ -57,6 +57,15 @@ import {
 } from "./model/album-action-owner.js";
 import { createPhotoOwner, type PhotoAuthority } from "./model/photo-owner.js";
 import {
+  BASELINE_SETTINGS,
+  CURRENT_SETTINGS,
+  comparisonIsCurrent,
+  comparisonRefusal,
+  editPreviewUri,
+  encodedSourceRevision,
+  type Comparison,
+} from "./model/edit-preview.js";
+import {
   artifactMatchesHeaders,
   describeExportState,
   parseExportInspection,
@@ -1374,6 +1383,19 @@ function mountPrivateLibraryBrowser(
   /// How many follow-up requests one admitted preview has already made.
   let editorPreviewAttempts = 0;
   let editorPreviewTimer: number | undefined;
+  /// The retained as-shot/baseline comparison of the chosen stage, the image
+  /// it was served, and its own progress. A comparison is defined by the Photo,
+  /// the stage, and the source revision, so it is retained across saved-settings
+  /// changes and dropped when one of those moves.
+  let editorComparison: Comparison | undefined;
+  let editorComparisonUrl: string | undefined;
+  let editorComparisonNote = "";
+  let editorComparisonBusy = false;
+  let editorComparisonAbort: AbortController | undefined;
+  let editorComparisonGeneration = 0;
+  /// How many follow-up requests one admitted comparison has already made.
+  let editorComparisonAttempts = 0;
+  let editorComparisonTimer: number | undefined;
   let editorExportId: string | undefined;
   let editorExportState: EditorExportViewModel["state"] = "idle";
   let editorExportNote = "";
@@ -1406,11 +1428,27 @@ function mountPrivateLibraryBrowser(
     view.editorVisible() &&
     photoOwner.isCurrent(photoOwner.authority) &&
     currentPhoto()?.id === photoId;
+  const clearEditorComparison = (): void => {
+    editorComparisonAbort?.abort();
+    editorComparisonAbort = undefined;
+    editorComparisonGeneration += 1;
+    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
+    editorComparison = undefined;
+    editorComparisonUrl = undefined;
+    editorComparisonNote = "";
+    editorComparisonBusy = false;
+    editorComparisonAttempts = 0;
+    if (editorComparisonTimer !== undefined) {
+      clearTimeout(editorComparisonTimer);
+      editorComparisonTimer = undefined;
+    }
+  };
   const clearEditorPreview = (): void => {
     if (editorPreviewUrl) URL.revokeObjectURL(editorPreviewUrl);
     editorPreviewUrl = undefined;
     editorPreviewNote = "";
     editorPreviewStale = false;
+    clearEditorComparison();
     view.clearEditorPreview();
   };
   const renderEditor = (): void => {
@@ -1440,8 +1478,11 @@ function mountPrivateLibraryBrowser(
       canEdit: presented.canEdit,
       canPreview: presented.canEdit && presented.processingAvailable,
       previewing: editorPreviewBusy,
-      previewNote: editorPreviewNote,
-      previewStale: editorPreviewStale,
+      // While the comparison is pressed, the presented image is the baseline
+      // development of the chosen stage, so its own note and its own freshness
+      // describe what a Photographer sees.
+      previewNote: editorComparing ? editorComparisonNote : editorPreviewNote,
+      previewStale: !editorComparing && editorPreviewStale,
       saving: presented.saving,
       dirty: presented.dirty,
       canUndo: presented.canUndo,
@@ -1472,16 +1513,24 @@ function mountPrivateLibraryBrowser(
   };
   /// What the presented image actually is. Every stage names its own
   /// provenance, so a camera Preview is never presented as a Development or
-  /// Film Result.
-  /// What the presented image actually is. The note names the image on screen,
-  /// so a stage whose rendition is still pending or refused never claims to be
-  /// presented while the camera Preview is what a Photographer sees.
+  /// Film Result, and a comparison is never presented as the current
+  /// rendition.
   const editorStageNote = (): string => {
     if (editorStage === "camera")
       return "Camera: the camera-produced Preview of this Photo.";
     const stageName = editorStage === "film" ? "Film" : "Develop";
-    if (editorComparing)
-      return `${stageName}: the camera reference is presented instead of the ${stageName} rendition.`;
+    if (editorComparing && editorComparisonUrl) {
+      // A comparison is only a comparison while both images describe the same
+      // development: a current rendition that is absent or older than the
+      // current settings is named instead of being compared as if it were
+      // current.
+      const current = !editorPreviewUrl
+        ? " No current rendition is presented, so the baseline is shown alone."
+        : editorPreviewStale
+          ? " The current rendition is older than the current settings."
+          : "";
+      return `${stageName}: the as-shot/baseline development of this stage, compared with the current settings.${current}`;
+    }
     if (!editorPreviewUrl)
       return `${stageName}: no ${stageName} rendition is presented; the presented image is the camera Preview.`;
     if (editorStage === "film")
@@ -1586,6 +1635,18 @@ function mountPrivateLibraryBrowser(
       ? withProcessingCapability(response.facts, processingCapability)
       : response.facts;
     const step = mode === "open" ? session.open(facts) : session.refresh(facts);
+    // A comparison is of one development: a source revision that moved makes
+    // the retained baseline rendition a comparison of an earlier source, so it
+    // is dropped rather than presented as this Photo's.
+    if (
+      editorComparison &&
+      !comparisonIsCurrent(editorComparison, {
+        photoId,
+        stage: editorStage,
+        sourceRevision: session.facts()?.sourceRevision ?? null,
+      })
+    )
+      clearEditorComparison();
     if (currentPhoto()?.id === photoId) renderEditor();
     void placeEditorWrite(photoId, session, step);
     // The surface opens on the stage's rendition, so the Edit Preview is read
@@ -1792,14 +1853,18 @@ function mountPrivateLibraryBrowser(
     if (stage === "film" && filmUnavailableReason) return;
     editorStage = stage;
     editorComparing = false;
+    // A comparison is of one stage: the rendition of another stage, or of the
+    // other settings selector, is not this stage's comparison.
+    clearEditorComparison();
     renderEditor();
     if (stage === "develop") void requestEditorPreview(photoId);
   };
-  /// The camera reference is a separately labelled view: it presents the
-  /// camera-produced Preview of this Photo and never replaces the current
-  /// settings, the chosen stage, or the saved recipe. The as-shot/baseline
-  /// development comparison is not available from the service surface this
-  /// client speaks, so it is not offered as one.
+  /// The as-shot/baseline development comparison of the chosen stage. Pressing
+  /// the control presents the baseline development of the same stage beside the
+  /// current settings; releasing it presents the current rendition again. The
+  /// comparison never replaces the current rendition, the chosen stage, or the
+  /// saved recipe, and a comparison whose rendition is still being prepared
+  /// says so instead of presenting an unrelated image.
   const setEditorComparison = (photoId: string, pressed: boolean): void => {
     if (
       !photoOwner.isCurrent(photoOwner.authority) ||
@@ -1808,23 +1873,132 @@ function mountPrivateLibraryBrowser(
       return;
     editorComparing = pressed;
     if (pressed) {
-      const cameraUrl = view.reviewImageUrl();
-      editorPreviewStale = false;
-      if (cameraUrl) {
-        editorPreviewNote =
-          "Camera reference: the camera-produced Preview of this Photo. The current settings and the chosen stage are unchanged.";
-        view.presentEditorPreview(cameraUrl);
-      } else {
-        editorPreviewNote =
-          "The camera reference is still loading, so no reference image is presented yet.";
+      if (editorComparisonUrl) view.presentEditorPreview(editorComparisonUrl);
+      else if (!editorComparisonBusy) {
+        if (!editorComparison)
+          editorComparisonNote = "Preparing the baseline comparison…";
+        void requestEditorComparisonPreview(photoId);
       }
-    } else {
-      editorPreviewNote = editorPreviewUrl
-        ? "The current Develop Edit Preview."
-        : "";
-      if (editorPreviewUrl) view.presentEditorPreview(editorPreviewUrl);
-      else view.clearEditorPreview();
+    } else if (editorPreviewUrl) view.presentEditorPreview(editorPreviewUrl);
+    else view.clearEditorPreview();
+    renderEditor();
+  };
+  /// The bounded follow-up of an admitted comparison. A baseline render is
+  /// queued or running like any other preview-class render, so the client
+  /// re-asks until the rendition arrives or the bounded attempt count runs out.
+  const scheduleEditorComparisonFollowUp = (photoId: string): void => {
+    if (editorComparisonAttempts >= PREVIEW_POLL_LIMIT) return;
+    editorComparisonAttempts += 1;
+    if (editorComparisonTimer !== undefined)
+      clearTimeout(editorComparisonTimer);
+    editorComparisonTimer = window.setTimeout(() => {
+      editorComparisonTimer = undefined;
+      if (!editorOwnsPhoto(photoId)) return;
+      void requestEditorComparisonPreview(photoId, true);
+    }, PREVIEW_POLL_MS);
+  };
+  /// One comparison request for the chosen stage. The comparison is its own
+  /// rendition: it is requested under the closed `baseline` selector, it never
+  /// replaces the current rendition's image or note, and a rendition served for
+  /// another Photo, stage, settings selector, or source revision is refused
+  /// rather than presented as the comparison.
+  const requestEditorComparisonPreview = async (
+    photoId: string,
+    followUp = false,
+  ): Promise<void> => {
+    const session = editorSessions.get(photoId);
+    const presented = session?.presentation();
+    if (
+      !session ||
+      !presented ||
+      !presented.canEdit ||
+      !presented.processingAvailable ||
+      // The camera stage presents the camera Preview: the baseline of a stage
+      // the deployment does not execute is not a comparison it can render.
+      editorStage === "camera" ||
+      !editorOwnsPhoto(photoId)
+    )
+      return;
+    const stage = editorStage;
+    const expected: Comparison = {
+      photoId,
+      stage,
+      sourceRevision: session.facts()?.sourceRevision ?? null,
+    };
+    if (!followUp) editorComparisonAttempts = 0;
+    const generation = ++editorComparisonGeneration;
+    editorComparisonAbort?.abort();
+    const controller = new AbortController();
+    editorComparisonAbort = controller;
+    editorComparisonBusy = true;
+    editorComparisonNote = "Preparing the baseline comparison…";
+    renderEditor();
+    let response: Response;
+    try {
+      response = await fetcher(
+        editPreviewUri(photoId, stage, BASELINE_SETTINGS),
+        {
+          signal: controller.signal,
+          priority: "high",
+        },
+      );
+    } catch {
+      if (generation === editorComparisonGeneration) {
+        editorComparisonBusy = false;
+        editorComparisonNote =
+          "The baseline comparison request did not reach the service.";
+        renderEditor();
+      }
+      return;
     }
+    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
+      return;
+    editorComparisonBusy = false;
+    if (response.status === 202) {
+      const body: unknown = await response.json().catch(() => undefined);
+      const state =
+        isRecord(body) && typeof body["state"] === "string"
+          ? body["state"]
+          : "queued";
+      editorComparisonNote =
+        state === "running"
+          ? "The baseline comparison is rendering."
+          : "The baseline comparison is waiting for processing capacity.";
+      renderEditor();
+      scheduleEditorComparisonFollowUp(photoId);
+      return;
+    }
+    if (!response.ok) {
+      editorComparisonNote = await describePreviewRefusal(response);
+      renderEditor();
+      return;
+    }
+    let image: Blob;
+    try {
+      image = await response.blob();
+    } catch {
+      editorComparisonNote =
+        "The baseline comparison could not be read. Compare again.";
+      renderEditor();
+      return;
+    }
+    if (generation !== editorComparisonGeneration || !editorOwnsPhoto(photoId))
+      return;
+    const refusal = comparisonRefusal(response.headers, expected);
+    if (refusal) {
+      editorComparisonNote = refusal;
+      renderEditor();
+      return;
+    }
+    if (editorComparisonUrl) URL.revokeObjectURL(editorComparisonUrl);
+    editorComparisonUrl = URL.createObjectURL(image);
+    editorComparison = expected;
+    const width = response.headers.get("slipstream-edit-preview-width") ?? "?";
+    const height =
+      response.headers.get("slipstream-edit-preview-height") ?? "?";
+    const stageName = stage === "film" ? "Film" : "Develop";
+    editorComparisonNote = `${stageName} baseline comparison ${width}×${height}: the as-shot/baseline development of this stage. The current settings are unchanged.`;
+    if (editorComparing) view.presentEditorPreview(editorComparisonUrl);
     renderEditor();
   };
   /// The bounded follow-up of an admitted Edit Preview. Preview-class work is
@@ -1877,11 +2051,10 @@ function mountPrivateLibraryBrowser(
       response.headers.get("slipstream-edit-preview-recipe-version") ?? "";
     const displayTransform =
       response.headers.get("slipstream-edit-preview-display-transform") ?? "";
-    const expectedEncodedSource = expected.sourceRevision
-      ? Array.from(new TextEncoder().encode(expected.sourceRevision), (byte) =>
-          byte.toString(16).padStart(2, "0"),
-        ).join("")
-      : "";
+    const expectedEncodedSource =
+      expected.sourceRevision === null
+        ? ""
+        : encodedSourceRevision(expected.sourceRevision);
     const wellFormed =
       contentType === EDIT_PREVIEW_CONTENT_TYPE &&
       Number.isInteger(width) &&
@@ -1946,7 +2119,7 @@ function mountPrivateLibraryBrowser(
     let response: Response;
     try {
       response = await fetcher(
-        `/api/photos/${encodeURIComponent(photoId)}/edit-preview/${stage}`,
+        editPreviewUri(photoId, stage, CURRENT_SETTINGS),
         { signal: controller.signal, priority: "high" },
       );
     } catch {

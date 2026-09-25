@@ -1180,6 +1180,13 @@ test("the Edit surface explains a deployment without processing and attempts no 
     "Develop: no Develop rendition is presented; the presented image is the camera Preview.",
   );
   await expect(page.locator("[data-photo-editor-exposure]")).toBeDisabled();
+  // The comparison is a rendition of its own, so it is offered exactly where
+  // the deployment can render one, and its label names the baseline
+  // development it compares against rather than the Camera view.
+  await expect(page.locator("[data-photo-editor-compare]")).toBeDisabled();
+  await expect(page.locator("[data-photo-editor-compare]")).toHaveText(
+    "Baseline comparison",
+  );
   await expect(
     page.locator("[data-photo-editor-export-submit]"),
   ).toBeDisabled();

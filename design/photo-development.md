@@ -187,7 +187,10 @@ and full identity before publication.
 Cancelling computation and ignoring obsolete output are distinct operations.
 Even a process that cannot stop immediately must not publish its stale result.
 Temporary comparison requests must not overwrite the main current preview or
-change the saved recipe.
+change the saved recipe. A comparison is therefore its own owner: its identity
+carries the settings selector it names beside the stage, so its admission,
+supersession, retention and publication are separate from the current
+rendition of that stage.
 
 Changing development settings invalidates both stages. A Film Result must use
 a matching Development Result. Display-only changes must not rerun RAW
@@ -607,16 +610,28 @@ with the new `recipeVersion` and `sourceRevision`; its refusal set is
 
 `GET /api/photos/{id}/edit-preview/{stage}` returns 200 as a stream whose
 response headers carry the closed typed metadata `photoId`, `stage`,
-`contentType`, `width`, `height`, `byteLength`, `sha256`, `sourceRevision`,
-`recipeVersion`, `displayTransform`, and `expiresAt`; `displayTransform` is
-the qualified transform identity of
+`settings`, `contentType`, `width`, `height`, `byteLength`, `sha256`,
+`sourceRevision`, `recipeVersion`, `displayTransform`, and `expiresAt`;
+`displayTransform` is the qualified transform identity of
 [Development Color Pipeline](development-color.md#display-and-comparison).
 The typed metadata framing for this route is response headers, and the stream
 follows them. The route also returns 202 with `state` (`queued` or `running`)
 and `stage` for admitted work, or a refusal. Refusals are 404 `unknown_photo`,
-422 `invalid_settings` for a stage outside the closed set, 422
-`unsupported_photo`, 503 `processing_unavailable`, 503
+422 `invalid_settings` for a stage or settings selector outside its closed
+set, 422 `unsupported_photo`, 503 `processing_unavailable`, 503
 `resource_unavailable`, and 500 `outcome_unknown`.
+
+The route takes one optional closed query selector `settings`, whose values are
+`current` (the default when absent) and `baseline`. `current` is the saved Edit
+Recipe's settings. `baseline` is the comparison rendition the
+[Product Spec](../docs/photo-development.md#preview-behavior) requires: the
+as-shot/baseline development settings — the processing baseline of 0 EV and
+as-shot white balance — derived from the Photo rather than from the saved
+recipe, so it stays the same development while the saved recipe moves. A
+baseline rendition reports the empty `recipeVersion`, because no saved recipe
+produced it, and a baseline request never changes the saved recipe. A Photo
+whose saved recipe already is that baseline resolves to the same development
+under either selector.
 
 `POST /api/photos/{id}/exports` takes `requestId`, `expectedRecipeVersion`,
 `expectedSourceRevision`, and `target`. Acceptance returns 201 with `exportId`,

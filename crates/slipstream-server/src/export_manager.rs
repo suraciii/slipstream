@@ -203,6 +203,7 @@ impl ExportManager {
         &self,
         photo_id: &str,
         stage: &'static str,
+        settings: &'static str,
         cancellation: PreviewCancellation,
     ) -> Result<PreviewRenderResult, String> {
         let _slot = self.admission.lock().await;
@@ -233,8 +234,13 @@ impl ExportManager {
         if !read.source_available || !photo.original_available {
             return Err("the Original is unavailable".to_owned());
         }
+        // The baseline selector names the processing baseline itself: 0 EV
+        // against the documented baseline and as-shot white balance,
+        // independently of the saved recipe. A Photo without a saved recipe
+        // is that same baseline.
+        let baseline = settings == "baseline";
         let recipe = match read.recipe.as_ref() {
-            Some(recipe) => ExportRecipePayload::capture(
+            Some(recipe) if !baseline => ExportRecipePayload::capture(
                 &recipe.settings,
                 ExportExposureRange {
                     minimum_milli_ev: APPROVED_EXPOSURE_MILLI_EV_MIN,
@@ -242,18 +248,22 @@ impl ExportManager {
                 },
             )
             .map_err(|_| "captured recipe is not representable by the execution payload")?,
-            None => ExportRecipePayload {
+            _ => ExportRecipePayload {
                 exposure_milli_ev: 0,
                 white_balance_mode: "as-shot",
             },
         };
         let facts = PreviewFacts {
             stage,
+            settings,
             long_edge: DEVELOPMENT_PREVIEW_LONG_EDGE,
             display_transform: DISPLAY_TRANSFORM_VERSION,
             bundle_sha256: self.processing.bundle_sha256.clone(),
             source_revision: read.current_source_revision.clone(),
-            recipe_revision: read.recipe.as_ref().map(|recipe| recipe.revision.clone()),
+            recipe_revision: match read.recipe.as_ref() {
+                Some(recipe) if !baseline => Some(recipe.revision.clone()),
+                _ => None,
+            },
             exposure_milli_ev: recipe.exposure_milli_ev,
             white_balance: "as-shot",
         };
@@ -1648,6 +1658,10 @@ const RECONCILE_TOLERANCE: u32 = 5;
 /// produced under to be current for one Edit Preview derivation: the exact
 /// recipe revision and exposure, the source revision, and the bundle.
 pub(crate) struct RetainedDevelopmentIdentity<'a> {
+    /// The settings selector the request asked for: `current` matches the
+    /// captured recipe revision exactly, while `baseline` matches any
+    /// captured snapshot produced under exactly the baseline settings.
+    pub(crate) settings: &'a str,
     pub(crate) recipe_revision: Option<&'a str>,
     pub(crate) exposure_milli_ev: i64,
     pub(crate) source_revision: &'a str,
@@ -1700,7 +1714,14 @@ pub(crate) fn retained_development_tiff(
     // attempt ran under: a snapshot that cannot produce one never ran.
     let payload = record.snapshot.recipe_payload().ok()?;
     let snapshot = &record.snapshot;
-    let matches = Some(snapshot.recipe_revision.as_str()) == identity.recipe_revision
+    // A baseline request (`edit_preview`'s closed `settings` selector) names
+    // the processing baseline rather than a saved recipe, so any snapshot
+    // whose captured settings are exactly that baseline is the same
+    // development whatever revision captured them. Every other request
+    // matches the captured revision exactly.
+    let revision_matches = identity.settings == "baseline"
+        || Some(snapshot.recipe_revision.as_str()) == identity.recipe_revision;
+    let matches = revision_matches
         && payload.exposure_milli_ev == identity.exposure_milli_ev
         && snapshot.source_revision == identity.source_revision
         && snapshot.bundle_id == identity.bundle_sha256;
