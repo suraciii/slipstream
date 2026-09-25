@@ -6,8 +6,12 @@
 
 use std::{
     collections::HashMap,
+    os::fd::AsRawFd,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -17,12 +21,11 @@ use axum::{
     http::{Request, StatusCode},
     response::Response,
 };
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use slipstream_processing::photo_profile::{
     APPROVED_EXPOSURE_MILLI_EV_MAX, APPROVED_EXPOSURE_MILLI_EV_MIN,
 };
-use std::os::fd::AsRawFd;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use slipstream_core::{
     DEVELOPMENT_PREVIEW_LONG_EDGE, DISPLAY_TRANSFORM_VERSION, EditRecipeRead,
@@ -46,6 +49,16 @@ const CLOSED_STAGES: [&str; 1] = ["develop"];
 /// rebuildable intermediates, so the bound is short and disclosed through the
 /// `expiresAt` response header on every delivery.
 const RENDITION_TTL: Duration = Duration::from_secs(300);
+
+/// The bounded patience for one admitted render intent. A render whose
+/// completion, failure, or cancellation never settles the intent — a lost
+/// receipt — frees its identity again after this bound.
+const PENDING_TTL: Duration = Duration::from_secs(300);
+
+/// The bounded number of Photo and stage owners the server retains. Every
+/// owner here holds only rebuildable rendition bytes and one pending intent,
+/// and the bound evicts the least recently touched owner under pressure.
+const MAXIMUM_OWNERS: usize = 1024;
 
 /// The stored white-balance mode name of the first workload. The core state
 /// layer only stores this mode, and the processing baseline is as-shot.
@@ -219,6 +232,18 @@ pub(crate) enum RenderAdmission {
     Unavailable(&'static str),
 }
 
+/// The settlement of one admitted render, reported when the attempt completes,
+/// fails, or is cancelled. A completed render publishes through the owner; a
+/// failed or cancelled one frees its identity to be admitted again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RenderSettlement {
+    #[allow(dead_code)]
+    Completed,
+    #[allow(dead_code)]
+    Failed,
+    Cancelled,
+}
+
 /// The admission request of one preview-class render. A production gate binds
 /// the attempt to the identity digest; today's fail-closed gate ignores it.
 #[allow(dead_code)]
@@ -230,19 +255,26 @@ pub(crate) struct PreviewRenderRequest<'a> {
 
 pub(crate) trait PreviewRenderGate: Send + Sync {
     fn admit(&self, request: PreviewRenderRequest<'_>) -> RenderAdmission;
+    /// Settles one admitted render. Every admission must eventually settle:
+    /// completion, failure, and cancellation all free the identity, so a
+    /// failed or lost render is retried by the next request instead of
+    /// answering `running` forever.
+    fn settle(&self, request: PreviewRenderRequest<'_>, settlement: RenderSettlement);
 }
 
 /// The service-side admission of preview-class development renders follows the
 /// same durable Export lifecycle that owns the production `development-tiff`
 /// path. Until that lifecycle lands, no render can be admitted and the route
 /// refuses fail-closed with the contract's `processing_unavailable` code; it
-/// never reports queued work that cannot run.
+/// never reports queued work that cannot run, and there is nothing to settle.
 pub(crate) struct UnlandedRenderGate;
 
 impl PreviewRenderGate for UnlandedRenderGate {
     fn admit(&self, _request: PreviewRenderRequest<'_>) -> RenderAdmission {
         RenderAdmission::Unavailable("preview-render-admission-unavailable")
     }
+
+    fn settle(&self, _request: PreviewRenderRequest<'_>, _settlement: RenderSettlement) {}
 }
 
 // ---------------------------------------------------------------- owner
@@ -258,26 +290,72 @@ pub(crate) struct PublishedRendition {
     expires_at: SystemTime,
 }
 
+/// One admitted render intent: the identity digest it was admitted under and
+/// the moment of admission, which bounds how long an unsettled intent answers
+/// `running` before the identity is free again.
+#[derive(Clone, Debug)]
+struct PendingIntent {
+    digest: String,
+    since: SystemTime,
+}
+
 #[derive(Default)]
 struct OwnerEntry {
     published: Option<PublishedRendition>,
-    /// The latest admitted render intent, by identity digest. The slot is
-    /// latest-intent-wins: a superseded intent never publishes, and a
-    /// completed request republishes only while its full identity is current.
-    pending: Option<String>,
+    pending: Option<PendingIntent>,
+    /// The cancellation token of the derivation in flight, if any.
+    inflight: Option<Arc<AtomicBool>>,
+    last_used: u64,
 }
 
 type OwnerKey = (String, &'static str);
+
+/// Evicts the least recently touched other owner when the retained-owner
+/// bound is full; every owner insert path runs this first.
+fn evict_if_full(owners: &mut HashMap<OwnerKey, OwnerEntry>, key: &OwnerKey) {
+    if !owners.contains_key(key) && owners.len() >= MAXIMUM_OWNERS {
+        let victim = owners
+            .iter()
+            .filter(|(existing, _)| *existing != key)
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(existing, _)| existing.clone());
+        if let Some(victim) = victim {
+            owners.remove(&victim);
+        }
+    }
+}
+
+/// The derived bytes of one rendition, awaiting the publication decision.
+struct DerivedRendition {
+    bytes: axum::body::Bytes,
+    sha256: String,
+    width: u32,
+    height: u32,
+}
+
+/// The outcome of a conditional publication.
+#[derive(Debug)]
+pub(crate) enum PublishOutcome {
+    Published(Box<PublishedRendition>),
+    Superseded,
+}
 
 /// The Edit Preview owner: the per-server rendition cache and the render
 /// intent slots of every Photo and stage owner.
 pub(crate) struct EditPreviewOwner {
     retention: Arc<dyn DevelopmentResultRetention>,
     render_gate: Arc<dyn PreviewRenderGate>,
-    owners: Mutex<HashMap<OwnerKey, OwnerEntry>>,
+    owners: AsyncMutex<HashMap<OwnerKey, OwnerEntry>>,
     /// Serializes derive-and-publish per owner, so equal concurrent requests
     /// coalesce onto one derivation instead of repeating it.
-    derive_permits: Mutex<HashMap<OwnerKey, Arc<tokio::sync::Mutex<()>>>>,
+    derive_permits: Mutex<HashMap<OwnerKey, Arc<AsyncMutex<()>>>>,
+    /// One heavy native conversion at a time, instance-wide: the same bound
+    /// the closed workload applies to processing jobs. Native conversion
+    /// memory scales with source size, so unbounded concurrency across
+    /// Photos would scale resident memory with request fan-out.
+    derivation_permits: Arc<Semaphore>,
+    touches: AtomicU64,
+    derivations_started: AtomicUsize,
 }
 
 impl EditPreviewOwner {
@@ -295,21 +373,34 @@ impl EditPreviewOwner {
         Self {
             retention,
             render_gate,
-            owners: Mutex::new(HashMap::new()),
+            owners: AsyncMutex::new(HashMap::new()),
             derive_permits: Mutex::new(HashMap::new()),
+            derivation_permits: Arc::new(Semaphore::new(1)),
+            touches: AtomicU64::new(0),
+            derivations_started: AtomicUsize::new(0),
         }
     }
 
-    fn with_entry<R>(&self, key: &OwnerKey, read: impl FnOnce(&mut OwnerEntry) -> R) -> R {
-        let mut owners = self.owners.lock().expect("edit preview owners poisoned");
-        read(owners.entry(key.clone()).or_default())
+    /// Touches one owner entry under the owner lock, evicting the least
+    /// recently touched other owner when the retained-owner bound is full.
+    async fn touch_entry<R>(&self, key: &OwnerKey, read: impl FnOnce(&mut OwnerEntry) -> R) -> R {
+        let mut owners = self.owners.lock().await;
+        let touch = self.touches.fetch_add(1, Ordering::Relaxed) + 1;
+        evict_if_full(&mut owners, key);
+        let entry = owners.entry(key.clone()).or_default();
+        entry.last_used = touch;
+        read(entry)
     }
 
     /// The published rendition still current for this full identity, if any.
     /// A rendition under a different display transform, without content
     /// evidence for its source, or past its disclosed expiry is not current.
-    fn current(&self, key: &OwnerKey, identity: &PreviewIdentity) -> Option<PublishedRendition> {
-        self.with_entry(key, |entry| {
+    async fn current(
+        &self,
+        key: &OwnerKey,
+        identity: &PreviewIdentity,
+    ) -> Option<PublishedRendition> {
+        self.touch_entry(key, |entry| {
             let hit = entry
                 .published
                 .as_ref()
@@ -324,11 +415,12 @@ impl EditPreviewOwner {
             }
             hit
         })
+        .await
     }
 
     /// The per-owner derive permit. Holding it serializes derive-and-publish
     /// so a concurrent equal request coalesces onto the first derivation.
-    fn derive_permit(&self, key: &OwnerKey) -> Arc<tokio::sync::Mutex<()>> {
+    fn derive_permit(&self, key: &OwnerKey) -> Arc<AsyncMutex<()>> {
         self.derive_permits
             .lock()
             .expect("edit preview derive permits poisoned")
@@ -337,27 +429,75 @@ impl EditPreviewOwner {
             .clone()
     }
 
-    /// Publishes the derived rendition and settles any pending intent.
-    fn publish(&self, key: &OwnerKey, rendition: PublishedRendition) {
-        self.with_entry(key, |entry| {
-            entry.published = Some(rendition);
-            entry.pending = None;
-        });
+    /// The instance-wide heavy-conversion permit. Held across one derivation,
+    /// so at most one native display conversion runs at a time.
+    pub(crate) async fn derivation_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.derivation_permits)
+            .acquire_owned()
+            .await
+            .expect("derivation permits never close")
+    }
+
+    /// A heavy-conversion permit without waiting; the test observation of the
+    /// instance-wide bound.
+    #[allow(dead_code)]
+    pub(crate) fn try_derivation_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.derivation_permits.clone().try_acquire_owned().ok()
+    }
+
+    /// The number of derivations this owner actually started, after every
+    /// coalescing check.
+    #[allow(dead_code)]
+    pub(crate) fn derivations_started(&self) -> usize {
+        self.derivations_started.load(Ordering::Relaxed)
+    }
+
+    fn note_derivation_started(&self) {
+        self.derivations_started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Registers one in-flight derivation and returns its cancellation token.
+    /// A previous in-flight derivation of this owner is cancelled: a
+    /// superseded request must not publish, and its native result is
+    /// discarded instead of racing the newer identity.
+    async fn begin_derivation(&self, key: &OwnerKey) -> Arc<AtomicBool> {
+        self.touch_entry(key, |entry| {
+            if let Some(previous) = entry.inflight.take() {
+                previous.store(true, Ordering::Relaxed);
+            }
+            let token = Arc::new(AtomicBool::new(false));
+            entry.inflight = Some(Arc::clone(&token));
+            token
+        })
+        .await
     }
 
     /// Admits one render. A pending request with the same full identity
-    /// coalesces; a different identity supersedes the pending intent.
-    fn admit(
+    /// coalesces until it settles or its patience expires; a different
+    /// identity supersedes the pending intent and cancels the superseded
+    /// derivation in flight.
+    async fn admit(
         &self,
         key: &OwnerKey,
         photo_id: &str,
         stage: &'static str,
         identity: &PreviewIdentity,
+        now: SystemTime,
     ) -> RenderAdmission {
         let digest = identity.digest();
-        let coalesced = self.with_entry(key, |entry| {
-            entry.pending.as_deref() == Some(digest.as_str())
-        });
+        let coalesced = self
+            .touch_entry(key, |entry| {
+                matches!(
+                    entry.pending.as_ref(),
+                    Some(pending)
+                        if pending.digest == digest
+                            && now
+                                .duration_since(pending.since)
+                                .unwrap_or_default()
+                                < PENDING_TTL
+                )
+            })
+            .await;
         if coalesced {
             return RenderAdmission::Running;
         }
@@ -370,9 +510,104 @@ impl EditPreviewOwner {
             admission,
             RenderAdmission::Queued | RenderAdmission::Running
         ) {
-            self.with_entry(key, |entry| entry.pending = Some(digest));
+            self.touch_entry(key, |entry| {
+                // Any identity change supersedes whatever ran before it:
+                // its in-flight derivation must not publish, and its native
+                // work is released.
+                let differing = entry
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.digest != digest);
+                if differing && let Some(inflight) = &entry.inflight {
+                    inflight.store(true, Ordering::Relaxed);
+                }
+                entry.pending = Some(PendingIntent { digest, since: now });
+            })
+            .await;
         }
         admission
+    }
+
+    /// Settles one admitted render: the gate records the outcome and the
+    /// pending intent of that identity is freed, so the next request retries
+    /// instead of coalescing into a dead intent.
+    async fn settle_render(
+        &self,
+        key: &OwnerKey,
+        photo_id: &str,
+        stage: &'static str,
+        identity: &PreviewIdentity,
+        settlement: RenderSettlement,
+    ) {
+        let digest = identity.digest();
+        self.render_gate.settle(
+            PreviewRenderRequest {
+                photo_id,
+                stage,
+                identity_digest: &digest,
+            },
+            settlement,
+        );
+        self.touch_entry(key, |entry| {
+            if entry
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.digest == digest)
+            {
+                entry.pending = None;
+            }
+        })
+        .await;
+    }
+
+    /// Publishes the derived rendition, conditional on the identity that is
+    /// current at publish time: the owner lock is held across one final
+    /// serialized facts read, and the rendition is stored only while the
+    /// identity that read returns is still the identity the request derived
+    /// under. Publication is ordered after that read; a save that commits
+    /// after it is reflected by the next request, exactly like every other
+    /// serialized read in the service.
+    async fn publish_if_current<F, Fut>(
+        &self,
+        key: &OwnerKey,
+        identity: &PreviewIdentity,
+        read_current: F,
+        derived: DerivedRendition,
+    ) -> PublishOutcome
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Option<PreviewIdentity>>,
+    {
+        let mut owners = self.owners.lock().await;
+        let Some(current) = read_current().await else {
+            // The fresh facts are unreadable; refuse instead of publishing.
+            return PublishOutcome::Superseded;
+        };
+        if current != *identity {
+            return PublishOutcome::Superseded;
+        }
+        let touch = self.touches.fetch_add(1, Ordering::Relaxed) + 1;
+        evict_if_full(&mut owners, key);
+        let entry = owners.entry(key.clone()).or_default();
+        entry.last_used = touch;
+        entry.pending = None;
+        entry.inflight = None;
+        let rendition = PublishedRendition {
+            identity: identity.clone(),
+            bytes: derived.bytes,
+            sha256: derived.sha256,
+            width: derived.width,
+            height: derived.height,
+            expires_at: SystemTime::now() + RENDITION_TTL,
+        };
+        entry.published = Some(rendition.clone());
+        PublishOutcome::Published(Box::new(rendition))
+    }
+
+    /// The bounded number of owners currently retained.
+    #[allow(dead_code)]
+    pub(crate) async fn owner_count(&self) -> usize {
+        self.owners.lock().await.len()
     }
 }
 
@@ -433,23 +668,49 @@ pub(crate) async fn get_edit_preview(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    let support = classify_support(&state, &photo, &metadata, read.source_available);
-    match support.state {
-        "unsupported" => return unsupported_photo(&photo_id),
-        "unavailable" => {
-            // An operator-disabled deployment is a capability failure of the
-            // stage, not missing source facts.
-            if support.reason == Some("operator-disabled") {
-                return processing_unavailable(stage, "operator-disabled");
-            }
-            return resource_unavailable(stage, support.reason.unwrap_or("source-unavailable"));
-        }
-        _ => {}
+    if let Some(response) = support_refusal(&state, &photo, &metadata, &read, stage) {
+        return response;
     }
     if let Err(response) = develop_executable(&state, stage, &read) {
         return *response;
     }
     serve_preview(&state, &photo_id, stage, &read).await
+}
+
+/// The support refusal of one Photo, if its class or facts refuse the route.
+fn support_refusal(
+    state: &HttpState,
+    photo: &slipstream_core::PhotoRead,
+    metadata: &slipstream_core::CaptureReviewMetadata,
+    read: &EditRecipeRead,
+    stage: &'static str,
+) -> Option<Response<Body>> {
+    let support = classify_support(state, photo, metadata, read.source_available);
+    match support.state {
+        "unsupported" => Some(unsupported_photo_support(state, photo, stage)),
+        "unavailable" => {
+            // An operator-disabled deployment is a capability failure of the
+            // stage, not missing source facts.
+            if support.reason == Some("operator-disabled") {
+                Some(processing_unavailable(stage, "operator-disabled"))
+            } else {
+                Some(resource_unavailable(
+                    stage,
+                    support.reason.unwrap_or("source-unavailable"),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unsupported_photo_support(
+    state: &HttpState,
+    photo: &slipstream_core::PhotoRead,
+    stage: &'static str,
+) -> Response<Body> {
+    let _ = (state, stage);
+    unsupported_photo(&photo.id)
 }
 
 /// The closed stage set of the route.
@@ -500,53 +761,138 @@ async fn serve_preview(
     let retained = owner.retention.resolve(photo_id);
     let facts = current_facts(state, stage, read);
     let identity = PreviewIdentity::build(&facts, retained.as_ref());
-    if let Some(rendition) = owner.current(&key, &identity) {
+    if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
     }
     // Serialize derive-and-publish per owner: a concurrent request with the
     // same full identity coalesces onto the first derivation.
     let permit = owner.derive_permit(&key);
     let _guard = permit.lock().await;
-    if let Some(rendition) = owner.current(&key, &identity) {
+    if let Some(rendition) = owner.current(&key, &identity).await {
         return rendition_response(photo_id, &rendition);
     }
     // Derive only from a retained result whose captured facts are exactly the
     // current identity facts; anything else falls through to admission.
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
-        return admit_render(owner, &key, photo_id, stage, &identity);
+        return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
     };
-    let long_edge = facts.long_edge;
-    let path = record.path.clone();
-    let derived = tokio::task::spawn_blocking(move || {
-        std::fs::File::open(&path).map(|file| process_development_tiff(file.as_raw_fd(), long_edge))
-    })
-    .await;
+    // One heavy native conversion at a time, instance-wide.
+    let _derivation_permit = owner.derivation_permit().await;
+    let token = owner.begin_derivation(&key).await;
+    if token.load(Ordering::Relaxed) {
+        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+    }
+    owner.note_derivation_started();
+    let derived = derive_development_display(record, facts.long_edge, Arc::clone(&token)).await;
     let derivative = match derived {
-        Ok(Ok(Ok(derivative))) => derivative,
-        Ok(Ok(Err(error))) => return derivative_error(stage, error),
-        Ok(Err(_)) => {
-            return processing_unavailable(stage, "development-result-unreadable");
+        Ok(Some(derivative)) => derivative,
+        Ok(None) => {
+            return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
         }
-        Err(_) => {
-            return processing_unavailable(stage, "derivation-unavailable");
-        }
+        Err(error) => return derivative_error(stage, error),
     };
-    // Publication recheck: the request republishes only while the current
-    // owner and the full identity are still the ones it derived under.
-    if let Err(response) = recheck_identity(state, photo_id, stage, &identity).await {
-        return *response;
+    if token.load(Ordering::Relaxed) {
+        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
     }
     let sha256 = hex(Sha256::digest(&derivative.jpeg).as_slice());
-    let rendition = PublishedRendition {
-        identity,
-        bytes: axum::body::Bytes::from(derivative.jpeg),
-        sha256,
-        width: derivative.width,
-        height: derivative.height,
-        expires_at: SystemTime::now() + RENDITION_TTL,
+    match owner
+        .publish_if_current(
+            &key,
+            &identity,
+            || async { fresh_identity(state, photo_id, stage).await.ok() },
+            DerivedRendition {
+                bytes: axum::body::Bytes::from(derivative.jpeg),
+                sha256,
+                width: derivative.width,
+                height: derivative.height,
+            },
+        )
+        .await
+    {
+        PublishOutcome::Published(rendition) => rendition_response(photo_id, &rendition),
+        PublishOutcome::Superseded => resource_unavailable(stage, "preview-superseded"),
+    }
+}
+
+/// One native display conversion of a retained result, cancellable: a token
+/// set before the conversion skips the native call entirely, and a token set
+/// during it discards the finished result. The conversion itself is one
+/// opaque FFI call and cannot be interrupted once started.
+async fn derive_development_display(
+    record: RetainedDevelopmentResult,
+    long_edge: u32,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Option<slipstream_core::Derivative>, slipstream_core::DerivativeError> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let path = record.path;
+    let derived = tokio::task::spawn_blocking(move || {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        std::fs::File::open(&path)
+            .map_err(|_| slipstream_core::DerivativeError::Internal)
+            .and_then(|file| process_development_tiff(file.as_raw_fd(), long_edge).map(Some))
+    })
+    .await;
+    match derived {
+        Ok(result) => result,
+        Err(_) => Err(slipstream_core::DerivativeError::Internal),
+    }
+}
+
+/// A derivation whose identity was superseded while it ran: its admission is
+/// cancelled, and the request is refused instead of served stale.
+async fn superseded_during_derivation(
+    owner: &EditPreviewOwner,
+    key: &OwnerKey,
+    photo_id: &str,
+    stage: &'static str,
+    identity: &PreviewIdentity,
+) -> Response<Body> {
+    owner
+        .settle_render(key, photo_id, stage, identity, RenderSettlement::Cancelled)
+        .await;
+    resource_unavailable(stage, "preview-superseded")
+}
+
+/// The fresh full identity of one Photo owner, re-read through the same
+/// serialized gates as the first pass.
+async fn fresh_identity(
+    state: &HttpState,
+    photo_id: &str,
+    stage: &'static str,
+) -> Result<PreviewIdentity, Response<Body>> {
+    let (photo, metadata, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
+        Ok(facts) => facts,
+        Err(response) => return Err(response),
     };
-    owner.publish(&key, rendition.clone());
-    rendition_response(photo_id, &rendition)
+    if let Some(response) = support_refusal(state, &photo, &metadata, &read, stage) {
+        return Err(response);
+    }
+    develop_executable(state, stage, &read).map_err(|response| *response)?;
+    let facts = current_facts(state, stage, &read);
+    let retained = state.edit_preview.retention.resolve(photo_id);
+    Ok(PreviewIdentity::build(&facts, retained.as_ref()))
+}
+
+/// Admits one preview-class render when no current rendition or usable
+/// retained result exists.
+async fn admit_render(
+    owner: &EditPreviewOwner,
+    key: &OwnerKey,
+    photo_id: &str,
+    stage: &'static str,
+    identity: &PreviewIdentity,
+    now: SystemTime,
+) -> Response<Body> {
+    match owner.admit(key, photo_id, stage, identity, now).await {
+        RenderAdmission::Queued => admitted(stage, "queued"),
+        RenderAdmission::Running => admitted(stage, "running"),
+        RenderAdmission::Indeterminate => outcome_unknown(stage),
+        RenderAdmission::Unavailable(reason) => processing_unavailable(stage, reason),
+    }
 }
 
 /// The current identity facts of one Photo owner: the source revision and
@@ -575,58 +921,6 @@ fn current_facts(state: &HttpState, stage: &'static str, read: &EditRecipeRead) 
         recipe_revision,
         exposure_milli_ev,
         white_balance: WHITE_BALANCE_AS_SHOT,
-    }
-}
-
-/// Re-reads the serialized facts and re-derives the full identity. Any change
-/// supersedes the request, and a superseded request never publishes.
-async fn recheck_identity(
-    state: &HttpState,
-    photo_id: &str,
-    stage: &'static str,
-    identity: &PreviewIdentity,
-) -> Result<(), Box<Response<Body>>> {
-    let (photo, metadata, read) = match crate::edit_recipe::load_facts(state, photo_id).await {
-        Ok(facts) => facts,
-        Err(response) => return Err(Box::new(response)),
-    };
-    let support = classify_support(state, &photo, &metadata, read.source_available);
-    match support.state {
-        "unsupported" => return Err(Box::new(unsupported_photo(photo_id))),
-        "unavailable" => {
-            if support.reason == Some("operator-disabled") {
-                return Err(Box::new(processing_unavailable(stage, "operator-disabled")));
-            }
-            return Err(Box::new(resource_unavailable(
-                stage,
-                support.reason.unwrap_or("source-unavailable"),
-            )));
-        }
-        _ => {}
-    }
-    develop_executable(state, stage, &read)?;
-    let fresh_facts = current_facts(state, stage, &read);
-    let fresh_retained = state.edit_preview.retention.resolve(photo_id);
-    if PreviewIdentity::build(&fresh_facts, fresh_retained.as_ref()) != *identity {
-        return Err(Box::new(resource_unavailable(stage, "preview-superseded")));
-    }
-    Ok(())
-}
-
-/// Admits one preview-class render when no current rendition or usable
-/// retained result exists.
-fn admit_render(
-    owner: &EditPreviewOwner,
-    key: &OwnerKey,
-    photo_id: &str,
-    stage: &'static str,
-    identity: &PreviewIdentity,
-) -> Response<Body> {
-    match owner.admit(key, photo_id, stage, identity) {
-        RenderAdmission::Queued => admitted(stage, "queued"),
-        RenderAdmission::Running => admitted(stage, "running"),
-        RenderAdmission::Indeterminate => outcome_unknown(stage),
-        RenderAdmission::Unavailable(reason) => processing_unavailable(stage, reason),
     }
 }
 
@@ -673,14 +967,13 @@ fn rendition_response(photo_id: &str, rendition: &PublishedRendition) -> Respons
 }
 
 fn admitted(stage: &'static str, state: &'static str) -> Response<Body> {
-    json_accepted(serde_json::json!({
-        "state": state,
-        "stage": stage,
-    }))
-}
-
-fn json_accepted(value: Value) -> Response<Body> {
-    crate::http::json_response(StatusCode::ACCEPTED, &value)
+    crate::http::json_response(
+        StatusCode::ACCEPTED,
+        &serde_json::json!({
+            "state": state,
+            "stage": stage,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------- refusals
@@ -772,6 +1065,7 @@ fn derivative_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn facts(exposure_milli_ev: i64) -> PreviewFacts {
         PreviewFacts {
@@ -799,43 +1093,88 @@ mod tests {
         }
     }
 
-    fn rendition(identity: PreviewIdentity, expires_at: SystemTime) -> PublishedRendition {
-        PublishedRendition {
-            identity,
-            bytes: axum::body::Bytes::from_static(b"jpeg"),
-            sha256: "a".repeat(64),
-            width: 64,
-            height: 64,
-            expires_at,
+    fn identity(exposure_milli_ev: i64) -> PreviewIdentity {
+        PreviewIdentity::build(&facts(exposure_milli_ev), Some(&record(exposure_milli_ev)))
+    }
+
+    /// A gate whose admissions and settlements a test scripts in order.
+    struct ScriptedGate {
+        admissions: Mutex<Vec<RenderAdmission>>,
+        settlements: Mutex<Vec<RenderSettlement>>,
+    }
+
+    impl ScriptedGate {
+        fn queued(times: usize) -> Arc<Self> {
+            Arc::new(Self {
+                admissions: Mutex::new(vec![RenderAdmission::Queued; times]),
+                settlements: Mutex::new(Vec::new()),
+            })
         }
+    }
+
+    impl PreviewRenderGate for ScriptedGate {
+        fn admit(&self, _request: PreviewRenderRequest<'_>) -> RenderAdmission {
+            self.admissions
+                .lock()
+                .expect("scripted gate poisoned")
+                .pop()
+                .unwrap_or(RenderAdmission::Unavailable("script-exhausted"))
+        }
+
+        fn settle(&self, _request: PreviewRenderRequest<'_>, settlement: RenderSettlement) {
+            self.settlements
+                .lock()
+                .expect("scripted gate poisoned")
+                .push(settlement);
+        }
+    }
+
+    fn scripted_identity(source: &str, exposure_milli_ev: i64) -> PreviewIdentity {
+        let mut varied = facts(exposure_milli_ev);
+        varied.source_revision = source.to_owned();
+        PreviewIdentity::build(&varied, None)
+    }
+
+    async fn publish(
+        owner: &EditPreviewOwner,
+        key: &OwnerKey,
+        identity: &PreviewIdentity,
+        current: Option<PreviewIdentity>,
+    ) -> PublishOutcome {
+        owner
+            .publish_if_current(
+                key,
+                identity,
+                || std::future::ready(current.clone()),
+                DerivedRendition {
+                    bytes: axum::body::Bytes::from_static(b"jpeg"),
+                    sha256: "a".repeat(64),
+                    width: 64,
+                    height: 64,
+                },
+            )
+            .await
     }
 
     #[test]
     fn identity_changes_with_every_identity_fact() {
-        let base = PreviewIdentity::build(&facts(250), Some(&record(250)));
-        let changed = |facts: &PreviewFacts, record: RetainedDevelopmentResult| {
-            PreviewIdentity::build(facts, Some(&record))
-        };
-        // A different display transform, geometry, bundle, source revision,
-        // recipe revision, recipe content, or content evidence is a
-        // different identity.
+        let base = identity(250);
         let mut transform = facts(250);
         transform.display_transform = "display-transform-v2";
-        assert_ne!(base, changed(&transform, record(250)));
+        assert_ne!(base, PreviewIdentity::build(&transform, Some(&record(250))));
         let mut geometry = facts(250);
         geometry.long_edge = 512;
-        assert_ne!(base, changed(&geometry, record(250)));
+        assert_ne!(base, PreviewIdentity::build(&geometry, Some(&record(250))));
         let mut bundle = facts(250);
         bundle.bundle_sha256 = "e".repeat(64);
-        assert_ne!(base, changed(&bundle, record(250)));
+        assert_ne!(base, PreviewIdentity::build(&bundle, Some(&record(250))));
         let mut source = facts(250);
         source.source_revision = "changed".to_owned();
-        assert_ne!(base, changed(&source, record(250)));
+        assert_ne!(base, PreviewIdentity::build(&source, Some(&record(250))));
         let mut revision = facts(250);
         revision.recipe_revision = Some("recipe-2".to_owned());
-        assert_ne!(base, changed(&revision, record(250)));
-        assert_ne!(base, changed(&facts(500), record(250)));
-        assert_ne!(base, changed(&facts(250), record(500)));
+        assert_ne!(base, PreviewIdentity::build(&revision, Some(&record(250))));
+        assert_ne!(base, identity(500));
         // A stale record contributes no evidence, so the identity falls back
         // to not-retained and can never equal a current-evidence identity.
         assert_ne!(
@@ -848,77 +1187,211 @@ mod tests {
         );
     }
 
-    #[test]
-    fn owner_serves_only_the_current_full_identity() {
+    #[tokio::test]
+    async fn owner_serves_only_the_current_full_identity() {
         let owner = EditPreviewOwner::production();
         let key = ("photo".to_owned(), "develop");
-        let identity = PreviewIdentity::build(&facts(250), Some(&record(250)));
-        let expires = SystemTime::now() + RENDITION_TTL;
-        owner.publish(&key, rendition(identity.clone(), expires));
-        assert!(owner.current(&key, &identity).is_some());
+        let first = identity(250);
+        assert!(matches!(
+            publish(&owner, &key, &first, Some(first.clone())).await,
+            PublishOutcome::Published(_)
+        ));
+        assert!(owner.current(&key, &first).await.is_some());
         // A different display transform is not current.
         let mut transform = facts(250);
         transform.display_transform = "display-transform-v2";
-        assert!(
-            owner
-                .current(
-                    &key,
-                    &PreviewIdentity::build(&transform, Some(&record(250)))
-                )
-                .is_none()
-        );
-        // A past expiry is not current.
-        let expired_at = SystemTime::now() - Duration::from_secs(1);
-        owner.publish(&key, rendition(identity.clone(), expired_at));
-        assert!(owner.current(&key, &identity).is_none());
+        let transformed = PreviewIdentity::build(&transform, Some(&record(250)));
+        assert!(owner.current(&key, &transformed).await.is_none());
     }
 
-    #[test]
-    fn pending_intents_coalesce_and_follow_latest_intent() {
-        struct ScriptedGate(Mutex<Vec<RenderAdmission>>);
-        impl PreviewRenderGate for ScriptedGate {
-            fn admit(&self, _request: PreviewRenderRequest<'_>) -> RenderAdmission {
-                self.0
-                    .lock()
-                    .expect("scripted gate poisoned")
-                    .pop()
-                    .unwrap_or(RenderAdmission::Unavailable("exhausted"))
-            }
-        }
-        let gate = Arc::new(ScriptedGate(Mutex::new(vec![
-            RenderAdmission::Queued,
-            RenderAdmission::Queued,
-        ])));
+    #[tokio::test]
+    async fn pending_intents_coalesce_and_follow_latest_intent() {
+        let gate = ScriptedGate::queued(2);
         let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
         let key = ("photo".to_owned(), "develop");
-        let first = PreviewIdentity::build(&facts(250), None);
-        let second = PreviewIdentity::build(&facts(500), None);
+        let now = SystemTime::now();
+        let first = identity(250);
+        let second = identity(500);
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &first),
+            owner.admit(&key, "photo", "develop", &first, now).await,
             RenderAdmission::Queued
         );
         // The same full identity coalesces without a second admission.
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &first),
+            owner.admit(&key, "photo", "develop", &first, now).await,
             RenderAdmission::Running
         );
-        // A changed identity supersedes the pending intent.
+        // A changed identity supersedes the pending intent and cancels the
+        // superseded derivation in flight.
         assert_eq!(
-            owner.admit(&key, "photo", "develop", &second),
+            owner.admit(&key, "photo", "develop", &second, now).await,
             RenderAdmission::Queued
         );
         assert_eq!(
-            gate.0.lock().unwrap().len(),
+            gate.admissions.lock().unwrap().len(),
             0,
             "exactly two admissions reached the gate"
         );
         // A settled rendition clears the pending slot.
-        let settled = PreviewIdentity::build(&facts(500), None);
-        owner.publish(
-            &key,
-            rendition(settled.clone(), SystemTime::now() + RENDITION_TTL),
+        assert!(matches!(
+            publish(&owner, &key, &second, Some(second.clone())).await,
+            PublishOutcome::Published(_)
+        ));
+        assert!(owner.current(&key, &second).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_lost_render_is_retried_instead_of_running_forever() {
+        let gate = ScriptedGate::queued(3);
+        let gate_dyn: Arc<dyn PreviewRenderGate> = gate.clone();
+        let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate_dyn);
+        let key = ("photo".to_owned(), "develop");
+        let identity = identity(250);
+        let now = SystemTime::now();
+        assert_eq!(
+            owner.admit(&key, "photo", "develop", &identity, now).await,
+            RenderAdmission::Queued
         );
-        assert!(owner.current(&key, &settled).is_some());
+        // An explicit failure settles the intent, and the next request is a
+        // new admission instead of coalescing into the dead one.
+        owner
+            .settle_render(
+                &key,
+                "photo",
+                "develop",
+                &identity,
+                RenderSettlement::Failed,
+            )
+            .await;
+        assert_eq!(
+            owner.admit(&key, "photo", "develop", &identity, now).await,
+            RenderAdmission::Queued,
+            "a failed render frees its identity for retry"
+        );
+        // A lost receipt — an intent that never settles — frees its identity
+        // once its patience expires instead of answering running forever.
+        assert_eq!(
+            owner
+                .admit(
+                    &key,
+                    "photo",
+                    "develop",
+                    &identity,
+                    now + PENDING_TTL - Duration::from_secs(1)
+                )
+                .await,
+            RenderAdmission::Running,
+            "an intent inside its patience still coalesces"
+        );
+        assert_eq!(
+            owner
+                .admit(
+                    &key,
+                    "photo",
+                    "develop",
+                    &identity,
+                    now + PENDING_TTL + Duration::from_secs(1)
+                )
+                .await,
+            RenderAdmission::Queued,
+            "an expired intent is re-admitted"
+        );
+        assert_eq!(gate.settlements.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publication_is_conditional_on_the_identity_current_at_publish_time() {
+        let owner = EditPreviewOwner::production();
+        let key = ("photo".to_owned(), "develop");
+        let derived = identity(250);
+        let newer = identity(500);
+        // The late completion of a superseded request never publishes: the
+        // final serialized read returns the newer identity.
+        assert!(matches!(
+            publish(&owner, &key, &derived, Some(newer.clone())).await,
+            PublishOutcome::Superseded
+        ));
+        assert!(owner.current(&key, &derived).await.is_none());
+        // Unreadable fresh facts refuse too.
+        assert!(matches!(
+            publish(&owner, &key, &derived, None).await,
+            PublishOutcome::Superseded
+        ));
+        // The current identity publishes and serves.
+        assert!(matches!(
+            publish(&owner, &key, &derived, Some(derived.clone())).await,
+            PublishOutcome::Published(_)
+        ));
+        assert!(owner.current(&key, &derived).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn heavy_derivations_are_bounded_instance_wide() {
+        let owner = EditPreviewOwner::production();
+        let first = owner.try_derivation_permit();
+        assert!(first.is_some(), "the first heavy conversion is admitted");
+        assert!(
+            owner.try_derivation_permit().is_none(),
+            "a second concurrent heavy conversion waits for the instance bound"
+        );
+        drop(first);
+        assert!(owner.try_derivation_permit().is_some());
+    }
+
+    #[tokio::test]
+    async fn owners_are_bounded_and_evict_the_least_recently_touched() {
+        let owner = EditPreviewOwner::production();
+        for index in 0..(MAXIMUM_OWNERS + 100) {
+            let key = (format!("photo-{index}"), "develop");
+            let identity = scripted_identity(&format!("source-{index}"), 250);
+            let current = identity.clone();
+            publish(&owner, &key, &identity, Some(current)).await;
+        }
+        assert!(
+            owner.owner_count().await <= MAXIMUM_OWNERS,
+            "the retained owners never grow past the bound"
+        );
+        // The most recently touched owner survives; the earliest was evicted.
+        let latest = (format!("photo-{}", MAXIMUM_OWNERS + 99), "develop");
+        let latest_identity = scripted_identity(&format!("source-{}", MAXIMUM_OWNERS + 99), 250);
+        assert!(owner.current(&latest, &latest_identity).await.is_some());
+        let earliest = ("photo-0".to_owned(), "develop");
+        let earliest_identity = scripted_identity("source-0", 250);
+        assert!(owner.current(&earliest, &earliest_identity).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_superseded_derivation_is_cancelled_and_never_published() {
+        let gate = ScriptedGate::queued(1);
+        let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate);
+        let key = ("photo".to_owned(), "develop");
+        let token = owner.begin_derivation(&key).await;
+        assert!(!token.load(Ordering::Relaxed));
+        // A newer identity supersedes the in-flight derivation.
+        let _admitted = owner
+            .admit(
+                &key,
+                "photo",
+                "develop",
+                &scripted_identity("newer", 500),
+                SystemTime::now(),
+            )
+            .await;
+        assert!(
+            token.load(Ordering::Relaxed),
+            "the superseded derivation is cancelled"
+        );
+        // A cancelled conversion skips the native call entirely: the record
+        // points at a path that does not exist, and the result is still a
+        // clean cancellation, not an open failure.
+        let cancelled_record = RetainedDevelopmentResult {
+            path: PathBuf::from("/nonexistent/development-result.tif"),
+            ..record(250)
+        };
+        assert!(matches!(
+            derive_development_display(cancelled_record, 1224, token).await,
+            Ok(None)
+        ));
     }
 }

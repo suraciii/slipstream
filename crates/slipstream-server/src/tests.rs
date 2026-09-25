@@ -12760,6 +12760,7 @@ impl crate::edit_preview::DevelopmentResultRetention for ScriptedRetention {
 /// A render gate whose admissions a test scripts in order.
 struct ScriptedGate {
     admissions: Mutex<std::collections::VecDeque<crate::edit_preview::RenderAdmission>>,
+    settlements: Mutex<Vec<crate::edit_preview::RenderSettlement>>,
     calls: AtomicUsize,
 }
 
@@ -12772,6 +12773,14 @@ impl crate::edit_preview::PreviewRenderGate for ScriptedGate {
         self.admissions.lock().unwrap().pop_front().unwrap_or(
             crate::edit_preview::RenderAdmission::Unavailable("script-exhausted"),
         )
+    }
+
+    fn settle(
+        &self,
+        _request: crate::edit_preview::PreviewRenderRequest<'_>,
+        settlement: crate::edit_preview::RenderSettlement,
+    ) {
+        self.settlements.lock().unwrap().push(settlement);
     }
 }
 
@@ -12788,6 +12797,7 @@ fn scripted_gate(
 ) -> Arc<ScriptedGate> {
     Arc::new(ScriptedGate {
         admissions: Mutex::new(admissions),
+        settlements: Mutex::new(Vec::new()),
         calls: AtomicUsize::new(0),
     })
 }
@@ -12797,10 +12807,10 @@ fn preview_router(
     web_root: impl Into<PathBuf>,
     retention: Arc<dyn crate::edit_preview::DevelopmentResultRetention>,
     gate: Arc<dyn crate::edit_preview::PreviewRenderGate>,
-) -> Router {
+) -> (Router, Arc<crate::edit_preview::EditPreviewOwner>) {
     application.access.seed_test_token();
     let owner = Arc::new(crate::edit_preview::EditPreviewOwner::new(retention, gate));
-    crate::http::create_router_with_preview(
+    let router = crate::http::create_router_with_preview(
         Arc::clone(application),
         crate::http::open_web_root(web_root.into()),
         Some(ProcessingConfig {
@@ -12808,8 +12818,9 @@ fn preview_router(
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
         }),
-        owner,
-    )
+        Arc::clone(&owner),
+    );
+    (router, owner)
 }
 
 /// Writes one generated float32 Development TIFF and returns its path and the
@@ -12943,7 +12954,7 @@ async fn edit_preview_streams_the_current_rendition_with_the_closed_metadata() {
     use sha2::{Digest, Sha256};
     let (base, config, application, photo_id, recipe_revision, record) =
         approved_photo_with_recipe_and_result("preview-save", 0.5).await;
-    let router = preview_router(
+    let (router, _preview_owner) = preview_router(
         &application,
         config.web_root(),
         scripted_retention(Some(record.clone())),
@@ -13024,7 +13035,7 @@ async fn edit_preview_reports_refusals_and_admissions_with_exact_statuses() {
         crate::edit_preview::RenderAdmission::Indeterminate,
     ]));
     let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
-    let router = preview_router(
+    let (router, _preview_owner) = preview_router(
         &application,
         config.web_root(),
         scripted_retention(None),
@@ -13105,7 +13116,7 @@ async fn edit_preview_refuses_unsupported_and_unobservable_source_classes() {
     generated_non_tiff_raw_fixture(&config.library_root.join("opaque.ARW"));
     let application = Arc::new(Application::open(&config).await.unwrap());
     wait_for_scan_settled(&application).await;
-    let router = preview_router(
+    let (router, _preview_owner) = preview_router(
         &application,
         config.web_root(),
         scripted_retention(None),
@@ -13157,7 +13168,8 @@ async fn edit_preview_does_not_serve_a_superseded_identity() {
     ]));
     let retention_dyn: Arc<dyn crate::edit_preview::DevelopmentResultRetention> = retention.clone();
     let gate_dyn: Arc<dyn crate::edit_preview::PreviewRenderGate> = gate.clone();
-    let router = preview_router(&application, config.web_root(), retention_dyn, gate_dyn);
+    let (router, _preview_owner) =
+        preview_router(&application, config.web_root(), retention_dyn, gate_dyn);
     let (_, read) = get_edit_recipe(&router, &photo_id).await;
     let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
 
@@ -13230,7 +13242,7 @@ async fn edit_preview_coalesces_concurrent_derivations() {
     use sha2::{Digest, Sha256};
     let (base, config, application, photo_id, _, record) =
         approved_photo_with_recipe_and_result("preview-save", 0.5).await;
-    let router = preview_router(
+    let (router, preview_owner) = preview_router(
         &application,
         config.web_root(),
         scripted_retention(Some(record.clone())),
@@ -13246,6 +13258,11 @@ async fn edit_preview_coalesces_concurrent_derivations() {
     assert_eq!(
         header_value(&first, "slipstream-edit-preview-sha256"),
         header_value(&second, "slipstream-edit-preview-sha256")
+    );
+    assert_eq!(
+        preview_owner.derivations_started(),
+        1,
+        "the concurrent requests coalesced onto exactly one derivation"
     );
     let first_bytes = body_bytes(first).await;
     let second_bytes = body_bytes(second).await;
