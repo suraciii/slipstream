@@ -817,7 +817,12 @@ async fn serve_preview(
         return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
     }
     owner.note_derivation_started();
-    let derived = derive_development_display(record, facts.long_edge, Arc::clone(&token)).await;
+    let derived = derive_development_display(
+        record,
+        slipstream_core::DerivativeTarget::DevelopmentPreview1224,
+        Arc::clone(&token),
+    )
+    .await;
     let derivative = match derived {
         Ok(Some(derivative)) => derivative,
         Ok(None) => {
@@ -871,7 +876,7 @@ async fn serve_preview(
 /// opaque FFI call and cannot be interrupted once started.
 async fn derive_development_display(
     record: RetainedDevelopmentResult,
-    long_edge: u32,
+    target: slipstream_core::DerivativeTarget,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Option<slipstream_core::Derivative>, slipstream_core::DerivativeError> {
     if cancelled.load(Ordering::Relaxed) {
@@ -884,7 +889,7 @@ async fn derive_development_display(
         }
         std::fs::File::open(&path)
             .map_err(|_| slipstream_core::DerivativeError::Internal)
-            .and_then(|file| process_development_tiff(file.as_raw_fd(), long_edge).map(Some))
+            .and_then(|file| process_development_tiff(file.as_raw_fd(), target).map(Some))
     })
     .await;
     match derived {
@@ -1506,7 +1511,12 @@ mod tests {
             ..record(250)
         };
         assert!(matches!(
-            derive_development_display(cancelled_record, 1224, token).await,
+            derive_development_display(
+                cancelled_record,
+                slipstream_core::DerivativeTarget::DevelopmentPreview1224,
+                token,
+            )
+            .await,
             Ok(None)
         ));
     }

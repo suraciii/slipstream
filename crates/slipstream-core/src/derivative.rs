@@ -1003,7 +1003,8 @@ mod tests {
     #[test]
     fn development_tiff_derivative_refuses_unpinned_source_profile() {
         let fixture = float_fixture(&[[0.0, 0.0, 0.0]], DESTINATION_PROFILE_ASSET);
-        let outcome = fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
+        let outcome =
+            fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
         assert_eq!(outcome, Err(DerivativeError::Malformed));
     }
 
@@ -1011,7 +1012,8 @@ mod tests {
     fn development_tiff_derivative_refuses_integer_samples() {
         let pixels = vec![127u8; 8 * 2 * 3];
         let fixture = tiff_fixture(&pixels, 8, 2, 8, 1, SOURCE_PROFILE_ASSET);
-        let outcome = fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
+        let outcome =
+            fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
         assert_eq!(outcome, Err(DerivativeError::Malformed));
     }
 
@@ -1022,7 +1024,8 @@ mod tests {
         // receipt that publishes the artifact, not by this conversion.
         let mut fixture = float_fixture(&[[0.18, 0.18, 0.18]], SOURCE_PROFILE_ASSET);
         fixture.bytes[0..4].copy_from_slice(b"\x89PNG");
-        let outcome = fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
+        let outcome =
+            fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
         assert_eq!(outcome, Err(DerivativeError::Malformed));
     }
 
@@ -1052,7 +1055,8 @@ mod tests {
         // strip stays one patch long.
         let pixels = vec![0u8; PATCH as usize * PATCH as usize * 3 * 4];
         let fixture = tiff_fixture(&pixels, 20_000, 20_000, 32, 3, SOURCE_PROFILE_ASSET);
-        let outcome = fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
+        let outcome =
+            fixture.descriptor(|fd| process_development_tiff(fd, DerivativeTarget::Thumbnail512));
         assert_eq!(outcome, Err(DerivativeError::ResourceLimit));
     }
 
@@ -1078,7 +1082,8 @@ mod tests {
         let path = std::env::var_os("SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE")
             .expect("SLIPSTREAM_DEVELOPMENT_TIFF_SAMPLE must name a qualified Development TIFF");
         let file = std::fs::File::open(path).unwrap();
-        let derivative = process_development_tiff(file.as_raw_fd(), DerivativeTarget::Thumbnail512).unwrap();
+        let derivative =
+            process_development_tiff(file.as_raw_fd(), DerivativeTarget::Thumbnail512).unwrap();
         assert_eq!(derivative.profile, DerivativeProfile::Srgb);
         assert_eq!(derivative.width.max(derivative.height), 512);
         assert!(

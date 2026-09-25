@@ -12819,6 +12819,7 @@ fn preview_router(
             instance: "f".repeat(32),
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
+            socket_override: None,
         }),
         Arc::clone(&owner),
     );
@@ -12919,6 +12920,7 @@ async fn approved_photo_with_recipe_and_result(
             instance: "f".repeat(32),
             policy_sha256: "b".repeat(64),
             bundle_sha256: "c".repeat(64),
+            socket_override: None,
         }),
     );
     let photo_id = browse_photo_ids(&application, BrowseSourceRequest::Library)

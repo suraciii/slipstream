@@ -889,6 +889,7 @@ pub(crate) fn derivative_target_name(target: DerivativeTarget) -> &'static str {
     match target {
         DerivativeTarget::Thumbnail512 => "thumbnail",
         DerivativeTarget::Review2560 => "review",
+        DerivativeTarget::DevelopmentPreview1224 => "preview",
     }
 }
 
