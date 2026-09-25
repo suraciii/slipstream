@@ -4656,6 +4656,23 @@ async fn cli_direct_photo_metadata_stays_with_its_published_revision() {
         "2026-01-01T11:00:00.000000000"
     );
 
+    // A vanished Original still answers fail-soft: the published revision no
+    // longer resolves, and the route reports an empty document rather than a
+    // storage failure.
+    fs::remove_file(&path).unwrap();
+    let vanished = send(
+        &router,
+        authenticated_request()
+            .uri(format!(
+                "https://camera.local/api/photos/{photo_id}/metadata"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(vanished.status(), StatusCode::OK);
+    assert_eq!(response_json(vanished).await, serde_json::json!({}));
+
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
 }
