@@ -13496,6 +13496,65 @@ mod export_routes {
         let _ = fs::remove_dir_all(base);
     }
 
+    /// A preview whose validation acknowledgement is lost fails the render
+    /// and abandons the launcher attempt: the launcher must not keep an
+    /// attempt its owner has already given up on.
+    #[tokio::test]
+    async fn edit_preview_abandons_the_attempt_when_the_acknowledgement_is_lost() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.settle_attempt(1, "completed");
+            s.refuse_ack = true;
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// An attempt that completed before its cancellation is released without a
+    /// fabricated rejection: the service holds no collected output, and the
+    /// launcher refuses an acknowledgement that names none.
+    #[tokio::test]
+    async fn edit_preview_releases_a_completed_attempt_it_cannot_collect() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        save_recipe(&application, &photo_id, "save-1", None, 0.2).await;
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.settle_attempt(1, "completed");
+            s.refuse_output = true;
+        });
+        let admitted = edit_preview_request(&router, &photo_id).await;
+        assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+        wait_for_launcher_op(&launcher, "cancel", 1).await;
+        let ops = launcher.with_script(|s| s.ops.clone());
+        assert!(
+            !ops.contains(&"validate".to_owned()),
+            "a preview without a collected output must not acknowledge one: {ops:?}"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
     /// Waits until the launcher recorded `count` operations named `op`.
     async fn wait_for_launcher_op(launcher: &FakeLauncher, op: &str, count: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

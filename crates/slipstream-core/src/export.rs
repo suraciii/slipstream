@@ -184,6 +184,11 @@ impl ExportWorkspace {
         let staging = create_private_child(&root, "staging")?;
         let artifacts = create_private_child(&root, "artifacts")?;
         let previews = create_private_child(&root, "previews")?;
+        // A freshly opened workspace owns no preview admission, so every
+        // preview output it inherits belongs to a service lifetime that ended
+        // without its owner: ephemeral preview staging never outlives the
+        // admission that produced it.
+        clear_private_child(&previews);
         let work = create_private_child(&root, "work")?;
         Ok(Self {
             inner: Arc::new(WorkspaceInner {
@@ -451,6 +456,26 @@ fn create_private_child(root: &Path, name: &str) -> Result<PathBuf, ExportError>
     Ok(canonical)
 }
 
+/// Removes everything a previous lifetime left in a private workspace child.
+/// Removal is best effort: a file that cannot be deleted must not stop the
+/// owner from opening its workspace, and the next open retries.
+fn clear_private_child(path: &Path) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let target = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&target) else {
+            continue;
+        };
+        let _ = if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+    }
+}
+
 fn seal_read_only(file: &File) -> Result<(), ExportError> {
     let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o400);
@@ -638,6 +663,35 @@ mod tests {
         assert!(published.path.exists());
         workspace.delete_preview_tiff("prev-test-1").unwrap();
         assert!(!published.path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Ephemeral preview staging never outlives the service lifetime that
+    /// produced it: a reopened workspace inherits no preview output, while a
+    /// retained Export artifact of the same lifetime stays.
+    #[test]
+    fn reopening_the_workspace_removes_inherited_preview_outputs() {
+        let (root, library, workspace) = fixture();
+        let writer = workspace.begin_preview_tiff("prev-test-2").unwrap();
+        fs::write(writer.temporary_path(), b"preview").unwrap();
+        let preview = writer.publish(|_| Ok(())).unwrap();
+        let retained = workspace.begin_development_tiff("request-3").unwrap();
+        fs::write(retained.temporary_path(), b"II*\0tiff").unwrap();
+        retained.publish(|_| Ok(())).unwrap();
+
+        let reopened =
+            ExportWorkspace::open(root.join("exports"), library.canonical_path()).unwrap();
+        assert!(!preview.path.exists());
+        assert!(
+            reopened
+                .root()
+                .join("previews")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(reopened.root().join("artifacts/request-3.tiff").exists());
         let _ = fs::remove_dir_all(root);
     }
     #[test]

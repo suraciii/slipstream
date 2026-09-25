@@ -38,6 +38,9 @@ pub(crate) type SourceLocationResolver =
 /// actionable reason. A live launcher-owned attempt cannot outlast this
 /// window of silence.
 const LAUNCHER_FAILURE_TOLERANCE: u32 = 120;
+/// How many times one abandoned preview attempt retries a cancel whose answer
+/// was lost. The cancel is idempotent, so a retry is safe and bounded.
+const ABANDON_TOLERANCE: u32 = 3;
 
 /// A cooperative cancellation marker for one preview-class launcher attempt.
 /// The gate flips it when a newer intent supersedes the attempt; the runner
@@ -439,60 +442,47 @@ impl ExportManager {
         let output_facts = match validation_result {
             Ok(Ok(facts)) => facts,
             Ok(Err(_)) => {
-                let _ = self
-                    .acknowledge_output(
-                        &attempt_key,
-                        &incarnation,
-                        sequence,
-                        false,
-                        1,
-                        &"0".repeat(64),
-                    )
-                    .await;
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
                 return Err(OUTPUT_VALIDATION_FAILED.to_owned());
             }
             Err(error) => {
-                let _ = self
-                    .acknowledge_output(
-                        &attempt_key,
-                        &incarnation,
-                        sequence,
-                        false,
-                        1,
-                        &"0".repeat(64),
-                    )
-                    .await;
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
                 return Err(format!("preview validation task failed: {error}"));
             }
         };
         let published = match writer.publish(|path| validate_development_tiff(path).map(|_| ())) {
             Ok(published) => published,
             Err(error) => {
-                let _ = self
-                    .acknowledge_output(
-                        &attempt_key,
-                        &incarnation,
-                        sequence,
-                        false,
-                        1,
-                        &"0".repeat(64),
-                    )
-                    .await;
+                self.discard_preview_attempt(
+                    &attempt_key,
+                    &incarnation,
+                    sequence,
+                    Some(&output_receipt),
+                )
+                .await;
                 return Err(format!("preview output publication failed: {error}"));
             }
         };
         if cancellation.is_cancelled() {
-            let _ = self
-                .acknowledge_output(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    false,
-                    output_receipt.size,
-                    &output_receipt.sha256,
-                )
-                .await;
-            self.delete_preview_output(&attempt_key);
+            self.discard_preview_attempt(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                Some(&output_receipt),
+            )
+            .await;
             return Err("preview render cancelled".to_owned());
         }
         if !self
@@ -506,17 +496,13 @@ impl ExportManager {
             )
             .await
         {
-            let _ = self
-                .acknowledge_output(
-                    &attempt_key,
-                    &incarnation,
-                    sequence,
-                    false,
-                    output_receipt.size,
-                    &output_receipt.sha256,
-                )
-                .await;
-            self.delete_preview_output(&attempt_key);
+            self.discard_preview_attempt(
+                &attempt_key,
+                &incarnation,
+                sequence,
+                Some(&output_receipt),
+            )
+            .await;
             return Err("preview output acknowledgement failed".to_owned());
         }
         Ok(PreviewRenderResult {
@@ -529,21 +515,54 @@ impl ExportManager {
         })
     }
 
+    /// Abandons one launcher attempt the service will never validate. The
+    /// cancel is idempotent, so a lost answer is retried a bounded number of
+    /// times instead of leaving the launcher holding an attempt its owner has
+    /// given up on. An attempt that completed before the cancel arrived is
+    /// left to the launcher's own reconciliation: the service holds no
+    /// collected output to validate or reject, and a rejection without one is
+    /// refused by the launcher anyway.
     async fn abandon_preview_attempt(&self, export_id: &str, incarnation: &str, sequence: u64) {
         let attempt = ExportAttempt {
             incarnation: incarnation.to_owned(),
             sequence,
         };
-        if matches!(
-            self.cancel_attempt(export_id, &attempt).await,
-            AttemptCancel::Completed
-        ) {
-            // A completion that raced cancellation may be waiting in the
-            // launcher's settling phase for an output acknowledgement.
+        for _ in 0..ABANDON_TOLERANCE {
+            if !matches!(
+                self.cancel_attempt(export_id, &attempt).await,
+                AttemptCancel::Uncertain
+            ) {
+                return;
+            }
+        }
+    }
+
+    /// Releases one preview attempt the service will not publish: the
+    /// transferred output is rejected while the launcher still waits for an
+    /// acknowledgement, the private output is deleted, and the attempt is
+    /// abandoned. Ephemeral preview staging never outlives its admission.
+    async fn discard_preview_attempt(
+        &self,
+        attempt_key: &str,
+        incarnation: &str,
+        sequence: u64,
+        receipt: Option<&slipstream_processing::photo::OutputReceipt>,
+    ) {
+        if let Some(receipt) = receipt {
             let _ = self
-                .acknowledge_output(export_id, incarnation, sequence, false, 1, &"0".repeat(64))
+                .acknowledge_output(
+                    attempt_key,
+                    incarnation,
+                    sequence,
+                    false,
+                    receipt.size,
+                    &receipt.sha256,
+                )
                 .await;
         }
+        self.delete_preview_output(attempt_key);
+        self.abandon_preview_attempt(attempt_key, incarnation, sequence)
+            .await;
     }
 
     /// Verifies one launcher capability against this deployment's configured
