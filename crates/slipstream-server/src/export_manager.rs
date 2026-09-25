@@ -732,16 +732,38 @@ impl ExportManager {
         sequence: u64,
     ) -> Result<(), String> {
         let export_id = record.id.clone();
-        // A previous process may have renamed the validated file into place
-        // and crashed before committing. The published file is the surviving
-        // truth: validate and resolve from it instead of requesting a second
-        // transfer the launcher can no longer serve.
+        // A previous process may have claimed this attempt's publication and
+        // crashed around the rename. The durable publication claim ties the
+        // file to the attempt that produced it: only that attempt's restart
+        // may adopt it, a claim without a file means the transfer result was
+        // lost, and anything else is a stale leftover to discard.
+        let claim = self
+            .library
+            .export_publication_claim(&export_id)
+            .await
+            .unwrap_or(None);
+        let claim_is_current = record.attempt.as_ref().is_some_and(|attempt| {
+            claim.as_ref() == Some(&(attempt.incarnation.clone(), attempt.sequence))
+        });
+        if claim_is_current {
+            let published_path = self
+                .artifact_path(&export_id)
+                .ok_or_else(|| "the publication claim named no artifact directory".to_owned())?;
+            if tokio::fs::metadata(&published_path).await.is_ok() {
+                return self
+                    .settle_from_published_file(&export_id, &published_path)
+                    .await;
+            }
+            // The launcher transfer claim is spent; a second Output can
+            // never arrive. The attempt fails, and a retry starts fresh.
+            return Err("the claimed publication never produced its artifact".to_owned());
+        }
         if let Some(published_path) = self.artifact_path(&export_id)
             && tokio::fs::metadata(&published_path).await.is_ok()
         {
-            return self
-                .settle_from_published_file(&export_id, &published_path)
-                .await;
+            // A file without a matching claim belongs to a superseded
+            // attempt; it is never this attempt's output.
+            let _ = fs::remove_file(&published_path);
         }
         // Collect the output into a private temporary file through the
         // workspace, then validate before any acknowledgement.
@@ -827,6 +849,18 @@ impl ExportManager {
         // into place and committed when it is released. A lost or refused
         // acknowledgement is benign afterwards; the launcher reconciles the
         // attempt by its own deadline and the Export is already settled.
+
+        // Claim the publication durably before the rename, so a crash around
+        // it leaves recoverable evidence instead of an unattributed file.
+        if self
+            .library
+            .claim_export_publication(&export_id, incarnation, sequence)
+            .await
+            .is_err()
+        {
+            return Err("the publication could not be claimed durably".to_owned());
+        }
+
         let facts_slot = std::cell::RefCell::new(None);
         let facts_ref = &facts_slot;
         let published = writer

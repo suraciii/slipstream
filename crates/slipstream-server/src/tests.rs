@@ -12214,6 +12214,13 @@ mod export_routes {
             )
             .unwrap();
         drop(connection);
+        // The crashed process had durably claimed this attempt's publication
+        // just before renaming the validated file into place.
+        application
+            .library
+            .claim_export_publication(&export_id, &incarnation, 1)
+            .await
+            .unwrap();
 
         manager.reconcile_after_restart();
         let settled = wait_for_state(&router, &export_id, "succeeded").await;
@@ -12335,6 +12342,277 @@ mod export_routes {
             response_json(first_created).await["exportId"],
             response_json(second_created).await["exportId"]
         );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1: a recorded submission replays with 200 even after its source has
+    /// become unreadable: receipt resolution must precede any source
+    /// classification, and a replay never touches the source.
+    #[tokio::test]
+    async fn export_replay_resolves_when_the_source_becomes_unreadable() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let export_id = response_json(created).await["exportId"].clone();
+
+        // The source file disappears after acceptance; the recorded receipt
+        // must still resolve without any source probe.
+        fs::remove_file(config.library_root.join("pair.ARW")).unwrap();
+        let replayed = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(
+            replayed.status(),
+            StatusCode::OK,
+            "a recorded identity must replay even when its source is unreadable: {}",
+            response_json(replayed).await
+        );
+        assert_eq!(response_json(replayed).await["exportId"], export_id);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1: the submission digest covers only the caller's payload, so a
+    /// legitimate deployment bundle change cannot turn an identical replay
+    /// into a conflict.
+    #[tokio::test]
+    async fn export_replay_survives_a_deployment_bundle_change() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let export_id = response_json(created).await["exportId"].clone();
+
+        // A redeploy swaps the processing bundle; the socket and policy stay
+        // as they were.
+        let mut redeployed = launcher.processing_config();
+        redeployed.bundle_sha256 = "d".repeat(64);
+        let router_after = create_router_with_processing(
+            Arc::clone(&application),
+            open_web_root(config.web_root()),
+            Some(redeployed),
+        );
+        let replayed = submit_export_request(
+            &router_after,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        assert_eq!(
+            replayed.status(),
+            StatusCode::OK,
+            "an identical caller payload must replay across a bundle change: {}",
+            response_json(replayed).await
+        );
+        assert_eq!(response_json(replayed).await["exportId"], export_id);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P1/P2: disk recovery must adopt a published artifact only for the
+    /// attempt that published it; a stale file from a superseded attempt is
+    /// never the live attempt's output.
+    #[tokio::test]
+    async fn export_recovery_ignores_a_file_from_a_superseded_attempt() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_state(&router, &export_id, "running").await;
+        cancel_export(&router, &export_id).await;
+        wait_for_state(&router, &export_id, "cancelled").await;
+
+        // A stale file survives from the cancelled attempt, while the retry
+        // runs with a spent transfer claim: the launcher refuses any new
+        // Output. Only the stale file could make this Export succeed.
+        let stale_bytes = valid_development_tiff();
+        let stale_digest = format!("{:x}", Sha256::digest(&stale_bytes));
+        let path = manager.artifact_path(&export_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &stale_bytes).unwrap();
+        let incarnation = launcher.with_script(|s| s.incarnation.clone());
+        launcher.with_script(|s| {
+            s.settle_attempt(2, "completed");
+            s.refuse_output = true;
+        });
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute(
+                "UPDATE exports SET state='running', attempt_incarnation=?1,
+                   attempt_sequence=2 WHERE id=?2",
+                rusqlite::params![incarnation, export_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        manager.reconcile_after_restart();
+        let settled = wait_for_state(&router, &export_id, "failed").await;
+        let recorded_sha = settled["artifact"]["sha256"].as_str().unwrap_or("absent");
+        assert_ne!(
+            recorded_sha, stale_digest,
+            "recovery must not adopt a superseded attempt's file as the retry's output"
+        );
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// P2: the download lease holds until the response body drains or is
+    /// dropped, not merely until the producer reaches end of file.
+    #[tokio::test]
+    async fn export_download_holds_its_lease_until_the_body_drains() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let (application, router) = export_application(&base, &config).await;
+        let manager = Arc::clone(application.exports.as_ref().unwrap());
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let export_id = "exp-lease-drain-check".to_owned();
+        let artifact_bytes = vec![9_u8; 64 * 1024];
+        let digest = format!("{:x}", Sha256::digest(&artifact_bytes));
+        let recipe_digest = slipstream_core::ExportRecipePayload::capture(
+            &slipstream_core::EditRecipeSettings {
+                exposure_ev: 0.0,
+                white_balance: slipstream_core::WhiteBalanceIntent::AsShot,
+            },
+            slipstream_core::ExportExposureRange {
+                minimum_milli_ev: i64::MIN,
+                maximum_milli_ev: i64::MAX,
+            },
+        )
+        .unwrap()
+        .digest();
+        let path = manager.artifact_path(&export_id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &artifact_bytes).unwrap();
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO exports(id,photo_id,target,state,recipe_revision,exposure_ev,
+                   white_balance_mode,source_revision,source_profile_id,source_kind,
+                   recipe_digest,policy_id,bundle_id,workload,created_at,outcome,
+                   artifact_size,artifact_sha256,artifact_expires_at,artifact_width,
+                   artifact_height,artifact_profile_identity,settled_at,retain_until)
+                 VALUES(?1,?2,'development-tiff','succeeded','rev',0.0,'as-shot','src',
+                   'profile','raw',?3,?4,?5,'development-tiff',1,NULL,?6,?7,?8,2,1,?9,
+                   1800000000,1900000000)",
+                rusqlite::params![
+                    export_id,
+                    photo_id,
+                    recipe_digest,
+                    "b".repeat(64),
+                    "c".repeat(64),
+                    artifact_bytes.len() as i64,
+                    digest,
+                    1_900_000_000_i64,
+                    "e".repeat(64),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let download = download_artifact(&router, &export_id).await;
+        assert_eq!(download.status(), StatusCode::OK);
+        // The producer has certainly reached end of file by now, but the
+        // response body was never consumed: the lease must still exist.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let held = {
+            let connection =
+                rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            held, 1,
+            "an undrained response body must keep its download lease"
+        );
+        drop(download);
+
+        // Dropping the body settles the stream and releases the lease.
+        let connection =
+            rusqlite::Connection::open(config.state_directory.join("library.sqlite")).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let leases = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM export_download_leases WHERE export_id = ?1",
+                    [&export_id],
+                    |row| row.get::<_, u32>(0),
+                )
+                .unwrap();
+            if leases == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the download lease must be released after the body is dropped"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(connection);
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);

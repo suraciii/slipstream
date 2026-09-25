@@ -803,14 +803,56 @@ impl Library {
     /// Resolves a request identity without admission or state change: a
     /// recorded identity replays, expires, or conflicts before the submit
     /// transaction runs. `None` means the identity was never recorded.
-    pub async fn resolve_export_submission(
+    pub async fn resolve_export_receipt(
         &self,
-        submission: ExportSubmission,
+        photo_id: &str,
+        request_id: &str,
+        payload_digest: &str,
     ) -> Result<Option<ExportSubmissionResolution>, LibraryError> {
         let receive = {
             let _admission = self.admit()?;
+            self.persistence.resolve_export_submission_receiver(
+                photo_id,
+                request_id,
+                payload_digest,
+            )
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(Into::into)
+    }
+
+    /// Durably claims the publication of one export attempt before its
+    /// artifact is renamed into place.
+    pub async fn claim_export_publication(
+        &self,
+        export_id: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<(), LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
             self.persistence
-                .resolve_export_submission_receiver(submission)
+                .claim_export_publication_receiver(export_id, incarnation, sequence)
+        }?;
+        receive
+            .await
+            .unwrap_or(Err(PersistenceError::OwnerStopped))
+            .map_err(LibraryError::from)?;
+        Ok(())
+    }
+
+    /// Reads an export's durable publication claim, if any: the attempt
+    /// whose validated artifact is (about to be) published.
+    pub async fn export_publication_claim(
+        &self,
+        export_id: &str,
+    ) -> Result<Option<(String, u64)>, LibraryError> {
+        let receive = {
+            let _admission = self.admit()?;
+            self.persistence
+                .export_publication_claim_receiver(export_id)
         }?;
         receive
             .await

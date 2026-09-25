@@ -3385,6 +3385,50 @@ pub(crate) async fn submit_export(
             "The Photo is not part of the published Library",
         );
     };
+    // Receipt resolution precedes every source probe: a recorded identity
+    // replays, expires, or conflicts without reading or classifying the
+    // source, and a fresh identity flows on to classification and
+    // admission. The digest covers only the caller's payload, so a
+    // deployment bundle or policy change cannot break a replay.
+    let payload_digest = slipstream_core::export_submission_payload_digest(
+        &body.expected_recipe_version,
+        &body.expected_source_revision,
+    );
+    match state
+        .application
+        .library
+        .resolve_export_receipt(&photo_id, &body.request_id, &payload_digest)
+        .await
+    {
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Existing(record))) => {
+            return crate::http::json_response(
+                StatusCode::OK,
+                &crate::wire::export_submit(&record),
+            );
+        }
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Expired)) => {
+            return export_error(
+                StatusCode::GONE,
+                "export_expired",
+                "The request identity expired and cannot start new work",
+            );
+        }
+        Ok(Some(slipstream_core::ExportSubmissionResolution::Conflict)) => {
+            return export_error(
+                StatusCode::CONFLICT,
+                "export_conflict",
+                "The request identity was already used with a different payload",
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return export_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "outcome_unknown",
+                "The submission outcome is unconfirmed",
+            );
+        }
+    }
     if photo.original_kind != slipstream_core::OriginalKind::Raw {
         return export_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -3448,44 +3492,6 @@ pub(crate) async fn submit_export(
         },
         retained_output_bytes_max: manager.allowance(),
     };
-    // Receipt resolution precedes admission: a recorded identity replays,
-    // expires, or conflicts even while the launcher is unavailable, and a
-    // fresh identity is admitted before anything is accepted.
-    match state
-        .application
-        .library
-        .resolve_export_submission(submission.clone())
-        .await
-    {
-        Ok(Some(slipstream_core::ExportSubmissionResolution::Existing(record))) => {
-            return crate::http::json_response(
-                StatusCode::OK,
-                &crate::wire::export_submit(&record),
-            );
-        }
-        Ok(Some(slipstream_core::ExportSubmissionResolution::Expired)) => {
-            return export_error(
-                StatusCode::GONE,
-                "export_expired",
-                "The request identity expired and cannot start new work",
-            );
-        }
-        Ok(Some(slipstream_core::ExportSubmissionResolution::Conflict)) => {
-            return export_error(
-                StatusCode::CONFLICT,
-                "export_conflict",
-                "The request identity was already used with a different payload",
-            );
-        }
-        Ok(None) => {}
-        Err(_) => {
-            return export_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "outcome_unknown",
-                "The submission outcome is unconfirmed",
-            );
-        }
-    }
     if manager.ensure_admissible().await.is_err() {
         return export_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3825,6 +3831,9 @@ pub(crate) async fn get_export_artifact(
         }
     };
     let (sender, receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(4);
+    // The response body reports its end — drained or dropped — through this
+    // channel, which is what actually settles the download.
+    let (body_done_tx, body_done_rx) = tokio::sync::oneshot::channel::<()>();
     // A live stream keeps its lease's liveness anchor fresh so the staleness
     // sweep can never reclaim it before the response settles.
     let renewer = {
@@ -3870,8 +3879,11 @@ pub(crate) async fn get_export_artifact(
                     }
                 }
             }
-            // The lease holds until the response stream settles, whatever its
-            // outcome.
+            // The producer reaching end of file is not the stream settling:
+            // the lease holds until the response body drains or is dropped,
+            // so a slow client keeps its protection.
+            drop(sender);
+            let _ = body_done_rx.await;
             let _ = library.release_export_lease(&lease_id).await;
             renewer.abort();
         })
@@ -3907,13 +3919,29 @@ pub(crate) async fn get_export_artifact(
             format!("attachment; filename=\"{export_id}.tiff\""),
         );
     builder
-        .body(Body::from_stream(ExportFileStream(receiver)))
+        .body(Body::from_stream(ExportFileStream(
+            receiver,
+            Some(body_done_tx),
+        )))
         .expect("valid artifact response")
 }
 
 /// `tokio`'s mpsc receiver has no `Stream` impl without tokio-stream, so the
 /// artifact body adapts it through the receiver's own `poll_recv`.
-struct ExportFileStream(tokio::sync::mpsc::Receiver<Result<Vec<u8>, std::io::Error>>);
+struct ExportFileStream(
+    tokio::sync::mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    // Dropping the response body — after it drains or is abandoned — fires
+    // this signal, which releases the download lease in the pump task.
+    Option<tokio::sync::oneshot::Sender<()>>,
+);
+
+impl Drop for ExportFileStream {
+    fn drop(&mut self) {
+        // Dropping the completion sender is itself the signal: the pump
+        // task's receive side resolves as cancelled and releases the lease.
+        drop(self.1.take());
+    }
+}
 
 impl futures_core::Stream for ExportFileStream {
     type Item = Result<Vec<u8>, std::io::Error>;

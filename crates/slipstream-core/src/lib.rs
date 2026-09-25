@@ -61,7 +61,7 @@ pub use domain::{
     PhotoStateBatchMutation, PhotoStateBatchResult, PhotoStateField, PhotoStateMutation,
     PhotoStateMutationResult, PhotoStateUndo, PhotoStateValue, PreviewSeed, PreviewSeedResult,
     PreviewSource, PreviewState, RebindEditRecipe, RelativeOriginalPath, SaveEditRecipe,
-    ScanResult, ScanSnapshot, SelectionState, WhiteBalanceIntent,
+    ScanResult, ScanSnapshot, SelectionState, WhiteBalanceIntent, export_submission_payload_digest,
 };
 pub use export::{
     ArtifactWriter, ExportError, ExportTarget, ExportWorkspace, MAXIMUM_EXPORT_BYTES,

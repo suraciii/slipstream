@@ -1141,24 +1141,35 @@ impl ExportSubmission {
     /// The canonical payload digest that scopes a request identity: two
     /// submissions under one identity conflict unless these digests match.
     pub fn payload_digest(&self) -> String {
-        let payload = serde_json::json!({
-            "photo_id": self.photo_id,
-            "source_profile_id": self.source_profile_id,
-            "policy_id": self.policy_id,
-            "bundle_id": self.bundle_id,
-            "expected_recipe_revision": self.expected_recipe_revision,
-            "expected_source_revision": self.expected_source_revision,
-        });
-        use sha2::{Digest, Sha256};
-        format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&payload)
-                    .expect("submission serializes")
-                    .as_slice()
-            )
+        export_submission_payload_digest(
+            &self.expected_recipe_revision,
+            &self.expected_source_revision,
         )
     }
+}
+
+/// The digest of the caller-owned export payload. Server-owned placement —
+/// policy, deployment bundle, resolved source profile — is deliberately
+/// excluded: a legitimate redeploy may change any of them, and an identical
+/// caller payload must still replay under its request identity. The Photo
+/// scopes the identity at the receipt key, not here.
+pub fn export_submission_payload_digest(
+    expected_recipe_revision: &str,
+    expected_source_revision: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "expected_recipe_revision": expected_recipe_revision,
+        "expected_source_revision": expected_source_revision,
+    });
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&payload)
+                .expect("submission serializes")
+                .as_slice()
+        )
+    )
 }
 
 /// The pre-admission resolution of a request identity: recorded identities

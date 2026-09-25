@@ -767,8 +767,20 @@ enum Command {
         reply: Reply<ExportRetryOutcome>,
     },
     ResolveExportSubmission {
-        submission: ExportSubmission,
+        photo_id: String,
+        request_id: String,
+        payload_digest: String,
         reply: Reply<Option<ExportSubmissionResolution>>,
+    },
+    ClaimExportPublication {
+        export_id: String,
+        incarnation: String,
+        sequence: u64,
+        reply: Reply<bool>,
+    },
+    ExportPublicationClaim {
+        export_id: String,
+        reply: Reply<Option<(String, u64)>>,
     },
     RenewExportLease {
         lease_id: String,
@@ -1330,14 +1342,49 @@ impl Persistence {
     /// transaction ever runs.
     pub(crate) fn resolve_export_submission_receiver(
         &self,
-        submission: ExportSubmission,
+        photo_id: &str,
+        request_id: &str,
+        payload_digest: &str,
     ) -> Result<
         oneshot::Receiver<Result<Option<ExportSubmissionResolution>, PersistenceError>>,
         PersistenceError,
     > {
         let (send, receive) = oneshot::channel();
         self.submit(Command::ResolveExportSubmission {
-            submission,
+            photo_id: photo_id.to_owned(),
+            request_id: request_id.to_owned(),
+            payload_digest: payload_digest.to_owned(),
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    /// Durably claims the publication of one attempt before its artifact is
+    /// renamed into place; `false` means the claim could not be written.
+    pub(crate) fn claim_export_publication_receiver(
+        &self,
+        export_id: &str,
+        incarnation: &str,
+        sequence: u64,
+    ) -> Result<oneshot::Receiver<Result<bool, PersistenceError>>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ClaimExportPublication {
+            export_id: export_id.to_owned(),
+            incarnation: incarnation.to_owned(),
+            sequence,
+            reply: send,
+        })?;
+        Ok(receive)
+    }
+
+    /// Reads the durable publication claim of an Export, if any.
+    pub(crate) fn export_publication_claim_receiver(
+        &self,
+        export_id: &str,
+    ) -> Result<oneshot::Receiver<ExportPublicationClaimReply>, PersistenceError> {
+        let (send, receive) = oneshot::channel();
+        self.submit(Command::ExportPublicationClaim {
+            export_id: export_id.to_owned(),
             reply: send,
         })?;
         Ok(receive)
@@ -1992,8 +2039,34 @@ fn owner_main(
                 );
                 let _ = reply.send(result);
             }
-            Command::ResolveExportSubmission { submission, reply } => {
-                let _ = reply.send(Ok(resolve_export_submission(&connection, &submission)));
+            Command::ResolveExportSubmission {
+                photo_id,
+                request_id,
+                payload_digest,
+                reply,
+            } => {
+                let _ = reply.send(Ok(resolve_export_submission(
+                    &connection,
+                    &photo_id,
+                    &request_id,
+                    &payload_digest,
+                )));
+            }
+            Command::ClaimExportPublication {
+                export_id,
+                incarnation,
+                sequence,
+                reply,
+            } => {
+                let _ = reply.send(claim_export_publication(
+                    &mut connection,
+                    &export_id,
+                    &incarnation,
+                    sequence,
+                ));
+            }
+            Command::ExportPublicationClaim { export_id, reply } => {
+                let _ = reply.send(Ok(export_publication_claim(&connection, &export_id)));
             }
             Command::RenewExportLease {
                 lease_id,
@@ -4592,6 +4665,14 @@ const EXPORT_LIST_LIMIT: usize = 60;
 /// release their lease when the stream settles.
 const EXPORT_LEASE_STALE_SECONDS: u64 = 24 * 60 * 60;
 
+type ExportPublicationClaimReply = Result<Option<(String, u64)>, PersistenceError>;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportPublicationClaimRow {
+    incarnation: String,
+    sequence: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ExportReceipt {
     payload_digest: String,
@@ -4611,6 +4692,54 @@ fn validate_export_request_id(request_id: &str) -> bool {
     !request_id.is_empty()
         && request_id.len() <= MAXIMUM_EXPORT_REQUEST_ID_BYTES
         && !request_id.chars().any(char::is_control)
+}
+
+/// Durably records that `attempt` is about to publish `export_id`'s
+/// artifact, before the rename: a restart can then tell a file published by
+/// this very attempt from a stale leftover of a superseded one.
+fn claim_export_publication(
+    connection: &mut Connection,
+    export_id: &str,
+    incarnation: &str,
+    sequence: u64,
+) -> Result<bool, PersistenceError> {
+    let transaction = connection
+        .transaction()
+        .map_err(|_| PersistenceError::Storage)?;
+    let claim = serde_json::json!({
+        "incarnation": incarnation,
+        "sequence": sequence,
+    });
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO library_metadata(key,value) VALUES(?1,?2)",
+            params![export_publication_claim_key(export_id), claim.to_string()],
+        )
+        .map_err(|_| PersistenceError::Storage)?;
+    transaction
+        .commit()
+        .map_err(|_| PersistenceError::Storage)?;
+    Ok(true)
+}
+
+/// The durable publication claim of an Export: the attempt whose validated
+/// artifact is (about to be) renamed into place, if any.
+fn export_publication_claim(connection: &Connection, export_id: &str) -> Option<(String, u64)> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM library_metadata WHERE key=?",
+            [export_publication_claim_key(export_id)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let claim: ExportPublicationClaimRow = serde_json::from_str(&value).ok()?;
+    Some((claim.incarnation, claim.sequence))
+}
+
+fn export_publication_claim_key(export_id: &str) -> String {
+    format!("export_publication:{export_id}")
 }
 
 fn export_payload_digest(submission: &ExportSubmission) -> Result<String, PersistenceError> {
@@ -5039,22 +5168,21 @@ fn export_record(
 /// `None` means the identity was never recorded and submission may proceed.
 fn resolve_export_submission(
     connection: &Connection,
-    submission: &ExportSubmission,
+    photo_id: &str,
+    request_id: &str,
+    payload_digest: &str,
 ) -> Option<ExportSubmissionResolution> {
     let value = connection
         .query_row(
             "SELECT value FROM library_metadata WHERE key=?",
-            [export_receipt_key(
-                &submission.photo_id,
-                &submission.request_id,
-            )],
+            [export_receipt_key(photo_id, request_id)],
             |row| row.get::<_, String>(0),
         )
         .optional()
         .ok()
         .flatten()?;
     let receipt: ExportReceipt = serde_json::from_str(&value).ok()?;
-    if receipt.payload_digest != export_payload_digest(submission).ok()? {
+    if receipt.payload_digest != payload_digest {
         return Some(ExportSubmissionResolution::Conflict);
     }
     match export_record(connection, &receipt.export_id) {
