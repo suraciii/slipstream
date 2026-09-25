@@ -10329,6 +10329,21 @@ mod export_routes {
             }
         }
 
+        /// Reports a validated output that waits for the service's collection
+        /// and acknowledgement, the phase the production launcher reports as
+        /// `settling` with no outcome.
+        fn ready_output(&mut self, sequence: u64) {
+            let attempt = self
+                .attempts
+                .entry((self.incarnation.clone(), sequence))
+                .or_insert(AttemptReceipt {
+                    state: "running",
+                    outcome: None,
+                });
+            attempt.state = "settling";
+            attempt.outcome = None;
+        }
+
         fn settle_attempt(&mut self, sequence: u64, outcome: &str) {
             let attempt = self
                 .attempts
@@ -10541,8 +10556,22 @@ mod export_routes {
                 export_id,
                 incarnation,
                 sequence,
+                accepted,
                 ..
             } => {
+                // The production launcher settles the attempt from the
+                // service's acknowledgement, so the scripted attempt does too.
+                let key = (incarnation.clone(), *sequence);
+                if let Some(attempt) = script.attempts.get_mut(&key)
+                    && attempt.state == "settling"
+                {
+                    attempt.state = "settled";
+                    attempt.outcome = Some(if *accepted {
+                        "completed".to_owned()
+                    } else {
+                        "refused-output-validation".to_owned()
+                    });
+                }
                 let receipt = launcher_receipt(script, export_id, incarnation, *sequence);
                 PhotoResponse::result(ResultBody::Receipt { receipt })
             }
@@ -11938,6 +11967,55 @@ mod export_routes {
         assert_eq!(settled["terminalOutcome"], "succeeded");
         let download = download_artifact(&router, &export_id).await;
         assert_eq!(download.status(), StatusCode::OK);
+
+        application.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
+    /// The production handshake: the launcher validates its engine artifact,
+    /// reports an output that waits for collection, and settles the attempt
+    /// from the service's acknowledgement. A service that waited for the
+    /// settled receipt before collecting would deadlock against it.
+    #[tokio::test]
+    async fn export_collects_the_output_the_launcher_waits_to_acknowledge() {
+        let (base, config) = export_fixture(Some(64 * 1024 * 1024 * 1024));
+        let processing = config.processing.clone().unwrap();
+        let launcher = FakeLauncher::start(&processing, LauncherScript::new());
+        let mut config = config;
+        config.processing = Some(launcher.processing_config());
+        let (application, router) = export_application(&base, &config).await;
+        let photo_id = photo_id_for(&config, "pair.ARW");
+        let recipe = save_recipe(&application, &photo_id, "save-1", None, 0.5).await;
+        let source_revision = current_source_revision(&application, &photo_id).await;
+        let created = submit_export_request(
+            &router,
+            &photo_id,
+            "request-1",
+            &recipe.revision,
+            &source_revision,
+        )
+        .await;
+        let export_id = response_json(created).await["exportId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        wait_for_state(&router, &export_id, "running").await;
+
+        launcher.with_script(|s| {
+            s.output = Some(valid_development_tiff());
+            s.ready_output(1);
+        });
+        let settled = wait_for_state(&router, &export_id, "succeeded").await;
+        assert_eq!(settled["terminalOutcome"], "succeeded");
+        let download = download_artifact(&router, &export_id).await;
+        assert_eq!(download.status(), StatusCode::OK);
+        // The acknowledgement settled the attempt, not a poll deadline.
+        let outcome = launcher.with_script(|s| {
+            s.attempts
+                .get(&(s.incarnation.clone(), 1))
+                .and_then(|attempt| attempt.outcome.clone())
+        });
+        assert_eq!(outcome.as_deref(), Some("completed"));
 
         application.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(base);

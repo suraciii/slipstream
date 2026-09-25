@@ -9,6 +9,7 @@ a real deployment.  Run with:
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import hashlib
 import io
@@ -59,11 +60,11 @@ def build_development_tiff(
     *,
     bits=(32, 32, 32),
     sample_format=(3, 3, 3),
-    compression: int = 1,
+    compression: int = 8,
     photometric: int = 2,
     samples: int = 3,
 ) -> bytes:
-    """Little-endian uncompressed float32 RGB TIFF with an embedded profile."""
+    """Little-endian float32 RGB TIFF carrying Deflate strips and an embedded profile."""
     short_tags = {
         258: bits,
         339: sample_format,
@@ -820,9 +821,9 @@ class HelperTests(unittest.TestCase):
         )
         self.assertIn("tiff-embedded-profile-digest-not-pinned", problems)
         _, problems = acceptance.validate_development_tiff(
-            build_development_tiff(4, 3, profile, compression=0), 4, 3
+            build_development_tiff(4, 3, profile, compression=1), 4, 3
         )
-        self.assertIn("tiff-compression-not-uncompressed", problems)
+        self.assertIn("tiff-compression-not-deflate", problems)
         _, problems = acceptance.validate_development_tiff(
             build_development_tiff(4, 3, profile, photometric=1), 4, 3
         )
@@ -907,6 +908,53 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(problems, ["declared-byteLength-not-positive"])
         limit, problems = acceptance.artifact_download_limit("100")
         self.assertEqual(problems, ["declared-byteLength-not-integer"])
+
+    def test_configured_download_bound_admits_a_full_resolution_artifact(self):
+        # A full-resolution float32 Development TIFF is larger than the
+        # default bound.  The deployment's own bound is what admits it, and
+        # the launcher's hard output maximum is the ceiling.
+        declared = 641_868_746
+        _, problems = acceptance.artifact_download_limit(declared)
+        self.assertEqual(problems, ["declared-byteLength-exceeds-download-limit"])
+        limit, problems = acceptance.artifact_download_limit(
+            declared, acceptance.MAXIMUM_DOWNLOAD_BYTES
+        )
+        self.assertEqual(problems, [])
+        self.assertEqual(limit, declared + acceptance.DOWNLOAD_SLACK_BYTES)
+        artifact = {
+            "exportId": EXPORT_ID,
+            "target": "development-tiff",
+            "stage": "develop",
+            "contentType": "image/tiff",
+            "width": 6376,
+            "height": 9568,
+            "profileIdentity": "profile",
+            "byteLength": declared,
+            "sha256": "a" * 64,
+            "expiresAt": "2026-01-01T00:00:00Z",
+        }
+        _, problems = acceptance.validate_artifact_object(artifact)
+        self.assertEqual(problems, ["artifact-byteLength-exceeds-download-limit"])
+        _, problems = acceptance.validate_artifact_object(
+            artifact, acceptance.MAXIMUM_DOWNLOAD_BYTES
+        )
+        self.assertEqual(problems, [])
+
+    def test_download_bound_option_is_bounded_by_the_hard_maximum(self):
+        self.assertEqual(acceptance.download_bound("4294967296"), acceptance.MAXIMUM_DOWNLOAD_BYTES)
+        for value in ("0", "-1", "abc", str(acceptance.MAXIMUM_DOWNLOAD_BYTES + 1)):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                acceptance.download_bound(value)
+        parsed = acceptance.parse_args(
+            [
+                "--base-url", "https://acceptance.example.com",
+                "--token-file", "/tmp/token",
+                "--fixture", "/tmp/fixture.raw",
+                "--output-dir", "/tmp/downloads",
+                "--max-download-bytes", "4294967296",
+            ]
+        )
+        self.assertEqual(parsed.max_download_bytes, acceptance.MAXIMUM_DOWNLOAD_BYTES)
 
     def test_export_submission_binds_snapshot_identity(self):
         good = {

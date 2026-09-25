@@ -17,6 +17,9 @@ exercise it.
 The tool must never run against an operator's live library.  It refuses to run
 without `--i-acknowledge-this-is-an-acceptance-instance`, and the documented
 target is a dedicated acceptance deployment (see tools/processing/README.md).
+`--max-download-bytes` carries that deployment's retained-output allowance, so
+the runner admits the qualified Development TIFF's declared size instead of
+refusing it against a smaller default bound.
 
 Exit codes: 0 when every step that ran passed, 1 when any step failed, and 2
 when the run was blocked (steps could not run, for example because a route of
@@ -44,7 +47,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_JSON_BYTES = 1024 * 1024
+# The read bound for an artifact download.  The default covers a small
+# deployment; a full-resolution float32 Development TIFF is larger, so the
+# operator passes the deployment's own published bound with
+# `--max-download-bytes` (its `SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`
+# value, see docs/deployment.md).
 MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+# The launcher's hard output maximum (`MAX_OUTPUT_BYTES` in
+# `crates/slipstream-processing/src/photo.rs`): the most any single published
+# artifact can be.  A larger configured bound would only invite reading bytes
+# the deployment cannot legitimately publish.
+MAXIMUM_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 DOWNLOAD_SLACK_BYTES = 65536
 MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
@@ -518,28 +531,28 @@ def header_object_mismatches(metadata: dict, artifact: dict) -> list:
     return problems
 
 
-def artifact_download_limit(declared: object) -> tuple[int, list]:
-    """Clamp the read limit for a download to the hard maximum.
+def artifact_download_limit(declared: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[int, list]:
+    """Clamp the read limit for a download to the configured maximum.
 
     Returns the applied byte limit and problems for an unusable declared
-    size.  A declared size above `MAX_DOWNLOAD_BYTES` is refused instead of
-    being clamped, because accepting it would mean reading an artifact the
+    size.  A declared size above `maximum` is refused instead of being
+    clamped, because accepting it would mean reading an artifact the
     deployment cannot legitimately publish.
     """
     problems: list = []
     if not isinstance(declared, int) or isinstance(declared, bool):
         problems.append("declared-byteLength-not-integer")
-        return MAX_DOWNLOAD_BYTES, problems
+        return maximum, problems
     if declared <= 0:
         problems.append("declared-byteLength-not-positive")
-        return MAX_DOWNLOAD_BYTES, problems
-    if declared > MAX_DOWNLOAD_BYTES:
+        return maximum, problems
+    if declared > maximum:
         problems.append("declared-byteLength-exceeds-download-limit")
-        return MAX_DOWNLOAD_BYTES, problems
-    return min(declared + DOWNLOAD_SLACK_BYTES, MAX_DOWNLOAD_BYTES), problems
+        return maximum, problems
+    return min(declared + DOWNLOAD_SLACK_BYTES, maximum), problems
 
 
-def validate_artifact_object(artifact: object) -> tuple[dict, list]:
+def validate_artifact_object(artifact: object, maximum: int = MAX_DOWNLOAD_BYTES) -> tuple[dict, list]:
     """Validate the closed artifact metadata object of `GET /api/exports/{id}`."""
     problems: list = []
     if not isinstance(artifact, dict):
@@ -554,7 +567,7 @@ def validate_artifact_object(artifact: object) -> tuple[dict, list]:
     if isinstance(declared, int) and not isinstance(declared, bool):
         if declared <= 0:
             problems.append("artifact-byteLength-not-positive")
-        elif declared > MAX_DOWNLOAD_BYTES:
+        elif declared > maximum:
             problems.append("artifact-byteLength-exceeds-download-limit")
     if not _LOWER_HEX_64.match(str(artifact.get("sha256", ""))):
         problems.append("artifact-sha256-not-lowercase-hex-64")
@@ -608,6 +621,7 @@ def validate_export_inspection(
     photo_id: str | None = None,
     recipe_version: str | None = None,
     source_revision: str | None = None,
+    maximum_download_bytes: int = MAX_DOWNLOAD_BYTES,
 ) -> tuple[dict, list]:
     """Validate `GET /api/exports/{id}` against the wire contract."""
     problems: list = []
@@ -643,7 +657,9 @@ def validate_export_inspection(
         if artifact is None:
             problems.append("artifact-null-after-succeeded")
         else:
-            artifact_facts, artifact_problems = validate_artifact_object(artifact)
+            artifact_facts, artifact_problems = validate_artifact_object(
+                artifact, maximum_download_bytes
+            )
             if isinstance(artifact, dict) and artifact.get("exportId") != payload.get("exportId"):
                 problems.append("artifact-exportId-mismatch")
             facts["artifact"] = artifact_facts
@@ -826,8 +842,11 @@ def validate_development_tiff(
         problems.append("tiff-bits-per-sample-not-float32-rgb")
     if sample_format != [3, 3, 3]:
         problems.append("tiff-sample-format-not-ieee-float")
-    if compression != 1:
-        problems.append("tiff-compression-not-uncompressed")
+    # design/processing-photo-protocol.md: the closed Development TIFF
+    # contract is IEEE float32 RGB samples with Deflate strip ranges, and the
+    # launcher refuses anything else before it publishes.
+    if compression != 8:
+        problems.append("tiff-compression-not-deflate")
     if photometric != 2:
         problems.append("tiff-photometric-not-rgb")
     if expected_width is not None and width != expected_width:
@@ -1182,11 +1201,12 @@ class Runner:
         settlement_timeout: float = 900.0,
         preview_timeout: float = 120.0,
         poll_interval: float = 2.0,
+        max_download_bytes: int = MAX_DOWNLOAD_BYTES,
         accepted_profile_digests: tuple[str, ...] = PINNED_SOURCE_PROFILE_DIGESTS,
         expected_identities: dict | None = None,
         monotonic=time.monotonic,
     ):
-        self.client = Client(base_url, token, timeout=request_timeout)
+        self.client = Client(base_url, token, timeout=request_timeout, max_download_bytes=max_download_bytes)
         self.fixture = fixture
         self.output_dir = output_dir
         self.settlement_timeout = settlement_timeout
@@ -1598,6 +1618,7 @@ class Runner:
                 photo_id=self.photo_id,
                 recipe_version=self.recipe_version,
                 source_revision=self.source_revision,
+                maximum_download_bytes=self.client.max_download_bytes,
             )
             state = facts.get("state")
             if state in ("succeeded", "failed", "cancelled"):
@@ -1641,7 +1662,7 @@ class Runner:
         declared = None
         if self.export_artifact:
             declared = self.export_artifact.get("byteLength")
-        limit, limit_problems = artifact_download_limit(declared)
+        limit, limit_problems = artifact_download_limit(declared, self.client.max_download_bytes)
         if limit_problems:
             raise AcceptanceFailure(
                 "artifact-declared-size-invalid", {"problems": limit_problems}
@@ -1928,6 +1949,21 @@ def render_summary(report: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def download_bound(value: str) -> int:
+    """Parse `--max-download-bytes`: a positive read bound within the hard maximum."""
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a decimal byte count") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive byte count")
+    if parsed > MAXIMUM_DOWNLOAD_BYTES:
+        raise argparse.ArgumentTypeError(
+            f"must not exceed the launcher's hard output maximum of {MAXIMUM_DOWNLOAD_BYTES} bytes"
+        )
+    return parsed
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base-url", required=True, help="Deployment base URL (https, or http on loopback).")
@@ -1942,6 +1978,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--settlement-timeout", type=float, default=900.0)
     parser.add_argument("--preview-timeout", type=float, default=120.0)
     parser.add_argument("--poll-interval", type=float, default=2.0)
+    parser.add_argument(
+        "--max-download-bytes",
+        type=download_bound,
+        default=MAX_DOWNLOAD_BYTES,
+        help=(
+            "Read bound for artifact downloads: the deployment's retained-output allowance in bytes "
+            "(`SLIPSTREAM_EXPORT_RETAINED_OUTPUT_BYTES`, docs/deployment.md), which must cover a "
+            f"full-resolution Development TIFF. Defaults to {MAX_DOWNLOAD_BYTES}; the launcher's hard "
+            f"output maximum is {MAXIMUM_DOWNLOAD_BYTES}."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1993,6 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         settlement_timeout=arguments.settlement_timeout,
         preview_timeout=arguments.preview_timeout,
         poll_interval=arguments.poll_interval,
+        max_download_bytes=arguments.max_download_bytes,
         expected_identities=expected,
     )
     try:

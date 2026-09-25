@@ -246,8 +246,10 @@ pub(crate) fn process_jpeg_with_orientation(
 /// This conversion is also an integrity gate for the reader's inputs. It
 /// verifies the embedded source profile identity, refuses anything it cannot
 /// decode as a float32 RGB TIFF, and loads with `fail_on` set to
-/// `VIPS_FAIL_ON_WARNING`, so malformed input and decode failures inside the
-/// container are refused instead of decoding as partial or black data. The
+/// `VIPS_FAIL_ON_ERROR`, so malformed input, truncated payloads, and decode
+/// failures inside the container are refused instead of decoding as partial
+/// or black data, while the private metadata warnings an engine writes into
+/// its own artifact do not refuse a decodable image. The
 /// byte length and digest of a published artifact are still established by
 /// the receipt that publishes it.
 pub fn process_development_tiff(
@@ -441,7 +443,7 @@ fn tiff_bytes(
     sample_format: u16,
     profile: &[u8],
 ) -> Vec<u8> {
-    let entries: [[u32; 4]; 11] = [
+    let entries: [[u32; 4]; 12] = [
         [256, 4, 1, width],
         [257, 4, 1, height],
         [258, 3, 3, 0],
@@ -453,6 +455,10 @@ fn tiff_bytes(
         [279, 4, 1, pixels.len() as u32],
         [339, 3, 3, 0],
         [34675, 7, profile.len() as u32, 0],
+        // An engine artifact carries private metadata tags libtiff reports as
+        // warnings. The fixture reproduces that accepted shape so a reader
+        // that refuses benign warnings fails here instead of in deployment.
+        [50341, 7, 4, 0],
     ];
     let ifd_offset = 8u32;
     let ifd_bytes = 2 + entries.len() as u32 * 12 + 4;
@@ -500,8 +506,8 @@ fn tiff_bytes(
 }
 
 /// Builds a minimal generated float32 RGB TIFF that carries the pinned linear
-/// ProPhoto source profile: the input shape `process_development_tiff`
-/// accepts. Tests across the workspace share this builder so generated
+/// ProPhoto source profile and one private metadata tag, the input shape
+/// `process_development_tiff` accepts from a real engine artifact. Tests across the workspace share this builder so generated
 /// fixture bytes never drift from the accepted source-profile identity.
 /// `samples` holds `width * height * 3` row-major interleaved RGB values.
 pub fn development_tiff_fixture(samples: &[f32], width: u32, height: u32) -> Vec<u8> {
