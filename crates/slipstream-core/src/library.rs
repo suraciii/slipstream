@@ -2107,7 +2107,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         assert_eq!(
             connection
@@ -2950,7 +2950,7 @@ mod tests {
             .save_edit_recipe(crate::SaveEditRecipe {
                 photo_id: photo_id.clone(),
                 request_id: "library-first-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: original_source_revision,
                 settings: crate::EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -3004,7 +3004,7 @@ mod tests {
                 .save_edit_recipe(crate::SaveEditRecipe {
                     photo_id: photo_id.clone(),
                     request_id: "library-stale-save".to_owned(),
-                    expected_recipe_revision: Some(saved.revision),
+                    expected_recipe_version: Some(saved.revision),
                     expected_source_revision: recovered.current_source_revision,
                     settings: crate::EditRecipeSettings {
                         exposure_ev: 1.0,

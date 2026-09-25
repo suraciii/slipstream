@@ -159,11 +159,16 @@ If the launcher endpoint or policy is unavailable, `processing-up` must fail
 closed without weakening Web isolation or changing an already-running Library
 service. The ordinary `up` command remains the recovery path for Library
 browsing. `/healthz` continues to report only Library service health.
-`GET /api/processing/capability` reports whether the operator disabled the
-path, whether an opted-in path is unavailable and why, or whether the exact
-deployed launcher, policy, bundle and resource boundary are available. It
-reports source and bundle availability separately and never advertises the
-qualification profile as production capability.
+`GET /api/processing/capability` follows the merged Photo Development service
+surface (`design/photo-development.md`): it reports the closed capability
+condition — `disabled` when the operator has not opted in, the named
+deployment defect when an opted-in path cannot be proven
+(`launcher-unavailable`, `bundle-unavailable`, `source-unsupported`,
+`resource-unavailable`), and `ready` only when the exact deployed launcher,
+policy, bundle, resource boundary and source qualification all check out. It
+never advertises the qualification profile as production capability, and the
+profile report stays empty only while the launcher itself exposes no
+photo-processing capability.
 
 Production acceptance tooling must exercise the packaged launcher and supported
 Compose path on the target host. It checks exact Web, launcher, worker, bundle

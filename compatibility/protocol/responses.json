@@ -13,6 +13,7 @@
           "state": "inspection-pending"
         },
         "rating": 0,
+        "hasSavedEdits": false,
         "selectionState": "undecided"
       }
     ],
@@ -39,6 +40,7 @@
           "width": 90
         },
         "rating": 0,
+        "hasSavedEdits": false,
         "selectionState": "undecided"
       }
     ],
