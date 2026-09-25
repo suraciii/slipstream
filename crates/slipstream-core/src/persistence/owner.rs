@@ -5869,7 +5869,9 @@ fn unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// The key the Library keeps its removal-marker high water mark under.
+/// The key the Library keeps its removal-marker high water mark under. A
+/// Library that predates the mark falls back to the greatest marker it still
+/// holds, so the first marker written after an upgrade cannot repeat one.
 const REMOVAL_MARKER_HIGH_WATER: &str = "removal_marker_high_water";
 
 /// The next removal marker: the clock reading, and strictly greater than every
@@ -5890,9 +5892,18 @@ fn next_removal_marker(transaction: &Transaction<'_>) -> Result<i64, MutationErr
         )
         .optional()
         .map_err(mutation_error_from_sqlite)?;
-    let high_water = stored
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
+    let high_water = match stored.and_then(|value| value.parse::<i64>().ok()) {
+        Some(value) => value,
+        // A Library written before this high water mark existed has no row to
+        // read: the markers it still holds are the floor, so the next marker
+        // cannot repeat one of them either.
+        None => transaction
+            .query_row("SELECT max(removed_at_ms) FROM photos", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .map_err(mutation_error_from_sqlite)?
+            .unwrap_or(0),
+    };
     let marker = unix_millis().max(high_water.saturating_add(1));
     transaction
         .execute(
@@ -12768,6 +12779,98 @@ mod tests {
     /// One removal reports exactly one outcome per requested Photo, a retried
     /// request adopts what its own operation already removed, and restore
     /// compares against the current marker instead of overwriting it.
+    #[tokio::test]
+    async fn a_library_without_the_marker_high_water_never_repeats_a_marker_it_still_holds() {
+        let (_base, library, state, name, path) = fixture();
+        seed(
+            &path,
+            include_str!("../../../../compatibility/sqlite/schema-v9.sql"),
+        );
+        // A Library written before the high water mark existed carries removal
+        // markers but no row for them. The greatest marker it still holds is
+        // the floor for the next one, so the marker already stored for the
+        // Photo cannot be assigned to a newer removal of it.
+        let held = unix_millis() + 60_000;
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_metadata(key,value) VALUES('canonical_root',?)",
+                [library.canonical_path().to_str().unwrap()],
+            )
+            .unwrap();
+        for index in [1, 2] {
+            add_recipe_test_photo(
+                &connection,
+                RecipeTestPhoto {
+                    original_id: &format!("original-{index}"),
+                    photo_id: &format!("photo-{index}"),
+                    relative_path: &format!("shoot/one-{index}.ARW"),
+                    kind: "raw",
+                    available: true,
+                    size: 17,
+                    mtime_ms: 1_000.0,
+                },
+            );
+            connection
+                .execute(
+                    "UPDATE photos SET selection_state='rejected' WHERE id=?",
+                    [format!("photo-{index}")],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE photos SET removed_at_ms=?,removed_operation='operation-held' WHERE id='photo-1'",
+                [held],
+            )
+            .unwrap();
+        let high_water: Option<String> = connection
+            .query_row(
+                "SELECT value FROM library_metadata WHERE key='removal_marker_high_water'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(high_water, None);
+        drop(connection);
+
+        let persistence = Persistence::open(
+            state,
+            name,
+            library.canonical_path().to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let removed = persistence
+            .remove_photos_receiver(PhotoRemovalMutation {
+                photo_ids: vec!["photo-2".to_owned()],
+                operation_id: "operation-next".to_owned(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.counts.removed, 1);
+        let (records, _) = persistence
+            .removed_photos_receiver(0, 10)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let marker = records
+            .iter()
+            .find(|record| record.photo_id == "photo-2")
+            .unwrap()
+            .removed_at_ms;
+        assert!(marker > held);
+        let held_marker = records
+            .iter()
+            .find(|record| record.photo_id == "photo-1")
+            .unwrap()
+            .removed_at_ms;
+        assert_eq!(held_marker, held);
+    }
+
     #[tokio::test]
     async fn removal_markers_never_repeat_even_when_the_clock_does_not_advance() {
         let (_base, library, state, name, path) = fixture();
