@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import struct
 import tempfile
 import threading
@@ -132,6 +133,8 @@ class StubDeployment:
         artifact_export_id: str = EXPORT_ID,
         preview_content_type: str = "image/jpeg",
         preview_body_override: bytes | None = None,
+        list_page_maximum: int = 60,
+        query_pages: list | None = None,
     ):
         self.capability_payload = {
             "state": capability_state,
@@ -173,6 +176,9 @@ class StubDeployment:
         self.artifact_export_id = artifact_export_id
         self.preview_content_type = preview_content_type
         self.preview_body_override = preview_body_override
+        self.list_page_maximum = list_page_maximum
+        self.query_pages = query_pages if query_pages is not None else [self.photos]
+        self.requests: list[dict] = []
         self.export_recipe_version: str | None = None
         self.artifact_expiry = iso_at_now_plus(7 * 86400)
 
@@ -207,19 +213,27 @@ class StubDeployment:
     def guarded_save(self, body: dict) -> tuple[int, dict]:
         if body.get("expectedSourceRevision") != self.source_revision:
             return 409, {
-                "code": "source_changed",
-                "message": "stub",
-                "currentSourceRevision": self.source_revision,
-                "currentRecipeVersion": self.recipe["recipeVersion"] if self.recipe else None,
+                "error": {
+                    "code": "source_changed",
+                    "message": "stub",
+                    "details": {
+                        "currentSourceRevision": self.source_revision,
+                        "currentRecipeVersion": self.recipe["recipeVersion"] if self.recipe else None,
+                    },
+                }
             }
         expected = body.get("expectedRecipeVersion")
         current = self.recipe["recipeVersion"] if self.recipe else None
         if expected != current:
             return 409, {
-                "code": "recipe_conflict",
-                "message": "stub",
-                "currentSourceRevision": self.source_revision,
-                "currentRecipeVersion": current,
+                "error": {
+                    "code": "recipe_conflict",
+                    "message": "stub",
+                    "details": {
+                        "currentSourceRevision": self.source_revision,
+                        "currentRecipeVersion": current,
+                    },
+                }
             }
         self.recipe_counter += 1
         version = f"rv-{self.recipe_counter}"
@@ -276,22 +290,125 @@ class StubDeployment:
             "artifact": artifact,
         }
 
+    def capabilities_payload(self) -> dict:
+        return {
+            "serverVersion": "0.0.0-stub",
+            "supportedCliContractVersions": [1],
+            "limits": {
+                "listPageMaximum": self.list_page_maximum,
+                "mutationPhotoIdsMaximum": 100,
+                "albumReorderMembersMaximum": 100,
+                "retainedQueryIdsMaximum": 100,
+                "retainedQueryIdleSeconds": 60,
+            },
+        }
+
+    @staticmethod
+    def _invalid_input(argument: str, reason: str) -> tuple[int, bytes, list]:
+        return (
+            400,
+            json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_input",
+                        "message": "The request is invalid.",
+                        "effect": "none",
+                        "details": {"argument": argument, "reason": reason},
+                    }
+                }
+            ).encode(),
+            [],
+        )
+
+    def photo_query(self, body: object) -> tuple[int, bytes, list]:
+        """Enforce what `create_photo_query` enforces on the merged server."""
+        if not isinstance(body, dict):
+            return self._invalid_input("body", "The Photo query body is invalid.")
+        allowed = {
+            "source",
+            "selection",
+            "ratingMinimum",
+            "ratingMaximum",
+            "kind",
+            "available",
+            "capturedFrom",
+            "capturedBefore",
+            "order",
+            "limit",
+        }
+        if set(body) - allowed:
+            return self._invalid_input("body", "The Photo query body is invalid.")
+        source = body.get("source")
+        # The source travels as the externally tagged enum (`tag = "kind"`):
+        # an untagged string like the legacy `"source": "all"` must refuse.
+        if source is not None and not (
+            isinstance(source, dict)
+            and isinstance(source.get("kind"), str)
+            and source.get("kind") in ("all", "album", "folder")
+        ):
+            return self._invalid_input("body", "The Photo query body is invalid.")
+        limit = body.get("limit", self.list_page_maximum)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not (
+            1 <= limit <= self.list_page_maximum
+        ):
+            return self._invalid_input("limit", f"The limit must be from 1 through {self.list_page_maximum}.")
+        kind = body.get("kind")
+        if kind is not None and kind not in ("raw", "jpeg"):
+            return self._invalid_input("kind", "The Original kind filter is invalid.")
+        available = body.get("available")
+        if available is not None and not isinstance(available, bool):
+            return self._invalid_input("available", "The Original availability filter is invalid.")
+        page = self.query_pages[0]
+        next_cursor = "query-cursor-1" if len(self.query_pages) > 1 else None
+        return (
+            200,
+            json.dumps({"items": page, "total": sum(len(p) for p in self.query_pages), "nextCursor": next_cursor}).encode(),
+            [],
+        )
+
+    def photo_query_page(self, cursor: str) -> tuple[int, bytes, list]:
+        if not cursor.startswith("query-cursor-"):
+            return 410, json.dumps({"error": {"code": "cursor_expired", "message": "stub"}}).encode(), []
+        index = int(cursor.rsplit("-", 1)[1])
+        page = self.query_pages[index]
+        next_cursor = f"query-cursor-{index + 1}" if index + 1 < len(self.query_pages) else None
+        return (
+            200,
+            json.dumps({"items": page, "total": sum(len(p) for p in self.query_pages), "nextCursor": next_cursor}).encode(),
+            [],
+        )
+
     def handle(self, method: str, path: str, body: bytes, headers) -> tuple[int, bytes, list]:
+        # The merged server validates the CLI contract header (and refuses
+        # with 426) before anything else on these routes.
+        if headers.get("slipstream-cli-contract") != "1":
+            return 426, json.dumps({"error": {"code": "incompatible_server", "message": "stub"}}).encode(), []
         if headers.get("Authorization") != f"Bearer {'wrong' if self.wrong_token else TOKEN}":
-            return 401, json.dumps({"code": "unauthorized", "message": "stub"}).encode(), []
+            return 401, json.dumps({"error": {"code": "unauthorized", "message": "stub"}}).encode(), []
+        try:
+            parsed_body: object = json.loads(body) if body else None
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return self._invalid_input("body", "The request body must be one valid JSON object.")
+        self.requests.append({"method": method, "path": path, "body": parsed_body})
+        if path == "/api/capabilities" and method == "GET":
+            return 200, json.dumps(self.capabilities_payload()).encode(), []
         if path == "/api/processing/capability":
             if "capability" in self.disabled_routes:
                 return 404, b"<html>not found</html>", []
             return 200, json.dumps(self.capability_payload).encode(), []
         if path == "/api/photo-queries" and method == "POST":
-            return 200, json.dumps({"items": self.photos, "total": len(self.photos), "nextCursor": None}).encode(), []
+            return self.photo_query(parsed_body)
+        if path.startswith("/api/photo-queries/") and method == "GET":
+            return self.photo_query_page(path.rsplit("/", 1)[1])
         if path == f"/api/photos/{PHOTO_ID}/edit-recipe":
             if "edit-recipe" in self.disabled_routes:
                 return 404, b"", []
             if method == "GET":
                 return 200, json.dumps(self.recipe_read()).encode(), []
-            payload = json.loads(body)
-            status, payload = self.guarded_save(payload)
+            refused = self.validate_save_body(parsed_body)
+            if refused is not None:
+                return refused
+            status, payload = self.guarded_save(parsed_body)
             return status, json.dumps(payload).encode(), []
         if path == f"/api/photos/{PHOTO_ID}/edit-preview/develop" and method == "GET":
             if "edit-preview" in self.disabled_routes:
@@ -299,54 +416,141 @@ class StubDeployment:
             self.preview_polls += 1
             if (self.preview_202_first and self.preview_polls == 1) or self.preview_202_always:
                 return 202, json.dumps({"state": "queued", "stage": "develop"}).encode(), []
-            preview_body = self.preview_body_override or self.preview_bytes
-            metadata = {
-                "photoId": PHOTO_ID,
-                "stage": "develop",
-                "contentType": self.preview_content_type,
-                "width": 3,
-                "height": 2,
-                "byteLength": len(preview_body),
-                "sha256": hashlib.sha256(preview_body).hexdigest(),
-                "sourceRevision": self.source_revision,
-                "recipeVersion": self.recipe["recipeVersion"] if self.recipe else "",
-                "displayTransform": "display-transform-v1",
-                "expiresAt": iso_at_now_plus(3600),
-            }
-            return 200, preview_body, sorted(metadata.items())
+            return 200, *self.preview_response()
         if path == f"/api/photos/{PHOTO_ID}/exports" and method == "POST":
             if "exports" in self.disabled_routes:
                 return 404, b"", []
-            payload = json.loads(body)
-            if payload.get("expectedSourceRevision") != self.source_revision:
-                return 409, json.dumps({"code": "source_changed", "message": "stub"}).encode(), []
-            current = self.recipe["recipeVersion"] if self.recipe else None
-            if payload.get("expectedRecipeVersion") != current:
-                return 409, json.dumps({"code": "recipe_conflict", "message": "stub"}).encode(), []
-            self.export_recipe_version = (
-                self.submit_recipe_version if self.submit_recipe_version is not None else current
-            )
-            return (
-                201,
-                json.dumps(
-                    {
-                        "exportId": EXPORT_ID,
-                        "state": "queued",
-                        "target": "development-tiff",
-                        "recipeVersion": self.export_recipe_version,
-                        "sourceRevision": self.source_revision,
-                        "receiptExpiresAt": None,
-                        "artifactExpiresAt": None,
-                    }
-                ).encode(),
-                [],
-            )
+            return self.submit_export(parsed_body)
         if path == f"/api/exports/{EXPORT_ID}" and method == "GET":
             return 200, json.dumps(self.export_inspect()).encode(), []
         if path == f"/api/exports/{EXPORT_ID}/artifact" and method == "GET":
-            metadata = self.artifact_metadata()
-            return 200, self.artifact_bytes, sorted(metadata.items())
+            return 200, *self.artifact_response()
         return 404, b"", []
+
+    @staticmethod
+    def _invalid_settings(argument: str, reason: str) -> tuple[int, bytes, list]:
+        return (
+            422,
+            json.dumps(
+                {
+                    "error": {
+                        "code": "invalid_settings",
+                        "message": "Correct the settings against the approved ranges and shape.",
+                        "details": {"argument": argument, "reason": reason},
+                    }
+                }
+            ).encode(),
+            [],
+        )
+
+    def validate_save_body(self, body: object) -> tuple[int, bytes, list] | None:
+        """Enforce the `deny_unknown_fields` save shape the server enforces."""
+        if not isinstance(body, dict) or set(body) != {
+            "requestId",
+            "expectedRecipeVersion",
+            "expectedSourceRevision",
+            "settings",
+        }:
+            return self._invalid_settings("body", "The body is malformed or contains unknown fields.")
+        identity = body["requestId"]
+        if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", identity):
+            return self._invalid_settings("requestId", "The request identity is outside the closed shape.")
+        if body["expectedRecipeVersion"] is not None and not isinstance(
+            body["expectedRecipeVersion"], str
+        ):
+            return self._invalid_settings("expectedRecipeVersion", "Use a string or null.")
+        if not isinstance(body["expectedSourceRevision"], str) or not body["expectedSourceRevision"]:
+            return self._invalid_settings("expectedSourceRevision", "Use a nonempty string.")
+        settings = body["settings"]
+        if not isinstance(settings, dict) or set(settings) != {"exposureEv", "whiteBalance"}:
+            return self._invalid_settings("settings", "The settings are malformed.")
+        if not isinstance(settings["exposureEv"], (int, float)) or isinstance(
+            settings["exposureEv"], bool
+        ):
+            return self._invalid_settings("exposureEv", "Use a finite number of EV.")
+        white_balance = settings["whiteBalance"]
+        if not isinstance(white_balance, dict) or white_balance.get("mode") != "as-shot":
+            return self._invalid_settings("whiteBalance", "The mode is not admitted.")
+        return None
+
+    def submit_export(self, body: object) -> tuple[int, bytes, list]:
+        if not isinstance(body, dict) or set(body) != {
+            "requestId",
+            "expectedRecipeVersion",
+            "expectedSourceRevision",
+            "target",
+        }:
+            return self._invalid_settings("body", "The submission carries a value outside the closed wire shape")
+        identity = body["requestId"]
+        if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", identity):
+            return self._invalid_settings("requestId", "The request identity is outside the closed shape")
+        if (
+            not isinstance(body["expectedRecipeVersion"], str)
+            or not body["expectedRecipeVersion"]
+            or not isinstance(body["expectedSourceRevision"], str)
+            or not body["expectedSourceRevision"]
+            or body["target"] != "development-tiff"
+        ):
+            return self._invalid_settings("target", "The submission carries a value outside the closed wire shape")
+        if body["expectedSourceRevision"] != self.source_revision:
+            return 409, json.dumps({"error": {"code": "source_changed", "message": "stub"}}).encode(), []
+        current = self.recipe["recipeVersion"] if self.recipe else None
+        if body["expectedRecipeVersion"] != current:
+            return 409, json.dumps({"error": {"code": "recipe_conflict", "message": "stub"}}).encode(), []
+        self.export_recipe_version = (
+            self.submit_recipe_version if self.submit_recipe_version is not None else current
+        )
+        return (
+            201,
+            json.dumps(
+                {
+                    "exportId": EXPORT_ID,
+                    "state": "queued",
+                    "target": "development-tiff",
+                    "recipeVersion": self.export_recipe_version,
+                    "sourceRevision": self.source_revision,
+                    "receiptExpiresAt": None,
+                    "artifactExpiresAt": None,
+                }
+            ).encode(),
+            [],
+        )
+
+    def preview_response(self) -> tuple[bytes, list]:
+        preview_body = self.preview_body_override or self.preview_bytes
+        metadata = [
+            ("Content-Type", self.preview_content_type),
+            ("slipstream-edit-preview-photo-id", PHOTO_ID),
+            ("slipstream-edit-preview-stage", "develop"),
+            ("slipstream-edit-preview-width", "3"),
+            ("slipstream-edit-preview-height", "2"),
+            ("slipstream-edit-preview-sha256", hashlib.sha256(preview_body).hexdigest()),
+            ("slipstream-edit-preview-source-revision", self.source_revision.encode().hex()),
+            (
+                "slipstream-edit-preview-recipe-version",
+                self.recipe["recipeVersion"] if self.recipe else "",
+            ),
+            ("slipstream-edit-preview-display-transform", "display-transform-v1"),
+            ("slipstream-edit-preview-expires-at", iso_at_now_plus(3600)),
+        ]
+        return preview_body, metadata
+
+    def artifact_response(self) -> tuple[bytes, list]:
+        metadata = self.artifact_metadata()
+        headers = [
+            ("Content-Type", "image/tiff"),
+            ("slipstream-artifact-export-id", metadata["exportId"]),
+            ("slipstream-artifact-target", metadata["target"]),
+            ("slipstream-artifact-stage", metadata["stage"]),
+            ("slipstream-artifact-content-type", metadata["contentType"]),
+            ("slipstream-artifact-width", str(metadata["width"])),
+            ("slipstream-artifact-height", str(metadata["height"])),
+            ("slipstream-artifact-profile-identity", metadata["profileIdentity"]),
+            ("slipstream-artifact-byte-length", str(metadata["byteLength"])),
+            ("slipstream-artifact-sha256", metadata["sha256"]),
+            ("slipstream-artifact-expires-at", metadata["expiresAt"]),
+        ]
+        return self.artifact_bytes, headers
 
 
 def make_handler(stub: StubDeployment):
@@ -358,12 +562,17 @@ def make_handler(stub: StubDeployment):
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             status, payload, metadata = stub.handle(method, self.path, body, self.headers)
-            content_type = (
+            explicit_type = next(
+                (value for name, value in metadata if name.lower() == "content-type"), None
+            )
+            content_type = explicit_type or (
                 "application/json" if payload[:1] in (b"{", b"[") or status in (202, 401) or not metadata
                 else "application/octet-stream"
             )
             self.send_response(status)
             for name, value in metadata:
+                if name.lower() == "content-type":
+                    continue
                 self.send_header(name, value)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
@@ -445,6 +654,24 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(acceptance.valid_request_identity(identity))
         self.assertIn("-save-", identity)
 
+    def test_structured_code_reads_the_merged_error_envelope(self):
+        """The merged server nests refusal codes under `error` (`cli_error`)."""
+        self.assertEqual(
+            acceptance.structured_code(
+                {
+                    "error": {
+                        "code": "processing_unavailable",
+                        "message": "The develop stage cannot execute for this Photo right now.",
+                        "details": {"reason": "preview-render-admission-unavailable"},
+                    }
+                }
+            ),
+            "processing_unavailable",
+        )
+        self.assertEqual(acceptance.structured_code({"code": "unknown_photo"}), "unknown_photo")
+        self.assertIsNone(acceptance.structured_code({"message": "no code here"}))
+        self.assertIsNone(acceptance.structured_code(None))
+
     def test_pinned_profile_asset_matches_spec_digests(self):
         digest = hashlib.sha256(PROFILE_ASSET.read_bytes()).hexdigest()
         self.assertIn(digest, acceptance.PINNED_SOURCE_PROFILE_DIGESTS)
@@ -472,7 +699,17 @@ class HelperTests(unittest.TestCase):
         _, problems = acceptance.validate_capability({"state": "turbo"})
         self.assertIn("state-outside-closed-set", problems)
         self.assertIn("stages-must-name-develop-and-film", problems)
-        self.assertIn("bundleId-not-lowercase-hex-64", problems)
+        _, problems = acceptance.validate_capability(
+            {
+                "state": "disabled",
+                "bundleId": None,
+                "incarnation": None,
+                "exposure": {"minimumEv": -5.0, "maximumEv": 5.0, "stepEv": 0.5},
+                "profiles": [],
+                "stages": {"develop": "unavailable", "film": "unavailable"},
+            }
+        )
+        self.assertEqual(problems, [])
         _, problems = acceptance.validate_capability(
             {
                 "state": "ready",
@@ -620,11 +857,18 @@ class HelperTests(unittest.TestCase):
                 return [value] if value is not None else None
 
         fields = acceptance.ARTIFACT_METADATA_FIELDS
-        metadata = {name: str(index) for index, name in enumerate(fields)}
-        collected, problems = acceptance.collect_metadata_headers(Headers(metadata), fields)
+        metadata = {
+            acceptance.ARTIFACT_METADATA_HEADERS[name]: str(index)
+            for index, name in enumerate(fields)
+        }
+        collected, problems = acceptance.collect_metadata_headers(
+            Headers(metadata), fields, acceptance.ARTIFACT_METADATA_HEADERS
+        )
         self.assertEqual(problems, [])
         self.assertEqual(set(collected), set(fields))
-        _, problems = acceptance.collect_metadata_headers(Headers({}), fields)
+        _, problems = acceptance.collect_metadata_headers(
+            Headers({}), fields, acceptance.ARTIFACT_METADATA_HEADERS
+        )
         self.assertEqual(len(problems), len(fields))
         artifact = {name: index for index, name in enumerate(fields)}
         self.assertEqual(acceptance.header_object_mismatches(collected, artifact), [])
@@ -1013,6 +1257,96 @@ class DryRunTests(AcceptanceTestCase):
         self.assertTrue(
             any(change.startswith("sha256-changed:") for change in invariance["detail"]["changes"])
         )
+
+    def test_stub_rejects_legacy_query_body(self):
+        """The exact request the pre-fix runner sent must refuse on the stub."""
+        stub = StubDeployment()
+        headers = {
+            "Authorization": f"Bearer {TOKEN}",
+            "slipstream-cli-contract": "1",
+        }
+        status, payload, _ = stub.handle(
+            "POST",
+            "/api/photo-queries",
+            json.dumps({"source": "all", "kind": "raw", "available": True, "limit": 200}).encode(),
+            headers,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("invalid_input", payload.decode())
+        status, payload, _ = stub.handle(
+            "POST",
+            "/api/photo-queries",
+            json.dumps({"source": {"kind": "all"}, "limit": 200}).encode(),
+            headers,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("limit", payload.decode())
+        status, _, _ = stub.handle(
+            "POST",
+            "/api/photo-queries",
+            json.dumps({"source": {"kind": "all"}, "limit": 60}).encode(),
+            {"Authorization": f"Bearer {TOKEN}"},
+        )
+        self.assertEqual(status, 426)
+
+    def test_photo_query_speaks_the_server_contract(self):
+        """The runner sends the tagged source object within the published bound."""
+        stub = StubDeployment()
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(self.invocation(running))
+        self.assertEqual(code, 0, report)
+        query_requests = [
+            entry
+            for entry in stub.requests
+            if entry["path"] == "/api/photo-queries" and entry["method"] == "POST"
+        ]
+        self.assertEqual(len(query_requests), 1)
+        body = query_requests[0]["body"]
+        self.assertEqual(
+            body,
+            {"source": {"kind": "all"}, "kind": "raw", "available": True, "limit": 60},
+        )
+        capabilities_requests = [
+            entry for entry in stub.requests if entry["path"] == "/api/capabilities"
+        ]
+        self.assertEqual(len(capabilities_requests), 1)
+        resolve = next(step for step in report["steps"] if step["name"] == "resolve-photo")
+        self.assertEqual(resolve["detail"]["listPageMaximum"], 60)
+
+    def test_photo_query_pages_with_published_limit(self):
+        """The runner honors `limits.listPageMaximum` and follows the cursor."""
+        later_photo = dict(
+            StubDeployment().photos[0],
+            id="aaaaaaaa-0000-4000-8000-00000000beef",
+            filename="OTHER_0001.ARW",
+        )
+        fixture_photo = StubDeployment().photos[0]
+        stub = StubDeployment(
+            list_page_maximum=2,
+            query_pages=[
+                [later_photo, dict(later_photo, id="bbbbbbbb-0000-4000-8000-00000000cafe")],
+                [fixture_photo],
+            ],
+        )
+        with RunningStub(stub) as running:
+            code, report, _ = run_main(self.invocation(running))
+        self.assertEqual(code, 0, report)
+        query_requests = [
+            entry
+            for entry in stub.requests
+            if entry["path"] == "/api/photo-queries" and entry["method"] == "POST"
+        ]
+        self.assertEqual(query_requests[0]["body"]["limit"], 2)
+        cursor_requests = [
+            entry
+            for entry in stub.requests
+            if entry["path"].startswith("/api/photo-queries/query-cursor")
+        ]
+        self.assertEqual(len(cursor_requests), 1)
+        resolve = next(step for step in report["steps"] if step["name"] == "resolve-photo")
+        self.assertEqual(resolve["detail"]["listPageMaximum"], 2)
+        self.assertEqual(resolve["detail"]["photoId"], PHOTO_ID)
+        self.assertEqual(report["identities"]["photoId"], PHOTO_ID)
 
     def test_sidecar_is_snapshot_and_proved_unchanged(self):
         sidecar = self.fixture.with_name(self.fixture.name + ".xmp")

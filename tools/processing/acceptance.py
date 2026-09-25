@@ -50,12 +50,20 @@ MAX_TOKEN_BYTES = 4096
 MAX_QUERY_PAGES = 50
 
 CAPABILITY_PATH = "/api/processing/capability"
+CAPABILITIES_PATH = "/api/capabilities"
 PHOTO_QUERIES_PATH = "/api/photo-queries"
 EDIT_RECIPE_PATH = "/api/photos/{id}/edit-recipe"
 EDIT_PREVIEW_PATH = "/api/photos/{id}/edit-preview/{stage}"
 PHOTO_EXPORTS_PATH = "/api/photos/{id}/exports"
 EXPORT_PATH = "/api/exports/{id}"
 EXPORT_ARTIFACT_PATH = "/api/exports/{id}/artifact"
+
+# The server publishes its page bound in `GET /api/capabilities`
+# (`limits.listPageMaximum`, currently 60, `crates/slipstream-server/src/queries.rs`
+# `MAXIMUM_LIST_PAGE`).  The runner uses the published value for paging and
+# falls back to the current bound when the capability read is unavailable.
+FALLBACK_LIST_PAGE_MAXIMUM = 60
+MAXIMUM_QUERY_LIMIT_BOUND = 10_000
 
 DEVELOPMENT_TARGET = "development-tiff"
 DEVELOP_STAGE = "develop"
@@ -107,6 +115,36 @@ PREVIEW_METADATA_FIELDS = (
     "displayTransform",
     "expiresAt",
 )
+
+# The closed wire-field names of the merged contract travel in typed response
+# headers under the route's kebab-case prefix (`crates/slipstream-server/src`
+# `edit_preview.rs` and `http.rs`); content type and byte length travel in the
+# standard `Content-Type` and `Content-Length` headers.
+ARTIFACT_METADATA_HEADERS = {
+    "exportId": "slipstream-artifact-export-id",
+    "target": "slipstream-artifact-target",
+    "stage": "slipstream-artifact-stage",
+    "contentType": "Content-Type",
+    "width": "slipstream-artifact-width",
+    "height": "slipstream-artifact-height",
+    "profileIdentity": "slipstream-artifact-profile-identity",
+    "byteLength": "slipstream-artifact-byte-length",
+    "sha256": "slipstream-artifact-sha256",
+    "expiresAt": "slipstream-artifact-expires-at",
+}
+PREVIEW_METADATA_HEADERS = {
+    "photoId": "slipstream-edit-preview-photo-id",
+    "stage": "slipstream-edit-preview-stage",
+    "contentType": "Content-Type",
+    "width": "slipstream-edit-preview-width",
+    "height": "slipstream-edit-preview-height",
+    "byteLength": "Content-Length",
+    "sha256": "slipstream-edit-preview-sha256",
+    "sourceRevision": "slipstream-edit-preview-source-revision",
+    "recipeVersion": "slipstream-edit-preview-recipe-version",
+    "displayTransform": "slipstream-edit-preview-display-transform",
+    "expiresAt": "slipstream-edit-preview-expires-at",
+}
 
 _SAVE_OUTCOMES = (
     "saved",
@@ -217,11 +255,24 @@ def validate_capability(payload: object) -> tuple[dict, list]:
     facts["state"] = payload.get("state")
     if payload.get("state") not in CAPABILITY_STATES:
         problems.append("state-outside-closed-set")
+    # The launcher identities are null when the service observed no launcher
+    # answer; a ready capability always names them, and a present value must
+    # be the exact identity shape (`bundle_id` 64 hex, `incarnation` 32 hex,
+    # `processing_capability.rs`).
+    ready = payload.get("state") == "ready"
     facts["bundleId"] = payload.get("bundleId")
-    if not _LOWER_HEX_64.match(str(payload.get("bundleId") or "")):
+    bundle_id = payload.get("bundleId")
+    if bundle_id is None:
+        if ready:
+            problems.append("bundleId-missing-when-ready")
+    elif not _LOWER_HEX_64.match(str(bundle_id)):
         problems.append("bundleId-not-lowercase-hex-64")
     facts["incarnation"] = payload.get("incarnation")
-    if not _LOWER_HEX_32.match(str(payload.get("incarnation") or "")):
+    incarnation = payload.get("incarnation")
+    if incarnation is None:
+        if ready:
+            problems.append("incarnation-missing-when-ready")
+    elif not _LOWER_HEX_32.match(str(incarnation)):
         problems.append("incarnation-not-lowercase-hex-32")
     exposure = payload.get("exposure")
     if not isinstance(exposure, dict):
@@ -425,12 +476,18 @@ def exposure_on_grid(controls: dict, value: float) -> float:
     return min(maximum, max(minimum, snapped))
 
 
-def collect_metadata_headers(headers, fields) -> tuple[dict, list]:
-    """Collect the closed typed metadata set from response headers."""
+def collect_metadata_headers(headers, fields, header_names) -> tuple[dict, list]:
+    """Collect the closed typed metadata set from response headers.
+
+    `header_names` maps each wire field to the header that carries it; the
+    standard `Content-Type` and `Content-Length` headers carry the content
+    type and byte length of both framed routes.
+    """
     metadata: dict = {}
     problems: list = []
     for name in fields:
-        values = headers.get_all(name)
+        header_name = header_names[name]
+        values = headers.get_all(header_name)
         if not values:
             problems.append(f"header-{name}-missing")
             continue
@@ -1044,11 +1101,22 @@ class Client:
 
 
 def structured_code(payload: object) -> str | None:
-    """The authoritative error code of a contract refusal, if any."""
+    """The authoritative error code of a contract refusal, if any.
+
+    The merged server maps every refusal onto the shared error envelope
+    (`cli_error`): `{"error": {"code": ..., "message": ..., "details": ...}}`.
+    A flat top-level `code` is accepted as well, so both conforming shapes
+    and the spec's flat wording are honored.
+    """
     if isinstance(payload, dict):
         code = payload.get("code")
         if isinstance(code, str) and code:
             return code
+        error = payload.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            if isinstance(code, str) and code:
+                return code
     return None
 
 
@@ -1217,7 +1285,11 @@ class Runner:
         self.identities["bundleId"] = facts["bundleId"]
         self.identities["incarnation"] = facts["incarnation"]
         expected_bundle = self.expected_identities.get("bundleSha256")
-        if expected_bundle and expected_bundle != facts["bundleId"]:
+        if (
+            expected_bundle
+            and facts["bundleId"]
+            and expected_bundle != facts["bundleId"]
+        ):
             raise AcceptanceFailure(
                 "capability-bundle-mismatch",
                 {"expected": expected_bundle, "observed": facts["bundleId"]},
@@ -1245,21 +1317,46 @@ class Runner:
                 },
             )
 
+    def _list_page_maximum(self) -> int:
+        """The server-published Photo list page bound for query paging."""
+        try:
+            response, payload = self.client.request_json("GET", CAPABILITIES_PATH)
+        except TransportFailure:
+            return FALLBACK_LIST_PAGE_MAXIMUM
+        if response.status != 200 or not isinstance(payload, dict):
+            return FALLBACK_LIST_PAGE_MAXIMUM
+        limits = payload.get("limits")
+        maximum = limits.get("listPageMaximum") if isinstance(limits, dict) else None
+        if (
+            isinstance(maximum, int)
+            and not isinstance(maximum, bool)
+            and 1 <= maximum <= MAXIMUM_QUERY_LIMIT_BOUND
+        ):
+            return maximum
+        return FALLBACK_LIST_PAGE_MAXIMUM
+
     def _step_resolve_photo(self) -> dict:
+        page_limit = self._list_page_maximum()
         matches = []
         seen = 0
-        path = PHOTO_QUERIES_PATH
         cursor = None
         for _page in range(MAX_QUERY_PAGES):
             if cursor is None:
                 response, payload = self.client.request_json(
                     "POST",
-                    path,
-                    payload={"source": "all", "kind": "raw", "available": True, "limit": 200},
+                    PHOTO_QUERIES_PATH,
+                    payload={
+                        "source": {"kind": "all"},
+                        "kind": "raw",
+                        "available": True,
+                        "limit": page_limit,
+                    },
                 )
                 require_success(response, payload, "photo-query")
             else:
-                response, payload = self.client.request_json("GET", f"{path}/{cursor}")
+                response, payload = self.client.request_json(
+                    "GET", f"{PHOTO_QUERIES_PATH}/{cursor}"
+                )
                 require_success(response, payload, "photo-query-page")
             items = payload.get("items")
             if not isinstance(items, list):
@@ -1293,7 +1390,7 @@ class Runner:
         if not isinstance(self.photo_id, str) or not self.photo_id:
             raise AcceptanceFailure("fixture-photo-id-invalid", {})
         self.identities["photoId"] = self.photo_id
-        return {"photoId": self.photo_id, "photosSeen": seen}
+        return {"photoId": self.photo_id, "photosSeen": seen, "listPageMaximum": page_limit}
 
     def _step_recipe_read(self) -> dict:
         response, payload = self.client.request_json(
@@ -1422,10 +1519,18 @@ class Runner:
                     {"status": response.status, "code": structured_code(self._safe_json(response))},
                 )
             break
-        metadata, problems = collect_metadata_headers(response.headers, PREVIEW_METADATA_FIELDS)
+        metadata, problems = collect_metadata_headers(
+            response.headers, PREVIEW_METADATA_FIELDS, PREVIEW_METADATA_HEADERS
+        )
+        # The preview route hex-encodes the opaque source revision for its
+        # header (`edit_preview.rs`); compare against the same encoding of the
+        # revision the recipe read observed.
         problems.extend(
             validate_preview_headers(
-                metadata, self.photo_id, self.source_revision, self.recipe_version
+                metadata,
+                self.photo_id,
+                (self.source_revision or "").encode("utf-8").hex(),
+                self.recipe_version or "",
             )
         )
         if problems:
@@ -1551,7 +1656,9 @@ class Runner:
                 "artifact-download-refused",
                 {"status": response.status, "code": structured_code(self._safe_json(response))},
             )
-        metadata, problems = collect_metadata_headers(response.headers, ARTIFACT_METADATA_FIELDS)
+        metadata, problems = collect_metadata_headers(
+            response.headers, ARTIFACT_METADATA_FIELDS, ARTIFACT_METADATA_HEADERS
+        )
         if metadata.get("exportId") != self.export_id:
             problems.append("header-exportId-mismatch")
         if metadata.get("target") != DEVELOPMENT_TARGET:
