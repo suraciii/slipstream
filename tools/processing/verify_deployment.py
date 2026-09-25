@@ -452,11 +452,14 @@ class DeploymentSnapshot:
             # The profile list stays empty only for `source-unsupported`,
             # which cannot be `ready`.
             return [Check("web-capability", False, "web-capability-unavailable", "profiles")]
+        # The qualified profile set is closed: a ready deployment may only
+        # advertise profiles the contract approves.
+        qualified_profile_ids = {"sony-ilce-7rm5-arw", "sony-ilce-7cm2-arw"}
         for profile in profiles:
             if (
                 not isinstance(profile, dict)
                 or not isinstance(profile.get("profileId"), str)
-                or not 1 <= len(profile["profileId"]) <= 64
+                or profile.get("profileId") not in qualified_profile_ids
                 or profile.get("whiteBalanceModes") != ["as-shot"]
                 or profile.get("whiteBalanceRanges") is not None
             ):

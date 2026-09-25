@@ -9780,15 +9780,27 @@ async fn rebind_recipe(
 
 fn save_body(
     request_id: &str,
-    expected_recipe_revision: Option<&str>,
+    expected_recipe_version: Option<&str>,
     expected_source_revision: &str,
     exposure_ev: f64,
 ) -> serde_json::Value {
     serde_json::json!({
         "requestId": request_id,
-        "expectedRecipeRevision": expected_recipe_revision,
+        "expectedRecipeVersion": expected_recipe_version,
         "expectedSourceRevision": expected_source_revision,
         "settings": {"exposureEv": exposure_ev, "whiteBalance": {"mode": "as-shot"}}
+    })
+}
+
+fn rebind_body(
+    request_id: &str,
+    expected_recipe_version: &str,
+    new_source_revision: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request_id,
+        "expectedRecipeVersion": expected_recipe_version,
+        "newSourceRevision": new_source_revision,
     })
 }
 
@@ -9819,7 +9831,10 @@ async fn edit_recipe_read_reports_recipe_absence_support_and_controls() {
     assert!(!read["sourceRevision"].as_str().unwrap().is_empty());
     assert_eq!(read["sourceSupport"], "supported");
     assert!(read["supportReason"].is_null());
-    assert_eq!(read["processingAvailable"], true);
+    // The deployment is configured but this test harness has no launcher
+    // socket, so the reconciled condition is launcher-unavailable and
+    // processing is not available for the Photo.
+    assert_eq!(read["processingAvailable"], false);
     assert_eq!(
         read["controls"],
         serde_json::json!({
@@ -9880,8 +9895,9 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
         &router,
         &photo_id,
         serde_json::json!({
-            "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
-            "expectedSourceRevision": source_revision,
+            "requestId": "probe-rebind",
+            "expectedRecipeVersion": "00000000-0000-4000-8000-000000000000",
+            "newSourceRevision": source_revision,
         }),
     )
     .await;
@@ -10067,10 +10083,7 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     let (status, rebound) = rebind_recipe(
         &router,
         &photo_id,
-        serde_json::json!({
-            "expectedRecipeRevision": second_revision,
-            "expectedSourceRevision": new_source,
-        }),
+        rebind_body("rebind-1", &second_revision, &new_source),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -10078,6 +10091,30 @@ async fn edit_recipe_save_replay_conflicts_and_rebind_follow_the_contract() {
     let rebound_revision = rebound["recipeVersion"].as_str().unwrap().to_owned();
     assert_ne!(rebound_revision, second_revision);
     assert_eq!(rebound["sourceRevision"], new_source);
+
+    // The same rebind identity and payload replay to the committed outcome:
+    // no second write, and the replay carries the receipt's recipe version.
+    let (status, rebind_replay) = rebind_recipe(
+        &router,
+        &photo_id,
+        rebind_body("rebind-1", &second_revision, &new_source),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rebind_replay["outcome"], "unchanged");
+    assert_eq!(rebind_replay["recipeVersion"], rebound_revision);
+    assert_eq!(rebind_replay["sourceRevision"], new_source);
+
+    // The same rebind identity with a different payload is refused.
+    let (status, rebind_conflict) = rebind_recipe(
+        &router,
+        &photo_id,
+        rebind_body("rebind-1", &rebound_revision, &new_source),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&rebind_conflict), "request_conflict");
+
     // The rebound recipe keeps its committed settings and renders the stored
     // white-balance mode in the shared field shape.
     let (_, rebound_read) = get_edit_recipe(&router, &photo_id).await;
@@ -10140,8 +10177,9 @@ async fn edit_recipe_refuses_unsupported_source_classes() {
             &router,
             &photo_id,
             serde_json::json!({
-                "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
-                "expectedSourceRevision": "00000000-0000-4000-8000-000000000000",
+                "requestId": "refused-rebind",
+                "expectedRecipeVersion": "00000000-0000-4000-8000-000000000000",
+                "newSourceRevision": "00000000-0000-4000-8000-000000000000",
             }),
         )
         .await;
@@ -10195,8 +10233,9 @@ async fn edit_recipe_reports_unobservable_camera_identity_as_unavailable() {
         &router,
         &photo_id,
         serde_json::json!({
-            "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
-            "expectedSourceRevision": "00000000-0000-4000-8000-000000000000",
+            "requestId": "opaque-rebind",
+            "expectedRecipeVersion": "00000000-0000-4000-8000-000000000000",
+            "newSourceRevision": "00000000-0000-4000-8000-000000000000",
         }),
     )
     .await;
@@ -10284,6 +10323,14 @@ async fn edit_recipe_validates_settings_before_the_write() {
         save_body("bad-range", None, &source_revision, 1.5),
         save_body("off-grid", None, &source_revision, 0.0005),
         save_body("", None, &source_revision, 0.1),
+        // The retired request field name is an unknown field: a client that
+        // sends the pre-contract name is refused before any state change.
+        serde_json::json!({
+            "requestId": "retired-name",
+            "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
+            "expectedSourceRevision": source_revision,
+            "settings": {"exposureEv": 0.1, "whiteBalance": {"mode": "as-shot"}}
+        }),
         // The request identity admits only letters, digits, `.`, `_`, `-`.
         save_body("space id", None, &source_revision, 0.1),
         save_body("slash/id", None, &source_revision, 0.1),
@@ -10352,7 +10399,7 @@ async fn edit_recipe_validates_settings_before_the_write() {
     let (status, refused) = rebind_recipe(
         &router,
         &photo_id,
-        serde_json::json!({"expectedRecipeRevision": "", "expectedSourceRevision": source_revision}),
+        serde_json::json!({"requestId": "bad-rebind", "expectedRecipeVersion": "", "newSourceRevision": source_revision}),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -10361,8 +10408,9 @@ async fn edit_recipe_validates_settings_before_the_write() {
         &router,
         &photo_id,
         serde_json::json!({
-            "expectedRecipeRevision": "00000000-0000-4000-8000-000000000000",
-            "expectedSourceRevision": source_revision,
+            "requestId": "probe-rebind",
+            "expectedRecipeVersion": "00000000-0000-4000-8000-000000000000",
+            "newSourceRevision": source_revision,
             "force": true,
         }),
     )

@@ -172,17 +172,20 @@ fn map_reconcile_response(
     else {
         return ProcessingCapabilityResponse::launcher_unavailable_unobserved();
     };
-    if mode != PHOTO_CAPABILITY || capability != PHOTO_CAPABILITY {
-        return ProcessingCapabilityResponse::observed("source-unsupported", bundle, incarnation);
-    }
+    // Launcher identity and bounded fields validate before anything they
+    // name can be surfaced, including the source-unsupported condition: a
+    // wrong-instance or stale launcher must fail closed without values.
     if instance != config.instance || !lower_hex(&incarnation, 32) || next_sequence == 0 {
-        return ProcessingCapabilityResponse::observed("launcher-unavailable", bundle, incarnation);
+        return ProcessingCapabilityResponse::launcher_unavailable_unobserved();
     }
     if policy != config.policy_sha256 {
         return ProcessingCapabilityResponse::observed("launcher-unavailable", bundle, incarnation);
     }
     if bundle != config.bundle_sha256 {
         return ProcessingCapabilityResponse::observed("bundle-unavailable", bundle, incarnation);
+    }
+    if mode != PHOTO_CAPABILITY || capability != PHOTO_CAPABILITY {
+        return ProcessingCapabilityResponse::observed("source-unsupported", bundle, incarnation);
     }
     if availability != Availability::Available {
         return ProcessingCapabilityResponse::observed("resource-unavailable", bundle, incarnation);
@@ -300,6 +303,56 @@ mod tests {
             assert_eq!(response.stages.develop, "unsupported");
             assert!(response.bundle_id.is_some());
         }
+    }
+
+    #[test]
+    fn unrecognized_capability_from_unproven_identity_fails_closed_unobserved() {
+        // A wrong-instance launcher that does not even expose the
+        // photo-processing capability must fail closed as launcher-unavailable
+        // and must not surface any of the values it named.
+        let wrong_instance = Response::result(ResultBody::Capability {
+            capability: "qualification-only".to_owned(),
+            instance: "f".repeat(32),
+            incarnation: "a".repeat(32),
+            next_sequence: 1,
+            policy: "b".repeat(64),
+            bundle: "c".repeat(64),
+            availability: Availability::Available,
+            active: None,
+        });
+        let response = map_reconcile_response(&config(), wrong_instance);
+        assert_eq!(response.state, "launcher-unavailable");
+        assert!(response.bundle_id.is_none());
+        assert!(response.incarnation.is_none());
+
+        // The same for a stale sequence and a malformed incarnation.
+        let stale_sequence = Response::result(ResultBody::Capability {
+            capability: "qualification-only".to_owned(),
+            instance: INSTANCE.to_owned(),
+            incarnation: "a".repeat(32),
+            next_sequence: 0,
+            policy: "b".repeat(64),
+            bundle: "c".repeat(64),
+            availability: Availability::Available,
+            active: None,
+        });
+        let response = map_reconcile_response(&config(), stale_sequence);
+        assert_eq!(response.state, "launcher-unavailable");
+        assert!(response.bundle_id.is_none());
+
+        let malformed_incarnation = Response::result(ResultBody::Capability {
+            capability: "qualification-only".to_owned(),
+            instance: INSTANCE.to_owned(),
+            incarnation: "zz-not-hex".to_owned(),
+            next_sequence: 1,
+            policy: "b".repeat(64),
+            bundle: "c".repeat(64),
+            availability: Availability::Available,
+            active: None,
+        });
+        let response = map_reconcile_response(&config(), malformed_incarnation);
+        assert_eq!(response.state, "launcher-unavailable");
+        assert!(response.incarnation.is_none());
     }
 
     #[test]

@@ -3855,7 +3855,7 @@ fn edit_recipe_payload_digest(mutation: &SaveEditRecipe) -> Result<String, Persi
     };
     let payload = serde_json::json!({
         "photo_id": mutation.photo_id,
-        "expected_recipe_revision": mutation.expected_recipe_revision,
+        "expected_recipe_version": mutation.expected_recipe_version,
         "expected_source_revision": mutation.expected_source_revision,
         "exposure_ev": mutation.settings.exposure_ev,
         "white_balance": white_balance,
@@ -3940,7 +3940,7 @@ fn save_edit_recipe(
             }
             let recipe = receipt_recipe(receipt.clone())?;
             return Ok(match receipt.outcome {
-                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Saved(recipe),
+                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
                 EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
             });
         }
@@ -3964,7 +3964,7 @@ fn save_edit_recipe(
             .recipe
             .as_ref()
             .map(|recipe| recipe.revision.as_str())
-            != mutation.expected_recipe_revision.as_deref()
+            != mutation.expected_recipe_version.as_deref()
         {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
@@ -4049,16 +4049,45 @@ fn save_edit_recipe(
     })
 }
 
+fn edit_recipe_rebind_payload_digest(
+    mutation: &RebindEditRecipe,
+) -> Result<String, PersistenceError> {
+    let payload = serde_json::json!({
+        "kind": "rebind",
+        "photo_id": mutation.photo_id,
+        "expected_recipe_version": mutation.expected_recipe_version,
+        "new_source_revision": mutation.new_source_revision,
+    });
+    let bytes = serde_json::to_vec(&payload).map_err(|_| PersistenceError::Storage)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn rebind_edit_recipe(
     state: &StateDirectory,
     database_name: &DatabaseName,
     connection: &mut Connection,
     mutation: RebindEditRecipe,
 ) -> Result<EditRecipeWriteOutcome, PersistenceError> {
-    if mutation.expected_source_revision.is_empty() {
+    if mutation.new_source_revision.is_empty()
+        || !validate_edit_recipe_request_id(&mutation.request_id)
+    {
         return Ok(EditRecipeWriteOutcome::InvalidSettings);
     }
+    let payload_digest = edit_recipe_rebind_payload_digest(&mutation)?;
     write_transaction(state, database_name, connection, |transaction| {
+        // The rebind identity follows the save rules: the same identity and
+        // payload replays the committed receipt, and the same identity with
+        // a different payload is refused.
+        if let Some(receipt) = read_edit_recipe_receipt(transaction, &mutation.request_id)? {
+            if receipt.photo_id != mutation.photo_id || receipt.payload_digest != payload_digest {
+                return Ok(EditRecipeWriteOutcome::RequestConflict);
+            }
+            let recipe = receipt_recipe(receipt.clone())?;
+            return Ok(match receipt.outcome {
+                EditRecipeReceiptOutcome::Saved => EditRecipeWriteOutcome::Replayed(recipe),
+                EditRecipeReceiptOutcome::Unchanged => EditRecipeWriteOutcome::Unchanged(recipe),
+            });
+        }
         let Some(current) = read_edit_recipe(transaction, &mutation.photo_id)? else {
             return Ok(EditRecipeWriteOutcome::MissingPhoto);
         };
@@ -4075,13 +4104,31 @@ fn rebind_edit_recipe(
         let Some(recipe) = current.recipe.as_ref() else {
             return Ok(EditRecipeWriteOutcome::MissingRecipe);
         };
-        if recipe.revision != mutation.expected_recipe_revision {
+        if recipe.revision != mutation.expected_recipe_version {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        if current.current_source_revision != mutation.expected_source_revision {
+        if current.current_source_revision != mutation.new_source_revision {
             return Ok(EditRecipeWriteOutcome::SourceChanged(current));
         }
-        if recipe.source_revision == mutation.expected_source_revision {
+        if recipe.source_revision == mutation.new_source_revision {
+            let (temperature_kelvin, tint_milli) =
+                white_balance_intent_values(recipe.settings.white_balance);
+            write_edit_recipe_receipt(
+                transaction,
+                &mutation.request_id,
+                &EditRecipeReceipt {
+                    photo_id: recipe.photo_id.clone(),
+                    payload_digest,
+                    outcome: EditRecipeReceiptOutcome::Unchanged,
+                    revision: recipe.revision.clone(),
+                    source_revision: recipe.source_revision.clone(),
+                    exposure_ev: recipe.settings.exposure_ev,
+                    white_balance_mode: white_balance_intent_name(recipe.settings.white_balance)
+                        .to_owned(),
+                    temperature_kelvin,
+                    tint_milli,
+                },
+            )?;
             return Ok(EditRecipeWriteOutcome::Unchanged(recipe.clone()));
         }
         let revision = random_uuid_v4()?;
@@ -4091,21 +4138,40 @@ fn rebind_edit_recipe(
                  WHERE photo_id=? AND revision=?",
                 params![
                     revision,
-                    mutation.expected_source_revision,
+                    mutation.new_source_revision,
                     mutation.photo_id,
-                    mutation.expected_recipe_revision,
+                    mutation.expected_recipe_version,
                 ],
             )
             .map_err(|_| PersistenceError::Storage)?;
         if changed != 1 {
             return Ok(EditRecipeWriteOutcome::Conflict(current));
         }
-        Ok(EditRecipeWriteOutcome::Saved(EditRecipe {
+        let rebound = EditRecipe {
             photo_id: mutation.photo_id,
             revision,
-            source_revision: mutation.expected_source_revision,
+            source_revision: mutation.new_source_revision,
             settings: recipe.settings,
-        }))
+        };
+        let (temperature_kelvin, tint_milli) =
+            white_balance_intent_values(rebound.settings.white_balance);
+        write_edit_recipe_receipt(
+            transaction,
+            &mutation.request_id,
+            &EditRecipeReceipt {
+                photo_id: rebound.photo_id.clone(),
+                payload_digest,
+                outcome: EditRecipeReceiptOutcome::Saved,
+                revision: rebound.revision.clone(),
+                source_revision: rebound.source_revision.clone(),
+                exposure_ev: rebound.settings.exposure_ev,
+                white_balance_mode: white_balance_intent_name(rebound.settings.white_balance)
+                    .to_owned(),
+                temperature_kelvin,
+                tint_milli,
+            },
+        )?;
+        Ok(EditRecipeWriteOutcome::Saved(rebound))
     })
 }
 
@@ -6269,7 +6335,7 @@ mod tests {
         let mutation = SaveEditRecipe {
             photo_id: "raw-photo".to_owned(),
             request_id: "first-save".to_owned(),
-            expected_recipe_revision: None,
+            expected_recipe_version: None,
             expected_source_revision: initial_source.clone(),
             settings: EditRecipeSettings {
                 exposure_ev: 0.0,
@@ -6305,7 +6371,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "unchanged-save".to_owned(),
-                expected_recipe_revision: Some(recipe.revision.clone()),
+                expected_recipe_version: Some(recipe.revision.clone()),
                 expected_source_revision: initial_source.clone(),
                 settings: recipe.settings,
             })
@@ -6319,7 +6385,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "first-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -6330,13 +6396,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(replay, EditRecipeWriteOutcome::Saved(recipe.clone()));
+        assert_eq!(replay, EditRecipeWriteOutcome::Replayed(recipe.clone()));
 
         let request_conflict = persistence
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "first-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 1.0,
@@ -6362,8 +6428,8 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "raw-photo".to_owned(),
                 request_id: "stale-save".to_owned(),
-                expected_recipe_revision: Some(recipe.revision.clone()),
-                expected_source_revision: initial_source,
+                expected_recipe_version: Some(recipe.revision.clone()),
+                expected_source_revision: initial_source.clone(),
                 settings: EditRecipeSettings {
                     exposure_ev: 1.0,
                     white_balance: WhiteBalanceIntent::AsShot,
@@ -6383,8 +6449,9 @@ mod tests {
         let rebound = persistence
             .rebind_edit_recipe_receiver(RebindEditRecipe {
                 photo_id: "raw-photo".to_owned(),
-                expected_recipe_revision: recipe.revision.clone(),
-                expected_source_revision: changed_source.clone(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
             })
             .unwrap()
             .await
@@ -6397,12 +6464,81 @@ mod tests {
         assert_ne!(rebound.revision, recipe.revision);
         assert_eq!(rebound.source_revision, changed_source);
         assert_eq!(rebound.settings, recipe.settings);
+
+        // A replay stays exact even after another write advanced the recipe:
+        // persistence decides the outcome inside the write transaction, so
+        // the receipt's version is reported whatever happened since.
+        persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "advance-save".to_owned(),
+                expected_recipe_version: Some(rebound.revision.clone()),
+                expected_source_revision: rebound.source_revision.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.5,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_replay = persistence
+            .save_edit_recipe_receiver(SaveEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "first-save".to_owned(),
+                expected_recipe_version: None,
+                expected_source_revision: initial_source.clone(),
+                settings: EditRecipeSettings {
+                    exposure_ev: 0.0,
+                    white_balance: WhiteBalanceIntent::AsShot,
+                },
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stale_replay,
+            EditRecipeWriteOutcome::Replayed(recipe.clone()),
+            "the replay must carry the receipt's version, not the current one"
+        );
+
+        // The rebind identity replays exactly like a save identity: the same
+        // payload replays the receipt, a different payload is refused.
+        let rebind_replay = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: recipe.revision.clone(),
+                new_source_revision: changed_source.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            rebind_replay,
+            EditRecipeWriteOutcome::Replayed(rebound.clone())
+        );
+        let rebind_conflict = persistence
+            .rebind_edit_recipe_receiver(RebindEditRecipe {
+                photo_id: "raw-photo".to_owned(),
+                request_id: "rebind-1".to_owned(),
+                expected_recipe_version: rebound.revision.clone(),
+                new_source_revision: rebound.source_revision.clone(),
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebind_conflict, EditRecipeWriteOutcome::RequestConflict);
         assert!(matches!(
             persistence
                 .save_edit_recipe_receiver(SaveEditRecipe {
                     photo_id: "raw-photo".to_owned(),
                     request_id: "after-rebind-save".to_owned(),
-                    expected_recipe_revision: Some(recipe.revision),
+                    expected_recipe_version: Some(recipe.revision),
                     expected_source_revision: changed_source,
                     settings: EditRecipeSettings {
                         exposure_ev: 2.0,
@@ -6497,7 +6633,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "missing-raw-photo".to_owned(),
                 request_id: "unavailable-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: source_revision("shoot/missing.ARW", 13, 1_000.0)
                     .unwrap(),
                 settings: EditRecipeSettings {
@@ -6515,7 +6651,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "jpeg-photo".to_owned(),
                 request_id: "jpeg-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: source_revision("shoot/one.JPG", 11, 2_000.0).unwrap(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,
@@ -6532,7 +6668,7 @@ mod tests {
             .save_edit_recipe_receiver(SaveEditRecipe {
                 photo_id: "not-a-photo".to_owned(),
                 request_id: "missing-save".to_owned(),
-                expected_recipe_revision: None,
+                expected_recipe_version: None,
                 expected_source_revision: "source-revision".to_owned(),
                 settings: EditRecipeSettings {
                     exposure_ev: 0.0,

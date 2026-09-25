@@ -165,14 +165,15 @@ fn representable(settings: &EditRecipeSettings) -> bool {
         && rounded <= APPROVED_EXPOSURE_MILLI_EV_MAX as f64
 }
 
-/// Whether the develop execution can process this Photo right now. A stored
-/// recipe outside the approved range, or whose white-balance mode the
-/// capability does not admit, stays readable but reports processing as
-/// unavailable instead of being rewritten; a deployment without the
-/// processing capability or with unreadable source facts reports the same.
+/// Whether the develop execution can process this Photo right now. Only the
+/// reconciled `ready` condition admits processing; every other closed
+/// condition reports processing as unavailable. A stored recipe whose
+/// white-balance mode the capability does not admit, or that leaves the
+/// approved range, stays readable but reports the same; so does an
+/// unreadable source or an unapproved class.
 fn processing_available(
     support: SupportClassification,
-    processing_configured: bool,
+    capability_condition: &str,
     source_available: bool,
     recipe: Option<&EditRecipe>,
 ) -> bool {
@@ -180,7 +181,7 @@ fn processing_available(
         matches!(recipe.settings.white_balance, WhiteBalanceIntent::AsShot)
             && representable(&recipe.settings)
     });
-    support.state == "supported" && processing_configured && source_available && admitted
+    support.state == "supported" && capability_condition == "ready" && source_available && admitted
 }
 
 /// A deployment whose launcher exposes no photo-processing capability has no
@@ -281,7 +282,7 @@ pub(crate) struct EditRecipeWriteResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SaveEditRecipeBody {
     request_id: String,
-    expected_recipe_revision: Option<String>,
+    expected_recipe_version: Option<String>,
     expected_source_revision: String,
     settings: SettingsBody,
 }
@@ -296,8 +297,9 @@ struct SettingsBody {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RebindEditRecipeBody {
-    expected_recipe_revision: String,
-    expected_source_revision: String,
+    request_id: String,
+    expected_recipe_version: String,
+    new_source_revision: String,
 }
 
 /// Reads one typed body. CLI requests use the CLI reader; Web requests use
@@ -475,13 +477,14 @@ pub(crate) async fn get_edit_recipe(
         Err(response) => return response,
     };
     let facts = source_facts(&photo, &metadata);
+    let condition = capability_condition(&state).await;
     let support = apply_capability_condition(
         derive_support(facts, read.source_available, photo.original_available),
-        capability_condition(&state).await,
+        condition,
     );
     let processing_available = processing_available(
         support,
-        state.processing.is_some(),
+        condition,
         read.source_available,
         read.recipe.as_ref(),
     );
@@ -543,7 +546,7 @@ pub(crate) async fn post_edit_recipe(
     let mutation = SaveEditRecipe {
         photo_id: photo_id.clone(),
         request_id: body.request_id,
-        expected_recipe_revision: body.expected_recipe_revision,
+        expected_recipe_version: body.expected_recipe_version,
         expected_source_revision: body.expected_source_revision,
         settings,
     };
@@ -551,7 +554,7 @@ pub(crate) async fn post_edit_recipe(
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-save"),
     };
-    map_write_outcome(&state, &photo_id, read, outcome).await
+    map_write_outcome(&photo_id, outcome)
 }
 
 /// `POST /api/photos/{id}/edit-recipe/rebind`: explicit rebinding of saved
@@ -576,15 +579,21 @@ pub(crate) async fn post_edit_recipe_rebind(
         Ok(body) => body,
         Err(response) => return response,
     };
-    if body.expected_recipe_revision.is_empty() {
+    if !valid_request_id(&body.request_id) {
         return settings_error(
-            "expectedRecipeRevision",
-            "The rebind must carry the observed recipe revision.",
+            "requestId",
+            "The rebind must carry a valid request identity: 1 to 128 characters of ASCII letters, digits, `.`, `_`, or `-`.",
         );
     }
-    if body.expected_source_revision.is_empty() {
+    if body.expected_recipe_version.is_empty() {
         return settings_error(
-            "expectedSourceRevision",
+            "expectedRecipeVersion",
+            "The rebind must carry the previously observed recipe version.",
+        );
+    }
+    if body.new_source_revision.is_empty() {
+        return settings_error(
+            "newSourceRevision",
             "The rebind must carry the newly observed source revision.",
         );
     }
@@ -606,33 +615,38 @@ pub(crate) async fn post_edit_recipe_rebind(
     }
     let mutation = RebindEditRecipe {
         photo_id: photo_id.clone(),
-        expected_recipe_revision: body.expected_recipe_revision,
-        expected_source_revision: body.expected_source_revision,
+        request_id: body.request_id,
+        expected_recipe_version: body.expected_recipe_version,
+        new_source_revision: body.new_source_revision,
     };
     let outcome = match state.application.library.rebind_edit_recipe(mutation).await {
         Ok(outcome) => outcome,
         Err(_) => return storage_error("edit-recipe-rebind"),
     };
-    map_write_outcome(&state, &photo_id, read, outcome).await
+    map_write_outcome(&photo_id, outcome)
 }
 
 // ---------------------------------------------------------------- validation
 
+/// The shared field shape's request identity: 1..=128 characters of ASCII
+/// letters, digits, `.`, `_`, or `-`.
+fn valid_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= MAXIMUM_REQUEST_ID_BYTES
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn validated_settings(body: &SaveEditRecipeBody) -> Option<EditRecipeSettings> {
     // The shared field shape closes the request identity to 1..=128
     // characters of ASCII letters, digits, `.`, `_`, or `-`.
-    if body.request_id.is_empty()
-        || body.request_id.len() > MAXIMUM_REQUEST_ID_BYTES
-        || !body
-            .request_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
+    if !valid_request_id(&body.request_id) {
         return None;
     }
     if body.expected_source_revision.is_empty()
         || body
-            .expected_recipe_revision
+            .expected_recipe_version
             .as_deref()
             .is_some_and(str::is_empty)
     {
@@ -694,38 +708,16 @@ fn invalid_settings_response() -> Response<Body> {
 // ---------------------------------------------------------------- outcome mapping
 
 /// Maps one core write outcome onto the closed outcome and error-code sets.
-/// Conflict-family responses carry the current source revision and the
-/// current recipe version.
-async fn map_write_outcome(
-    state: &HttpState,
-    photo_id: &str,
-    read: EditRecipeRead,
-    outcome: EditRecipeWriteOutcome,
-) -> Response<Body> {
-    let pre_write_revision = read.recipe.map(|recipe| recipe.revision);
+/// The saved-versus-replayed fact is decided by persistence inside the write
+/// transaction, so a concurrent write after the commit can never reclassify
+/// this response. Conflict-family responses carry the current source
+/// revision and the current recipe version.
+fn map_write_outcome(photo_id: &str, outcome: EditRecipeWriteOutcome) -> Response<Body> {
     match outcome {
-        EditRecipeWriteOutcome::Saved(recipe) => {
-            // `Saved` covers a fresh commit and a receipt replay, and a
-            // replay must report `unchanged` because no write occurred. One
-            // post-write read separates them: a fresh commit installs a
-            // revision that was not current before, while a replay leaves
-            // either the superseded receipt revision or the pre-write
-            // revision in place.
-            let current_revision = state
-                .application
-                .library
-                .edit_recipe(photo_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|current| current.recipe.map(|recipe| recipe.revision));
-            let installed = current_revision.as_deref() == Some(recipe.revision.as_str());
-            let replayed =
-                !installed || pre_write_revision.as_deref() == Some(recipe.revision.as_str());
-            let outcome_name = if replayed { "unchanged" } else { "saved" };
-            write_response(outcome_name, recipe)
+        EditRecipeWriteOutcome::Saved(recipe) => write_response("saved", recipe),
+        EditRecipeWriteOutcome::Replayed(recipe) | EditRecipeWriteOutcome::Unchanged(recipe) => {
+            write_response("unchanged", recipe)
         }
-        EditRecipeWriteOutcome::Unchanged(recipe) => write_response("unchanged", recipe),
         EditRecipeWriteOutcome::Conflict(current) => conflict_response(
             "recipe_conflict",
             "The expected recipe revision is no longer current; decide again from the carried facts.",
@@ -893,10 +885,41 @@ mod tests {
             state: "supported",
             reason: None,
         };
-        assert!(!processing_available(support, true, true, Some(&recipe)));
-        // The same exposure as as-shot stays processable.
+        assert!(!processing_available(support, "ready", true, Some(&recipe)));
+        // The same exposure as as-shot stays processable only when the
+        // reconciled condition is ready.
         let mut as_shot = recipe.clone();
         as_shot.settings.white_balance = WhiteBalanceIntent::AsShot;
-        assert!(processing_available(support, true, true, Some(&as_shot)));
+        assert!(processing_available(support, "ready", true, Some(&as_shot)));
+    }
+
+    #[test]
+    fn only_the_ready_condition_admits_processing() {
+        let recipe = EditRecipe {
+            photo_id: "photo".to_owned(),
+            revision: "rev-1".to_owned(),
+            source_revision: "source-1".to_owned(),
+            settings: EditRecipeSettings {
+                exposure_ev: 0.0,
+                white_balance: WhiteBalanceIntent::AsShot,
+            },
+        };
+        let support = SupportClassification {
+            state: "supported",
+            reason: None,
+        };
+        for condition in [
+            "disabled",
+            "launcher-unavailable",
+            "bundle-unavailable",
+            "source-unsupported",
+            "resource-unavailable",
+        ] {
+            assert!(
+                !processing_available(support, condition, true, Some(&recipe)),
+                "{condition} must not admit processing"
+            );
+        }
+        assert!(processing_available(support, "ready", true, Some(&recipe)));
     }
 }

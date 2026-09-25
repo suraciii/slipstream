@@ -348,6 +348,38 @@ class DeploymentVerifierTests(unittest.TestCase):
             self.assertEqual(checks[0].reason, "web-capability-unavailable")
             self.assertEqual(checks[0].detail, "profiles")
 
+            # A ready answer advertising a profile outside the closed
+            # qualified set is a failed check.
+            def urlopen_unapproved(request, timeout):
+                path = request.full_url.split("/", 3)[-1]
+                if path == "healthz":
+                    return FakeResponse({"status": "ok"})
+                if path == "api/status":
+                    return FakeResponse({"state": "published"})
+                if path == "api/overview":
+                    return FakeResponse({"albums": []})
+                capability = ready_capability()
+                capability["profiles"] = [
+                    {
+                        "profileId": "unapproved-camera",
+                        "whiteBalanceModes": ["as-shot"],
+                        "whiteBalanceRanges": None,
+                    }
+                ]
+                return FakeResponse(capability)
+
+            unapproved = deployment.DeploymentSnapshot(
+                instance=INSTANCE,
+                policy=POLICY,
+                bundle=BUNDLE,
+                web_url="https://photos.example.com",
+                web_token_file=token_file,
+                urlopen=urlopen_unapproved,
+            )
+            checks = unapproved._web_checks()
+            self.assertEqual(checks[0].reason, "web-capability-response-invalid")
+            self.assertEqual(checks[0].detail, "profiles")
+
     def test_web_rejects_plain_http_before_sending_bearer(self):
         with tempfile.TemporaryDirectory() as directory:
             token_file = Path(directory) / "token"
