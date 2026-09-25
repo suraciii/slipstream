@@ -13305,7 +13305,7 @@ mod export_routes {
 mod retained_development_result {
     use super::*;
     use crate::export_manager::{
-        RetainedDevelopmentIdentity, RetainedDevelopmentTiff, retained_development_tiff,
+        RetainedDevelopmentIdentity, RetainedDevelopmentTiff, retained_development_tiff_of,
     };
     use slipstream_core::{
         EditRecipeSettings, ExportArtifactFacts, ExportRecord, ExportSnapshot, ExportState,
@@ -13377,7 +13377,15 @@ mod retained_development_result {
         identity: &RetainedDevelopmentIdentity<'_>,
         now: u64,
     ) -> Option<RetainedDevelopmentTiff> {
-        retained_development_tiff(record, identity, now, |export_id| {
+        resolve_all(std::slice::from_ref(record), identity, now)
+    }
+
+    fn resolve_all(
+        records: &[ExportRecord],
+        identity: &RetainedDevelopmentIdentity<'_>,
+        now: u64,
+    ) -> Option<RetainedDevelopmentTiff> {
+        retained_development_tiff_of(records, identity, now, |export_id| {
             Some(PathBuf::from(format!("/artifacts/{export_id}.tiff")))
         })
     }
@@ -13479,6 +13487,51 @@ mod retained_development_result {
             Some(artifact(now + 1)),
         );
         assert!(resolve(&live, &identity(EXPOSURE_MILLI_EV), now).is_some());
+    }
+
+    #[test]
+    fn the_retained_result_is_the_first_matching_record_in_retention_order() {
+        // A newer Export of another identity must not hide an older Export
+        // that does match: the selection filters on the identity, not on the
+        // head of the list.
+        let newer_other = {
+            let mut record = record(
+                ExportState::Succeeded,
+                WhiteBalanceIntent::AsShot,
+                Some(artifact(2_000)),
+            );
+            record.id = "export-newer".to_owned();
+            record.snapshot.recipe_revision = "another-revision".to_owned();
+            record
+        };
+        let older_matching = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let retained = resolve_all(
+            &[newer_other, older_matching],
+            &identity(EXPOSURE_MILLI_EV),
+            1_000,
+        )
+        .expect("the matching record behind a newer one is retained");
+        assert_eq!(retained.path, PathBuf::from("/artifacts/export-1.tiff"));
+
+        // Two Exports of one identity are the same Development Result; the
+        // first record in retention order is the one served.
+        let first = record(
+            ExportState::Succeeded,
+            WhiteBalanceIntent::AsShot,
+            Some(artifact(2_000)),
+        );
+        let second = {
+            let mut record = first.clone();
+            record.id = "export-second".to_owned();
+            record
+        };
+        let retained = resolve_all(&[first, second], &identity(EXPOSURE_MILLI_EV), 1_000)
+            .expect("one of the matching records is retained");
+        assert_eq!(retained.path, PathBuf::from("/artifacts/export-1.tiff"));
     }
 
     #[test]

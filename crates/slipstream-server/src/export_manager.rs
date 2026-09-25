@@ -111,9 +111,9 @@ impl ExportManager {
         })
     }
 
-    /// The newest retained Development TIFF of one Photo whose captured
-    /// snapshot matches the current Edit identity and whose retention has not
-    /// expired, or `None` when no matching artifact is retained.
+    /// The retained Development TIFF of one Photo whose captured snapshot
+    /// matches the current Edit identity and whose retention has not expired,
+    /// or `None` when no matching artifact is retained.
     ///
     /// This is the durable Development Result retention the Edit Preview
     /// derivation resolves against: a published Development TIFF artifact is
@@ -126,11 +126,8 @@ impl ExportManager {
         identity: &RetainedDevelopmentIdentity<'_>,
     ) -> Option<RetainedDevelopmentTiff> {
         let records = self.library.photo_exports(photo_id).await.ok().flatten()?;
-        let now_unix_seconds = unix_seconds();
-        records.into_iter().find_map(|record| {
-            retained_development_tiff(&record, identity, now_unix_seconds, |export_id| {
-                self.artifact_path(export_id)
-            })
+        retained_development_tiff_of(&records, identity, unix_seconds(), |export_id| {
+            self.artifact_path(export_id)
         })
     }
 
@@ -1134,6 +1131,22 @@ pub(crate) struct RetainedDevelopmentTiff {
     pub(crate) exposure_milli_ev: i64,
     pub(crate) source_revision: String,
     pub(crate) bundle_id: String,
+}
+
+/// The first retained Development TIFF in one Photo's Export records, in the
+/// Library's retention order, that was produced under exactly the current
+/// identity. The caller reads the records through the durable Export
+/// lifecycle; this selection is pure so the ordering and identity rules are
+/// testable without a Library.
+pub(crate) fn retained_development_tiff_of(
+    records: &[ExportRecord],
+    identity: &RetainedDevelopmentIdentity<'_>,
+    now_unix_seconds: u64,
+    artifact_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<RetainedDevelopmentTiff> {
+    records.iter().find_map(|record| {
+        retained_development_tiff(record, identity, now_unix_seconds, &artifact_path)
+    })
 }
 
 /// The retained Development TIFF of one Export record when it was produced
