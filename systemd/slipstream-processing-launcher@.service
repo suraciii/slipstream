@@ -10,12 +10,12 @@ ConditionPathExists=/etc/slipstream-processing/%i/config.json
 # the worker's bounded result metadata back from that path, and unmounts it at
 # cleanup. Those mounts must land in the host mount namespace, because the
 # engine container resolves its bind sources there. Do not enable a directive
-# that gives this service a private mount namespace (PrivateTmp,
-# ProtectSystem, ProtectKernelTunables, ProtectKernelModules, ProtectKernelLogs,
-# ReadWritePaths, PrivateMounts, or any explicit Bind/TemporaryFileSystem
-# path): the container would then bind the empty placeholder directory instead
-# of the mounted storage, and the fixed UID-1000 worker would fail to write its
-# result and exit before any engine work.
+# that gives this service a private mount namespace (for example PrivateTmp,
+# PrivateDevices, ProtectHome, ProtectProc, ProtectSystem, ProtectKernelTunables,
+# ProtectKernelModules, ProtectKernelLogs, ReadWritePaths, ExecPaths,
+# NoExecPaths, PrivateMounts, or Bind/TemporaryFileSystem paths). The container
+# would then bind the empty placeholder directory instead of the mounted
+# storage, and the fixed UID-1000 worker would fail before any engine work.
 Type=simple
 User=root
 Group=root

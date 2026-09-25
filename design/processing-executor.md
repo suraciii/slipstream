@@ -134,9 +134,11 @@ storage has been reclaimed or charged to an explicit retained-output allowance.
 
 That storage must resolve for the engine container's bind sources, which resolve
 in the host mount namespace. The launcher's service must therefore run in the
-host mount namespace: a unit that gives it a private mount namespace makes the
-container bind the empty placeholder directory instead of the mounted storage,
-and the fixed worker identity cannot write its result at all.
+host mount namespace and its running process must share PID 1's mount namespace:
+a unit that gives it a private mount namespace makes the container bind the empty
+placeholder directory instead of the mounted storage, and the fixed worker
+identity cannot write its result at all. The deployment verifier checks both the
+effective unit properties and the running namespace identity.
 
 Worker containers use Docker's `none` log driver; they must not inherit an
 unbounded daemon log default. Fixed-size result metadata lives in the private

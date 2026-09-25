@@ -16,6 +16,11 @@ UNIT = REPOSITORY_ROOT / "systemd" / "slipstream-processing-launcher@.service"
 # mounts to resolve, so the unit must not enable any of them.
 MOUNT_NAMESPACE_DIRECTIVES = (
     "PrivateTmp",
+    "PrivateDevices",
+    "ProtectHome",
+    "ProtectProc",
+    "ExecPaths",
+    "NoExecPaths",
     "PrivateMounts",
     "ProtectSystem",
     "ProtectKernelTunables",

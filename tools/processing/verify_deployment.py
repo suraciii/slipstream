@@ -35,6 +35,11 @@ MAX_CGROUP_IO_BYTES = 4096
 # resolution, which resolves in the host mount namespace.
 MOUNT_NAMESPACE_PROPERTIES = (
     "PrivateTmp",
+    "PrivateDevices",
+    "ProtectHome",
+    "ProtectProc",
+    "ExecPaths",
+    "NoExecPaths",
     "PrivateMounts",
     "ProtectSystem",
     "ProtectKernelTunables",
@@ -225,15 +230,13 @@ class DeploymentSnapshot:
         return _regular_root_file("launcher-unit", self.paths.unit)
 
     def _mount_namespace_check(self) -> Check:
-        """The installed unit must not isolate the launcher's mount namespace.
+        """Require the running launcher to share the host mount namespace.
 
         The launcher mounts the size- and inode-capped attempt tmpfs and the
-        engine's bind sources beneath its instance root. The engine container
-        resolves those bind sources in the host mount namespace, so a unit
-        directive that gives the service a private mount namespace makes the
-        container bind the empty placeholder directory instead of the mounted
-        storage; the fixed UID-1000 worker then cannot write its bounded result
-        and exits before any engine work.
+        engine's bind sources beneath its instance root. Docker resolves bind
+        sources in the host namespace. Unit properties diagnose known causes;
+        comparing the running process with PID 1 catches other namespace
+        options and a service still running under an older unit definition.
         """
         if not _lower_hex(self.instance, 32):
             return Check("launcher-mount-namespace", False, "invalid-instance")
@@ -252,7 +255,7 @@ class DeploymentSnapshot:
             if name not in MOUNT_NAMESPACE_PROPERTIES:
                 continue
             value = value.strip()
-            if not value or value in ("no", "false"):
+            if not value or value in ("no", "false") or (name == "ProtectProc" and value == "default"):
                 continue
             enabled.append(f"{name}={value[:60]}")
         if enabled:
@@ -262,6 +265,19 @@ class DeploymentSnapshot:
                 "launcher-private-mount-namespace",
                 ", ".join(enabled),
             )
+        pid_result = self.command(
+            ("systemctl", "--system", "show", "--property=MainPID", "--value", unit)
+        )
+        pid = pid_result.stdout.strip()
+        if pid_result.returncode != 0 or not pid.isascii() or not pid.isdigit() or int(pid) <= 1:
+            return Check("launcher-mount-namespace", False, "launcher-process-unavailable")
+        try:
+            host_mount = os.readlink("/proc/1/ns/mnt")
+            launcher_mount = os.readlink(f"/proc/{pid}/ns/mnt")
+        except OSError:
+            return Check("launcher-mount-namespace", False, "launcher-process-unavailable")
+        if host_mount != launcher_mount:
+            return Check("launcher-mount-namespace", False, "launcher-private-mount-namespace")
         return Check("launcher-mount-namespace", True)
 
     def _config_check(self) -> Check:
