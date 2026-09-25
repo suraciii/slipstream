@@ -55,6 +55,12 @@ const RENDITION_TTL: Duration = Duration::from_secs(300);
 /// receipt — frees its identity again after this bound.
 const PENDING_TTL: Duration = Duration::from_secs(300);
 
+/// The longest a derive request waits for the instance-wide conversion slot
+/// before falling through to admission. Generous against a whole conversion
+/// of a large source, short enough that a stuck conversion cannot hold a
+/// request forever.
+const DERIVATION_QUEUE_BOUND: Duration = Duration::from_secs(30);
+
 /// The bounded number of Photo and stage owners the server retains. Every
 /// owner here holds only rebuildable rendition bytes and one pending intent,
 /// and the bound evicts the least recently touched owner under pressure.
@@ -114,11 +120,33 @@ impl PreviewIdentity {
         }
     }
 
+    /// The digest of the render intent alone: the identity sequence with the
+    /// content-evidence tail always unset. A queued admission may carry no
+    /// local evidence while a later derive request for the same intent does,
+    /// so supersession and settlement compare intents, not evidence.
+    fn intent_digest(&self) -> String {
+        Self::digest_sequence(&self.facts, &[1])
+    }
+
     /// The opaque digest of the full identity, used as the pending intent
     /// identity of the owner.
     fn digest(&self) -> String {
+        match &self.evidence {
+            ContentEvidence::DevelopmentResult {
+                sha256,
+                byte_length,
+            } => {
+                let mut tail = sha256.as_bytes().to_vec();
+                tail.push(0);
+                tail.extend_from_slice(&byte_length.to_le_bytes());
+                Self::digest_sequence(&self.facts, &tail)
+            }
+            ContentEvidence::NotRetained => Self::digest_sequence(&self.facts, &[1]),
+        }
+    }
+
+    fn digest_sequence(facts: &PreviewFacts, evidence_tail: &[u8]) -> String {
         let mut hasher = Sha256::new();
-        let facts = &self.facts;
         for part in [
             facts.stage.as_bytes(),
             facts.long_edge.to_le_bytes().as_slice(),
@@ -132,17 +160,7 @@ impl PreviewIdentity {
             hasher.update(part);
             hasher.update([0]);
         }
-        match &self.evidence {
-            ContentEvidence::DevelopmentResult {
-                sha256,
-                byte_length,
-            } => {
-                hasher.update(sha256.as_bytes());
-                hasher.update([0]);
-                hasher.update(byte_length.to_le_bytes());
-            }
-            ContentEvidence::NotRetained => hasher.update([1]),
-        }
+        hasher.update(evidence_tail);
         hex(&hasher.finalize())
     }
 }
@@ -318,12 +336,58 @@ struct PendingIntent {
     since: SystemTime,
 }
 
+/// The cancellable intent of one derivation: the token the conversion
+/// polls, plus the wakeup that releases a request still queued for the
+/// conversion slot the moment its intent is cancelled.
+#[derive(Clone)]
+struct DerivationSignal {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl DerivationSignal {
+    fn start() -> Self {
+        Self {
+            cancelled: Arc::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// The token the native conversion polls around its opaque call.
+    fn token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Resolves as soon as the intent is cancelled. The waiter is registered
+    /// before each flag check, so a concurrent cancel is never lost.
+    async fn cancelled(&self) {
+        let mut notified = std::pin::pin!(self.notify.notified());
+        loop {
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.as_mut().await;
+            notified.set(self.notify.notified());
+        }
+    }
+}
+
 #[derive(Default)]
 struct OwnerEntry {
     published: Option<PublishedRendition>,
     pending: Option<PendingIntent>,
-    /// The cancellation token of the derivation in flight, if any.
-    inflight: Option<Arc<AtomicBool>>,
+    /// The cancellable intent of the derivation in flight, if any.
+    inflight: Option<DerivationSignal>,
     /// The per-owner derive serialization, owned by the entry so owner
     /// eviction releases it with the rest of the owner state.
     derive_permit: Arc<AsyncMutex<()>>,
@@ -361,8 +425,8 @@ fn evict_if_full(
                     RenderSettlement::Cancelled,
                 );
             }
-            if let Some(inflight) = entry.inflight {
-                inflight.store(true, Ordering::Relaxed);
+            if let Some(inflight) = &entry.inflight {
+                inflight.cancel();
             }
         }
     }
@@ -394,6 +458,9 @@ pub(crate) struct EditPreviewOwner {
     /// memory scales with source size, so unbounded concurrency across
     /// Photos would scale resident memory with request fan-out.
     derivation_permits: Arc<Semaphore>,
+    /// How long a request may wait for the conversion slot before falling
+    /// through to the admission path instead of hanging behind a conversion.
+    derivation_queue_bound: Duration,
     touches: AtomicU64,
     derivations_started: AtomicUsize,
 }
@@ -415,6 +482,7 @@ impl EditPreviewOwner {
             render_gate,
             owners: AsyncMutex::new(HashMap::new()),
             derivation_permits: Arc::new(Semaphore::new(1)),
+            derivation_queue_bound: DERIVATION_QUEUE_BOUND,
             touches: AtomicU64::new(0),
             derivations_started: AtomicUsize::new(0),
         }
@@ -467,6 +535,18 @@ impl EditPreviewOwner {
 
     /// The instance-wide heavy-conversion permit. Held across one derivation,
     /// so at most one native display conversion runs at a time.
+    fn derivation_queue_bound(&self) -> Duration {
+        self.derivation_queue_bound
+    }
+
+    /// Binds a shorter conversion-slot wait, for tests that observe the
+    /// bound without waiting out the production constant.
+    #[cfg(test)]
+    pub(crate) fn with_derivation_queue_bound(mut self, bound: Duration) -> Self {
+        self.derivation_queue_bound = bound;
+        self
+    }
+
     pub(crate) async fn derivation_permit(&self) -> tokio::sync::OwnedSemaphorePermit {
         Arc::clone(&self.derivation_permits)
             .acquire_owned()
@@ -496,14 +576,43 @@ impl EditPreviewOwner {
     /// A previous in-flight derivation of this owner is cancelled: a
     /// superseded request must not publish, and its native result is
     /// discarded instead of racing the newer identity.
-    async fn begin_derivation(&self, key: &OwnerKey) -> Arc<AtomicBool> {
+    async fn begin_derivation(&self, key: &OwnerKey) -> DerivationSignal {
         self.touch_entry(key, |entry| {
             if let Some(previous) = entry.inflight.take() {
-                previous.store(true, Ordering::Relaxed);
+                previous.cancel();
             }
-            let token = Arc::new(AtomicBool::new(false));
-            entry.inflight = Some(Arc::clone(&token));
-            token
+            let signal = DerivationSignal::start();
+            entry.inflight = Some(signal.clone());
+            signal
+        })
+        .await
+    }
+
+    /// Clears the in-flight slot when this derivation leaves without
+    /// publishing, so a cancelled slot never lingers on the entry.
+    async fn end_derivation(&self, key: &OwnerKey, signal: &DerivationSignal) {
+        self.touch_entry(key, |entry| {
+            if entry
+                .inflight
+                .as_ref()
+                .is_some_and(|installed| Arc::ptr_eq(&installed.cancelled, &signal.cancelled))
+            {
+                entry.inflight = None;
+            }
+        })
+        .await
+    }
+
+    /// Whether a newer intent has been registered for this owner while this
+    /// request waited: its pending digest names a different identity, so
+    /// this request must not start native work of its own.
+    async fn intent_superseded(&self, key: &OwnerKey, identity: &PreviewIdentity) -> bool {
+        let intent = identity.intent_digest();
+        self.touch_entry(key, |entry| {
+            entry
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.digest != intent)
         })
         .await
     }
@@ -521,12 +630,13 @@ impl EditPreviewOwner {
         now: SystemTime,
     ) -> RenderAdmission {
         let digest = identity.digest();
+        let intent = identity.intent_digest();
         let coalesced = self
             .touch_entry(key, |entry| {
                 matches!(
                     entry.pending.as_ref(),
                     Some(pending)
-                        if pending.digest == digest
+                        if pending.digest == intent
                             && now
                                 .duration_since(pending.since)
                                 .unwrap_or_default()
@@ -553,11 +663,14 @@ impl EditPreviewOwner {
                 let differing = entry
                     .pending
                     .as_ref()
-                    .is_none_or(|pending| pending.digest != digest);
+                    .is_none_or(|pending| pending.digest != intent);
                 if differing && let Some(inflight) = &entry.inflight {
-                    inflight.store(true, Ordering::Relaxed);
+                    inflight.cancel();
                 }
-                entry.pending = Some(PendingIntent { digest, since: now });
+                entry.pending = Some(PendingIntent {
+                    digest: intent,
+                    since: now,
+                });
             })
             .await;
         }
@@ -576,6 +689,7 @@ impl EditPreviewOwner {
         settlement: RenderSettlement,
     ) {
         let digest = identity.digest();
+        let intent = identity.intent_digest();
         self.render_gate.settle(
             PreviewRenderRequest {
                 photo_id,
@@ -588,7 +702,7 @@ impl EditPreviewOwner {
             if entry
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.digest == digest)
+                .is_some_and(|pending| pending.digest == intent)
             {
                 entry.pending = None;
             }
@@ -831,25 +945,43 @@ async fn serve_preview(
     let Some(record) = retained.filter(|record| record.matches_facts(&facts)) else {
         return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now()).await;
     };
+    // A newer intent registered while this request waited for the mutex
+    // supersedes it: refuse without starting any conversion.
+    if owner.intent_superseded(&key, &identity).await {
+        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+    }
     // Register the intent before queuing for the heavy conversion: a newer
-    // admission can then cancel this token while it waits, and the queued
+    // admission can then cancel this signal while it waits, and the queued
     // request discovers the supersession before any native work starts.
-    let token = owner.begin_derivation(&key).await;
-    if token.load(Ordering::Relaxed) {
-        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
-    }
-    // One heavy native conversion at a time, instance-wide.
-    let _derivation_permit = owner.derivation_permit().await;
-    // Superseded while queued: leave without starting the native conversion,
-    // so supersession releases the heavy slot instead of consuming it.
-    if token.load(Ordering::Relaxed) {
-        return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
-    }
+    let signal = owner.begin_derivation(&key).await;
+    // One heavy native conversion at a time, instance-wide. The wait is
+    // observable: cancellation wakes the queued request, and the wait is
+    // bounded, so a stuck conversion cannot hold a request forever.
+    let acquisition = owner.derivation_permit();
+    // Biased so a cancellation that is already resolved always wins the
+    // poll over an acquisition that completed in the same wake: superseded
+    // intent never starts work.
+    let _derivation_permit = tokio::select! {
+        biased;
+        _ = signal.cancelled() => {
+            owner.end_derivation(&key, &signal).await;
+            return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
+        }
+        _ = tokio::time::sleep(owner.derivation_queue_bound()) => {
+            owner.end_derivation(&key, &signal).await;
+            // The bounded wait fell through to the admission path: the
+            // stage is reported as queued render work instead of hanging
+            // on the slot.
+            return admit_render(owner, &key, photo_id, stage, &identity, SystemTime::now())
+                .await;
+        }
+        permit = acquisition => permit,
+    };
     owner.note_derivation_started();
     let derived = derive_development_display(
         record,
         slipstream_core::DerivativeTarget::DevelopmentPreview1224,
-        Arc::clone(&token),
+        signal.token(),
     )
     .await;
     let derivative = match derived {
@@ -859,7 +991,7 @@ async fn serve_preview(
         }
         Err(error) => return derivative_error(stage, error),
     };
-    if token.load(Ordering::Relaxed) {
+    if signal.is_cancelled() {
         return superseded_during_derivation(owner, &key, photo_id, stage, &identity).await;
     }
     let sha256 = hex(Sha256::digest(&derivative.jpeg).as_slice());
@@ -1543,8 +1675,8 @@ mod tests {
         let gate = ScriptedGate::queued(1);
         let owner = EditPreviewOwner::new(Arc::new(UnlandedRetention), gate);
         let key = ("photo".to_owned(), "develop");
-        let token = owner.begin_derivation(&key).await;
-        assert!(!token.load(Ordering::Relaxed));
+        let signal = owner.begin_derivation(&key).await;
+        assert!(!signal.is_cancelled());
         // A newer identity supersedes the in-flight derivation.
         let _admitted = owner
             .admit(
@@ -1556,7 +1688,7 @@ mod tests {
             )
             .await;
         assert!(
-            token.load(Ordering::Relaxed),
+            signal.is_cancelled(),
             "the superseded derivation is cancelled"
         );
         // A cancelled conversion skips the native call entirely: the record
@@ -1570,7 +1702,7 @@ mod tests {
             derive_development_display(
                 cancelled_record,
                 slipstream_core::DerivativeTarget::DevelopmentPreview1224,
-                token,
+                signal.token(),
             )
             .await,
             Ok(None)

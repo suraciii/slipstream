@@ -12810,8 +12810,22 @@ fn preview_router(
     retention: Arc<dyn crate::edit_preview::DevelopmentResultRetention>,
     gate: Arc<dyn crate::edit_preview::PreviewRenderGate>,
 ) -> (Router, Arc<crate::edit_preview::EditPreviewOwner>) {
+    preview_router_bounded(application, web_root, retention, gate, None)
+}
+
+fn preview_router_bounded(
+    application: &Arc<Application>,
+    web_root: impl Into<PathBuf>,
+    retention: Arc<dyn crate::edit_preview::DevelopmentResultRetention>,
+    gate: Arc<dyn crate::edit_preview::PreviewRenderGate>,
+    derivation_queue_bound: Option<std::time::Duration>,
+) -> (Router, Arc<crate::edit_preview::EditPreviewOwner>) {
     application.access.seed_test_token();
-    let owner = Arc::new(crate::edit_preview::EditPreviewOwner::new(retention, gate));
+    let owner = Arc::new(match derivation_queue_bound {
+        Some(bound) => crate::edit_preview::EditPreviewOwner::new(retention, gate)
+            .with_derivation_queue_bound(bound),
+        None => crate::edit_preview::EditPreviewOwner::new(retention, gate),
+    });
     let router = crate::http::create_router_with_preview(
         Arc::clone(application),
         crate::http::open_web_root(web_root.into()),
@@ -13409,6 +13423,178 @@ async fn edit_preview_refuses_render_admission_fail_closed() {
         body["error"]["details"]["reason"],
         "preview-render-admission-unavailable"
     );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A same-owner request queued on the per-owner derive mutex while a newer
+/// intent is admitted must not start a conversion of its own once it
+/// acquires the mutex: the pending intent names a different identity.
+#[tokio::test]
+async fn edit_preview_per_owner_waiter_does_not_start_a_superseded_conversion() {
+    let (base, config, application, photo_id, first_revision, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let (router, owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record)),
+        scripted_gate(std::collections::VecDeque::from([
+            crate::edit_preview::RenderAdmission::Queued,
+        ])),
+    );
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    // The older derivation holds the per-owner derive mutex and parks on the
+    // conversion slot; a same-identity waiter queues on the mutex behind it.
+    let parked = owner.try_derivation_permit().expect("parking permit");
+    let uri = preview_uri(&photo_id, "develop");
+    let older = {
+        let router = router.clone();
+        let uri = uri.clone();
+        tokio::spawn(async move { get_preview_response(&router, &uri).await })
+    };
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let waiter = {
+        let router = router.clone();
+        let uri = uri.clone();
+        tokio::spawn(async move { get_preview_response(&router, &uri).await })
+    };
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    // A newer intent is admitted while both stale requests are queued.
+    let (_, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "preview-save-2",
+            Some(&first_revision),
+            &source_revision,
+            0.75,
+        ),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+    let admitted = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+    // Both stale requests leave without any native conversion: the parked
+    // derivation is cancelled by the admission, and the waiter discovers the
+    // superseded intent when it acquires the mutex.
+    drop(parked);
+    let older_response = older.await.unwrap();
+    assert_eq!(older_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let waiter_response = waiter.await.unwrap();
+    assert_eq!(waiter_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        owner.derivations_started(),
+        0,
+        "neither stale request may start a conversion"
+    );
+
+    // The newer intent survived both refusals and is still coalescing.
+    let again = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(again).await,
+        serde_json::json!({"state": "running", "stage": "develop"})
+    );
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// A request queued for the conversion slot wakes on cancellation without
+/// the slot ever being released.
+#[tokio::test]
+async fn edit_preview_stops_waiting_for_the_conversion_slot_when_superseded() {
+    let (base, config, application, photo_id, first_revision, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let (router, owner) = preview_router(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record)),
+        scripted_gate(std::collections::VecDeque::from([
+            crate::edit_preview::RenderAdmission::Queued,
+        ])),
+    );
+    let (_, read) = get_edit_recipe(&router, &photo_id).await;
+    let source_revision = read["sourceRevision"].as_str().unwrap().to_owned();
+
+    let parked = owner.try_derivation_permit().expect("parking permit");
+    let queued_router = router.clone();
+    let queued_uri = preview_uri(&photo_id, "develop");
+    let queued =
+        tokio::spawn(async move { get_preview_response(&queued_router, &queued_uri).await });
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+
+    let (_, saved) = save_recipe(
+        &router,
+        &photo_id,
+        save_body(
+            "preview-save-2",
+            Some(&first_revision),
+            &source_revision,
+            0.75,
+        ),
+    )
+    .await;
+    assert_eq!(saved["outcome"], "saved");
+    let admitted = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(admitted.status(), StatusCode::ACCEPTED);
+
+    // The queued request settles as cancelled while the slot stays held.
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), queued)
+        .await
+        .expect("the queued request must wake on cancellation")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(response).await;
+    assert_eq!(error_code(&body), "resource_unavailable");
+    assert_eq!(body["error"]["details"]["reason"], "preview-superseded");
+    assert_eq!(owner.derivations_started(), 0);
+    drop(parked);
+
+    application.shutdown().await.unwrap();
+    let _ = fs::remove_dir_all(base);
+}
+
+/// The conversion-slot wait is bounded: a stuck conversion cannot hold a
+/// request forever, and the bounded wait falls through to admission.
+#[tokio::test]
+async fn edit_preview_bounds_the_conversion_queue_wait() {
+    let (base, config, application, photo_id, _, record) =
+        approved_photo_with_recipe_and_result("preview-save", 0.5).await;
+    let (router, owner) = preview_router_bounded(
+        &application,
+        config.web_root(),
+        scripted_retention(Some(record)),
+        scripted_gate(std::collections::VecDeque::from([
+            crate::edit_preview::RenderAdmission::Queued,
+        ])),
+        Some(std::time::Duration::from_millis(200)),
+    );
+
+    let parked = owner.try_derivation_permit().expect("parking permit");
+    let response = get_preview_response(&router, &preview_uri(&photo_id, "develop")).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response_json(response).await,
+        serde_json::json!({"state": "queued", "stage": "develop"}),
+        "the bounded wait falls through to the admission path"
+    );
+    assert_eq!(owner.derivations_started(), 0);
+    drop(parked);
 
     application.shutdown().await.unwrap();
     let _ = fs::remove_dir_all(base);
