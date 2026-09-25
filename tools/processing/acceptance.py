@@ -816,6 +816,7 @@ def validate_development_tiff(
         return facts, ["tiff-ifd-out-of-range"]
 
     entries: dict[int, tuple[int, int, bytes, int]] = {}
+    value_ranges: list[tuple[int, int]] = []
     for index in range(entry_count):
         start = ifd_offset + 2 + 12 * index
         tag, kind, count = struct.unpack(endian + "HHI", data[start : start + 8])
@@ -823,26 +824,31 @@ def validate_development_tiff(
         if type_size is None:
             continue
         byte_count = type_size * count
-        if tag in (273, 279):
-            max_bytes = _MAXIMUM_TIFF_STRIPS * 4
-        elif tag == 34675:
-            max_bytes = _MAXIMUM_TIFF_VALUE_BYTES
-        else:
-            max_bytes = 64
-        if byte_count > max_bytes:
-            problems.append(f"tiff-tag-{tag}-value-exceeds-bound")
-            continue
         if byte_count <= 4:
-            raw = data[start + 8 : start + 8 + byte_count]
             value_offset = start + 8
         else:
             value_offset = struct.unpack(endian + "I", data[start + 8 : start + 12])[0]
-            if value_offset + byte_count > len(data):
-                problems.append(f"tiff-tag-{tag}-value-out-of-range")
-                continue
-            raw = data[value_offset : value_offset + byte_count]
+        value_end = value_offset + byte_count
+        if value_end > len(data):
+            problems.append(f"tiff-tag-{tag}-value-out-of-range")
+            continue
+        value_ranges.append((value_offset, value_end))
+        if tag in (273, 279):
+            maximum = _MAXIMUM_TIFF_STRIPS * 4
+        elif tag == 34675:
+            maximum = _MAXIMUM_TIFF_VALUE_BYTES
+        elif tag in (256, 257, 258, 259, 262, 273, 274, 277, 278, 279, 339):
+            maximum = 64
+        else:
+            # Engine metadata such as XMP and private tags is part of the
+            # bounded file, but is not part of the closed pixel contract.
+            # Account for its range without retaining an unbounded value.
+            maximum = None
+        if maximum is not None and byte_count > maximum:
+            problems.append(f"tiff-tag-{tag}-value-exceeds-bound")
+            continue
+        raw = data[value_offset:value_end]
         entries[tag] = (kind, count, raw, value_offset)
-
     def unsigned(tag: int) -> int | None:
         entry = entries.get(tag)
         if entry is None:
@@ -946,10 +952,9 @@ def validate_development_tiff(
     ):
         problems.append("tiff-strip-layout-shape-invalid")
         return facts, problems
-
     covered_end = max(
         ifd_end,
-        max((entry[3] + len(entry[2]) for entry in entries.values()), default=ifd_end),
+        max((end for _, end in value_ranges), default=ifd_end),
     )
     decoded_bytes = 0
     for index, (offset, byte_count) in enumerate(zip(offsets, byte_counts)):
